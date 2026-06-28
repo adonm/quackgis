@@ -1,0 +1,76 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# duckdb_sedona — a DuckDB loadable extension that exposes a catalog of
+# vector spatial (ST_*) functions over WKB-encoded geometries, powered by the
+# same `wkb` / `geo` / `geo-traits` Rust stack used by Apache SedonaDB.
+#
+# See README.md for the architecture (unified vectorized dispatch pipeline +
+# declarative macro registry) and for notes on how this maps to the upstream
+# SedonaDB / quack-rs APIs.
+
+[package]
+name = "duckdb_sedona"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.87"
+authors = ["duckdb_sedona contributors"]
+license = "Apache-2.0"
+description = "DuckDB extension exposing a vector spatial (ST_*) function catalog over WKB geometries"
+readme = "README.md"
+keywords = ["duckdb", "extension", "gis", "geospatial", "sedona"]
+categories = ["database", "science::geo"]
+publish = false
+
+# The loadable extension. The library name (`sedonadb`) drives the produced
+# file name (libsedonadb.so / sedonadb.dll) and MUST match the entry-point
+# symbol convention `<name>_init_c_api` that DuckDB looks up on LOAD.
+[lib]
+name = "sedonadb"
+crate-type = ["cdylib"]
+
+# Packaging helper: appends the 512-byte DuckDB extension metadata trailer to a
+# built `.so`, producing a `.duckdb_extension` that DuckDB will LOAD (with
+# `-unsigned`). Mirrors quack-rs's `append_metadata` so the project is
+# self-contained for local dev and CI.
+[[bin]]
+name = "sedonadb-package"
+path = "src/bin/package.rs"
+required-features = []
+
+[dependencies]
+# DuckDB C-API SDK for Rust. We depend on `libduckdb-sys` with the
+# `loadable-extension` feature so the DuckDB host process supplies the symbols
+# at load time (no static linking of DuckDB into this crate).
+quack-rs = "0.14"
+libduckdb-sys = { version = ">=1.4.4, <2", features = ["loadable-extension"] }
+
+# The geospatial stack — the same crates Apache SedonaDB builds on. These are
+# pure-Rust, Apache-2.0 / MIT dual-licensed georust crates, so they keep the
+# extension light (no Arrow / DataFusion / GEOS pulled in here).
+wkb = "0.9"
+geo = { version = "0.31", features = ["spade"] }
+geo-types = "0.7"
+geo-traits = "0.3"
+wkt = "0.14"
+delaunator = "1.0"
+geojson = "1.0"
+rstar = "0.13"
+proj = { version = "0.31", features = ["bundled_proj"] }
+libsqlite3-sys = { version = ">=0.28,<0.36", features = ["bundled"] }
+arrow = "57"
+parquet = "57"
+gdal = { version = "0.19", features = ["bindgen"] }
+
+# Vendored + patched `gdal` so we can build against libgdal 3.13 (the upstream
+# 0.19 crate lags the 3.13 C-API renames). Only the high-level `gdal` crate is
+# patched; `gdal-sys` is unpatched and resolved straight from crates.io. See
+# vendor/gdal/PATCHES.md.
+[patch.crates-io]
+gdal = { path = "vendor/gdal" }
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true

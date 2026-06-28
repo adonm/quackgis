@@ -1,0 +1,17 @@
+# Rust build output: the extension shared object, deps, incremental cache.
+/target/
+
+# Local dev output: packaged .duckdb_extension, DuckLake catalog, benchmark
+# parquet, spatial-join spill files.
+/build/
+
+# A packaged extension can be emitted anywhere; always ignore by extension.
+*.duckdb_extension
+
+# Tooling backups.
+**/*.rs.bk
+Cargo.lock.bak
+
+# Local reference clones used during development (kept inside the trust
+# boundary per the agent trust model — never commit this directory).
+/.tmp/

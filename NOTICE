@@ -1,0 +1,27 @@
+duckdb_sedona
+=============
+
+Copyright 2026 duckdb_sedona contributors.
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product includes software developed as part of the following projects,
+which are licensed under the Apache License, Version 2.0 and / or the MIT
+license:
+
+  * Apache SedonaDB (https://github.com/apache/sedona-db)
+    The geo-traits -> geo-types geometry converter in `src/geometry.rs` is
+    adapted from `rust/sedona-geo/src/to_geo.rs` in the Apache SedonaDB Rust
+    API. Licensed under the Apache License, Version 2.0.
+
+  * quack-rs (https://github.com/tomtom215/quack-rs)
+    Production-grade Rust SDK for building DuckDB loadable extensions, used as
+    the DuckDB C-API binding layer. Licensed under the MIT license.
+
+  * The georust crates `wkb`, `geo`, `geo-types`, and `geo-traits`
+    (https://github.com/georust) provide the Well-Known Binary reader/writer and
+    the geometry algorithms. Licensed under the MIT OR Apache-2.0 license.
+
+DuckDB is a trademark of the DuckDB Foundation; this project is not affiliated
+with or endorsed by the DuckDB Foundation. Apache Sedona and SedonaDB are
+trademarks of the Apache Software Foundation.
