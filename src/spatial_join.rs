@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //! `sedona_join` — an indexed spatial-join table function.
-//!
+//
 //! Answers the brief's "spill table data to disk, let the extension handle the
 //! join with an index" pattern, since DuckDB's C API exposes no join-planner or
 //! GiST-style index operators. Usage:
@@ -17,12 +17,19 @@
 //! whose bounding box intersects, then applies the exact predicate. Returns one
 //! row per matching pair: `(a_row BIGINT, b_row BIGINT)` (0-indexed file rows).
 //! The geometry column is taken to be the **last** BLOB column in each file.
+//
+//! # Parallelism
+//
+//! The scan is **parallel-safe** via an atomic cursor: each DuckDB worker
+//! thread atomically claims the next `vector_size`-row batch from the
+//! pre-computed pairs vector. No partitioning or local-init needed.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use arrow::array::{Array, BinaryArray, LargeBinaryArray};
 use libduckdb_sys::{
-    duckdb_bind_info, duckdb_data_chunk, duckdb_function_info, duckdb_init_info, duckdb_vector_size,
+    duckdb_bind_info, duckdb_data_chunk, duckdb_function_info, duckdb_init_info,
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use quack_rs::data_chunk::DataChunk;
@@ -128,6 +135,12 @@ pub fn join_pairs(
 }
 
 fn matches_predicate(a: &Geom, b: &Geom, predicate: &str) -> bool {
+    // Parse "dwithin:0.01" syntax for configurable tolerance, or use the
+    // default ~500m at the equator (0.0045 degrees).
+    if let Some(tolerance) = predicate.strip_prefix("dwithin:") {
+        let tol: f64 = tolerance.parse().unwrap_or(0.0045);
+        return crate::functions::dwithin(a, b, tol).unwrap_or(false);
+    }
     match predicate.to_ascii_lowercase().as_str() {
         "intersects" => crate::functions::intersects(a, b).unwrap_or(false),
         "contains" => crate::functions::contains(a, b).unwrap_or(false),
@@ -138,30 +151,26 @@ fn matches_predicate(a: &Geom, b: &Geom, predicate: &str) -> bool {
         "touches" => crate::functions::touches(a, b).unwrap_or(false),
         "crosses" => crate::functions::crosses(a, b).unwrap_or(false),
         "overlaps" => crate::functions::overlaps(a, b).unwrap_or(false),
-        "dwithin_0.0045" | "dwithin" => crate::functions::dwithin(a, b, 0.0045).unwrap_or(false),
+        "dwithin" => crate::functions::dwithin(a, b, 0.0045).unwrap_or(false),
         _ => false,
     }
-}
-
-// These re-exports keep the parquet RowFilter/RowSelector imports used if we
-// later add predicate-pushdown to the parquet read; for now they document intent.
-#[allow(dead_code)]
-fn _suppress() {
-    let _ = std::marker::PhantomData::<()>;
 }
 
 // ---------------------------------------------------------------------------
 // Table-function lifecycle (bind / init / scan)
 // ---------------------------------------------------------------------------
 
-/// Bind data: the precomputed list of matching (left_row, right_row) pairs.
+/// Bind data: the precomputed list of matching (left_row, right_row) pairs,
+/// wrapped in an `Arc` so the scan callback can share it across threads.
 pub struct JoinBindData {
-    pub pairs: Vec<(i64, i64)>,
+    pub pairs: Arc<[(i64, i64)]>,
 }
 
-/// Scan state: a cursor into `JoinBindData::pairs` (single-threaded scan).
+/// Scan state: an atomic cursor into the shared pairs slice. Each DuckDB
+/// worker thread atomically claims the next `vector_size`-row batch via
+/// `fetch_add`, making the scan lock-free and parallel-safe.
 pub struct JoinScanState {
-    pub cursor: usize,
+    pub cursor: AtomicUsize,
 }
 
 pub unsafe extern "C" fn join_bind(info: duckdb_bind_info) {
@@ -192,15 +201,15 @@ pub unsafe extern "C" fn join_bind(info: duckdb_bind_info) {
     bi.add_result_column("a_row", TypeId::BigInt)
         .add_result_column("b_row", TypeId::BigInt)
         .set_cardinality(pairs.len() as u64, true);
-    unsafe { FfiBindData::<JoinBindData>::set(info, JoinBindData { pairs }) };
+    unsafe { FfiBindData::<JoinBindData>::set(info, JoinBindData { pairs: Arc::from(pairs) }) };
 }
 
 pub unsafe extern "C" fn join_init(info: duckdb_init_info) {
-    // Force single-threaded scan: the cursor pattern below is not partition-safe.
-    unsafe {
-        InitInfo::new(info).set_max_threads(1);
-    }
-    unsafe { FfiInitData::<JoinScanState>::set(info, JoinScanState { cursor: 0 }) };
+    // Let DuckDB choose the thread count — the atomic cursor in the scan
+    // callback is lock-free and works with any number of threads.
+    // (Previously we forced set_max_threads(1); removing this cap lets
+    // DuckDB parallelise the scan across its worker pool.)
+    unsafe { FfiInitData::<JoinScanState>::set(info, JoinScanState { cursor: AtomicUsize::new(0) }) };
 }
 
 pub unsafe extern "C" fn join_scan(info: duckdb_function_info, output: duckdb_data_chunk) {
@@ -209,20 +218,24 @@ pub unsafe extern "C" fn join_scan(info: duckdb_function_info, output: duckdb_da
         unsafe { chunk.set_size(0) };
         return;
     };
-    let Some(state) = (unsafe { FfiInitData::<JoinScanState>::get_mut(info) }) else {
+    let Some(state) = (unsafe { FfiInitData::<JoinScanState>::get(info) }) else {
         unsafe { chunk.set_size(0) };
         return;
     };
-    let vector_size = unsafe { duckdb_vector_size() } as usize;
-    let remaining = data.pairs.len().saturating_sub(state.cursor);
-    let batch = remaining.min(vector_size);
+    let vector_size = unsafe { libduckdb_sys::duckdb_vector_size() } as usize;
+    // Atomically claim the next batch of rows.
+    let start = state.cursor.fetch_add(vector_size, Ordering::Relaxed);
+    if start >= data.pairs.len() {
+        unsafe { chunk.set_size(0) };
+        return;
+    }
+    let batch = (data.pairs.len() - start).min(vector_size);
     let mut w0 = unsafe { chunk.writer(0) };
     let mut w1 = unsafe { chunk.writer(1) };
     for i in 0..batch {
-        let (a, b) = data.pairs[state.cursor + i];
+        let (a, b) = data.pairs[start + i];
         unsafe { w0.write_i64(i, a) };
         unsafe { w1.write_i64(i, b) };
     }
-    state.cursor += batch;
     unsafe { chunk.set_size(batch) };
 }

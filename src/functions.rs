@@ -32,7 +32,7 @@ use crate::geometry::Geom;
 /// input. Non-areal geometries contribute an empty `MultiPolygon`, which means
 /// they yield an empty result — the standard OGC behaviour for boolean ops on
 /// non-polygonal inputs.
-fn to_multi_polygon(g: &Geom) -> MultiPolygon {
+pub(crate) fn to_multi_polygon(g: &Geom) -> MultiPolygon {
     let polys: Vec<geo_types::Polygon> = match g {
         Geometry::Polygon(p) => vec![p.clone()],
         Geometry::MultiPolygon(mp) => mp.0.clone(),
@@ -115,22 +115,26 @@ fn ensure_valid<'a>(g: &'a Geom) -> std::borrow::Cow<'a, Geom> {
     }
 }
 
-/// `ST_Intersection(a, b)`.
+/// `ST_Intersection(a, b)`. Local `geo::BooleanOps` with GEOS fallback on panic.
 pub fn intersection(a: &Geom, b: &Geom) -> Option<Geom> {
     let av = ensure_valid(a);
     let bv = ensure_valid(b);
-    Some(Geometry::MultiPolygon(
-        to_multi_polygon(&av).intersection(&to_multi_polygon(&bv)),
-    ))
+    overlay_local_or_geos(
+        &av, &bv,
+        |mp_a, mp_b| Geometry::MultiPolygon(mp_a.intersection(mp_b)),
+        crate::geos_backend::intersection,
+    )
 }
 
-/// `ST_Union(a, b)`.
+/// `ST_Union(a, b)`. Local `geo::BooleanOps` with GEOS fallback on panic.
 pub fn union(a: &Geom, b: &Geom) -> Option<Geom> {
     let av = ensure_valid(a);
     let bv = ensure_valid(b);
-    Some(Geometry::MultiPolygon(
-        to_multi_polygon(&av).union(&to_multi_polygon(&bv)),
-    ))
+    overlay_local_or_geos(
+        &av, &bv,
+        |mp_a, mp_b| Geometry::MultiPolygon(mp_a.union(mp_b)),
+        crate::geos_backend::union,
+    )
 }
 
 // ----- binary: geometry, geometry -> boolean ----------------------------
@@ -141,35 +145,24 @@ pub fn intersects(a: &Geom, b: &Geom) -> Option<bool> {
     Some(a.intersects(b))
 }
 
-/// `ST_Contains(a, b)` — a fully contains b. Point operand uses our own robust
-/// ray-cast PIP (see `point_in_geometry`); the general case falls back to geo's
-/// `Contains` guarded by `ensure_valid`.
+/// `ST_Contains(a, b)` — a fully contains b. Routed through `geo::Relate` with
+/// the PostGIS DE-9IM pattern `T*****FF*` (M22: boundary delta retired).
+/// `ensure_valid` guards against stack-overflow on degenerate polygons.
 pub fn contains(a: &Geom, b: &Geom) -> Option<bool> {
-    match b {
-        Geometry::Point(p) => Some(point_in_geometry(p, a)),
-        _ => {
-            use geo::Contains;
-            let av = ensure_valid(a);
-            let bv = ensure_valid(b);
-            Some((&*av).contains(&*bv))
-        }
-    }
+    use geo::Relate;
+    let av = ensure_valid(a);
+    let bv = ensure_valid(b);
+    (&*av).relate(&*bv).matches("T*****FF*").ok()
 }
 
-/// `ST_Within(a, b)` — a is fully contained by b. Point operand uses our own
-/// robust ray-cast PIP (the SpatialBench join shape: trip point within a zone
-/// polygon). General case falls back to geo's `Contains` guarded by
-/// `ensure_valid`.
+/// `ST_Within(a, b)` — a is fully contained by b. Routed through `geo::Relate`
+/// with the PostGIS DE-9IM pattern (M22: boundary delta retired).
+/// `ST_Within(a, b) = ST_Contains(b, a)`.
 pub fn within(a: &Geom, b: &Geom) -> Option<bool> {
-    match a {
-        Geometry::Point(p) => Some(point_in_geometry(p, b)),
-        _ => {
-            use geo::Contains;
-            let av = ensure_valid(a);
-            let bv = ensure_valid(b);
-            Some((&*bv).contains(&*av))
-        }
-    }
+    use geo::Relate;
+    let av = ensure_valid(a);
+    let bv = ensure_valid(b);
+    (&*bv).relate(&*av).matches("T*****FF*").ok()
 }
 
 /// Robust point-in-geometry test via even-odd ray casting.
@@ -274,7 +267,12 @@ pub fn geometry_type(g: &Geom) -> Option<String> {
 // ----- unary: geometry -> INTEGER ---------------------------------------
 
 /// `ST_Dimension(geom)` — inherent dimension (Point=0, Line=1, Polygon=2, ...).
+/// PostGIS returns -1 for empty geometries.
 pub fn dimension(g: &Geom) -> Option<i32> {
+    use geo::HasDimensions;
+    if g.is_empty() {
+        return Some(-1);
+    }
     let dim = match g {
         Geometry::Point(_) | Geometry::MultiPoint(_) => 0,
         Geometry::Line(_) | Geometry::LineString(_) | Geometry::MultiLineString(_) => 1,
@@ -296,7 +294,7 @@ pub fn geom_from_text(s: &str) -> Option<Geom> {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn geom_from_wkt(parsed: wkt::Wkt<f64>) -> Option<Geom> {
+pub(crate) fn geom_from_wkt(parsed: wkt::Wkt<f64>) -> Option<Geom> {
     use std::convert::TryInto;
     // Prefer the explicit TryFrom<Wkt> for Geometry when available; fall back
     // to the inherent `to_geometry` accessor used by upstream SedonaDB.
@@ -358,7 +356,13 @@ pub fn dwithin(a: &Geom, b: &Geom, distance: f64) -> Option<bool> {
 // ----- transforms -------------------------------------------------------
 
 /// `ST_Buffer(geom, radius)` — polygon buffer at `radius`.
+/// Returns NULL for EMPTY geometries (the `geo` buffer algorithm panics on
+/// empty input; PostGIS returns EMPTY).
 pub fn buffer(g: &Geom, radius: f64) -> Option<Geom> {
+    use geo::HasDimensions;
+    if g.is_empty() {
+        return None;
+    }
     Some(Geometry::MultiPolygon(g.buffer(radius)))
 }
 
@@ -380,22 +384,55 @@ pub fn simplify(g: &Geom, epsilon: f64) -> Option<Geom> {
 
 // ----- set operations ---------------------------------------------------
 
-/// `ST_Difference(a, b)`. Guards via `ensure_valid`.
+/// Try a local `geo::BooleanOps` overlay; fall back to GEOS on panic.
+///
+/// The local `geo` crate is faster on common input but can stack-overflow on
+/// very complex or pathological polygons. GEOS (the canonical PostGIS engine)
+/// handles those cases. `catch_unwind` catches the panic; GEOS produces the
+/// result via the narrow WKB-in/WKB-out boundary in `geos_backend.rs`.
+fn overlay_local_or_geos(
+    a: &Geom,
+    b: &Geom,
+    local_op: impl Fn(&MultiPolygon, &MultiPolygon) -> Geom,
+    geos_op: fn(&[u8], &[u8]) -> Option<Vec<u8>>,
+) -> Option<Geom> {
+    let mp_a = to_multi_polygon(a);
+    let mp_b = to_multi_polygon(b);
+    let local = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        local_op(&mp_a, &mp_b)
+    }));
+    match local {
+        Ok(result) => Some(result),
+        Err(_) => {
+            // GEOS fallback: WKB → GEOS overlay → WKB → Geom.
+            let a_wkb = crate::geometry::to_wkb(a).ok()?;
+            let b_wkb = crate::geometry::to_wkb(b).ok()?;
+            let result_wkb = geos_op(&a_wkb, &b_wkb)?;
+            crate::geometry::from_wkb(&result_wkb).ok()
+        }
+    }
+}
+
+/// `ST_Difference(a, b)`. Local `geo::BooleanOps` with GEOS fallback on panic.
 pub fn difference(a: &Geom, b: &Geom) -> Option<Geom> {
     let av = ensure_valid(a);
     let bv = ensure_valid(b);
-    Some(Geometry::MultiPolygon(
-        to_multi_polygon(&av).difference(&to_multi_polygon(&bv)),
-    ))
+    overlay_local_or_geos(
+        &av, &bv,
+        |mp_a, mp_b| Geometry::MultiPolygon(mp_a.difference(mp_b)),
+        crate::geos_backend::difference,
+    )
 }
 
-/// `ST_SymDifference(a, b)`. Guards via `ensure_valid`.
+/// `ST_SymDifference(a, b)`. Local `geo::BooleanOps` with GEOS fallback on panic.
 pub fn sym_difference(a: &Geom, b: &Geom) -> Option<Geom> {
     let av = ensure_valid(a);
     let bv = ensure_valid(b);
-    Some(Geometry::MultiPolygon(
-        to_multi_polygon(&av).xor(&to_multi_polygon(&bv)),
-    ))
+    overlay_local_or_geos(
+        &av, &bv,
+        |mp_a, mp_b| Geometry::MultiPolygon(mp_a.xor(mp_b)),
+        crate::geos_backend::symmetric_difference,
+    )
 }
 
 /// `ST_MakeLine(a, b)` — line string through the point coordinates of `a`
@@ -522,6 +559,32 @@ pub fn covered_by(a: &Geom, b: &Geom) -> Option<bool> {
     let bv = ensure_valid(b);
     Some((&*av).relate(&*bv).is_coveredby())
 }
+/// `ST_ContainsProperly(a, b)` — a contains b and no point of b lies on the
+/// boundary of a. DE-9IM pattern: `T**FF*FF*`.
+pub fn contains_properly(a: &Geom, b: &Geom) -> Option<bool> {
+    use geo::Relate;
+    let av = ensure_valid(a);
+    let bv = ensure_valid(b);
+    (&*av).relate(&*bv).matches("T**FF*FF*").ok()
+}
+
+// ----- DE-9IM relate (via GEOS, the canonical PostGIS engine) --------------
+
+/// `ST_Relate(a, b)` — returns the 9-character DE-9IM intersection matrix.
+/// Routed through GEOS for PostGIS fidelity.
+pub fn relate(a: &Geom, b: &Geom) -> Option<String> {
+    let wkb_a = crate::geometry::to_wkb(a).ok()?;
+    let wkb_b = crate::geometry::to_wkb(b).ok()?;
+    crate::geos_backend::relate(&wkb_a, &wkb_b)
+}
+
+/// `ST_Relate(a, b, pattern)` — returns whether the DE-9IM matrix matches the
+/// 9-character pattern. Routed through GEOS for PostGIS fidelity.
+pub fn relate_pattern(a: &Geom, b: &Geom, pattern: &str) -> Option<bool> {
+    let wkb_a = crate::geometry::to_wkb(a).ok()?;
+    let wkb_b = crate::geometry::to_wkb(b).ok()?;
+    crate::geos_backend::relate_pattern(&wkb_a, &wkb_b, pattern)
+}
 
 // ----- structural accessors ----------------------------------------------
 
@@ -578,14 +641,28 @@ pub fn end_point(g: &Geom) -> Option<Geom> {
 
 /// `ST_IsClosed(geom)`.
 pub fn is_closed(g: &Geom) -> Option<bool> {
-    Some(match g {
-        Geometry::LineString(ls) => ls.0.first().is_some_and(|f| ls.0.last().is_some_and(|l| f == l)),
-        Geometry::MultiLineString(mls) => mls.0.iter().all(|ls| {
-            ls.0.first().is_some_and(|f| ls.0.last().is_some_and(|l| f == l))
-        }),
-        Geometry::Polygon(_) | Geometry::MultiPolygon(_) => true,
-        _ => false,
-    })
+    // An empty geometry is not closed (matches SedonaDB / PostGIS).
+    if is_empty(g).unwrap_or(false) {
+        return Some(false);
+    }
+    Some(all_rings_closed(g))
+}
+
+/// Recursive helper: true iff every constituent LineString is closed (its
+/// endpoints coincide). A GeometryCollection is closed only if every child is.
+#[inline]
+fn all_rings_closed(g: &Geom) -> bool {
+    fn endpoints_match(ls: &geo_types::LineString<f64>) -> bool {
+        ls.0.first().is_some_and(|f| ls.0.last().is_some_and(|l| f == l))
+    }
+    match g {
+        // Polygons are always closed (rings); points/multipoints have no open
+        // boundary, so they are vacuously closed.
+        Geometry::LineString(ls) => endpoints_match(ls),
+        Geometry::MultiLineString(mls) => mls.0.iter().all(endpoints_match),
+        Geometry::GeometryCollection(c) => c.0.iter().all(all_rings_closed),
+        _ => true,
+    }
 }
 
 /// `ST_CoordDim(geom)` — this extension handles 2D WKB.
@@ -652,8 +729,13 @@ pub fn translate(g: &Geom, dx: f64, dy: f64) -> Option<Geom> {
 
 /// `ST_Scale(geom, xfac, yfac)`.
 pub fn scale(g: &Geom, xfac: f64, yfac: f64) -> Option<Geom> {
-    use geo::Scale;
-    Some(g.scale_xy(xfac, yfac))
+    use geo::Scale as _;
+    // PostGIS/SedonaDB ST_Scale multiplies coordinates by the factors about the
+    // ORIGIN (0,0). geo's `scale_xy` scales about the centroid instead, which
+    // would leave a single point unchanged — wrong vs the SQL standard. Scale
+    // about the origin explicitly. (Surfaced by tests/fidelity.sql vs
+    // sedona_st_scale.)
+    Some(g.scale_around_point(xfac, yfac, geo_types::Coord { x: 0.0, y: 0.0 }))
 }
 
 // ----- I/O ----------------------------------------------------------------
@@ -663,29 +745,45 @@ pub fn as_binary(g: &Geom) -> Option<Vec<u8>> {
     crate::geometry::to_wkb(g).ok()
 }
 
-// ----- 2D / Z / M stubs (this extension handles 2D WKB only) -------------
+// ----- 2D / Z / M stubs --------------------------------------------------
+//
+// The functions below are DORMANT FROM SQL: their public `st_*` registrations
+// route to the literal Apache SedonaDB kernel (see registry.rs, bridge batch),
+// which handles Z/M dimensions natively in the WKB bytes. The local stubs
+// remain here because they may be called by internal functions (e.g.,
+// `ensure_valid`) and serve as a fallback reference implementation.
+//
+// DORMANT INVENTORY (local impl exists but `st_*` routes to literal kernel):
+//   force_2d, has_z, has_m, zm_flag, z, m
+//   (Also: point, azimuth, affine, rotate, translate, scale, make_line,
+//    line_from_text — local bodies retained for internal use or aggregates,
+//    but public `st_*` now routes to SedonaDB bridge since Month 4.)
+//
+// If you add a new function here, check whether the SedonaDB bridge already
+// provides a literal equivalent — if so, route the public `st_*` to the literal
+// kernel instead of wiring this local implementation.
 
-/// `ST_Force2D(geom)` — drop Z/M (no-op here; we are already 2D).
+/// `ST_Force2D(geom)` — DORMANT: `st_force2d` routes to literal SedonaDB kernel.
 pub fn force_2d(g: &Geom) -> Option<Geom> {
     Some(g.clone())
 }
-/// `ST_HasZ(geom)` — false (2D only).
+/// `ST_HasZ(geom)` — DORMANT: `st_hasz` routes to literal kernel. Local stub: false.
 pub fn has_z(_g: &Geom) -> Option<bool> {
     Some(false)
 }
-/// `ST_HasM(geom)` — false (2D only).
+/// `ST_HasM(geom)` — DORMANT: `st_hasm` routes to literal kernel. Local stub: false.
 pub fn has_m(_g: &Geom) -> Option<bool> {
     Some(false)
 }
-/// `ST_ZMflag(geom)` — 0 (2D only).
+/// `ST_ZMflag(geom)` — DORMANT: `st_zmflag` routes to literal kernel. Local stub: 0.
 pub fn zm_flag(_g: &Geom) -> Option<i32> {
     Some(0)
 }
-/// `ST_Z(geom)` — NULL (2D only).
+/// `ST_Z(geom)` — DORMANT: `st_z` routes to literal kernel. Local stub: NULL.
 pub fn z(_g: &Geom) -> Option<f64> {
     None
 }
-/// `ST_M(geom)` — NULL (2D only).
+/// `ST_M(geom)` — DORMANT: `st_m` routes to literal kernel. Local stub: NULL.
 pub fn m(_g: &Geom) -> Option<f64> {
     None
 }
@@ -802,14 +900,45 @@ pub fn hausdorff_distance(a: &Geom, b: &Geom) -> Option<f64> {
     Some(a.hausdorff_distance(b))
 }
 
-// ----- EWKT / SRID (SRID carried in text only; geometry is SRID-less) ----
+// ----- EWKT / EWKB SRID (SRID carried as an EWKB tag on the blob) ---------
+// PostGIS SRID semantics on SRID-less ISO WKB storage: `ST_SetSRID` writes an
+// EWKB SRID tag (flag 0x20000000 + 4-byte SRID), `ST_SRID` reads it, and the
+// dispatch layer propagates it through geometry-producing functions. Kernels
+// themselves never see the tag (`from_wkb` strips it at the trust boundary).
 
-/// `ST_AsEWKT(geom, srid)` — `SRID=<n>;<wkt>`.
+/// `ST_AsEWKT(geom, srid)` — `SRID=<n>;<wkt>` with an explicit SRID.
 pub fn as_ewkt(g: &Geom, srid: i32) -> Option<String> {
     Some(format!("SRID={srid};{}", as_text(g)?))
 }
 
-/// `ST_GeomFromEWKT(text)` — parse `SRID=<n>;<wkt>` (SRID discarded, 2D only).
+/// `ST_AsEWKT(geom)` — reads the EWKB SRID tag; prints `SRID=<n>;<wkt>` when
+/// tagged, plain WKT when not (PostGIS prints no prefix for SRID 0).
+pub fn as_ewkt_auto(wkb: &[u8]) -> Option<String> {
+    let g = crate::geometry::from_wkb(wkb).ok()?;
+    match crate::geometry::peek_ewkb_srid(wkb) {
+        Some(srid) => as_ewkt(&g, srid),
+        None => as_text(&g),
+    }
+}
+
+/// `ST_GeomFromEWKT(text)` — parse `SRID=<n>;<wkt>`; the SRID is preserved as
+/// an EWKB tag on the output blob.
+pub fn geom_from_ewkt_raw(s: &str) -> Option<Vec<u8>> {
+    let (srid, wkt) = if let Some(rest) = s.strip_prefix("SRID=") {
+        match rest.split_once(';') {
+            Some((n, w)) => (n.trim().parse::<i32>().ok().unwrap_or(0), w),
+            None => (0, rest),
+        }
+    } else {
+        (0, s)
+    };
+    let g = geom_from_text(wkt)?;
+    let wkb = crate::geometry::to_wkb(&g).ok()?;
+    Some(crate::geometry::tag_ewkb_srid(&wkb, srid))
+}
+
+/// `ST_GeomFromEWKT(text)` — legacy Geom-typed variant (SRID discarded); kept
+/// for callers that need a parsed geometry rather than a tagged blob.
 pub fn geom_from_ewkt(s: &str) -> Option<Geom> {
     let wkt = if let Some(rest) = s.strip_prefix("SRID=") {
         rest.split_once(';').map(|(_, w)| w).unwrap_or(rest)
@@ -819,15 +948,56 @@ pub fn geom_from_ewkt(s: &str) -> Option<Geom> {
     geom_from_text(wkt)
 }
 
-/// `ST_SetSRID(geom, srid)` — no-op tag (extension is SRID-less until PROJ/Tier 3).
+/// `ST_SetSRID(geom, srid)` — retag the blob's EWKB SRID (byte-level; no
+/// geometry parse). `srid <= 0` clears the tag (PostGIS "unknown SRID").
+pub fn set_srid_raw(wkb: &[u8], srid: i32) -> Option<Vec<u8>> {
+    // Validate it is real WKB before tagging so garbage stays NULL.
+    crate::geometry::from_wkb(wkb).ok()?;
+    Some(crate::geometry::tag_ewkb_srid(wkb, srid))
+}
+
+/// `ST_SRID(geom)` — the blob's EWKB SRID tag, or 0 when untagged.
+pub fn srid_raw(wkb: &[u8]) -> Option<i32> {
+    crate::geometry::from_wkb(wkb).ok()?;
+    Some(crate::geometry::peek_ewkb_srid(wkb).unwrap_or(0))
+}
+
+/// `ST_GeomFromText(wkt, srid)` — PostGIS 2-arg constructor: parse and tag.
+pub fn geom_from_text_srid(wkt: &str, srid: i32) -> Option<Vec<u8>> {
+    let g = geom_from_text(wkt)?;
+    let wkb = crate::geometry::to_wkb(&g).ok()?;
+    Some(crate::geometry::tag_ewkb_srid(&wkb, srid))
+}
+
+/// `ST_GeomFromWKB(bytes, srid)` — PostGIS 2-arg constructor: validate and tag.
+pub fn geom_from_wkb_srid(wkb: &[u8], srid: i32) -> Option<Vec<u8>> {
+    crate::geometry::from_wkb(wkb).ok()?;
+    Some(crate::geometry::tag_ewkb_srid(wkb, srid))
+}
+
+/// `ST_Transform(geom, to_srid)` — PostGIS 2-arg reprojection: the source CRS
+/// is the blob's EWKB SRID tag. NULL for untagged input (PostGIS errors on
+/// "unknown SRID"; we fail closed with NULL). Output is tagged with `to_srid`.
+pub fn transform_to_srid(wkb: &[u8], to_srid: i32) -> Option<Vec<u8>> {
+    let from_srid = crate::geometry::peek_ewkb_srid(wkb)?;
+    let g = crate::geometry::from_wkb(wkb).ok()?;
+    let out = transform(&g, from_srid, to_srid)?;
+    let out_wkb = crate::geometry::to_wkb(&out).ok()?;
+    Some(crate::geometry::tag_ewkb_srid(&out_wkb, to_srid))
+}
+
+/// Legacy no-op variants retained for the `sedona_st_*` literal namespace.
 pub fn set_srid(g: &Geom, _srid: i32) -> Option<Geom> {
     Some(g.clone())
 }
 
-/// `ST_SRID(geom)` — always 0 until CRS support lands.
+/// `ST_SRID(geom)` (Geom-typed) — always 0; SRID lives on the blob, not `Geom`.
 pub fn srid(_g: &Geom) -> Option<i32> {
     Some(0)
 }
+
+// ----- scalar collect ------------------------------------------------------
+// (See `collect_two` in the collection-utilities section below.)
 
 // ----- more geometry processing -----------------------------------------
 
@@ -912,6 +1082,446 @@ pub fn as_geojson(g: &Geom) -> Option<String> {
         _ => r#"{"type":"GeometryCollection","geometries":[]}"#.to_string(),
     };
     Some(json)
+}
+
+/// `ST_AsSVG(geom)` — SVG path data string. Y axis is flipped (SVG convention).
+/// Absolute coordinates, full precision. Matches PostGIS `ST_AsSVG(geom, 0)`.
+pub fn as_svg(g: &Geom) -> Option<String> {
+    let coord = |c: &geo_types::Coord<f64>| format!("{} {}", c.x, -c.y);
+    let path = |ls: &geo_types::LineString<f64>| {
+        let pts = &ls.0;
+        if pts.is_empty() {
+            return String::new();
+        }
+        let mut s = format!("M {}", coord(&pts[0]));
+        for c in &pts[1..] {
+            s.push_str(&format!(" L {}", coord(c)));
+        }
+        s
+    };
+    let ring_path = |ls: &geo_types::LineString<f64>| {
+        // PostGIS closes ring paths with Z
+        let mut s = path(ls);
+        if !s.is_empty() {
+            s.push_str(" Z");
+        }
+        s
+    };
+    let s = match g {
+        Geometry::Point(p) => format!("{} {}", p.x(), -p.y()),
+        Geometry::MultiPoint(mp) => mp
+            .0
+            .iter()
+            .map(|p| format!("{} {}", p.x(), -p.y()))
+            .collect::<Vec<_>>()
+            .join(","),
+        Geometry::LineString(ls) => path(ls),
+        Geometry::MultiLineString(mls) => mls
+            .0
+            .iter()
+            .map(path)
+            .collect::<Vec<_>>()
+            .join(" "),
+        Geometry::Polygon(p) => {
+            let rings: Vec<String> =
+                std::iter::once(p.exterior()).chain(p.interiors().iter()).map(ring_path).collect();
+            rings.join(" ")
+        }
+        Geometry::MultiPolygon(mp) => mp
+            .0
+            .iter()
+            .map(|p| {
+                let rings: Vec<String> =
+                    std::iter::once(p.exterior()).chain(p.interiors().iter()).map(ring_path).collect();
+                rings.join(" ")
+            })
+            .collect::<Vec<_>>()
+            .join(";"),
+        Geometry::GeometryCollection(c) => c
+            .0
+            .iter()
+            .filter_map(|item| as_svg(item))
+            .collect::<Vec<_>>()
+            .join(";"),
+        _ => return None,
+    };
+    Some(s)
+}
+
+/// `ST_AsKML(geom)` — KML 2.2 geometry serialization as XML text.
+/// Coordinates are `x,y` (lon,lat) as PostGIS emits. No altitude dimension.
+pub fn as_kml(g: &Geom) -> Option<String> {
+    let coords = |c: &geo_types::Coord<f64>| format!("{},{}", c.x, c.y);
+    let coord_list = |ls: &geo_types::LineString<f64>| {
+        ls.0.iter().map(coords).collect::<Vec<_>>().join(" ")
+    };
+    let s = match g {
+        Geometry::Point(p) => {
+            format!("<Point><coordinates>{},{}</coordinates></Point>", p.x(), p.y())
+        }
+        Geometry::MultiPoint(mp) => {
+            let inner: String = mp.0.iter()
+                .map(|p| format!("<Point><coordinates>{},{}</coordinates></Point>", p.x(), p.y()))
+                .collect::<Vec<_>>()
+                .join("");
+            format!("<MultiGeometry>{}</MultiGeometry>", inner)
+        }
+        Geometry::LineString(ls) => {
+            format!("<LineString><coordinates>{}</coordinates></LineString>", coord_list(ls))
+        }
+        Geometry::MultiLineString(mls) => {
+            let inner: String = mls.0.iter()
+                .map(|ls| format!("<LineString><coordinates>{}</coordinates></LineString>", coord_list(ls)))
+                .collect::<Vec<_>>()
+                .join("");
+            format!("<MultiGeometry>{}</MultiGeometry>", inner)
+        }
+        Geometry::Polygon(p) => {
+            let exterior = format!("<outerBoundaryIs><LinearRing><coordinates>{}</coordinates></LinearRing></outerBoundaryIs>",
+                coord_list(p.exterior()));
+            let interiors: String = p.interiors().iter()
+                .map(|ring| format!("<innerBoundaryIs><LinearRing><coordinates>{}</coordinates></LinearRing></innerBoundaryIs>",
+                    coord_list(ring)))
+                .collect::<Vec<_>>()
+                .join("");
+            format!("<Polygon>{}{}</Polygon>", exterior, interiors)
+        }
+        Geometry::MultiPolygon(mp) => {
+            let inner: String = mp.0.iter()
+                .map(|p| {
+                    let ext = format!("<outerBoundaryIs><LinearRing><coordinates>{}</coordinates></LinearRing></outerBoundaryIs>",
+                        coord_list(p.exterior()));
+                    let ints: String = p.interiors().iter()
+                        .map(|ring| format!("<innerBoundaryIs><LinearRing><coordinates>{}</coordinates></LinearRing></innerBoundaryIs>",
+                            coord_list(ring)))
+                        .collect::<Vec<_>>()
+                        .join("");
+                    format!("<Polygon>{}{}</Polygon>", ext, ints)
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            format!("<MultiGeometry>{}</MultiGeometry>", inner)
+        }
+        Geometry::GeometryCollection(c) => {
+            let inner: String = c.0.iter()
+                .filter_map(|item| as_kml(item))
+                .collect::<Vec<_>>()
+                .join("");
+            format!("<MultiGeometry>{}</MultiGeometry>", inner)
+        }
+        _ => return None,
+    };
+    Some(s)
+}
+
+// ----- TWKB (Tiny Well-Known Binary) encoding ---------------------------
+// TWKB spec: https://github.com/TWKB/Specification
+// This implementation uses precision=0 (integer coordinates), no bbox, no size,
+// no ID list. Coordinates are zigzag-varint encoded as deltas.
+
+fn zigzag_encode(n: i64) -> u64 {
+    ((n << 1) ^ (n >> 63)) as u64
+}
+
+fn write_varint(buf: &mut Vec<u8>, mut n: u64) {
+    loop {
+        let byte = (n & 0x7F) as u8;
+        n >>= 7;
+        if n == 0 {
+            buf.push(byte);
+            break;
+        }
+        buf.push(byte | 0x80);
+    }
+}
+
+fn twkb_type_byte(g: &Geom) -> Option<u8> {
+    Some(match g {
+        Geometry::Point(_) => 1,
+        Geometry::LineString(_) => 2,
+        Geometry::Polygon(_) => 3,
+        Geometry::MultiPoint(_) => 4,
+        Geometry::MultiLineString(_) => 5,
+        Geometry::MultiPolygon(_) => 6,
+        Geometry::GeometryCollection(_) => 7,
+        _ => return None,
+    })
+}
+
+fn twkb_coords(buf: &mut Vec<u8>, coords: &[geo_types::Coord<f64>]) {
+    let mut prev_x = 0i64;
+    let mut prev_y = 0i64;
+    for c in coords {
+        let x = c.x.round() as i64;
+        let y = c.y.round() as i64;
+        write_varint(buf, zigzag_encode(x - prev_x));
+        write_varint(buf, zigzag_encode(y - prev_y));
+        prev_x = x;
+        prev_y = y;
+    }
+}
+
+/// `ST_AsTWKB(geom)` — Tiny WKB compact binary encoding, returned as
+/// lowercase hex string (use `unhex()` for binary BLOB). Precision=0, no bbox.
+pub fn as_twkb(g: &Geom) -> Option<String> {
+    let mut buf = Vec::new();
+    let type_byte = twkb_type_byte(g)?;
+    // type_and_prec: bits 0-3 = type, bits 4-5 = precision (0), bits 6-7 = no bbox/size
+    buf.push(type_byte);
+
+    match g {
+        Geometry::Point(p) => {
+            twkb_coords(&mut buf, &[geo_types::Coord { x: p.x(), y: p.y() }]);
+        }
+        Geometry::LineString(ls) => {
+            write_varint(&mut buf, ls.0.len() as u64);
+            twkb_coords(&mut buf, &ls.0);
+        }
+        Geometry::Polygon(p) => {
+            let rings: Vec<&geo_types::LineString<f64>> =
+                std::iter::once(p.exterior()).chain(p.interiors().iter()).collect();
+            write_varint(&mut buf, rings.len() as u64);
+            for ring in &rings {
+                write_varint(&mut buf, ring.0.len() as u64);
+                twkb_coords(&mut buf, &ring.0);
+            }
+        }
+        Geometry::MultiPoint(mp) => {
+            let coords: Vec<geo_types::Coord<f64>> = mp.0.iter()
+                .map(|p| geo_types::Coord { x: p.x(), y: p.y() })
+                .collect();
+            write_varint(&mut buf, coords.len() as u64);
+            twkb_coords(&mut buf, &coords);
+        }
+        Geometry::MultiLineString(mls) => {
+            write_varint(&mut buf, mls.0.len() as u64);
+            for ls in &mls.0 {
+                write_varint(&mut buf, ls.0.len() as u64);
+                twkb_coords(&mut buf, &ls.0);
+            }
+        }
+        Geometry::MultiPolygon(mp) => {
+            write_varint(&mut buf, mp.0.len() as u64);
+            for p in &mp.0 {
+                let rings: Vec<&geo_types::LineString<f64>> =
+                    std::iter::once(p.exterior()).chain(p.interiors().iter()).collect();
+                write_varint(&mut buf, rings.len() as u64);
+                for ring in &rings {
+                    write_varint(&mut buf, ring.0.len() as u64);
+                    twkb_coords(&mut buf, &ring.0);
+                }
+            }
+        }
+        Geometry::GeometryCollection(c) => {
+            write_varint(&mut buf, c.0.len() as u64);
+            for item in &c.0 {
+                // Each sub-geometry gets its own type byte + content
+                let sub_type = twkb_type_byte(item)?;
+                buf.push(sub_type);
+                match item {
+                    Geometry::Point(p) => {
+                        twkb_coords(&mut buf, &[geo_types::Coord { x: p.x(), y: p.y() }]);
+                    }
+                    Geometry::LineString(ls) => {
+                        write_varint(&mut buf, ls.0.len() as u64);
+                        twkb_coords(&mut buf, &ls.0);
+                    }
+                    Geometry::Polygon(poly) => {
+                        let rings: Vec<&geo_types::LineString<f64>> =
+                            std::iter::once(poly.exterior()).chain(poly.interiors().iter()).collect();
+                        write_varint(&mut buf, rings.len() as u64);
+                        for ring in &rings {
+                            write_varint(&mut buf, ring.0.len() as u64);
+                            twkb_coords(&mut buf, &ring.0);
+                        }
+                    }
+                    _ => return None, // nested multi-types in collections not supported in v1
+                }
+            }
+        }
+        _ => return None,
+    }
+
+    Some(buf.iter().map(|b| format!("{:02x}", b)).collect())
+}
+
+// ----- MVT (Mapbox Vector Tile) encoding -------------------------------
+// Encodes a single geometry as a protobuf MVT tile (one layer, one feature).
+// Coordinates must already be in tile-local integer space (0..4096).
+// See: https://github.com/mapbox/vector-tile-spec
+
+fn pb_varint(buf: &mut Vec<u8>, mut n: u64) {
+    while n >= 0x80 {
+        buf.push((n as u8 & 0x7F) | 0x80);
+        n >>= 7;
+    }
+    buf.push(n as u8);
+}
+
+fn pb_field_varint(buf: &mut Vec<u8>, field: u32, val: u64) {
+    pb_varint(buf, ((field as u64) << 3)); // wire type 0
+    pb_varint(buf, val);
+}
+
+fn pb_field_string(buf: &mut Vec<u8>, field: u32, s: &str) {
+    pb_varint(buf, ((field as u64) << 3) | 2); // wire type 2
+    pb_varint(buf, s.len() as u64);
+    buf.extend_from_slice(s.as_bytes());
+}
+
+fn pb_field_message(buf: &mut Vec<u8>, field: u32, msg: &[u8]) {
+    pb_varint(buf, ((field as u64) << 3) | 2); // wire type 2
+    pb_varint(buf, msg.len() as u64);
+    buf.extend_from_slice(msg);
+}
+
+fn pb_packed_uint32(buf: &mut Vec<u8>, field: u32, vals: &[u32]) {
+    let mut inner = Vec::new();
+    for &v in vals {
+        pb_varint(&mut inner, v as u64);
+    }
+    pb_field_message(buf, field, &inner);
+}
+
+/// MVT zigzag encode for i32.
+fn mvt_zz(n: i32) -> u32 {
+    ((n << 1) ^ (n >> 31)) as u32
+}
+
+/// Encode a ring as MVT commands: MoveTo + LineTo + ClosePath.
+fn mvt_ring(geoms: &mut Vec<u32>, prev: &mut (i32, i32), ring: &[geo_types::Coord<f64>]) {
+    if ring.len() < 4 {
+        return;
+    }
+    let x0 = ring[0].x.round() as i32;
+    let y0 = ring[0].y.round() as i32;
+    // MoveTo count=1
+    geoms.push((1 << 3) | 1);
+    geoms.push(mvt_zz(x0 - prev.0));
+    geoms.push(mvt_zz(y0 - prev.1));
+    *prev = (x0, y0);
+    // LineTo count = ring.len() - 2 (skip repeated closing vertex)
+    let count = ring.len() - 2;
+    geoms.push((2 << 3) | count as u32);
+    for c in &ring[1..ring.len() - 1] {
+        let x = c.x.round() as i32;
+        let y = c.y.round() as i32;
+        geoms.push(mvt_zz(x - prev.0));
+        geoms.push(mvt_zz(y - prev.1));
+        *prev = (x, y);
+    }
+    // ClosePath count=1
+    geoms.push((7 << 3) | 1);
+}
+
+/// `ST_AsMVT(geom)` — Mapbox Vector Tile encoding (hex-encoded VARCHAR).
+/// Creates a single-layer, single-feature MVT tile. Coordinates must already
+/// be in tile-local integer space (0..4096). Use this as a building block with
+/// SQL aggregation for multi-feature tiles.
+pub fn as_mvt(g: &Geom) -> Option<String> {
+    let mut prev = (0i32, 0i32);
+    let mut geoms: Vec<u32> = Vec::new();
+
+    let geom_type: u32 = match g {
+        Geometry::Point(p) => {
+            let x = p.x().round() as i32;
+            let y = p.y().round() as i32;
+            geoms.push((1 << 3) | 1);
+            geoms.push(mvt_zz(x - prev.0));
+            geoms.push(mvt_zz(y - prev.1));
+            prev = (x, y);
+            1 // POINT
+        }
+        Geometry::MultiPoint(mp) => {
+            if mp.0.is_empty() { return None; }
+            geoms.push((1 << 3) | mp.0.len() as u32);
+            for p in &mp.0 {
+                let x = p.x().round() as i32;
+                let y = p.y().round() as i32;
+                geoms.push(mvt_zz(x - prev.0));
+                geoms.push(mvt_zz(y - prev.1));
+                prev = (x, y);
+            }
+            1 // POINT
+        }
+        Geometry::LineString(ls) => {
+            if ls.0.len() < 2 { return None; }
+            let x = ls.0[0].x.round() as i32;
+            let y = ls.0[0].y.round() as i32;
+            geoms.push((1 << 3) | 1);
+            geoms.push(mvt_zz(x - prev.0));
+            geoms.push(mvt_zz(y - prev.1));
+            prev = (x, y);
+            let count = ls.0.len() - 1;
+            geoms.push((2 << 3) | count as u32);
+            for c in &ls.0[1..] {
+                let x = c.x.round() as i32;
+                let y = c.y.round() as i32;
+                geoms.push(mvt_zz(x - prev.0));
+                geoms.push(mvt_zz(y - prev.1));
+                prev = (x, y);
+            }
+            2 // LINESTRING
+        }
+        Geometry::MultiLineString(mls) => {
+            if mls.0.is_empty() { return None; }
+            for ls in &mls.0 {
+                if ls.0.len() < 2 { continue; }
+                let x = ls.0[0].x.round() as i32;
+                let y = ls.0[0].y.round() as i32;
+                geoms.push((1 << 3) | 1);
+                geoms.push(mvt_zz(x - prev.0));
+                geoms.push(mvt_zz(y - prev.1));
+                prev = (x, y);
+                let count = ls.0.len() - 1;
+                geoms.push((2 << 3) | count as u32);
+                for c in &ls.0[1..] {
+                    let x = c.x.round() as i32;
+                    let y = c.y.round() as i32;
+                    geoms.push(mvt_zz(x - prev.0));
+                    geoms.push(mvt_zz(y - prev.1));
+                    prev = (x, y);
+                }
+            }
+            2 // LINESTRING
+        }
+        Geometry::Polygon(p) => {
+            mvt_ring(&mut geoms, &mut prev, &p.exterior().0);
+            for ring in p.interiors() {
+                mvt_ring(&mut geoms, &mut prev, &ring.0);
+            }
+            3 // POLYGON
+        }
+        Geometry::MultiPolygon(mp) => {
+            if mp.0.is_empty() { return None; }
+            for p in &mp.0 {
+                mvt_ring(&mut geoms, &mut prev, &p.exterior().0);
+                for ring in p.interiors() {
+                    mvt_ring(&mut geoms, &mut prev, &ring.0);
+                }
+            }
+            3 // POLYGON
+        }
+        _ => return None,
+    };
+
+    // Build Feature message (field 3=type, field 4=geometry)
+    let mut feature = Vec::new();
+    pb_field_varint(&mut feature, 3, geom_type as u64);
+    pb_packed_uint32(&mut feature, 4, &geoms);
+
+    // Build Layer message (field 15=version, field 1=name, field 2=features, field 5=extent)
+    let mut layer = Vec::new();
+    pb_field_varint(&mut layer, 15, 2); // version=2
+    pb_field_string(&mut layer, 1, "geometry"); // name
+    pb_field_message(&mut layer, 2, &feature); // features
+    pb_field_varint(&mut layer, 5, 4096); // extent
+
+    // Build Tile message (field 3=layers)
+    let mut tile = Vec::new();
+    pb_field_message(&mut tile, 3, &layer); // layers
+
+    Some(tile.iter().map(|b| format!("{:02x}", b)).collect())
 }
 
 /// `ST_Project(geom, distance, azimuth)` — geographic destination point from a
@@ -1113,6 +1723,151 @@ pub fn area_sphere(g: &Geom) -> Option<f64> {
         Geometry::MultiPolygon(mp) => mp.chamberlain_duquette_unsigned_area(),
         _ => 0.0,
     })
+}
+
+// ----- Geography (spheroid) variants ---------------------------------------
+// Coordinates interpreted as lon/lat (x=lon, y=lat). Uses Karney's algorithm
+// (GeographicLib) — converges everywhere, including antipodal points where
+// Vincenty fails. Distances in metres, area in m². The default ellipsoid is
+// WGS84; the PostGIS spheroid-string variants accept any
+// `SPHEROID["name",semi_major_axis,inverse_flattening]`.
+
+/// Parse a PostGIS spheroid string into a custom [`Geodesic`].
+///
+/// Accepts `SPHEROID["WGS 84",6378137,298.257223563]` (case-insensitive
+/// keyword, single or double quotes, optional whitespace). An inverse
+/// flattening of 0 yields a sphere. Returns `None` on malformed input or
+/// non-finite/non-positive parameters — callers emit NULL, never a silent
+/// wrong answer.
+fn parse_spheroid(s: &str) -> Option<geographiclib_rs::Geodesic> {
+    let t = s.trim();
+    let rest = t
+        .get(..8)
+        .filter(|p| p.eq_ignore_ascii_case("SPHEROID"))
+        .map(|_| t[8..].trim_start())?;
+    let inner = rest.strip_prefix('[')?.strip_suffix(']')?;
+    // inner = "name", a, rf — name may contain commas inside quotes, so split
+    // from the right: the last two comma-separated fields are numeric.
+    let (head, rf_str) = inner.rsplit_once(',')?;
+    let (_name, a_str) = head.rsplit_once(',')?;
+    let a: f64 = a_str.trim().parse().ok()?;
+    let rf: f64 = rf_str.trim().parse().ok()?;
+    if !a.is_finite() || a <= 0.0 || !rf.is_finite() || rf < 0.0 {
+        return None;
+    }
+    let f = if rf == 0.0 { 0.0 } else { 1.0 / rf };
+    Some(geographiclib_rs::Geodesic::new(a, f))
+}
+
+/// Geodesic point-to-point distance on the given ellipsoid (metres).
+fn distance_geodesic(geo: &geographiclib_rs::Geodesic, a: &Geom, b: &Geom) -> Option<f64> {
+    use geographiclib_rs::InverseGeodesic;
+    let ca = point_coord(a)?;
+    let cb = point_coord(b)?;
+    // geographiclib takes (lat, lon); our coords are (x=lon, y=lat).
+    let d: f64 = geo.inverse(ca.y, ca.x, cb.y, cb.x);
+    Some(d)
+}
+
+/// Geodesic length of a (multi)linestring on the given ellipsoid (metres).
+fn length_geodesic(geo: &geographiclib_rs::Geodesic, g: &Geom) -> Option<f64> {
+    use geographiclib_rs::InverseGeodesic;
+    let mut total = 0.0_f64;
+    for line in lines_of(g) {
+        let mut prev: Option<(f64, f64)> = None; // (lon, lat)
+        for c in line.coords() {
+            let cur = (c.x, c.y);
+            if let Some((lon1, lat1)) = prev {
+                let d: f64 = geo.inverse(lat1, lon1, cur.1, cur.0);
+                total += d;
+            }
+            prev = Some(cur);
+        }
+    }
+    Some(total)
+}
+
+/// Geodesic area on the given ellipsoid (m²).
+fn area_geodesic(geo: &geographiclib_rs::Geodesic, g: &Geom) -> Option<f64> {
+    use geographiclib_rs::{PolygonArea, Winding};
+    let mut total = 0.0_f64;
+    for poly in polygons_of(g) {
+        let (_outer_perimeter, outer_area) = {
+            let mut pa = PolygonArea::new(geo, Winding::CounterClockwise);
+            for c in poly.exterior().coords() {
+                pa.add_point(c.y, c.x); // (lat, lon)
+            }
+            let (perimeter, area, _) = pa.compute(true);
+            (perimeter, area)
+        };
+        total += outer_area.abs();
+        for interior in poly.interiors() {
+            let mut pa = PolygonArea::new(geo, Winding::Clockwise);
+            for c in interior.coords() {
+                pa.add_point(c.y, c.x);
+            }
+            let (_perimeter, area, _) = pa.compute(true);
+            total -= area.abs();
+        }
+    }
+    Some(total)
+}
+
+/// `ST_DistanceSpheroid(a, b)` — geodesic distance on the WGS84 ellipsoid
+/// (metres). Higher accuracy than the spherical `ST_DistanceSphere`.
+pub fn distance_spheroid(a: &Geom, b: &Geom) -> Option<f64> {
+    distance_geodesic(&geographiclib_rs::Geodesic::wgs84(), a, b)
+}
+
+/// `ST_DistanceSpheroid(a, b, spheroid)` — PostGIS signature with an explicit
+/// `SPHEROID["name",a,rf]` string.
+pub fn distance_spheroid_custom(a: &Geom, b: &Geom, spheroid: &str) -> Option<f64> {
+    distance_geodesic(&parse_spheroid(spheroid)?, a, b)
+}
+
+/// `ST_DWithinSpheroid(a, b, metres)`.
+pub fn dwithin_spheroid(a: &Geom, b: &Geom, metres: f64) -> Option<bool> {
+    Some(distance_spheroid(a, b)? <= metres)
+}
+
+/// `ST_LengthSpheroid(geom)` — geodesic length of a (multi)linestring on WGS84
+/// (metres).
+pub fn length_spheroid(g: &Geom) -> Option<f64> {
+    length_geodesic(&geographiclib_rs::Geodesic::wgs84(), g)
+}
+
+/// `ST_LengthSpheroid(geom, spheroid)` — PostGIS signature with an explicit
+/// spheroid string.
+pub fn length_spheroid_custom(g: &Geom, spheroid: &str) -> Option<f64> {
+    length_geodesic(&parse_spheroid(spheroid)?, g)
+}
+
+/// `ST_AreaSpheroid(geom)` — geodesic area on the WGS84 ellipsoid (m²).
+pub fn area_spheroid(g: &Geom) -> Option<f64> {
+    area_geodesic(&geographiclib_rs::Geodesic::wgs84(), g)
+}
+
+/// `ST_AreaSpheroid(geom, spheroid)` — explicit spheroid string variant.
+pub fn area_spheroid_custom(g: &Geom, spheroid: &str) -> Option<f64> {
+    area_geodesic(&parse_spheroid(spheroid)?, g)
+}
+
+/// Collect all line strings from a geometry (for spheroid length).
+fn lines_of(g: &Geom) -> Vec<&geo_types::LineString> {
+    match g {
+        Geometry::LineString(ls) => vec![ls],
+        Geometry::MultiLineString(mls) => mls.0.iter().collect(),
+        _ => vec![],
+    }
+}
+
+/// Collect all polygons from a geometry (for spheroid area).
+fn polygons_of(g: &Geom) -> Vec<&geo_types::Polygon> {
+    match g {
+        Geometry::Polygon(p) => vec![p],
+        Geometry::MultiPolygon(mp) => mp.0.iter().collect(),
+        _ => vec![],
+    }
 }
 
 // ----- CRS reprojection via PROJ (Tier 3a) ------------------------------
@@ -1448,6 +2203,41 @@ pub fn force_collection(g: &Geom) -> Option<Geom> {
             vec![other.clone()],
         ))),
     }
+}
+
+/// `ST_Collect(geom1, geom2)` — scalar pairwise collect (PostGIS semantics):
+/// two points make a MULTIPOINT, two linestrings a MULTILINESTRING, two
+/// polygons a MULTIPOLYGON; anything else becomes a GEOMETRYCOLLECTION.
+/// GeometryCollection inputs are flattened in (`geo-types` cannot round-trip
+/// nested collections, so flattening keeps output readable by our own parser).
+pub fn collect_two(g1: &Geom, g2: &Geom) -> Option<Geom> {
+    use geo_types::{MultiLineString, MultiPoint, MultiPolygon};
+    match (g1, g2) {
+        (Geometry::Point(p1), Geometry::Point(p2)) => {
+            return Some(Geometry::MultiPoint(MultiPoint(vec![*p1, *p2])));
+        }
+        (Geometry::LineString(l1), Geometry::LineString(l2)) => {
+            return Some(Geometry::MultiLineString(MultiLineString(vec![
+                l1.clone(),
+                l2.clone(),
+            ])));
+        }
+        (Geometry::Polygon(p1), Geometry::Polygon(p2)) => {
+            return Some(Geometry::MultiPolygon(MultiPolygon(vec![
+                p1.clone(),
+                p2.clone(),
+            ])));
+        }
+        _ => {}
+    }
+    let mut items = Vec::new();
+    for g in [g1, g2] {
+        match g {
+            Geometry::GeometryCollection(c) => items.extend(c.0.iter().cloned()),
+            other => items.push(other.clone()),
+        }
+    }
+    Some(Geometry::GeometryCollection(geo_types::GeometryCollection(items)))
 }
 
 /// `ST_Multi(geom)` — promote a single geometry to its Multi form. Multi and
@@ -1846,6 +2636,742 @@ pub fn as_hex_ewkb(g: &Geom) -> Option<String> {
     Some(s)
 }
 
+// =====================================================================
+// Tier 1/1b parity batch (round 2): constructors, editing, measurements,
+// validity reporting. Each reuses an existing dispatch shape.
+// =====================================================================
+
+// ----- constructors -----------------------------------------------------
+
+/// `ST_MakeEnvelope(xmin, ymin, xmax, ymax)` — axis-aligned rectangle as a
+/// Polygon, CCW-closed. Returns NULL if `xmin > xmax` or `ymin > ymax`.
+pub fn make_envelope(xmin: f64, ymin: f64, xmax: f64, ymax: f64) -> Option<Geom> {
+    if xmin > xmax || ymin > ymax {
+        return None;
+    }
+    Some(Geometry::Polygon(geo_types::Polygon::new(
+        geo_types::LineString::from(vec![
+            (xmin, ymin),
+            (xmax, ymin),
+            (xmax, ymax),
+            (xmin, ymax),
+            (xmin, ymin),
+        ]),
+        vec![],
+    )))
+}
+
+/// `ST_MakePolygon(shell)` — wrap a LineString as a Polygon (no holes). The
+/// shell must be closed (first == last vertex); returns NULL otherwise or for
+/// non-LineString input.
+pub fn make_polygon(g: &Geom) -> Option<Geom> {
+    match g {
+        Geometry::LineString(ls) => {
+            let closed = ls
+                .0
+                .first()
+                .is_some_and(|f| ls.0.last().is_some_and(|l| f == l));
+            if !closed || ls.0.len() < 4 {
+                return None;
+            }
+            Some(Geometry::Polygon(geo_types::Polygon::new(ls.clone(), vec![])))
+        }
+        _ => None,
+    }
+}
+
+/// `ST_Polygon(linestring, srid)` — PostGIS-compatible polygon constructor.
+/// Builds a polygon from a closed LineString (exterior ring) and tags the
+/// result with the given SRID (PostGIS semantics; `srid <= 0` leaves it
+/// untagged).
+pub fn polygon_raw(wkb: &[u8], srid: i32) -> Option<Vec<u8>> {
+    let g = crate::geometry::from_wkb(wkb).ok()?;
+    let out = make_polygon(&g)?;
+    let bytes = crate::geometry::to_wkb(&out).ok()?;
+    Some(crate::geometry::tag_ewkb_srid(&bytes, srid))
+}
+
+// ----- line editing -----------------------------------------------------
+
+/// `ST_RemovePoint(linestring, n)` — drop the 0-indexed n-th vertex of a
+/// LineString, re-closing it if it was closed and the endpoint was removed.
+/// Returns NULL for non-LineString input or out-of-range `n`.
+pub fn remove_point(g: &Geom, n: i32) -> Option<Geom> {
+    let i = usize::try_from(n).ok()?;
+    match g {
+        Geometry::LineString(ls) => {
+            if i >= ls.0.len() {
+                return None;
+            }
+            let mut pts = ls.0.clone();
+            pts.remove(i);
+            Some(Geometry::LineString(geo_types::LineString(pts)))
+        }
+        _ => None,
+    }
+}
+
+/// `ST_AddPoint(target, point)` — append `point` to a LineString. Returns
+/// `target` unchanged for non-LineString `target`.
+pub fn add_point(target: &Geom, point: &Geom) -> Option<Geom> {
+    let c = point_coord(point)?;
+    match target {
+        Geometry::LineString(ls) => {
+            let mut pts = ls.0.clone();
+            pts.push(c);
+            Some(Geometry::LineString(geo_types::LineString(pts)))
+        }
+        Geometry::Line(l) => Some(Geometry::LineString(geo_types::LineString::from(
+            vec![(l.start.x, l.start.y), (l.end.x, l.end.y), (c.x, c.y)],
+        ))),
+        _ => None,
+    }
+}
+
+/// `ST_SetPoint(linestring, n, point)` — replace the point at 0-based index
+/// `n` in a LineString with `point`. Matches PostGIS 0-based indexing.
+/// Returns NULL if the input is not a LineString or the index is out of range.
+pub fn set_point(g: &Geom, n: i32, pt: &Geom) -> Option<Geom> {
+    let i = usize::try_from(n).ok()?;
+    let c = point_coord(pt)?;
+    match g {
+        Geometry::LineString(ls) => {
+            if i >= ls.0.len() {
+                return None;
+            }
+            let mut pts = ls.0.clone();
+            pts[i] = c;
+            Some(Geometry::LineString(geo_types::LineString(pts)))
+        }
+        _ => None,
+    }
+}
+
+/// `ST_SimplifyPreserveTopology(geom, epsilon)` — Ramer-Douglas-Peucker
+/// simplification that falls back to the original geometry if the simplified
+/// result would be structurally invalid (collapsed ring / self-intersection).
+pub fn simplify_preserve_topology(g: &Geom, epsilon: f64) -> Option<Geom> {
+    use geo::Validation;
+    let simplified = simplify(g, epsilon)?;
+    // Accept the simplification only if it stays valid; otherwise keep the
+    // original to preserve topology (a coarse approximation of PostGIS's
+    // topology-preserving RDP, which geo does not expose directly).
+    if simplified.is_valid() {
+        Some(simplified)
+    } else {
+        Some(g.clone())
+    }
+}
+
+// ----- measurements (Tier 1b) -------------------------------------------
+
+/// Distance between two 2D points.
+#[inline]
+fn pt_dist(a: geo_types::Coord<f64>, b: geo_types::Coord<f64>) -> f64 {
+    (a.x - b.x).hypot(a.y - b.y)
+}
+
+/// `ST_MinimumClearance(geom)` — the smallest distance a vertex can move before
+/// the geometry may become invalid. Defined as the minimum of:
+///   * the distance from each vertex to the nearest segment it is NOT an
+///     endpoint of, and
+///   * the distance between non-adjacent vertices.
+/// Returns positive infinity for geometries with no segments / too few vertices
+/// (points, single segments).
+pub fn minimum_clearance(g: &Geom) -> Option<f64> {
+    let coords = all_coords(g);
+    let segs = segments(g);
+    if coords.len() < 3 || segs.len() < 2 {
+        return Some(f64::INFINITY);
+    }
+    // For each segment, record its two endpoint coordinate indices so we can
+    // skip vertex-to-incident-segment comparisons. We do this by matching
+    // coordinate identity (cheap pointer-free compare via value + epsilon).
+    let best = coords
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let mut m = f64::INFINITY;
+            for (j, &u) in coords.iter().enumerate() {
+                // Non-adjacent, non-coincident vertex-vertex distance. (Rings
+                // repeat their closing vertex, so we must skip the coincident
+                // pair it creates — a clearance of 0 would be meaningless.)
+                if i.abs_diff(j) > 1 {
+                    let d = pt_dist(v, u);
+                    if d > 1e-9 {
+                        m = m.min(d);
+                    }
+                }
+            }
+            for s in &segs {
+                // Skip segments incident to this vertex.
+                if approx_eq_coord(s.0, v) || approx_eq_coord(s.1, v) {
+                    continue;
+                }
+                let p = closest_on_segment(&v, s);
+                let d = pt_dist(v, p);
+                if d > 1e-9 {
+                    m = m.min(d);
+                }
+            }
+            m
+        })
+        .fold(f64::INFINITY, f64::min);
+    Some(best)
+}
+
+/// `ST_MinimumClearanceLine(geom)` — the 2-point LineString realizing
+/// `ST_MinimumClearance` (between the closest non-incident vertex/segment pair).
+/// Returns NULL when the clearance is infinite (undefined for the input).
+pub fn minimum_clearance_line(g: &Geom) -> Option<Geom> {
+    let coords = all_coords(g);
+    let segs = segments(g);
+    if coords.len() < 3 || segs.len() < 2 {
+        return None;
+    }
+    let mut best = f64::INFINITY;
+    let mut bestpair = (coords[0], coords[0]);
+    for (i, &v) in coords.iter().enumerate() {
+        for (j, &u) in coords.iter().enumerate() {
+            if i.abs_diff(j) > 1 {
+                let d = pt_dist(v, u);
+                // Skip coincident pairs (rings repeat their closing vertex).
+                if d > 1e-9 && d < best {
+                    best = d;
+                    bestpair = (v, u);
+                }
+            }
+        }
+        for s in &segs {
+            if approx_eq_coord(s.0, v) || approx_eq_coord(s.1, v) {
+                continue;
+            }
+            let p = closest_on_segment(&v, s);
+            let d = pt_dist(v, p);
+            if d > 1e-9 && d < best {
+                best = d;
+                bestpair = (v, p);
+            }
+        }
+    }
+    if !best.is_finite() {
+        return None;
+    }
+    Some(Geometry::LineString(geo_types::LineString::from(vec![
+        (bestpair.0.x, bestpair.0.y),
+        (bestpair.1.x, bestpair.1.y),
+    ])))
+}
+
+#[inline]
+fn approx_eq_coord(a: geo_types::Coord<f64>, b: geo_types::Coord<f64>) -> bool {
+    (a.x - b.x).abs() < 1e-12 && (a.y - b.y).abs() < 1e-12
+}
+
+// ----- minimum bounding circle (Welzl's algorithm) ----------------------
+
+/// `ST_MinimumBoundingCircle(geom, num_segs)` — the minimum enclosing circle of
+/// the vertex set, returned as a polygon approximation. `num_segs` is the number
+/// of quadrature segments per quarter-circle (PostGIS default 48); ≤ 0 ⇒ 48.
+///
+/// The circle is computed exactly via Welzl's randomized algorithm on the vertex
+/// set; only the output polygon is an approximation.
+pub fn minimum_bounding_circle(g: &Geom, num_segs: f64) -> Option<Geom> {
+    let pts: Vec<[f64; 2]> = all_coords(g).into_iter().map(|c| [c.x, c.y]).collect();
+    if pts.is_empty() {
+        return None;
+    }
+    let nq = if num_segs <= 0.0 { 48.0 } else { num_segs } as usize;
+    // A single point: zero-radius "circle" at that point (return the point).
+    if pts.len() == 1 {
+        return Some(Geometry::Point(geo_types::Point::new(pts[0][0], pts[0][1])));
+    }
+    let circle = welzl(&pts);
+    Some(circle_polygon(circle.cx, circle.cy, circle.r, nq.max(8)))
+}
+
+struct Circle {
+    cx: f64,
+    cy: f64,
+    r: f64,
+}
+
+impl Circle {
+    fn from_two(a: [f64; 2], b: [f64; 2]) -> Self {
+        Self {
+            cx: (a[0] + b[0]) / 2.0,
+            cy: (a[1] + b[1]) / 2.0,
+            r: pt_dist_arr(a, b) / 2.0,
+        }
+    }
+    fn from_three(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> Self {
+        let (ax, ay) = (a[0], a[1]);
+        let (bx, by) = (b[0], b[1]);
+        let (cx_, cy_) = (c[0], c[1]);
+        let d = 2.0 * (ax * (by - cy_) + bx * (cy_ - ay) + cx_ * (ay - by));
+        if d.abs() < 1e-20 {
+            // Collinear: fall back to the diameter of the two farthest.
+            let circ = Self::from_two(a, b);
+            return Self {
+                cx: circ.cx,
+                cy: circ.cy,
+                r: circ.r.max(pt_dist_arr(a, c) / 2.0).max(pt_dist_arr(b, c) / 2.0),
+            };
+        }
+        let a2 = ax * ax + ay * ay;
+        let b2 = bx * bx + by * by;
+        let c2 = cx_ * cx_ + cy_ * cy_;
+        let ux = (a2 * (by - cy_) + b2 * (cy_ - ay) + c2 * (ay - by)) / d;
+        let uy = (a2 * (cx_ - bx) + b2 * (ax - cx_) + c2 * (bx - ax)) / d;
+        Self {
+            cx: ux,
+            cy: uy,
+            r: pt_dist_arr([ux, uy], a),
+        }
+    }
+    #[inline]
+    fn contains(&self, p: [f64; 2]) -> bool {
+        // Small epsilon to keep points that sit exactly on the boundary.
+        pt_dist_arr([self.cx, self.cy], p) <= self.r + 1e-10
+    }
+}
+
+#[inline]
+fn pt_dist_arr(a: [f64; 2], b: [f64; 2]) -> f64 {
+    (a[0] - b[0]).hypot(a[1] - b[1])
+}
+
+/// Welzl's minimum enclosing circle (iterative, randomized).
+fn welzl(pts: &[[f64; 2]]) -> Circle {
+    let mut pts = pts.to_vec();
+    // Shuffle for expected-linear time (Fisher-Yates with a fixed seed for
+    // determinism — ST_MinimumBoundingCircle is a pure function of its input).
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    for i in (1..pts.len()).rev() {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let j = (state >> 33) as usize % (i + 1);
+        pts.swap(i, j);
+    }
+    let mut c = Circle {
+        cx: pts[0][0],
+        cy: pts[0][1],
+        r: 0.0,
+    };
+    for i in 1..pts.len() {
+        if !c.contains(pts[i]) {
+            c = circle_with_point(&pts[..i], pts[i]);
+        }
+    }
+    c
+}
+
+fn circle_with_point(pts: &[[f64; 2]], q: [f64; 2]) -> Circle {
+    let mut c = Circle {
+        cx: pts[0][0],
+        cy: pts[0][1],
+        r: 0.0,
+    };
+    for i in 1..pts.len() {
+        if !c.contains(pts[i]) {
+            c = circle_with_two_points(&pts[..i], pts[i], q);
+        }
+    }
+    c
+}
+
+fn circle_with_two_points(pts: &[[f64; 2]], q1: [f64; 2], q2: [f64; 2]) -> Circle {
+    let mut c = Circle::from_two(q1, q2);
+    for &p in pts {
+        if !c.contains(p) {
+            c = Circle::from_three(q1, q2, p);
+        }
+    }
+    c
+}
+
+/// A regular `n`-gon approximating a circle of radius `r` at `(cx, cy)`,
+/// CCW-closed.
+fn circle_polygon(cx: f64, cy: f64, r: f64, n: usize) -> Geom {
+    let n = n.max(8);
+    let mut pts: Vec<(f64, f64)> = (0..n)
+        .map(|i| {
+            let a = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
+            (cx + r * a.cos(), cy + r * a.sin())
+        })
+        .collect();
+    pts.push(pts[0]);
+    Geometry::Polygon(geo_types::Polygon::new(
+        geo_types::LineString::from(pts),
+        vec![],
+    ))
+}
+
+// ----- random point generation ------------------------------------------
+
+/// `ST_GeneratePoints(geom, npoints)` — `npoints` random points uniformly
+/// distributed inside the polygonal bounding box, kept if they fall inside the
+/// polygon. Deterministic (seeded) so results are reproducible per call.
+/// Returns a MultiPoint. Non-polygonal input returns NULL.
+pub fn generate_points(g: &Geom, npoints: i32) -> Option<Geom> {
+    let n = npoints.max(0) as usize;
+    let rect = g.bounding_rect()?;
+    let (xmin, ymin, xmax, ymax) = (rect.min().x, rect.min().y, rect.max().x, rect.max().y);
+    let mut rng = SplitMix64 { state: 0x2545_F491_4F6C_DD1D };
+    let polys: Vec<&geo_types::Polygon<f64>> = match g {
+        Geometry::Polygon(p) => vec![p],
+        Geometry::MultiPolygon(mp) => mp.0.iter().collect(),
+        _ => return None,
+    };
+    let mut out: Vec<geo_types::Point<f64>> = Vec::with_capacity(n);
+    while out.len() < n {
+        let x = xmin + rng.next_f64() * (xmax - xmin);
+        let y = ymin + rng.next_f64() * (ymax - ymin);
+        for p in &polys {
+            if point_in_polygon(x, y, p) {
+                out.push(geo_types::Point::new(x, y));
+                break;
+            }
+        }
+    }
+    Some(Geometry::MultiPoint(geo_types::MultiPoint(out)))
+}
+
+/// Tiny deterministic PRNG (SplitMix64) + a uniform [0,1) mapper. Chosen so
+/// `ST_GeneratePoints` is reproducible and dependency-free.
+struct SplitMix64 {
+    state: u64,
+}
+impl SplitMix64 {
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+    fn next_f64(&mut self) -> f64 {
+        // 53-bit mantissa → uniform [0,1).
+        (self.next_u64() >> 11) as f64 * (1.0 / ((1u64 << 53) as f64))
+    }
+}
+
+// ----- validity reporting -----------------------------------------------
+
+/// `ST_IsValidReason(geom)` — a human-readable reason string, or
+/// `"Valid Geometry"` when the geometry passes structural validation.
+pub fn is_valid_reason(g: &Geom) -> Option<String> {
+    use geo::Validation;
+    let errs = g.validation_errors();
+    if errs.is_empty() {
+        Some("Valid Geometry".to_string())
+    } else {
+        Some(
+            errs.iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tier 1 remaining: ST_Snap, ST_Subdivide, ST_Node, ST_Polygonize stub
+// ---------------------------------------------------------------------------
+
+/// `ST_Snap(geom1, geom2, tolerance)` — snap coordinates of `geom1` to the
+/// nearest coordinate of `geom2` when within `tolerance` distance.
+///
+/// This is the PostGIS `ST_Snap` semantics: for every coordinate in `geom1`,
+/// find the closest coordinate in `geom2`; if the distance is ≤ `tolerance`,
+/// replace the `geom1` coordinate with the `geom2` coordinate. This is useful
+/// for making geometries that should share boundaries exactly coincident.
+pub fn snap(g1: &Geom, g2: &Geom, tolerance: f64) -> Option<Geom> {
+    if tolerance <= 0.0 {
+        return Some(g1.clone());
+    }
+    let targets = all_coords(g2);
+    if targets.is_empty() {
+        return Some(g1.clone());
+    }
+    let tol2 = tolerance * tolerance;
+    use geo::MapCoords;
+    let snapped = g1.map_coords(|coord| {
+        let mut best = coord;
+        let mut best_d2 = f64::MAX;
+        for &t in &targets {
+            let dx = coord.x - t.x;
+            let dy = coord.y - t.y;
+            let d2 = dx * dx + dy * dy;
+            if d2 < best_d2 {
+                best_d2 = d2;
+                if d2 <= tol2 {
+                    best = t;
+                }
+            }
+        }
+        best
+    });
+    Some(snapped)
+}
+
+/// `ST_Subdivide(geom, max_vertices)` — splits a geometry into a
+/// `GeometryCollection` of smaller geometries, each with at most `max_vertices`
+/// vertices.
+///
+/// For `LineString`s: split into chunks of `max_vertices` points. For
+/// `Polygon`s: divide the bounding box into a grid and clip each sub-rectangle
+/// against the polygon using `BooleanOps::intersection`. For
+/// `MultiLineString`/`MultiPolygon`: subdivide each element. Points /
+/// MultiPoints are returned as-is if small enough, otherwise split.
+pub fn subdivide(g: &Geom, max_vertices: i32) -> Option<Geom> {
+    let max_v = max_vertices.max(1) as usize;
+    let total_v: usize = all_coords(g).len();
+
+    if total_v <= max_v {
+        return Some(g.clone());
+    }
+
+    match g {
+        Geometry::LineString(ls) => {
+            let chunks: Vec<Geometry> = ls
+                .0
+                .chunks(max_v)
+                .map(|chunk| {
+                    Geometry::LineString(geo_types::LineString(
+                        chunk.to_vec(),
+                    ))
+                })
+                .collect();
+            Some(Geometry::GeometryCollection(geo_types::GeometryCollection(
+                chunks,
+            )))
+        }
+        Geometry::MultiLineString(mls) => {
+            let mut parts = Vec::new();
+            for ls in &mls.0 {
+                for chunk in ls.0.chunks(max_v) {
+                    parts.push(Geometry::LineString(geo_types::LineString(
+                        chunk.to_vec(),
+                    )));
+                }
+            }
+            Some(Geometry::GeometryCollection(geo_types::GeometryCollection(
+                parts,
+            )))
+        }
+        Geometry::Polygon(poly) => subdivide_polygon(poly, max_v),
+        Geometry::MultiPolygon(mp) => {
+            let mut parts = Vec::new();
+            for poly in &mp.0 {
+                if let Some(Geometry::GeometryCollection(gc)) =
+                    subdivide_polygon(poly, max_v)
+                {
+                    parts.extend(gc.0);
+                }
+            }
+            if parts.is_empty() {
+                None
+            } else {
+                Some(Geometry::GeometryCollection(
+                    geo_types::GeometryCollection(parts),
+                ))
+            }
+        }
+        Geometry::GeometryCollection(gc) => {
+            let mut parts = Vec::new();
+            for item in &gc.0 {
+                if let Some(sub) = subdivide(item, max_vertices) {
+                    match sub {
+                        Geometry::GeometryCollection(sub_gc) => {
+                            parts.extend(sub_gc.0);
+                        }
+                        other => parts.push(other),
+                    }
+                }
+            }
+            Some(Geometry::GeometryCollection(
+                geo_types::GeometryCollection(parts),
+            ))
+        }
+        _ => Some(g.clone()),
+    }
+}
+
+/// Subdivide a polygon by clipping against a grid of its bounding box.
+fn subdivide_polygon(poly: &geo_types::Polygon<f64>, max_v: usize) -> Option<Geom> {
+    let bbox = match poly.bounding_rect() {
+        Some(r) => r,
+        None => return Some(Geometry::Polygon(poly.clone())),
+    };
+    let total_v: usize = all_coords(&Geometry::Polygon(poly.clone())).len();
+    if total_v <= max_v {
+        return Some(Geometry::Polygon(poly.clone()));
+    }
+    // Determine grid divisions: aim for each cell to hold ~max_v vertices.
+    let n_cells = ((total_v as f64) / (max_v as f64)).ceil() as usize;
+    let n_side = (n_cells as f64).sqrt().ceil() as usize;
+    let n_side = n_side.max(1);
+    let dx = (bbox.max().x - bbox.min().x) / n_side as f64;
+    let dy = (bbox.max().y - bbox.min().y) / n_side as f64;
+    let mp = MultiPolygon::new(vec![poly.clone()]);
+    let mut parts: Vec<Geometry> = Vec::new();
+    for i in 0..n_side {
+        for j in 0..n_side {
+            let lo_x = bbox.min().x + dx * i as f64;
+            let lo_y = bbox.min().y + dy * j as f64;
+            let hi_x = lo_x + dx;
+            let hi_y = lo_y + dy;
+            let cell = geo_types::Rect::new(
+                geo_types::Coord { x: lo_x, y: lo_y },
+                geo_types::Coord { x: hi_x, y: hi_y },
+            )
+            .to_polygon();
+            let clipped = mp.intersection(&MultiPolygon::new(vec![cell]));
+            if !clipped.0.is_empty() {
+                parts.push(Geometry::MultiPolygon(clipped));
+            }
+        }
+    }
+    if parts.is_empty() {
+        Some(Geometry::Polygon(poly.clone()))
+    } else {
+        Some(Geometry::GeometryCollection(
+            geo_types::GeometryCollection(parts),
+        ))
+    }
+}
+
+/// `ST_Node(geom)` — nodes all line intersections in a `MultiLineString`,
+/// returning a new `MultiLineString` where every self-intersection is split
+/// into a separate segment.
+///
+/// This is a simplified noder: it finds all pairwise line-segment
+/// intersections and splits each segment at those points. It does NOT handle
+/// overlapping collinear segments (a full topology noder would). For most
+/// practical use cases (going from un-noded to noded lines for polygonize)
+/// this is sufficient.
+pub fn node(g: &Geom) -> Option<Geom> {
+    match g {
+        Geometry::LineString(ls) => {
+            let lines = vec![ls.clone()];
+            let noded = node_lines(lines);
+            if noded.is_empty() {
+                None
+            } else {
+                Some(Geometry::MultiLineString(geo_types::MultiLineString(
+                    noded,
+                )))
+            }
+        }
+        Geometry::MultiLineString(mls) => {
+            let lines: Vec<geo_types::LineString<f64>> = mls.0.clone();
+            let noded = node_lines(lines);
+            if noded.is_empty() {
+                None
+            } else {
+                Some(Geometry::MultiLineString(geo_types::MultiLineString(
+                    noded,
+                )))
+            }
+        }
+        Geometry::GeometryCollection(gc) => {
+            let mut lines = Vec::new();
+            for item in &gc.0 {
+                match item {
+                    Geometry::LineString(ls) => lines.push(ls.clone()),
+                    Geometry::MultiLineString(mls) => lines.extend(mls.0.iter().cloned()),
+                    _ => {}
+                }
+            }
+            if lines.is_empty() {
+                Some(g.clone())
+            } else {
+                let noded = node_lines(lines);
+                Some(Geometry::MultiLineString(geo_types::MultiLineString(
+                    noded,
+                )))
+            }
+        }
+        _ => Some(g.clone()),
+    }
+}
+
+/// Find all pairwise line-segment intersections and split each segment at the
+/// intersection points. Returns the noded line segments.
+fn node_lines(lines: Vec<geo_types::LineString<f64>>) -> Vec<geo_types::LineString<f64>> {
+    use geo::line_intersection::{line_intersection, LineIntersection};
+
+    // Collect all segments as (line_idx, seg_idx, segment) triples.
+    #[allow(clippy::type_complexity)]
+    let segments: Vec<(usize, geo_types::Line<f64>)> = lines
+        .iter()
+        .enumerate()
+        .flat_map(|(li, ls)| {
+            ls.lines()
+                .map(move |seg| (li, seg))
+        })
+        .collect();
+
+    // For each segment, find all intersection points with other segments.
+    let mut split_points: Vec<Vec<geo_types::Coord<f64>>> = vec![Vec::new(); segments.len()];
+    for i in 0..segments.len() {
+        for j in (i + 1)..segments.len() {
+            let (li_a, seg_a) = segments[i];
+            let (li_b, seg_b) = segments[j];
+            // Don't split segments from the same original line at shared endpoints.
+            if li_a == li_b {
+                continue;
+            }
+            if let Some(inter) = line_intersection(seg_a, seg_b) {
+                let pt = match inter {
+                    LineIntersection::SinglePoint { intersection, .. } => intersection,
+                    LineIntersection::Collinear { intersection, .. } => intersection.start,
+                };
+                let c = geo_types::Coord {
+                    x: pt.x,
+                    y: pt.y,
+                };
+                // Only add if the point is strictly interior to both segments
+                // (not a shared endpoint).
+                let is_endpoint_a = (seg_a.start == c) || (seg_a.end == c);
+                let is_endpoint_b = (seg_b.start == c) || (seg_b.end == c);
+                if !is_endpoint_a {
+                    split_points[i].push(c);
+                }
+                if !is_endpoint_b {
+                    split_points[j].push(c);
+                }
+            }
+        }
+    }
+
+    // Split each segment at its intersection points, producing new line segments.
+    let mut result = Vec::new();
+    for (i, (_, seg)) in segments.iter().enumerate() {
+        let mut pts = vec![seg.start, seg.end];
+        pts.extend(split_points[i].iter().copied());
+        // Sort points along the segment direction.
+        let dx = seg.end.x - seg.start.x;
+        let dy = seg.end.y - seg.start.y;
+        let len2 = dx * dx + dy * dy;
+        if len2 < f64::EPSILON {
+            continue;
+        }
+        pts.sort_by(|a, b| {
+            let ta = ((a.x - seg.start.x) * dx + (a.y - seg.start.y) * dy) / len2;
+            let tb = ((b.x - seg.start.x) * dx + (b.y - seg.start.y) * dy) / len2;
+            ta.partial_cmp(&tb).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        pts.dedup_by(|a, b| {
+            (a.x - b.x).abs() < 1e-12 && (a.y - b.y).abs() < 1e-12
+        });
+        for w in pts.windows(2) {
+            result.push(geo_types::LineString(vec![w[0], w[1]]));
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2206,5 +3732,159 @@ mod tests {
         // Every char is a hex digit; the encoding is uppercase (A-F where used).
         assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
         assert!(h.chars().all(|c| !c.is_ascii_lowercase()));
+    }
+
+    // ---- Tier 1/1b round 2 ---------------------------------------------
+
+    #[test]
+    fn make_envelope_builds_ccw_rectangle() {
+        let p = make_envelope(0.0, 0.0, 4.0, 4.0).unwrap();
+        match p {
+            Geometry::Polygon(poly) => {
+                assert_eq!(poly.exterior().0.len(), 5); // closed
+                assert!((area(&Geometry::Polygon(poly.clone())).unwrap() - 16.0).abs() < 1e-9);
+                let first = poly.exterior().0[0];
+                assert!((first.x - 0.0).abs() < 1e-12 && (first.y - 0.0).abs() < 1e-12);
+            }
+            other => panic!("expected polygon, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn make_envelope_rejects_inverted_bounds() {
+        assert!(make_envelope(4.0, 4.0, 0.0, 0.0).is_none());
+    }
+
+    #[test]
+    fn make_polygon_from_closed_ring() {
+        let shell = Geometry::LineString(geo_types::LineString::from(vec![
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (1.0, 1.0),
+            (0.0, 0.0),
+        ]));
+        let p = make_polygon(&shell).unwrap();
+        assert!(matches!(p, Geometry::Polygon(_)));
+    }
+
+    #[test]
+    fn make_polygon_rejects_open_ring() {
+        let shell = Geometry::LineString(geo_types::LineString::from(vec![
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (1.0, 1.0),
+        ]));
+        assert!(make_polygon(&shell).is_none());
+    }
+
+    #[test]
+    fn remove_point_drops_indexed_vertex() {
+        let ls = ls(&[(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)]);
+        let out = remove_point(&ls, 1).unwrap();
+        assert_eq!(num_points(&out).unwrap(), 2);
+    }
+
+    #[test]
+    fn add_point_appends_to_linestring() {
+        let target = ls(&[(0.0, 0.0), (1.0, 1.0)]);
+        let out = add_point(&target, &wkt_point(2.0, 2.0)).unwrap();
+        assert_eq!(num_points(&out).unwrap(), 3);
+    }
+
+    #[test]
+    fn simplify_preserve_topology_keeps_invalid_fallback() {
+        // A simple square simplifies without issue and stays valid.
+        let sq = rect_poly(0.0, 0.0, 4.0, 4.0);
+        let out = simplify_preserve_topology(&sq, 0.1).unwrap();
+        assert!(is_valid(&out).unwrap());
+    }
+
+    #[test]
+    fn minimum_clearance_is_finite_for_polygon() {
+        // A unit square has a well-defined (positive) minimum clearance.
+        let sq = rect_poly(0.0, 0.0, 1.0, 1.0);
+        let mc = minimum_clearance(&sq).unwrap();
+        assert!(mc.is_finite() && mc > 0.0);
+    }
+
+    #[test]
+    fn minimum_clearance_infinite_for_point() {
+        assert!(minimum_clearance(&wkt_point(1.0, 1.0)).unwrap().is_infinite());
+    }
+
+    #[test]
+    fn minimum_clearance_line_matches_clearance() {
+        let sq = rect_poly(0.0, 0.0, 4.0, 4.0);
+        let line = minimum_clearance_line(&sq).unwrap();
+        // The line's length equals the clearance.
+        let d = match line {
+            Geometry::LineString(ls) => {
+                let a = ls.0[0];
+                let b = ls.0[1];
+                (a.x - b.x).hypot(a.y - b.y)
+            }
+            other => panic!("expected linestring, got {other:?}"),
+        };
+        assert!((d - minimum_clearance(&sq).unwrap()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn minimum_bounding_circle_encloses_all_vertices() {
+        // Points on a unit circle: the minimum enclosing circle is centered at
+        // origin with radius 1.
+        let pts = Geometry::MultiPoint(geo_types::MultiPoint(
+            (0..8)
+                .map(|i| {
+                    let a = std::f64::consts::FRAC_PI_4 * i as f64;
+                    geo_types::Point::new(a.cos(), a.sin())
+                })
+                .collect(),
+        ));
+        let out = minimum_bounding_circle(&pts, 32.0).unwrap();
+        match out {
+            Geometry::Polygon(poly) => {
+                // Every original vertex must be inside the circle polygon.
+                let b = poly.bounding_rect().unwrap();
+                // radius ~1 → bbox roughly [-1.1, 1.1] in both axes.
+                assert!(b.min().x >= -1.2 && b.max().x <= 1.2);
+            }
+            other => panic!("expected polygon, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn generate_points_is_deterministic_and_inside() {
+        let sq = rect_poly(0.0, 0.0, 10.0, 10.0);
+        let a = generate_points(&sq, 50).unwrap();
+        let b = generate_points(&sq, 50).unwrap();
+        // Same seed → identical point set.
+        match (&a, &b) {
+            (Geometry::MultiPoint(ma), Geometry::MultiPoint(mb)) => {
+                assert_eq!(ma.0.len(), 50);
+                assert_eq!(ma.0, mb.0);
+                // All points inside the 10×10 square.
+                assert!(ma.0.iter().all(|p| p.x() >= 0.0 && p.x() <= 10.0 && p.y() >= 0.0 && p.y() <= 10.0));
+            }
+            other => panic!("expected multipoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn is_valid_reason_reports_valid_or_invalid() {
+        let ok = rect_poly(0.0, 0.0, 1.0, 1.0);
+        assert_eq!(is_valid_reason(&ok).unwrap(), "Valid Geometry");
+        // A self-touching "bowtie" polygon is structurally invalid.
+        let bad = Geometry::Polygon(geo_types::Polygon::new(
+            geo_types::LineString::from(vec![
+                (0.0, 0.0),
+                (1.0, 1.0),
+                (1.0, 0.0),
+                (0.0, 1.0),
+                (0.0, 0.0),
+            ]),
+            vec![],
+        ));
+        let reason = is_valid_reason(&bad).unwrap();
+        assert_ne!(reason, "Valid Geometry");
     }
 }

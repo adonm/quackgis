@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Reproducible builder for the duckdb_sedona extension. Provides GDAL 3.13.1
+# dev headers + libclang (for the gdal crate's bindgen), Rust, and the build
+# toolchain, so the full extension (vector + CRS + R-tree + raster + the literal
+# SedonaDB bridge) compiles with no dependency on a host Linuxbrew.
+#
+# The base is the official GDAL image, which builds GDAL 3.13.1 from source into
+# /usr/local (headers in /usr/local/include, libgdal.so + libproj.so in
+# /usr/local/lib, gdal.pc in /usr/local/lib/pkgconfig).
+#
+# Build the image:   ./ci/container-build.sh
+# Build+test inside: ./ci/container-test.sh
+
+FROM ghcr.io/osgeo/gdal:ubuntu-full-3.13.1-amd64
+
+ARG RUST_VERSION=1.88.0
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Build prerequisites: clang/libclang for the gdal crate's bindgen step,
+# pkg-config to locate libgdal, cmake for the bundled PROJ/sqlite, the sqlite3
+# CLI (PROJ's CMake runs it during configure), and basic build tooling.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        clang \
+        libclang-dev \
+        llvm \
+        pkg-config \
+        cmake \
+        sqlite3 \
+        build-essential \
+        curl \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Rust toolchain (sedona-db workspace requires >= 1.88).
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain ${RUST_VERSION} --profile minimal
+ENV PATH=/root/.cargo/bin:${PATH}
+
+# GDAL lives in /usr/local in the osgeo base; make pkg-config + the linker find it.
+ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
+ENV LD_LIBRARY_PATH=/usr/local/lib
+
+WORKDIR /work
+CMD ["cargo", "test", "--lib"]

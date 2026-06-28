@@ -15,3 +15,4 @@ Cargo.lock.bak
 # Local reference clones used during development (kept inside the trust
 # boundary per the agent trust model — never commit this directory).
 /.tmp/
+tests/upstream/

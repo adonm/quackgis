@@ -62,12 +62,12 @@ SELECT CASE WHEN st_asewkt(st_point(1,2),4326) = 'SRID=4326;POINT(1 2)' THEN 'PA
 SELECT CASE WHEN st_astext(st_boundary(st_geomfromtext('LINESTRING(0 0,1 1,2 2)'))) = 'MULTIPOINT((0 0),(2 2))' THEN 'PASS' ELSE 'FAIL boundary' END;
 
 -- === Aggregates ===
-SELECT CASE WHEN st_numgeometries(st_collect(g)) = 3 THEN 'PASS' ELSE 'FAIL collect' FROM (SELECT st_point(0,0) g UNION ALL SELECT st_point(1,1) UNION ALL SELECT st_point(2,2));
-SELECT CASE WHEN st_astext(st_envelope_agg(g)) = 'POLYGON((0 0,5 0,5 8,0 8,0 0))' THEN 'PASS' ELSE 'FAIL envelope_agg' FROM (SELECT st_point(0,0) g UNION ALL SELECT st_point(5,2) UNION ALL SELECT st_point(2,8));
-SELECT CASE WHEN st_area(st_union_agg(g)) = 2.0 THEN 'PASS' ELSE 'FAIL union_agg' FROM (SELECT st_geomfromtext('POLYGON((0 0,1 0,1 1,0 1,0 0))') g UNION ALL SELECT st_geomfromtext('POLYGON((1 0,2 0,2 1,1 1,1 0))'));
+SELECT CASE WHEN st_numgeometries(st_collect(g)) = 3 THEN 'PASS' ELSE 'FAIL collect' END FROM (SELECT st_point(0,0) g UNION ALL SELECT st_point(1,1) UNION ALL SELECT st_point(2,2));
+SELECT CASE WHEN st_astext(st_envelope_agg(g)) = 'POLYGON((0 0,5 0,5 8,0 8,0 0))' THEN 'PASS' ELSE 'FAIL envelope_agg' END FROM (SELECT st_point(0,0) g UNION ALL SELECT st_point(5,2) UNION ALL SELECT st_point(2,8));
+SELECT CASE WHEN st_area(st_union_agg(g)) = 2.0 THEN 'PASS' ELSE 'FAIL union_agg' END FROM (SELECT st_geomfromtext('POLYGON((0 0,1 0,1 1,0 1,0 0))') g UNION ALL SELECT st_geomfromtext('POLYGON((1 0,2 0,2 1,1 1,1 0))'));
 
 -- === Raster ===
-SELECT CASE WHEN count = 16 THEN 'PASS' ELSE 'FAIL raster_stats' FROM st_raster_stats('/var/home/adonm/dev/duckdb_sedona/build/raster/test.tif', 1);
+SELECT CASE WHEN count = 16 THEN 'PASS' ELSE 'FAIL raster_stats' END FROM st_raster_stats('/var/home/adonm/dev/duckdb_sedona/build/raster/test.tif', 1);
 
 -- === Tier 1/1b parity batch (editing, transforms, measurements, I/O) ===
 SELECT CASE WHEN st_astext(st_affine(st_point(1,2),1,0,0,1,5,5)) = 'POINT(6 7)' THEN 'PASS' ELSE 'FAIL affine' END;
@@ -90,3 +90,47 @@ SELECT CASE WHEN st_asewkb(st_point(1,2)) IS NOT NULL THEN 'PASS' ELSE 'FAIL ase
 SELECT CASE WHEN st_astext(st_geomfromewkb(st_asewkb(st_point(1,2)))) = 'POINT(1 2)' THEN 'PASS' ELSE 'FAIL geomfromewkb' END;
 SELECT CASE WHEN length(st_ashexewkb(st_point(1,2))) = 42 THEN 'PASS' ELSE 'FAIL ashexewkb' END;
 SELECT CASE WHEN abs(st_area(st_triangulatepolygon(st_geomfromtext('POLYGON((0 0,2 0,2 2,0 2,0 0))'))) - 4.0) < 0.0001 THEN 'PASS' ELSE 'FAIL triangulatepolygon' END;
+
+-- === Set-returning table functions: ST_Dump family ===
+SELECT CASE WHEN (SELECT count(*) FROM st_dump(st_geomfromtext('MULTIPOLYGON(((0 0,1 0,1 1,0 0)),((2 2,3 2,3 3,2 2)))'))) = 2 THEN 'PASS' ELSE 'FAIL dump' END;
+SELECT CASE WHEN (SELECT count(*) FROM st_dump(st_geomfromtext('POLYGON((0 0,1 0,1 1,0 0))'))) = 1 THEN 'PASS' ELSE 'FAIL dump_atomic' END;
+SELECT CASE WHEN (SELECT count(*) FROM st_dump(st_geomfromtext('GEOMETRYCOLLECTION(POINT(1 2),POINT(3 4))'))) = 2 THEN 'PASS' ELSE 'FAIL dump_path' END;
+SELECT CASE WHEN (SELECT count(*) FROM st_dumppoints(st_geomfromtext('LINESTRING(0 0,1 1,2 2)'))) = 3 THEN 'PASS' ELSE 'FAIL dumppoints' END;
+SELECT CASE WHEN (SELECT count(*) FROM st_dumpsegments(st_geomfromtext('LINESTRING(0 0,1 1,2 2)'))) = 2 THEN 'PASS' ELSE 'FAIL dumpsegments' END;
+SELECT CASE WHEN (SELECT count(*) FROM st_dumppoints(st_geomfromtext('POLYGON((0 0,1 0,1 1,0 0))'))) = 4 THEN 'PASS' ELSE 'FAIL dumppoints_polygon' END;
+
+-- === Tier 1/1b round 2 (constructors, editing, measurements, validity) ===
+SELECT CASE WHEN st_area(st_makeenvelope(0,0,4,4)) = 16.0 THEN 'PASS' ELSE 'FAIL makeenvelope' END;
+SELECT CASE WHEN st_geometrytype(st_makepolygon(st_geomfromtext('LINESTRING(0 0,1 0,1 1,0 0)'))) = 'ST_Polygon' THEN 'PASS' ELSE 'FAIL makepolygon' END;
+SELECT CASE WHEN st_astext(st_makepoint(3,4)) = 'POINT(3 4)' THEN 'PASS' ELSE 'FAIL makepoint' END;
+SELECT CASE WHEN st_numpoints(st_removepoint(st_geomfromtext('LINESTRING(0 0,1 1,2 2)'),1)) = 2 THEN 'PASS' ELSE 'FAIL removepoint' END;
+SELECT CASE WHEN st_numpoints(st_addpoint(st_geomfromtext('LINESTRING(0 0,1 1)'),st_point(2,2))) = 3 THEN 'PASS' ELSE 'FAIL addpoint' END;
+SELECT CASE WHEN st_isvalid(st_simplifypreservetopology(st_geomfromtext('POLYGON((0 0,4 0,4 4,0 4,0 0))'),0.1)) = true THEN 'PASS' ELSE 'FAIL simplifypreservetopology' END;
+SELECT CASE WHEN st_minimumclearance(st_geomfromtext('POLYGON((0 0,4 0,4 4,0 4,0 0))') ) > 0 THEN 'PASS' ELSE 'FAIL minimumclearance' END;
+SELECT CASE WHEN st_minimumclearanceline(st_geomfromtext('POLYGON((0 0,4 0,4 4,0 4,0 0))')) IS NOT NULL THEN 'PASS' ELSE 'FAIL minimumclearanceline' END;
+SELECT CASE WHEN st_minimumboundingcircle(st_geomfromtext('MULTIPOINT(0 0,2 0,1 1,1 -1)'),32) IS NOT NULL THEN 'PASS' ELSE 'FAIL minimumboundingcircle' END;
+SELECT CASE WHEN st_numgeometries(st_generatepoints(st_geomfromtext('POLYGON((0 0,10 0,10 10,0 10,0 0))'),20)) = 20 THEN 'PASS' ELSE 'FAIL generatepoints' END;
+SELECT CASE WHEN st_isvalidreason(st_geomfromtext('POLYGON((0 0,1 0,1 1,0 1,0 0))')) = 'Valid Geometry' THEN 'PASS' ELSE 'FAIL isvalidreason' END;
+
+-- === Aggregate: ST_MakeLine ===
+SELECT CASE WHEN st_numpoints(st_makeline_agg(g)) = 3 THEN 'PASS' ELSE 'FAIL makeline_agg' END FROM (SELECT st_point(0,0) g UNION ALL SELECT st_point(1,1) UNION ALL SELECT st_point(2,2));
+-- NOTE: aggregate ORDER BY (e.g. st_makeline_agg(g ORDER BY k)) currently
+-- segfaults via the DuckDB C-API aggregate callback path. See ROADMAP M27
+-- and tests/reference/m27_known_issues.sql for the tracked bug.
+
+-- === Tier 1 remaining: ST_Snap, ST_Subdivide, ST_Node, ST_Intersection agg ===
+SELECT CASE WHEN st_astext(st_snap(st_geomfromtext('POINT(0.001 0)'), st_geomfromtext('POINT(0 0)'), 0.01)) = 'POINT(0 0)' THEN 'PASS' ELSE 'FAIL snap' END;
+SELECT CASE WHEN st_numgeometries(st_subdivide(st_geomfromtext('LINESTRING(0 0,1 1,2 2,3 3,4 4,5 5)'),2)) >= 2 THEN 'PASS' ELSE 'FAIL subdivide' END;
+SELECT CASE WHEN st_geometrytype(st_node(st_geomfromtext('MULTILINESTRING((0 0,2 2),(2 0,0 2))'))) = 'ST_MultiLineString' THEN 'PASS' ELSE 'FAIL node' END;
+-- GEOS-backed topology (Phase 2): PostGIS-grade planar operations
+SELECT CASE WHEN st_numgeometries(st_node(st_geomfromtext('MULTILINESTRING((0 0,4 4),(0 4,4 0))'))) = 4 THEN 'PASS' ELSE 'FAIL geos-node-crossing' END;
+SELECT CASE WHEN st_numgeometries(st_polygonize(st_geomfromtext('LINESTRING(0 0,4 0,4 4,0 4,0 0)'))) = 1 THEN 'PASS' ELSE 'FAIL geos-polygonize' END;
+SELECT CASE WHEN abs(st_area(st_buildarea(st_geomfromtext('MULTILINESTRING((0 0,4 0,4 4,0 4,0 0),(1 1,2 1,2 2,1 2,1 1))'))) - 15.0) < 1e-6 THEN 'PASS' ELSE 'FAIL geos-buildarea' END;
+-- The 3x3 Voronoi grid that defeated the earlier angle-sort prototype (now GEOS)
+SELECT CASE WHEN st_numgeometries(st_voronoipolygons(st_geomfromtext('MULTIPOINT((0 0),(1 0),(2 0),(0 1),(1 1),(2 1),(0 2),(1 2),(2 2))'))) = 9 THEN 'PASS' ELSE 'FAIL geos-voronoi-grid' END;
+-- Spheroid geodesics (Karney / GeographicLib, WGS84)
+SELECT CASE WHEN abs(st_distancespheroid(st_point(-0.1278, 51.5074), st_point(2.3522, 48.8566)) - 343924.0) < 50.0 THEN 'PASS' ELSE 'FAIL spheroid-distance' END;
+SELECT CASE WHEN abs(st_lengthspheroid(st_geomfromtext('LINESTRING(0 0,1 0)')) - 111319.0) < 1.0 THEN 'PASS' ELSE 'FAIL spheroid-length' END;
+SELECT CASE WHEN st_areaspheroid(st_geomfromtext('POLYGON((0 0,1 0,1 1,0 1,0 0))')) > 1.2e10 THEN 'PASS' ELSE 'FAIL spheroid-area' END;
+SELECT CASE WHEN st_dwithinspheroid(st_point(-0.1278, 51.5074), st_point(2.3522, 48.8566), 400000.0) = true THEN 'PASS' ELSE 'FAIL spheroid-dwithin' END;
+SELECT CASE WHEN st_area(st_intersection_agg(g)) = 16.0 THEN 'PASS' ELSE 'FAIL intersection_agg' END FROM (SELECT st_geomfromtext('POLYGON((0 0,4 0,4 4,0 4,0 0))') g UNION ALL SELECT st_geomfromtext('POLYGON((0 0,4 0,4 4,0 4,0 0))'));

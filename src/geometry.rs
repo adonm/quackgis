@@ -64,7 +64,7 @@ pub fn from_wkb(bytes: &[u8]) -> Result<Geom, GeometryError> {
 /// carries the SRID flag, return an owned slice with the flag cleared and the
 /// 4 SRID bytes removed. Otherwise return a borrow of the input unchanged.
 /// Owned output is dropped by the caller, so there is no leak.
-fn strip_ewkb_srid(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+pub(crate) fn strip_ewkb_srid(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     use std::borrow::Cow;
     // EWKB layout: [endian:1][type:4][optional srid:4][coords...].
     if bytes.len() < 5 {
@@ -112,6 +112,82 @@ pub fn to_wkb(geom: &Geom) -> Result<Vec<u8>, GeometryError> {
     )
     .map_err(|_| GeometryError("failed to serialize WKB"))?;
     Ok(buf)
+}
+
+// ---------------------------------------------------------------------------
+// EWKB SRID tagging (PostGIS SRID semantics on SRID-less ISO WKB storage)
+// ---------------------------------------------------------------------------
+//
+// PostGIS stores an SRID inside every geometry; ISO WKB has no SRID field.
+// We close that gap with the EWKB representation PostGIS itself uses on the
+// wire: a `0x20000000` flag in the type word plus a 4-byte SRID. `from_wkb`
+// strips the tag before parsing (kernels never see it), the dispatch layer
+// re-tags outputs, and the two functions below are the only readers/writers
+// of the raw tag bytes.
+
+const EWKB_SRID_FLAG: u32 = 0x2000_0000;
+
+/// Read the EWKB SRID tag from a WKB blob without parsing the geometry.
+/// Returns `None` for plain (untagged) WKB or for blobs too short to carry
+/// a tag. A tag of 0 is reported as `None` (PostGIS treats SRID 0 as unknown).
+pub fn peek_ewkb_srid(bytes: &[u8]) -> Option<i32> {
+    if bytes.len() < 9 {
+        return None;
+    }
+    let little = bytes[0] == 1;
+    let type_bytes: [u8; 4] = bytes[1..5].try_into().ok()?;
+    let type_word = if little {
+        u32::from_le_bytes(type_bytes)
+    } else {
+        u32::from_be_bytes(type_bytes)
+    };
+    if type_word & EWKB_SRID_FLAG == 0 {
+        return None;
+    }
+    let srid_bytes: [u8; 4] = bytes[5..9].try_into().ok()?;
+    let srid = if little {
+        i32::from_le_bytes(srid_bytes)
+    } else {
+        i32::from_be_bytes(srid_bytes)
+    };
+    (srid > 0).then_some(srid)
+}
+
+/// Return `wkb` tagged with `srid` as EWKB (any existing tag is replaced).
+/// `srid <= 0` clears the tag instead, returning plain ISO WKB — this gives
+/// `ST_SetSRID(geom, 0)` PostGIS's "unknown SRID" semantics.
+pub fn tag_ewkb_srid(wkb: &[u8], srid: i32) -> Vec<u8> {
+    let plain = strip_ewkb_srid(wkb);
+    if srid <= 0 {
+        return plain.into_owned();
+    }
+    let bytes: &[u8] = &plain;
+    if bytes.len() < 5 {
+        // Not valid WKB; return unchanged rather than fabricate a header.
+        return plain.into_owned();
+    }
+    let little = bytes[0] == 1;
+    let type_bytes: [u8; 4] = match bytes[1..5].try_into() {
+        Ok(b) => b,
+        Err(_) => return plain.into_owned(),
+    };
+    let type_word = if little {
+        u32::from_le_bytes(type_bytes)
+    } else {
+        u32::from_be_bytes(type_bytes)
+    };
+    let flagged = type_word | EWKB_SRID_FLAG;
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len() + 4);
+    out.push(bytes[0]);
+    if little {
+        out.extend_from_slice(&flagged.to_le_bytes());
+        out.extend_from_slice(&srid.to_le_bytes());
+    } else {
+        out.extend_from_slice(&flagged.to_be_bytes());
+        out.extend_from_slice(&srid.to_be_bytes());
+    }
+    out.extend_from_slice(&bytes[5..]);
+    out
 }
 
 /// Convert any `geo-traits` geometry into an owned [`Geometry`].
@@ -194,7 +270,7 @@ mod tests {
     const POINT_EWKB_SRID: [u8; 25] = [
         0x01,                                   // little-endian
         0x01, 0x00, 0x00, 0x20,                 // type = 0x20000001 (Point + SRID flag)
-        0xe0, 0x01, 0x00, 0x00,                 // SRID = 4326 (LE)
+        0xe6, 0x10, 0x00, 0x00,                 // SRID = 4326 (LE: 0x000010e6)
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x3f, // x = 1.0
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, // y = 2.0
     ];
@@ -219,5 +295,35 @@ mod tests {
         let g = from_wkb(&POINT_WKB).expect("parse POINT");
         let bytes = to_wkb(&g).expect("serialize POINT");
         assert_eq!(bytes, POINT_WKB);
+    }
+
+    #[test]
+    fn peek_srid_reads_tag() {
+        assert_eq!(peek_ewkb_srid(&POINT_EWKB_SRID), Some(4326));
+        assert_eq!(peek_ewkb_srid(&POINT_WKB), None);
+        assert_eq!(peek_ewkb_srid(&[]), None);
+        assert_eq!(peek_ewkb_srid(&[1, 1, 0]), None);
+    }
+
+    #[test]
+    fn tag_and_peek_roundtrip() {
+        let tagged = tag_ewkb_srid(&POINT_WKB, 4326);
+        assert_eq!(tagged, POINT_EWKB_SRID);
+        assert_eq!(peek_ewkb_srid(&tagged), Some(4326));
+        // Retag replaces, not stacks.
+        let retagged = tag_ewkb_srid(&tagged, 3857);
+        assert_eq!(peek_ewkb_srid(&retagged), Some(3857));
+        assert_eq!(retagged.len(), POINT_EWKB_SRID.len());
+        // srid 0 clears back to plain WKB.
+        let cleared = tag_ewkb_srid(&tagged, 0);
+        assert_eq!(cleared, POINT_WKB.to_vec());
+        assert_eq!(peek_ewkb_srid(&cleared), None);
+    }
+
+    #[test]
+    fn tagged_blob_still_parses() {
+        let tagged = tag_ewkb_srid(&POINT_WKB, 28356);
+        let g = from_wkb(&tagged).expect("parse tagged EWKB");
+        assert!(matches!(g, Geometry::Point(_)));
     }
 }

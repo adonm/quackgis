@@ -4,6 +4,43 @@ Runs the [Apache SpatialBench](https://github.com/apache/sedona-spatialbench)
 queries against the **sedonadb** extension over a **local DuckLake** (DuckDB file
 as catalog, local folder for Parquet data).
 
+## Benchmark suites
+
+| Script | What it measures |
+|--------|-----------------|
+| `run.sh` / `run_queries.sh` | SpatialBench end-to-end (Q1–Q7, FN_dist/FN_area) over 600k trips / 20k buildings |
+| `bridge.sql` | Literal SedonaDB bridge overhead vs local reimplementation (1M points) |
+| `backends.sql` | GEOS topology, spheroid geodesics, raster streaming, bridge overhead (10k–100k rows) |
+| `perf_budget.sql` | Full performance budget: bridge, GEOS, spheroid, raster, local pipeline, aggregates, table functions (10k–100k rows) |
+
+## QA role
+
+Apache SpatialBench is the **heavy workload tier** for this extension. It is not
+the primary semantic oracle — exact compatibility belongs in focused SQL
+fixtures under `tests/reference/`. SpatialBench answers a different release QA
+question: do realistic spatial scans/joins finish, return stable row counts, and
+stay within broad performance budgets on real geometry distributions?
+
+Use SpatialBench:
+
+- before releases and after hard backend routing changes (GEOS/local/SedonaDB);
+- to catch robustness failures on invalid, complex, or very large Overture
+  polygons;
+- to track spatial join ergonomics (`bbox` prefilter + exact predicate) and
+  throughput regressions;
+- as a manual/nightly gate, not as a required per-commit test.
+
+Snapshot every release run with: extension commit, DuckDB version, hardware,
+data scale, adapted/skipped queries, result row counts, and wall-clock timings.
+
+Run `backends.sql`:
+
+```sh
+LD_LIBRARY_PATH="$(brew --prefix gdal)/lib" \
+  duckdb -unsigned -cmd "LOAD 'build/dev/sedonadb.duckdb_extension';" \
+  < benchmarks/backends.sql
+```
+
 ## Reproduce
 
 ```sh
@@ -69,13 +106,14 @@ polygons. `geo` 0.31's `relate` and point-in-polygon paths crash on these.
 Three layered fixes were added so the extension degrades gracefully instead of
 segfaulting:
 
-1. **`ST_MakeValid(geom)` + an internal `ensure_valid` guard.** Every
+1. **Public GEOS `ST_MakeValid(geom)` + an internal `ensure_valid` guard.** Every
    relate-based predicate (`ST_Within/Contains/Covers/CoveredBy/Equals/Touches/
    Crosses/Overlaps`) and every boolean op (`ST_Intersection/Union/Difference/
-   SymDifference`) now validates its inputs and, if invalid, repairs them with
-   `buffer(0)` (even-odd topology rebuild) before calling into `geo`. Valid
-   inputs take the cheap fast path (`is_valid` + borrow, no copy). This fixes
-   the broad class of *invalid-polygon* errors across the whole catalog.
+   SymDifference`) validates inputs and avoids fabricating results for invalid
+   geometry. The public `ST_MakeValid` route now uses GEOS `make_valid` (the same
+   canonical engine PostGIS uses); the local guard remains a cheap repair/fallback
+   around `geo` operations. Valid inputs take the cheap fast path (`is_valid` +
+   borrow, no copy).
 2. **Custom ray-cast point-in-polygon for `ST_Within`/`ST_Contains`.** When one
    operand is a point (the SpatialBench join shape), we run PNPOLY even-odd ray
    casting ourselves instead of `geo`'s `Contains<Point>`. It is iterative O(n),
@@ -88,18 +126,9 @@ segfaulting:
 
 ## Known limitations
 
-- **`ORDER BY ... LIMIT` on a geometry column that then feeds a scalar function
-  segfaults.** An ordered/limited subquery yields a non-flat
-  (sequence/dictionary) vector. The DuckDB **C API exposes no vector-encoding
-  inspection** (only `duckdb_vector_get_data` / `get_validity` /
-  `get_column_type`), so `BlobCol` cannot portably decode it and reads garbage
-  → SIGSEGV. (This equally affects `quack-rs`'s own `VectorReader`.) Q4's
-  canonical `ORDER BY t_tip DESC LIMIT 1000` form hits this; the benchmark uses
-  the filter-equivalent (`WHERE t_tip > 40 LIMIT 1000`), which materializes a
-  flat vector. **Workaround for users:** materialize the ordered geometry set
-  into a temp/CTE table first, or filter instead of order. **Real fix:** the
-  DuckDB C API would need to expose vector types (or a "flatten/fetch row"
-  helper); tracked as the main portability gap.
+- **Non-flat vector encodings are fixed and pinned by tests.** Ordered/limited,
+  filtered, projected, and constant geometry vectors now feed scalar `ST_*` and
+  `sedona_*` callbacks without segfaulting (`tests/vector_encodings.sql`).
 - **General (non-point) `ST_Within/Contains/Covers/...` on a 100k+ vertex
   polygon** can still overflow `geo`'s geomgraph `relate`. The point case is
   covered by fix #2 above; the general case is the upstream `geo` bug below.
@@ -141,3 +170,27 @@ guards here remain as cheap belt-and-suspenders.
 | `spatialbench_full.sql` | full query set incl. bbox-prefiltered joins |
 | `run_queries.sh` | per-query timing (one process each) |
 | `run.sh` | end-to-end: build → package → generate/cache data → lake → queries |
+| `bridge.sql` | local `st_*` vs literal SedonaDB `sedona_*` overhead (1M points) |
+
+## Literal SedonaDB bridge overhead (`bridge.sql`)
+
+Compares the local `st_*` reimplementation against the literal Apache SedonaDB
+kernel (`sedona_*`) over 1,000,000 points, wall-clock seconds (DuckDB
+1.5.4, `.timer on`). Both paths share the same vectorized DuckDB chunking; the
+delta is the DuckDB-chunk ⇄ Arrow bridge cost (per-chunk array build +
+`invoke_with_args` + write-back).
+
+| Operation | local `st_*` (s) | literal `sedona_*` (s) |
+|-----------|------------------|------------------------|
+| `ST_Dimension`     | 0.197 | 0.188 |
+| `ST_XMin`          | 0.208 | 0.258 |
+| `ST_AsText`        | 0.355 | 0.324 |
+| `ST_Segmentize`    | 0.491 | 0.436 |
+
+**Finding: the bridge overhead is negligible** — within run-to-run noise, and
+the literal SedonaDB path is competitive with (often faster than) the local
+reimplementation on the heavier kernels (`ST_AsText`, `ST_Segmentize`). No
+allocation-tuning is warranted: the per-chunk Arrow array build is amortized
+across DuckDB's standard 2048-row chunks, and SedonaDB's own WKB iteration is
+already vectorized. Reproduce with:
+`LD_LIBRARY_PATH=<gdal-lib> duckdb -unsigned -cmd "LOAD '<ext>';" < benchmarks/bridge.sql`.

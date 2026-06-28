@@ -41,9 +41,15 @@ pub mod dispatch;
 #[allow(clippy::needless_borrow)]
 pub mod functions;
 pub mod geometry;
+pub mod geos_backend;
 pub mod raster;
 pub mod registry;
 pub mod spatial_join;
+pub mod spatial_keys;
+pub mod dump;
+pub mod rewriter;
+#[allow(clippy::not_unsafe_ptr_arg_deref, clippy::missing_safety_doc)]
+pub mod bridge;
 
 use quack_rs::entry_point;
 

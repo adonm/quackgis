@@ -37,6 +37,14 @@ name = "sedonadb-package"
 path = "src/bin/package.rs"
 required-features = []
 
+# Migration assistant: PostGIS → DuckDB SQL rewriter with review reports.
+# Uses #[path] to include the rewriter module directly, so the binary depends
+# only on `sqlparser` — not the extension's GDAL/GEOS/PROJ stack.
+[[bin]]
+name = "sedonadb-migrate"
+path = "src/bin/migrate.rs"
+required-features = []
+
 [dependencies]
 # DuckDB C-API SDK for Rust. We depend on `libduckdb-sys` with the
 # `loadable-extension` feature so the DuckDB host process supplies the symbols
@@ -58,15 +66,56 @@ rstar = "0.13"
 proj = { version = "0.31", features = ["bundled_proj"] }
 libsqlite3-sys = { version = ">=0.28,<0.36", features = ["bundled"] }
 arrow = "57"
+arrow-array = "57"
+arrow-schema = "57"
 parquet = "57"
 gdal = { version = "0.19", features = ["bindgen"] }
 
-# Vendored + patched `gdal` so we can build against libgdal 3.13 (the upstream
-# 0.19 crate lags the 3.13 C-API renames). Only the high-level `gdal` crate is
-# patched; `gdal-sys` is unpatched and resolved straight from crates.io. See
-# vendor/gdal/PATCHES.md.
+# GEOS bindings for high-fidelity planar topology (ST_Node, ST_Polygonize,
+# ST_VoronoiPolygons) — the same engine PostGIS uses for these operations.
+# Links libgeos_c (already present transitively via GDAL). geos-sys finds it
+# via pkg-config at build time.
+geos = { version = "11.1", features = ["v3_8_0"] }
+
+# SQL AST parser for PostGIS→DuckDB rewriting (M25). Already resolved
+# transitively via datafusion-expr; adding as direct dep for `use sqlparser::`.
+sqlparser = "0.59"
+
+# Karney-quality spheroid geodesics (ST_DistanceSpheroid, ST_LengthSpheroid).
+# Converges everywhere including antipodal points (better than Vincenty).
+geographiclib-rs = "0.2"
+
+# The *literal* SedonaDB superset. We link the real `sedona-functions` crate —
+# its `default_function_set()` of DataFusion scalar UDFs — and bridge DuckDB
+# chunks ⇄ Arrow (see `src/bridge.rs`) so DuckDB invokes SedonaDB's own kernels
+# directly instead of our reimplementation. The git rev pins the whole
+# `sedona-db` workspace; the transitive internal crates (sedona-expr,
+# sedona-schema, sedona-common, sedona-geometry, sedona-raster) resolve from the
+# same rev automatically. The tree is pure-Rust (no GDAL/PROJ/GEOS dragged in),
+# so it cannot collide with the vendored GDAL/PROJ above. datafusion-* is pulled
+# only as expression/common traits (no executor), and arrow 57.x already matches.
+sedona-functions = { git = "https://github.com/apache/sedona-db", rev = "b23ccd15f649487b043be219b2dfbb6bad7a668d" }
+# Direct deps so `src/bridge.rs` can `use sedona_expr::` / `use sedona_schema::`
+# (Rust requires direct deps for `use` paths). Same git rev; no extra fetch.
+sedona-expr = { git = "https://github.com/apache/sedona-db", rev = "b23ccd15f649487b043be219b2dfbb6bad7a668d" }
+sedona-schema = { git = "https://github.com/apache/sedona-db", rev = "b23ccd15f649487b043be219b2dfbb6bad7a668d" }
+datafusion-common = "52.5"
+datafusion-expr = "52.5"
+
+# Vendored + patched crates. We vendor when an upstream crate lags the C-API we
+# target OR has a correctness bug on the hot path that we need to fix at source
+# rather than work around.
+#
+# - `gdal` 0.19: upstream `georust/gdal` lags libgdal 3.13 C-API renames
+#   (GDT_Byte→GDT_UInt8, bOperateInBufType). Patched on fork branch
+#   `fix/gdal-3.13-support` at `github.com/adonm/gdal`. When upstream lands
+#   3.13 support, drop the patch line.
+# - `quack-rs` 0.14: upstreamed to fork branch `feat/c-api-full-coverage` on
+#   `github.com/adonm/quack-rs`. Includes the `read_blob` binary-safety fix,
+#   `Value::as_blob`, and 88% C-API coverage. See `.tmp/quack-rs/COVERAGE.md`.
 [patch.crates-io]
-gdal = { path = "vendor/gdal" }
+gdal = { git = "https://github.com/adonm/gdal", branch = "fix/gdal-3.13-support" }
+quack-rs = { git = "https://github.com/adonm/quack-rs", branch = "feat/c-api-full-coverage" }
 
 [profile.release]
 panic = "abort"
