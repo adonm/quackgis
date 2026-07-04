@@ -1,45 +1,41 @@
 # Contributing
 
-Two tracks: **engine** (Rust DuckDB extension) and **facade** (container, SQL
-stubs, tests, deployment).
+QuackGIS is a thin integration layer over three upstream DataFusion projects
+(datafusion-postgres, SedonaDB, datafusion-ducklake), consumed as **pinned
+forks**. Several capabilities the design needs don't exist upstream yet — see
+the gap ledger in [ROADMAP.md](./ROADMAP.md). Policy: **fork/vendor
+preferred** — when a needed capability is missing, build it in our fork and
+ship; upstream the patch opportunistically, never on the critical path. This
+repo owns the PostGIS compatibility surface (geometry over the wire,
+geometry_columns/spatial_ref_sys, client shims) and the glue.
 
-## Engine
+Fork rules:
 
-```sh
-cargo test --lib
-./tests/run_sql.sh
-./ci/package-and-smoke.sh
-python3 tools/catalog_audit.py --check
-```
-
-Architecture: declarative macro dispatch. One registry line per function in
-`src/registry.rs`. One generic executor per result shape in `src/dispatch.rs`.
-WKB parse/validate in `src/geometry.rs` (trust boundary). See the module
-headers in `src/` for details.
-
-Adding a function: pick the backend (literal SedonaDB bridge, GEOS, local
-GeoRust, PROJ, GDAL), register one line in `registry.rs`, add tests, update
-`COMPATIBILITY.md` if user-visible.
-
-## Facade
+- Pin exact revisions (`[patch.crates-io]` or git rev); no floating branches.
+- Minimal diffs; every patch listed in the fork's `DIVERGENCE.md` with its
+  upstream PR link if one exists.
+- Rebase forks onto upstream tags at milestone boundaries.
 
 ```sh
-./container/build.sh
-./container/smoke-test.sh
-./container/run-all-tests.sh --no-build
+cargo build --release          # server binary
+cargo test                     # unit + wire integration tests
+cargo test -p quackgis-server  # the server crate only
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Init scripts in `container/init.d/` define the PG-level surface: geometry
-DOMAIN, operators, function stubs, aggregates, layout helpers. The bridge table
-pattern (`quackgis._bridge`) routes standalone spatial calls to DuckDB.
+Compatibility work is trace-driven: capture the SQL a client (QGIS, GeoServer,
+OGR) actually sends, add it as a replay fixture, then fix. See
+[ROADMAP.md](./ROADMAP.md) for the current milestone and gates.
 
-`container/generate-stubs.sh` reads `src/registry.rs` and generates stubs for
-all `st_*` functions not manually defined. **Known bug**: generated stubs have
-wrong arities — needs fixing to read dispatch macro signatures.
+Note: legacy v0.1 assets (DuckDB extension in `src/`, `container/init.d/`,
+`vendor/`) are being retired at M0 — don't extend them; see ROADMAP.md
+"Retired v0.1 assets".
 
 ## Rules
 
 - No silent geometry semantic changes.
-- Validate at trust boundaries and fail closed.
-- Rust-first owned code.
+- Validate at trust boundaries (wire input, WKB/EWKB) and fail closed.
+- Rust-first owned code; fork/vendor when a needed capability is missing
+  upstream (follow the fork rules above); upstream opportunistically.
 - Keep docs short — see [ROADMAP.md](./ROADMAP.md) for current priorities.

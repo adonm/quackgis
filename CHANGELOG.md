@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased — architecture redesign: pgwire adaptor, no PostgreSQL
+
+Full PostgreSQL judged too heavy for the goal (PG-wire compatibility good
+enough for QGIS/GeoServer). Redesigned around three DataFusion-native
+components in one Rust binary:
+
+- **Wire**: [datafusion-postgres](https://github.com/datafusion-contrib/datafusion-postgres)
+  (pgwire server, auth, TLS, pg_catalog emulation, Arrow↔PG type mapping).
+- **Spatial**: [Apache SedonaDB](https://github.com/apache/sedona-db) used
+  natively (replaces this repo's DuckDB `sedonadb` extension wrapper).
+- **Storage**: [datafusion-ducklake](https://github.com/datafusion-contrib/datafusion-ducklake)
+  (replaces vendored pg_ducklake).
+
+Retired: PostgreSQL server, `vendor/pg_ducklake`, `pg_geometry` C extension,
+DuckDB extension packaging, `container/init.d` SQL stubs. Success metric moved
+from PostGIS regress pass rate to scripted QGIS/GeoServer/OGR client
+workflows (regress subset stays as secondary metric). Upstreams consumed as
+pinned forks — capabilities missing upstream (DuckLake UPDATE/DELETE and
+pruning, SQL cursors, deep pg_catalog, SedonaDB wire encodings) are built
+in-fork per the gap ledger; upstreaming is opportunistic. See ARCHITECTURE.md
+and ROADMAP.md (milestones M0–M7, gap ledger G1–G10).
+
 ## v0.1.0 — release candidate (Milestones 0–6)
 
 First QuackGIS container release candidate. Thin PostgreSQL facade backed by

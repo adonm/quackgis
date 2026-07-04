@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "quackgis-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "PostGIS-compatible spatial database server: datafusion-postgres + SedonaDB + (M1) DuckLake"
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "quackgis-server"
+path = "src/main.rs"
+
+[lib]
+name = "quackgis_server"
+path = "src/lib.rs"
+
+[dependencies]
+datafusion-postgres = { workspace = true }
+datafusion = { workspace = true }
+sedona = { workspace = true }
+
+tokio = { workspace = true }
+env_logger = { workspace = true }
+log = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+
+[dev-dependencies]
+# Pure-Rust pg client for integration tests (no psql binary required in CI).
+tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }

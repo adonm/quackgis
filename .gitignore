@@ -1,19 +1,26 @@
-# Rust build output: the extension shared object, deps, incremental cache.
+# Rust build output
 /target/
+**/target/
 
-# Local dev output: packaged .duckdb_extension, DuckLake catalog, benchmark
-# parquet, spatial-join spill files.
+# Spike build cache (spike is a standalone throwaway crate, not a workspace member)
+/spike/m00-wire-spike/target/
+
+# Local dev output (DuckLake catalogs, benchmark parquet, spill files, build cache)
 /build/
-
-# A packaged extension can be emitted anywhere; always ignore by extension.
-*.duckdb_extension
-
-# Tooling backups.
-**/*.rs.bk
-Cargo.lock.bak
 
 # Local reference clones used during development (kept inside the trust
 # boundary per the agent trust model — never commit this directory).
 /.tmp/
-tests/upstream/
+
+# A packaged extension can be emitted anywhere; always ignore by extension.
+*.duckdb_extension
+
+# Editor / OS
+*.swp
+**/*.rs.bk
+Cargo.lock.bak
+.DS_Store
+
+# v0.1 leftovers if they reappear
 pg_geometry/*.so
+core.*

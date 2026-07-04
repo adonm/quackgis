@@ -1,0 +1,8 @@
+# Build artifacts (spike is standalone; not part of parent workspace)
+/target/
+**/target/
+Cargo.lock
+
+# Editor / OS
+*.swp
+.DS_Store

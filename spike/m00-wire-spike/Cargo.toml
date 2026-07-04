@@ -1,0 +1,26 @@
+[package]
+name = "m00-wire-spike"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.88"
+publish = false
+license = "Apache-2.0"
+
+# Standalone: isolate from the v0.1 Cargo.toml at repo root (still a DuckDB
+# extension cdylib). Removing this [workspace] block would let root pick us up
+# and break the v0.1 build.
+[workspace]
+
+[dependencies]
+# Follow upstream master (DataFusion 53 / Arrow 58). Fork lives at
+# adonm/datafusion-postgres for the G1/G3 fork work coming next; spike consumes
+# upstream master directly until we need our patches.
+datafusion-postgres = { git = "https://github.com/datafusion-contrib/datafusion-postgres" }
+
+# SedonaDB main is still on DataFusion 52; adonm/sedona-db@quackgis/df53 bumps
+# to DF 53 / Arrow 58 / object_store 0.13 to align with datafusion-postgres
+# master. PR upstream when SedonaDB cuts a release on DF 53.
+sedona = { git = "https://github.com/adonm/sedona-db.git", branch = "quackgis/df53" }
+
+tokio = { version = "1.52", features = ["macros", "rt-multi-thread"] }
+env_logger = "0.11"

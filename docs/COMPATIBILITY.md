@@ -1,93 +1,67 @@
 # Compatibility and limitations
 
-## Engine function catalog
+Targets for the wire-adaptor architecture (see [ROADMAP.md](../ROADMAP.md) for
+milestone gates). Until a milestone lands, rows are **targets**, not claims.
+`G#` references point to the upstream gap ledger in ROADMAP.md — capabilities
+missing upstream that we build in pinned forks.
 
-The sedonadb DuckDB extension exposes 254 SQL functions: 180 public `st_*`, 72
-literal `sedona_st_*` bridge functions, and 2 extension-specific helpers. 46
-public `st_*` route to the literal Apache SedonaDB kernel.
+## Client compatibility targets
 
-Run `python3 tools/catalog_audit.py` for the current count. The full per-function
-table is in `COMPATIBILITY.md` at the repo root (auto-generated).
-
-## PostgreSQL versions
-
-| PostgreSQL | Status | Notes |
-|---|---|---|
-| 17 | ✅ Recommended | |
-| 18 | ✅ Container base | Current `pgducklake/pgducklake` image |
-
-## DuckDB ABI
-
-The `sedonadb` extension must be compiled against the same DuckDB version that
-pg_ducklake bundles. The Dockerfile builds from source to match. Check at
-runtime via `quackgis.diagnostics`.
-
-## DuckLake catalog modes
-
-| Mode | Catalog | Data | Use case |
+| Client | Target | Milestone | Notes |
 |---|---|---|---|
-| File (default) | PVC | PVC | Dev, single-node |
-| PostgreSQL | PG instance | PVC or S3 | Production, multi-writer |
+| `psql` | ✅ | M0 | simple + extended protocol via datafusion-postgres |
+| psycopg (v3) | ✅ | M2 | text + binary geometry round-trip |
+| GDAL/OGR (`ogr2ogr`) | ✅ | M2 | PG driver load + read-back is the M2 gate |
+| QGIS (postgres provider) | ✅ read | M3 | introspection, binary cursors, extents |
+| QGIS (editing) | ✅ | M4 | needs DuckLake UPDATE/DELETE (upstream) |
+| GeoServer (PostGIS datastore) | ✅ | M4 | JDBC extended protocol, WMS/WFS-T |
+| pg_featureserv / martin | stretch | M7 | trace-driven |
+| `pg_dump` / logical replication | ❌ | — | back up the DuckLake catalog + Parquet instead |
 
-## Object-store backends
+## Wire protocol surface (datafusion-postgres)
 
-| Backend | Protocol | Auth |
-|---|---|---|
-| Local PVC | file path | N/A |
-| AWS S3 | `s3://` | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` |
-| GCS | `gs://` | Service account JSON |
-| Azure Blob | `az://` | Connection string |
-| R2 / S3-compatible | `s3://` | S3 creds + endpoint |
-
-## Client compatibility
-
-| Client | Status |
+| Feature | Status |
 |---|---|
-| `psql` | ✅ Full |
-| psycopg (v3) | ✅ Full |
-| JDBC | ✅ Expected (standard PG driver) |
-| BI tools | ✅ Expected (pg_catalog/information_schema) |
-| `pg_dump` | ⚠️ Use `--insert` mode; COPY protocol untested |
+| Simple + extended query protocol | ✅ upstream |
+| TLS, password auth, RBAC roles | ✅ upstream |
+| pg_catalog + information_schema emulation | ✅ upstream (datafusion-pg-catalog) |
+| Portals / fetch-size suspension | probe; built in our fork if missing (G4, M4) |
+| `DECLARE BINARY CURSOR` / `FETCH` | probe; built in our fork if missing (G3, M3) |
+| COPY subprotocol | not planned initially; `ogr2ogr`/INSERT for bulk load |
+| LISTEN/NOTIFY, PL/pgSQL, triggers | ❌ non-goals |
 
-## Known limitations
+## Spatial engine (SedonaDB)
 
-### Architecture constraints (unlikely to change)
+- ST_* vector functions, geography, CRS propagation, spatial joins — per
+  [SedonaDB docs](https://sedona.apache.org). Raster in progress upstream.
+- PostGIS-compat aliases and `&&` / `<->` operator mapping are quackgis-owned
+  (M2).
+- Function conformance tracked against a curated PostGIS regress subset
+  (secondary metric).
 
-- **GiST indexes / planner hooks**: DuckDB C-API cannot register binary operators
-  or planner hooks. Use DuckLake layout columns instead.
-- **Topology schema**: PostgreSQL-specific, not supported.
-- **SFCGAL 3D solids**: No mature Rust binding.
-- **Raster `ST_MapAlgebra`**: DuckDB SQL replaces the expression language.
-- **`LISTEN`/`NOTIFY`**: Not routed through DuckDB.
+## Storage (datafusion-ducklake)
 
-### Known gaps (may improve)
+| Capability | Status upstream |
+|---|---|
+| Read catalogs: DuckDB, SQLite, PostgreSQL, MySQL | ✅ |
+| Write: SQLite catalog (spec-compliant), CTAS + INSERT | ✅ |
+| Write: PostgreSQL catalog | ⚠️ experimental, non-spec multi-catalog layout (spec layout in our fork when prioritized, G6) |
+| UPDATE / DELETE | ❌ upstream — built in our fork for M4 (G5) |
+| Snapshot time travel (SQL `AS OF`) | ❌ programmatic only (G8) |
+| Partition/file pruning | ❌ upstream — built in our fork for M5 (G7) |
+| DuckDB-inlined data reads | ❌ — avoid inlining when writing from DuckDB |
+| Object stores | local FS, S3/MinIO |
 
-- **Typmod enforcement**: `geometry(Point, 4326)` is accepted but PostgreSQL does
-  not enforce the type/SRID constraint. Handled at the EWKB level instead.
-- **COPY protocol**: `pg_dump`/`pg_restore` use COPY, which is untested through
-  the facade. Use `pg_dump --insert` or PVC snapshots.
-- **PL/pgSQL function bodies**: Spatial calls inside stored procedures use stub
-  functions that delegate to DuckDB. Performance implications for complex logic.
-- **Aggregate functions**: PG-level aggregate stubs (`st_union_agg`, `st_collect`)
-  collect rows into memory. For large tables, queries must route to DuckDB via
-  DuckLake tables.
-- **DuckDB ABI coupling**: Every DuckDB version bump requires rebuilding sedonadb.
-- **DuckLake pruning without clustering**: Spatial pruning only works when files
-  are Hilbert-sorted. Without layout columns, queries fall back to full scans.
+Interop: tables written by QuackGIS must stay readable by DuckDB's `ducklake`
+extension (CI check from M1). Use the SQLite catalog for spec-compliant
+single-node deployments; treat the PostgreSQL catalog as experimental until
+upstream adopts a spec layout.
 
-### Known gaps (being addressed by strategy in ROADMAP.md)
+## Known limitations (architecture)
 
-- **Operators (`&&`, `<->`)**: sedonadb now registers these as DuckDB functions
-  but pg_ducklake's deparser doesn't always resolve them. Being fixed by
-  switching to DuckDB spatial's GEOMETRY type (Phase A).
-- **Typmod enforcement**: `geometry(Point, 4326)` accepted but not enforced.
-  Will be fixed by the C extension geometry type (Phase C).
-- **COPY protocol**: `pg_dump`/`pg_restore` untested through the facade.
-- **Bridge table standalone calls**: type conversion issue for non-DuckLake
-  queries. Primary use case (DuckLake table queries) works correctly.
-
-### Strategy for improvement
-
-See [ROADMAP.md](../ROADMAP.md) for the full strategy. Key metric:
-**PostGIS regress test pass rate**. Upstream PostGIS tests replace custom
-tests as coverage grows.
+- Transactions are accepted (`BEGIN`/`COMMIT`) but DuckLake commits are
+  per-statement snapshots; no multi-statement rollback initially.
+- No ctid: tables without primary keys get a synthesized row-id for QGIS
+  editing (M3).
+- Typmod enforcement (`geometry(Point, 4326)`) is metadata + EWKB-level, not
+  PG typmod machinery.

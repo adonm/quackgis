@@ -1,5 +1,11 @@
 # Operations
 
+> **Stale — v0.1 stack.** This document describes the retired
+> PostgreSQL + pg_ducklake + DuckDB architecture. The project has been
+> redesigned around a single-binary pgwire server (see
+> [ARCHITECTURE.md](../ARCHITECTURE.md)); this doc is refreshed at milestone
+> M6 ([ROADMAP.md](../ROADMAP.md)).
+
 Deployment, backup, upgrade, migration, and dependencies for QuackGIS.
 
 ## Quick start

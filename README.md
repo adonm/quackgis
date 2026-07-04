@@ -1,87 +1,81 @@
 # QuackGIS
 
-A thin PostgreSQL/PostGIS-compatible facade container backed by DuckDB
-execution, the `sedonadb` spatial extension, and DuckLake storage.
+A PostGIS-compatible spatial database server in a single Rust binary:
+PostgreSQL wire protocol via
+[datafusion-postgres](https://github.com/datafusion-contrib/datafusion-postgres),
+spatial execution via [Apache SedonaDB](https://github.com/apache/sedona-db),
+storage via [DuckLake](https://ducklake.select)
+([datafusion-ducklake](https://github.com/datafusion-contrib/datafusion-ducklake)).
 
-Clients connect with normal PostgreSQL tooling (`psql`, JDBC, psycopg, BI
-tools). PostgreSQL provides pgwire, sessions, auth, and catalog behavior.
-DuckDB executes analytical queries. `sedonadb` provides 180+ spatial `ST_*`
-functions. DuckLake stores table data in Parquet.
+No PostgreSQL. No DuckDB. The goal: spatial clients — **QGIS, GeoServer,
+GDAL/OGR, psycopg** — connect and work without significant changes.
 
 ```text
-psql / JDBC / psycopg / BI tools
+QGIS / GeoServer (JDBC) / psql / OGR / psycopg
         │  pgwire
         ▼
-PostgreSQL + pg_ducklake (table AM)
-        │
+quackgis server (one Rust binary)
+├── datafusion-postgres   wire protocol · auth · TLS · pg_catalog
+├── quackgis compat layer geometry OID/EWKB · geometry_columns ·
+│                         spatial_ref_sys · client shims
+├── SedonaDB              ST_* kernels · CRS · spatial joins (DataFusion)
+└── datafusion-ducklake   DuckLake catalog + Parquet
         ▼
-DuckDB + sedonadb (spatial execution)
-        │
-        ▼
-DuckLake (Parquet / object storage)
-```
-
-## Quick start
-
-```sh
-docker build -t quackgis:dev -f container/Dockerfile .
-docker run -e POSTGRES_PASSWORD=quackgis -p 5432:5432 quackgis:dev
-psql postgres://postgres:quackgis@localhost:5432/postgres
-```
-
-```sql
-SELECT ST_AsText(ST_GeomFromText('POINT(1 2)'));        -- POINT(1 2)
-SELECT ST_Area(ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0))'));  -- 16
-SELECT postgis_version();                                -- 3.4 QUACKGIS
+catalog DB (SQLite/PG) + Parquet on file/S3
 ```
 
 ## Status
 
-Code-complete through M11 but **not yet validated end-to-end**. The Docker
-image has a known build blocker (missing `libgeos-dev`) and several unproven
-assumptions (see [ROADMAP.md](./ROADMAP.md)). Validation is the current focus.
+**Redesign in progress.** The architecture above was adopted after v0.1
+validated (then retired) a heavier stack: full PostgreSQL + vendored
+pg_ducklake + a C geometry extension + a DuckDB spatial extension. The wire
+adaptor approach replaces all four layers with DataFusion-native components.
+
+Current milestone: **M0 — skeleton server** (SedonaDB context served over
+pgwire, psql smoke test). See [ROADMAP.md](./ROADMAP.md) for milestones and
+the risk register.
+
+## Target quick start (post-M1)
+
+```sh
+docker run -e QUACKGIS_PASSWORD=quackgis -p 5432:5432 quackgis:dev
+psql postgres://postgres:quackgis@localhost:5432/quackgis
+```
+
+```sql
+SELECT ST_AsText(ST_GeomFromText('POINT(1 2)'));        -- POINT(1 2)
+CREATE TABLE parcels (id int, geom geometry);            -- DuckLake + Parquet
+SELECT postgis_version();                                -- 3.4 QUACKGIS
+```
 
 ## Documentation
 
-- [ARCHITECTURE.md](./ARCHITECTURE.md) — layer model, trust boundaries.
-- [ROADMAP.md](./ROADMAP.md) — current status, known blockers, what's next.
-- [CHANGELOG.md](./CHANGELOG.md) — release history.
-- [docs/COMPATIBILITY.md](./docs/COMPATIBILITY.md) — supported configs and
-  known limitations.
-- [docs/OPERATIONS.md](./docs/OPERATIONS.md) — deploy, backup, upgrade,
-  migration, DuckLake layout recipes.
-- [COMPATIBILITY.md](./COMPATIBILITY.md) — engine-level function catalog
-  (auto-generated).
-- [CONTRIBUTING.md](./CONTRIBUTING.md) — engine and facade contribution guide.
-
-## What this repo contains
-
-**Engine** (pre-existing, tested):
-- DuckDB `sedonadb` spatial extension: 254 functions over WKB/EWKB geometry.
-- Literal Apache SedonaDB bridge, GEOS, PROJ, GDAL, GeoRust backends.
-- PostGIS SQL rewriter (`sedonadb_rewrite_postgis`, `sedonadb-migrate`).
-- DuckLake spatial layout functions (`st_quadkey`, `st_hilbert`, etc.).
-- 860+ SQL regression tests.
-
-**Facade container** (M0–M11, unvalidated):
-- Multi-stage Dockerfile (pg_ducklake base + sedonadb + spatial libs).
-- 8 init SQL scripts: DuckDB config, bridge table, diagnostics, geometry
-  DOMAIN + operators, 50 manual stubs + 112 generated stubs, aggregates,
-  DuckLake layout helpers.
-- Test suite: smoke, PostGIS compat, DuckLake persistence, psycopg, backup.
-- Helm chart + K8s manifests + KinD test.
-- CI/CD: engine + container + facade + release automation.
+- [ARCHITECTURE.md](./ARCHITECTURE.md) — layer model, geometry over the wire,
+  trust boundaries, what changed from v0.1.
+- [ROADMAP.md](./ROADMAP.md) — milestones M0–M7, success metrics, risks.
+- [docs/COMPATIBILITY.md](./docs/COMPATIBILITY.md) — client compatibility
+  targets and known limitations.
+- [docs/OPERATIONS.md](./docs/OPERATIONS.md) — deploy/backup recipes
+  (v0.1-era; refreshed at M6).
+- [CHANGELOG.md](./CHANGELOG.md) — history, including the retired v0.1 facade.
+- [CONTRIBUTING.md](./CONTRIBUTING.md) — contribution guide.
 
 ## Development
 
 ```sh
-# Engine
-cargo test --lib
-./tests/run_sql.sh
-
-# Container (after fixing build blocker)
-./container/build.sh
-./container/smoke-test.sh
+cargo build --release          # server binary at target/release/quackgis-server
+cargo test                     # unit + wire integration tests
+cargo run --release -- --host 0.0.0.0 --port 5434
 ```
+
+M0 dev note: `sedonadb`'s default feature set builds against GEOS, so the
+host needs `libgeos` installed. On Linux: `apt install libgeos-dev`; on macOS
+`brew install geos`. CI installs it automatically.
+
+Upstreams are pinned forks: several needed capabilities don't exist upstream
+yet (DuckLake UPDATE/DELETE + pruning, SQL cursors, deep pg_catalog — see the
+gap ledger in [ROADMAP.md](./ROADMAP.md)), so we build them in our forks and
+upstream opportunistically. This repo owns the PostGIS compatibility surface
+and the glue.
 
 Licensed under the [Apache License 2.0](./LICENSE).

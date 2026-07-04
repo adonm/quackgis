@@ -1,6 +1,0 @@
-[submodule "duckdb"]
-	path = duckdb
-	url = https://github.com/duckdb/duckdb.git
-[submodule "pg_ducklake/third_party/ducklake"]
-	path = pg_ducklake/third_party/ducklake
-	url = https://github.com/duckdb/ducklake.git

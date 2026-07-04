@@ -1,4 +1,0 @@
-comment = 'PostgreSQL geometry type for QuackGIS (WKT I/O via GEOS)'
-default_version = '1.0'
-module_pathname = '$libdir/quackgis_type'
-relocatable = true
