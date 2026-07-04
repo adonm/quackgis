@@ -1,0 +1,143 @@
+# SPDX-License-Identifier: Apache-2.0
+# Plain Kubernetes manifests for QuackGIS (no Helm required).
+#
+# Apply: kubectl apply -f deploy/k8s/
+# Port-forward: kubectl port-forward svc/quackgis 55432:5432 -n quackgis
+# Connect: psql postgres://postgres:quackgis@127.0.0.1:55432/postgres
+#
+# For production, prefer the Helm chart (deploy/helm/) for parameterized
+# resource limits, storage classes, secrets, and network policies.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: quackgis
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: quackgis-secret
+  namespace: quackgis
+type: Opaque
+stringData:
+  postgres-password: "quackgis"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: quackgis-pgdata
+  namespace: quackgis
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: quackgis-ducklake
+  namespace: quackgis
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: quackgis
+  namespace: quackgis
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: pgql
+  selector:
+    app: quackgis
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: quackgis
+  namespace: quackgis
+spec:
+  serviceName: quackgis
+  replicas: 1
+  selector:
+    matchLabels:
+      app: quackgis
+  template:
+    metadata:
+      labels:
+        app: quackgis
+    spec:
+      securityContext:
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: quackgis
+          image: quackgis:dev
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 999
+            runAsGroup: 999
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false  # Postgres needs to write config
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: POSTGRES_USER
+              value: "postgres"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: quackgis-secret
+                  key: postgres-password
+            - name: POSTGRES_DB
+              value: "postgres"
+            - name: QUACKGIS_DUCKLAKE_DIR
+              value: /var/lib/quackgis
+            - name: QUACKGIS_DUCKDB_MEMORY_LIMIT
+              value: "4096"
+            - name: QUACKGIS_DUCKDB_THREADS
+              value: "-1"
+            - name: QUACKGIS_REWRITE_MODE
+              value: "warn"
+          ports:
+            - containerPort: 5432
+              name: pgql
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U postgres -d postgres"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U postgres -d postgres"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "4000m"
+              memory: "8Gi"
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+            - name: ducklake
+              mountPath: /var/lib/quackgis
+      volumes:
+        - name: pgdata
+          persistentVolumeClaim:
+            claimName: quackgis-pgdata
+        - name: ducklake
+          persistentVolumeClaim:
+            claimName: quackgis-ducklake

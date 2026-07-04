@@ -63,8 +63,8 @@ wkt = "0.14"
 delaunator = "1.0"
 geojson = "1.0"
 rstar = "0.13"
-proj = { version = "0.31", features = ["bundled_proj"] }
-libsqlite3-sys = { version = ">=0.28,<0.36", features = ["bundled"] }
+proj = "0.31"
+libsqlite3-sys = ">=0.28,<0.36"
 arrow = "57"
 arrow-array = "57"
 arrow-schema = "57"

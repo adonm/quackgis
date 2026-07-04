@@ -1,29 +1,54 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Unified CI pipeline: run every quality gate in sequence. This is the
-# canonical "does the project pass?" command. Run before every commit/push.
+# Unified CI pipeline for QuackGIS.
 #
-# Phases:
-#   1. Rust unit tests
-#   2. Catalog/compat/ledger drift gate
-#   3. Build + package + smoke test (all backend families)
-#   4. SQL regression suite (including DuckLake tests)
-#   5. Migration CLI smoke (sedonadb-migrate binary)
-#   6. Scale harness smoke tier (DuckLake pruning evidence)
+# Two tracks:
+#   ENGINE  — Rust DuckDB extension safety, SQL regression, catalog drift.
+#   FACADE  — Container-based client tests (psql, psycopg, PostGIS fixtures).
 #
-# Phase 3 runs before the SQL suite because it (re)builds
-# build/dev/sedonadb.duckdb_extension — the artifact phases 4 and 5 load.
-# Running SQL first would silently test a stale extension.
+# Engine phases (always run):
+#   E1. Rust unit tests
+#   E2. Catalog/compat/ledger drift gate
+#   E3. Build + package + smoke test (all backend families)
+#   E4. SQL regression suite (including DuckLake tests)
+#   E5. Migration CLI smoke
+#   E6. Scale harness (smoke tier)
 #
-# Usage: ./ci/all-checks.sh [duckdb_binary]
-# Exits non-zero on any failure.
-set -euo pipefail
+# Facade phases (run when --facade or docker is available):
+#   F1. Container smoke test
+#   F2. PostGIS compatibility suite
+#   F3. DuckLake storage + persistence
+#   F4. PostGIS fixture suite
+#   F5. psycopg client tests
+#
+# Usage:
+#   ./ci/all-checks.sh                 # engine only
+#   ./ci/all-checks.sh --facade        # engine + facade
+#   ./ci/all-checks.sh --facade-only   # facade only (image must exist)
+#   ./ci/all-checks.sh [duckdb_binary]
+set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
 DUCKDB="${1:-duckdb}"
+RUN_ENGINE=true
+RUN_FACADE=false
 
-# Locate runtime libs (libgdal/libproj/libgeos) for Linuxbrew if installed.
+for arg in "$@"; do
+    case "$arg" in
+        --facade)       RUN_FACADE=true ;;
+        --facade-only)  RUN_FACADE=true; RUN_ENGINE=false ;;
+        --engine-only)  RUN_ENGINE=true; RUN_FACADE=false ;;
+    esac
+done
+
+# Auto-detect docker for facade if requested but not explicitly set.
+if $RUN_FACADE && ! command -v docker >/dev/null 2>&1; then
+    echo "⚠ docker not found — facade tests skipped"
+    RUN_FACADE=false
+fi
+
+# Locate runtime libs for Linuxbrew if installed.
 BREW=/var/home/linuxbrew/.linuxbrew
 if [ -d "$BREW/lib" ]; then
     export LD_LIBRARY_PATH="$BREW/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -36,12 +61,18 @@ fi
 FAIL=0
 
 echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║  sedonadb — unified CI pipeline                             ║"
+echo "║  QuackGIS — unified CI pipeline                             ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo
 
-# ---- Phase 1: Rust unit tests ----
-echo "=== Phase 1: Rust unit tests ==="
+# ══════════════════════════════════════════════════════════════════════════════
+# ENGINE TRACK
+# ══════════════════════════════════════════════════════════════════════════════
+
+if $RUN_ENGINE; then
+
+# ---- E1: Rust unit tests ----
+echo "=== E1: Rust unit tests ==="
 if cargo test --lib 2>&1 | tail -5; then
     echo "✓ Rust tests passed"
 else
@@ -50,8 +81,8 @@ else
 fi
 echo
 
-# ---- Phase 2: Drift gate ----
-echo "=== Phase 2: Catalog/compat/ledger drift gate ==="
+# ---- E2: Drift gate ----
+echo "=== E2: Catalog/compat/ledger drift gate ==="
 if ./ci/check.sh; then
     echo "✓ Drift gate passed"
 else
@@ -60,8 +91,8 @@ else
 fi
 echo
 
-# ---- Phase 3: Build + package + smoke ----
-echo "=== Phase 3: Build + package + smoke ==="
+# ---- E3: Build + package + smoke ----
+echo "=== E3: Build + package + smoke ==="
 if ./ci/package-and-smoke.sh "$DUCKDB"; then
     echo "✓ Package + smoke passed"
 else
@@ -70,8 +101,8 @@ else
 fi
 echo
 
-# ---- Phase 4: SQL regression suite ----
-echo "=== Phase 4: SQL regression suite ==="
+# ---- E4: SQL regression suite ----
+echo "=== E4: SQL regression suite ==="
 if ./tests/run_sql.sh; then
     echo "✓ SQL suite passed"
 else
@@ -80,8 +111,8 @@ else
 fi
 echo
 
-# ---- Phase 5: Migration CLI smoke ----
-echo "=== Phase 5: Migration CLI smoke ==="
+# ---- E5: Migration CLI smoke ----
+echo "=== E5: Migration CLI smoke ==="
 MIGRATE_BIN="target/debug/sedonadb-migrate"
 if [ ! -f "$MIGRATE_BIN" ]; then
     MIGRATE_BIN="target/release/sedonadb-migrate"
@@ -99,8 +130,8 @@ else
 fi
 echo
 
-# ---- Phase 6: Scale harness (smoke tier) ----
-echo "=== Phase 6: Scale harness (smoke tier) ==="
+# ---- E6: Scale harness (smoke tier) ----
+echo "=== E6: Scale harness (smoke tier) ==="
 if ./benchmarks/scale_harness.sh smoke 2>&1; then
     echo "✓ Scale harness passed"
 else
@@ -108,6 +139,31 @@ else
     FAIL=1
 fi
 echo
+
+fi  # end RUN_ENGINE
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FACADE TRACK
+# ══════════════════════════════════════════════════════════════════════════════
+
+if $RUN_FACADE; then
+
+echo "═══════════════════════════════════════════════════════════════"
+echo "  FACADE TRACK (container-based client tests)"
+echo "═══════════════════════════════════════════════════════════════"
+echo
+
+# ---- F1-F5: Unified facade test runner ----
+echo "=== F1-F5: Unified facade tests ==="
+if ./container/run-all-tests.sh --no-build --skip-ducklake 2>&1; then
+    echo "✓ Facade tests passed"
+else
+    echo "✗ Facade tests had failures (see output above)"
+    FAIL=1
+fi
+echo
+
+fi  # end RUN_FACADE
 
 # ---- Summary ----
 echo "╔══════════════════════════════════════════════════════════════╗"

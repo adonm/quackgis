@@ -1,0 +1,18 @@
+# Exclude everything not needed for the build to keep context small.
+.tmp/
+target/
+tests/
+benchmarks/
+*.md
+!Cargo.toml
+!Cargo.lock
+!LICENSE
+.git/
+.gitignore
+docker-compose.yml
+deploy/
+*.duckdb_extension
+node_modules/
+__pycache__/
+# Allow pre-built extension for dev builds
+!build/dev/sedonadb.duckdb_extension

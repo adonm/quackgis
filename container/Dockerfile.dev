@@ -1,0 +1,177 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# QuackGIS DEV Dockerfile.
+# Uses the osgeo GDAL image (Ubuntu 26.04 + GDAL 3.13) as both builder and
+# runtime base to ensure ABI compatibility.
+#
+# Usage:
+#   docker build -t quackgis:dev -f container/Dockerfile.dev .
+
+ARG GDAL_IMAGE=ghcr.io/osgeo/gdal:ubuntu-full-3.13.1-amd64
+
+# ════════════════════════════════════════════════════════════════════════════
+# Stage 1: Build sedonadb (GDAL 3.13 + Rust)
+# ════════════════════════════════════════════════════════════════════════════
+FROM ${GDAL_IMAGE} AS sedonadb-builder
+
+ARG RUST_VERSION=1.88.0
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        clang libclang-dev llvm pkg-config cmake \
+        build-essential curl ca-certificates libgeos-dev \
+        libsqlite3-dev sqlite3 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain ${RUST_VERSION} --profile minimal
+ENV PATH=/root/.cargo/bin:${PATH}
+ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/local/gdal-internal/lib/pkgconfig
+ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/gdal-internal/lib
+ENV CMAKE_PREFIX_PATH=/usr/local:/usr/local/gdal-internal
+
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY src/ src/
+COPY sql/ sql/
+
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    cargo build --release
+
+RUN ./target/release/sedonadb-package \
+    target/release/libsedonadb.so \
+    /tmp/sedonadb.duckdb_extension linux_amd64
+
+# ════════════════════════════════════════════════════════════════════════════
+# Stage 2: Build pg_ducklake from vendored source (Debian Bookworm base)
+# ════════════════════════════════════════════════════════════════════════════
+FROM postgres:18-bookworm AS pg-ducklake-builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && \
+    apt-get install -y curl ca-certificates gnupg lsb-release && \
+    curl https://www.postgresql.org/media/keys/ACCC4CF8.asc | \
+        gpg --dearmor -o /usr/share/keyrings/postgresql-keyring.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/postgresql-keyring.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main 18" \
+        > /etc/apt/sources.list.d/pgdg.list && \
+    apt-get update && apt-get install -y \
+    postgresql-server-dev-18 \
+    build-essential libreadline-dev zlib1g-dev flex bison libxml2-dev libxslt-dev \
+    libssl-dev libxml2-utils xsltproc pkg-config libc++-dev libc++abi-dev libglib2.0-dev \
+    libtinfo6 cmake libstdc++-12-dev liblz4-dev ccache ninja-build git libcurl4-openssl-dev \
+    curl zip unzip libgeos-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV VCPKG_FORCE_SYSTEM_BINARIES=1
+RUN git clone https://github.com/microsoft/vcpkg.git /vcpkg && \
+    git -C /vcpkg checkout 84bab45d415d22042bd0b9081aea57f362da3f35 && \
+    /vcpkg/bootstrap-vcpkg.sh -disableMetrics
+ENV VCPKG_TOOLCHAIN_PATH=/vcpkg/scripts/buildsystems/vcpkg.cmake
+RUN echo x64-linux > /vcpkg/triplet
+
+WORKDIR /build
+COPY vendor/pg_ducklake/Makefile vendor/pg_ducklake/Makefile.pgxs ./
+COPY vendor/pg_ducklake/libpgduckdb libpgduckdb
+COPY vendor/pg_ducklake/pg_ducklake pg_ducklake
+
+RUN git clone --depth 1 --branch v1.5.4 https://github.com/duckdb/duckdb.git duckdb && \
+    mkdir -p .git/modules/duckdb && touch .git/modules/duckdb/HEAD
+
+RUN git clone https://github.com/duckdb/ducklake.git pg_ducklake/third_party/ducklake && \
+    git -C pg_ducklake/third_party/ducklake checkout 93cc490d9b5554f6fd5322dbef23f41d4fa91bb8 && \
+    for patch in pg_ducklake/third_party/ducklake-*.patch; do \
+        git -C pg_ducklake/third_party/ducklake apply "$(readlink -f "$patch")"; \
+    done && \
+    mkdir -p .git/modules/pg_ducklake/third_party/ducklake && \
+    touch .git/modules/pg_ducklake/third_party/ducklake/HEAD && \
+    touch pg_ducklake/third_party/ducklake/.patched
+
+RUN --mount=type=cache,target=/ccache/ \
+    VCPKG_TARGET_TRIPLET=x64-linux make -j$(nproc) -C pg_ducklake duckdb
+
+RUN --mount=type=cache,target=/ccache/ \
+    VCPKG_TARGET_TRIPLET=x64-linux make -j$(nproc) -C pg_ducklake
+
+RUN mkdir /out && \
+    VCPKG_TARGET_TRIPLET=x64-linux DESTDIR=/out make -C pg_ducklake install
+
+# ════════════════════════════════════════════════════════════════════════════
+# Stage 2b: Build quackgis_type extension (same base as runtime for ABI match)
+# ════════════════════════════════════════════════════════════════════════════
+FROM ${GDAL_IMAGE} AS geometry-builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && \
+    apt-get install -y curl ca-certificates gnupg lsb-release build-essential && \
+    curl https://www.postgresql.org/media/keys/ACCC4CF8.asc | \
+        gpg --dearmor -o /usr/share/keyrings/postgresql-keyring.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/postgresql-keyring.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main 18" \
+        > /etc/apt/sources.list.d/pgdg.list && \
+    apt-get update && apt-get install -y --no-install-recommends \
+        postgresql-server-dev-18 libgeos-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pg_geometry/ /build/
+RUN cd /build && make && \
+    mkdir -p /geom_out/usr/lib/postgresql/18/lib /geom_out/usr/share/postgresql/18/extension && \
+    cp quackgis_type.so /geom_out/usr/lib/postgresql/18/lib/ && \
+    cp quackgis_type.control quackgis_type--1.0.sql /geom_out/usr/share/postgresql/18/extension/
+
+# ════════════════════════════════════════════════════════════════════════════
+# Stage 3: Runtime — osgeo GDAL base + PostgreSQL 18 + pg_ducklake + sedonadb
+# ════════════════════════════════════════════════════════════════════════════
+FROM ${GDAL_IMAGE} AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install PostgreSQL 18 from PGDG.
+RUN apt-get update && \
+    apt-get install -y curl ca-certificates gnupg lsb-release && \
+    curl https://www.postgresql.org/media/keys/ACCC4CF8.asc | \
+        gpg --dearmor -o /usr/share/keyrings/postgresql-keyring.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/postgresql-keyring.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main 18" \
+        > /etc/apt/sources.list.d/pgdg.list && \
+    apt-get update && apt-get install -y --no-install-recommends \
+        postgresql-18 postgresql-client-18 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy postgres docker-entrypoint from the official image.
+COPY --from=postgres:18-bookworm /usr/local/bin/docker-entrypoint.sh /usr/local/bin/
+
+# Copy pg_ducklake from builder.
+COPY --from=pg-ducklake-builder /out/ /
+
+# Copy quackgis_type from matching builder (ABI-safe).
+COPY --from=geometry-builder /geom_out/ /
+
+# Place sedonadb extension.
+RUN mkdir -p /opt/quackgis/duckdb-extensions/v1.5.4/linux_amd64
+COPY --from=sedonadb-builder /tmp/sedonadb.duckdb_extension \
+     /opt/quackgis/duckdb-extensions/v1.5.4/linux_amd64/sedonadb.duckdb_extension
+
+# Copy init scripts.
+COPY container/init.d/ /docker-entrypoint-initdb.d/
+
+# Entrypoint wrapper.
+COPY container/entrypoint.sh /opt/quackgis/entrypoint.sh
+RUN chmod +x /opt/quackgis/entrypoint.sh
+
+# Create postgres user if not exists.
+RUN id postgres 2>/dev/null || useradd -m -u 999 -s /bin/bash postgres
+
+ENV HOME=/var/lib/postgresql \
+    PGDATA=/var/lib/postgresql/18/docker \
+    PG_MAJOR=18 \
+    PATH=/usr/lib/postgresql/18/bin:$PATH \
+    QUACKGIS_DUCKLAKE_DIR=/var/lib/quackgis
+
+RUN mkdir -p /var/lib/postgresql/18/docker /var/lib/quackgis/data /var/run/postgresql && \
+    chown -R postgres:postgres /var/lib/postgresql /var/lib/quackgis /var/run/postgresql /opt/quackgis
+
+USER postgres
+
+ENTRYPOINT ["/opt/quackgis/entrypoint.sh"]
+CMD ["postgres"]

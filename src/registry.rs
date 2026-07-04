@@ -1807,5 +1807,19 @@ pub(crate) fn register_all(con: duckdb_connection) -> Result<(), ExtensionError>
         }
     }
 
+    // ── DuckDB operator aliases ─────────────────────────────────────────────
+    //
+    // pg_ducklake deparses PG operators (&&, <->, <#>) into DuckDB SQL using
+    // operator syntax. DuckDB's binder resolves operators by looking for
+    // functions with matching names. These registrations make DuckDB find
+    // our sedonadb functions when the operators are used on BLOB geometry.
+    //
+    // &&  → bbox overlap (same as st_bbox_intersects)
+    // <-> → KNN distance (same as st_distance)
+    // <#> → bbox distance (same as st_distance)
+    register_predicate!("&&", crate::spatial_keys::bbox_intersects);
+    register_binary_double!("<->", functions::distance);
+    register_binary_double!("<#>", functions::distance);
+
     Ok(())
 }

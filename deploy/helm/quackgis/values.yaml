@@ -1,0 +1,120 @@
+# QuackGIS Helm chart values
+#
+# Default values target a small development cluster. Override for production.
+
+image:
+  repository: quackgis
+  tag: "dev"
+  pullPolicy: IfNotPresent
+
+# ── QuackGIS configuration ──────────────────────────────────────────────────
+
+quackgis:
+  # Postgres bootstrap credentials (used by initdb on first start).
+  postgresUser: postgres
+  postgresPassword: "changeme"
+  postgresDb: quackgis
+
+  # DuckDB execution settings.
+  duckdbMemoryLimit: "4096"   # MB
+  duckdbThreads: -1           # -1 = auto (all cores)
+
+  # DuckLake storage.
+  ducklake:
+    # Catalog: 'file' (default, PVC-backed) or 'postgres' (catalog in PG).
+    mode: file
+    # When mode=file, catalog is stored at /var/lib/quackgis/catalog.ducklake
+    # and data at /var/lib/quackgis/data/. When mode=postgres, the catalog
+    # lives in the Postgres instance and data goes to dataPath or object store.
+    dataPath: ""              # empty = /var/lib/quackgis/data/
+    # For object-store data: set dataPath to s3://bucket/path/ and provide
+    # credentials via the secret below.
+    s3:
+      enabled: false
+      # Existing secret with keys: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+      # (or AWS_SESSION_TOKEN for temporary creds).
+      existingSecret: ""
+      region: ""
+
+  # Rewrite mode: strict, warn, or off.
+  rewriteMode: warn
+
+# ── Persistence ─────────────────────────────────────────────────────────────
+
+persistence:
+  # PostgreSQL data volume.
+  pgdata:
+    enabled: true
+    storageClass: ""          # empty = cluster default
+    size: 10Gi
+  # DuckLake catalog + data volume (file mode only).
+  ducklake:
+    enabled: true
+    storageClass: ""
+    size: 50Gi
+
+# ── Resource limits ─────────────────────────────────────────────────────────
+
+resources:
+  requests:
+    cpu: "500m"
+    memory: "1Gi"
+  limits:
+    cpu: "4000m"
+    memory: "8Gi"
+
+# ── Service ─────────────────────────────────────────────────────────────────
+
+service:
+  type: ClusterIP
+  port: 5432
+  annotations: {}
+
+# ── Probes ──────────────────────────────────────────────────────────────────
+
+probes:
+  liveness:
+    enabled: true
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+  readiness:
+    enabled: true
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    timeoutSeconds: 5
+
+# ── Security ────────────────────────────────────────────────────────────────
+
+securityContext:
+  runAsUser: 999            # postgres user in the image
+  runAsGroup: 999
+  fsGroup: 999
+  runAsNonRoot: true
+
+podSecurityContext:
+  fsGroup: 999
+  fsGroupChangePolicy: OnRootMismatch
+
+# ── Network policy ─────────────────────────────────────────────────────────
+
+networkPolicy:
+  enabled: true
+  # Restrict ingress to pods with these labels. Empty = allow all.
+  ingressFromLabels: {}
+  #  app.kubernetes.io/name: my-app
+
+# ── Replica count ───────────────────────────────────────────────────────────
+# QuackGIS uses a single replica with PVC persistence. For HA, use a
+# PostgreSQL operator with streaming replication (future milestone).
+replicaCount: 1
+
+# ── Node selector / tolerations / affinity ──────────────────────────────────
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# ── Image registry secrets ──────────────────────────────────────────────────
+
+imagePullSecrets: []

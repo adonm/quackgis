@@ -16,3 +16,4 @@ Cargo.lock.bak
 # boundary per the agent trust model — never commit this directory).
 /.tmp/
 tests/upstream/
+pg_geometry/*.so

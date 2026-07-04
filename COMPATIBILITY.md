@@ -280,8 +280,8 @@ No SQL-surface backlog items remain.
 ## PostGIS portability ledger
 
 Representative PostGIS SQL verified against the extension via
-`tests/postgis_port/`. See [docs/MIGRATION.md](./docs/MIGRATION.md) for the
-full migration cookbook.
+`tests/postgis_port/`. See [docs/OPERATIONS.md](./docs/OPERATIONS.md) for the
+  full migration cookbook.
 
 | Family | Cases | Status | Notes |
 |---|---|---|---|
@@ -294,5 +294,5 @@ full migration cookbook.
 | Line editing | 8 | ✅ port | LineSubstring, LineInterpolatePoint, LineLocatePoint, SetPoint, AddPoint, RemovePoint, Translate, Simplify. |
 | Operator rewrites | 6 | ✅ rewrite | `&&` → bbox columns, `<->` → ORDER BY distance, casts, SRID, geography distance. |
 
-Operational packaging work is tracked in ROADMAP M21; it is not a SQL
-compatibility gap.
+Operational packaging is now tracked in the facade/container roadmap; it is not
+a SQL compatibility gap.

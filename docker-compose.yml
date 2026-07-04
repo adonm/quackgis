@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# QuackGIS local development docker-compose.
+#
+# Usage:
+#   docker compose up -d          # start QuackGIS
+#   psql postgres://postgres:quackgis@localhost:55432/postgres
+#   docker compose down -v        # stop and remove volumes
+
+services:
+  quackgis:
+    build:
+      context: .
+      dockerfile: container/Dockerfile
+    image: quackgis:dev
+    ports:
+      - "${QUACKGIS_PORT:-55432}:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${QUACKGIS_PASSWORD:-quackgis}
+      POSTGRES_DB: ${QUACKGIS_DB:-postgres}
+      QUACKGIS_DUCKDB_MEMORY_LIMIT: ${QUACKGIS_DUCKDB_MEMORY_LIMIT:-4096}
+      QUACKGIS_DUCKDB_THREADS: ${QUACKGIS_DUCKDB_THREADS:--1}
+      QUACKGIS_REWRITE_MODE: ${QUACKGIS_REWRITE_MODE:-warn}
+    volumes:
+      - quackgis_data:/var/lib/postgresql/data
+      - quackgis_lake:/var/lib/quackgis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+volumes:
+  quackgis_data:
+  quackgis_lake:
