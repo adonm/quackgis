@@ -1,8 +1,8 @@
 # Contributing
 
 QuackGIS is a thin integration layer over three upstream DataFusion projects
-(datafusion-postgres, SedonaDB, datafusion-ducklake), consumed as **pinned
-forks**. Several capabilities the design needs don't exist upstream yet — see
+(datafusion-postgres, SedonaDB, datafusion-ducklake), consumed as **tracked fork
+branches**. Several capabilities the design needs don't exist upstream yet — see
 the gap ledger in [ROADMAP.md](./ROADMAP.md). Policy: **fork/vendor
 preferred** — when a needed capability is missing, build it in our fork and
 ship; upstream the patch opportunistically, never on the critical path. This
@@ -11,18 +11,23 @@ geometry_columns/spatial_ref_sys, client shims) and the glue.
 
 Fork rules:
 
-- Pin exact revisions (`[patch.crates-io]` or git rev); no floating branches.
+- Track upstream heads through named `quackgis/*` fork branches; no silent floating dependency changes outside commits.
 - Minimal diffs; every patch listed in the fork's `DIVERGENCE.md` with its
   upstream PR link if one exists.
 - Rebase forks onto upstream tags at milestone boundaries.
 
 ```sh
-cargo build --release          # server binary
-cargo test                     # unit + wire integration tests
-cargo test -p quackgis-server  # the server crate only
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
+mise install                   # pinned Rust/tool bootstrap
+just --list                    # discover common tasks
+just build                     # server binary
+just test                      # unit + wire integration tests
+just martin-sql                # Martin-generated SQL compatibility
+just check                     # fmt + clippy + tests
 ```
+
+The repo uses `mise.toml` for tool/env management and `Justfile` as the stable
+entrypoint for newcomers. Prefer adding reusable local workflows there instead
+of documenting one-off shell snippets.
 
 Compatibility work is trace-driven: capture the SQL a client (QGIS, GeoServer,
 OGR) actually sends, add it as a replay fixture, then fix. See

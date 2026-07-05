@@ -8,8 +8,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # sedonadb's default feature set builds against libgeos; CI needs the headers.
-  LD_LIBRARY_PATH: /usr/lib/x86_64-linux-gnu:/usr/local/lib
 
 jobs:
   test:
@@ -21,7 +19,7 @@ jobs:
       - name: Install system dependencies (libgeos for sedonadb-geos)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgeos-dev
+          # No native deps needed — pure Rust build (GEOS and libproj dropped)
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -67,7 +65,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgeos-dev
+          # No native deps needed — pure Rust build (GEOS and libproj dropped)
 
       - uses: dtolnay/rust-toolchain@stable
 

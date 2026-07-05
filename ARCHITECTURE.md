@@ -8,11 +8,11 @@ Three DataFusion-native components share one `SessionContext`:
 |---|---|---|
 | [datafusion-postgres](https://github.com/datafusion-contrib/datafusion-postgres) | datafusion-contrib | pgwire server, auth/RBAC, TLS, extended query protocol; `datafusion-pg-catalog` (pg_catalog + information_schema), `arrow-pg` (Arrow↔PG type/OID mapping) |
 | [Apache SedonaDB](https://github.com/apache/sedona-db) | Apache Sedona | Spatial execution: ST_* kernels (GeoRust/GEOS/PROJ), geometry/geography types, CRS propagation, spatial joins, GeoParquet |
-| [datafusion-ducklake](https://github.com/datafusion-contrib/datafusion-ducklake) | datafusion-contrib | DuckLake lakehouse: catalog metadata in SQL DB, data in Parquet on file/object storage |
+| [datafusion-ducklake](https://github.com/datafusion-contrib/datafusion-ducklake) | datafusion-contrib | Rust-native DuckLake lakehouse targeting the official DuckLake 1.0+ spec: catalog metadata in SQL DB, data in Parquet on file/object storage |
 
 QuackGIS itself is the thin integration layer: PostGIS SQL surface, client
 compatibility shims, and spatial table layout. Upstreams are consumed as
-**pinned forks** (`[patch.crates-io]` / git revs) so missing capabilities are
+**tracked fork branches** so missing capabilities are
 built immediately in-fork — see the gap ledger in
 [ROADMAP.md](./ROADMAP.md).
 
@@ -21,7 +21,7 @@ built immediately in-fork — see the gap ledger in
 ```text
 ┌──────────────────────────────────────────────────────────────┐
 │ PostgreSQL clients                                           │
-│ QGIS · GeoServer (JDBC) · psql · psycopg · GDAL/OGR · BI     │
+│ QGIS · GeoServer · Martin · psql · psycopg · GDAL/OGR · BI     │
 ├──────────────────────────────────────────────────────────────┤
 │ datafusion-postgres                                          │
 │ pgwire · simple+extended protocol · auth · TLS · portals     │
@@ -39,9 +39,10 @@ built immediately in-fork — see the gap ledger in
 │ DuckLake CatalogProvider · Parquet scan/write · snapshots    │
 ├──────────────────────────────────────────────────────────────┤
 │ Storage                                                      │
-│ catalog DB (SQLite / PostgreSQL†) · Parquet on file/S3       │
+│ Dev: SQLite catalog + local Parquet files                   │
+│ Prod target: PostgreSQL catalog + AWS S3 Parquet             │
 └──────────────────────────────────────────────────────────────┘
-† catalog-metadata-only; a few MB of SQL rows, not a data engine.
+PostgreSQL in this design is catalog metadata only; it is not the query engine or user table storage.
 ```
 
 One process, one binary. No PostgreSQL server, no DuckDB, no C extensions, no
@@ -58,9 +59,8 @@ extension ABI coupling.
 2. **Pinned upstreams, fork-preferred for gaps.** The best design needs
    capabilities that do not all exist upstream yet (DuckLake UPDATE/DELETE and
    pruning, SQL cursors, deep pg_catalog, SedonaDB wire encodings — see the
-   gap ledger in ROADMAP.md). All upstreams are Apache-2.0, so we pin exact
-   revisions and fork/vendor the moment a capability is missing, shipping from
-   the fork. Each fork logs its divergence (`DIVERGENCE.md`) and rebases at
+   gap ledger in ROADMAP.md). All upstreams are Apache-2.0, so we track upstream heads through fork branches and fork/vendor the moment a capability is missing, shipping from
+   the fork branch. Each fork logs its divergence (`DIVERGENCE.md`) and rebases at
    milestone boundaries; upstreaming happens opportunistically from the fork,
    never on the critical path.
 
@@ -68,25 +68,58 @@ extension ABI coupling.
    registers SedonaDB's function catalog and adds only PostGIS-compat aliases
    and signature adapters where names/arities differ.
 
-4. **DuckLake is the only table storage.** Tables live as Parquet + DuckLake
-   catalog metadata. Interoperable with DuckDB's `ducklake` extension and
-   anything else that reads the spec.
+4. **DuckLake is the only table storage and is priority validated.** Tables live as Parquet + DuckLake catalog metadata. Dev path is SQLite catalog + local files. Production target is PostgreSQL catalog + AWS S3. Extending datafusion-ducklake for QuackGIS requirements is in scope, but changes must remain forward-compatible with the official DuckLake 1.0+ spec and interoperable with reference DuckLake readers where possible.
 
-5. **Client-driven compatibility.** The definition of done is scripted QGIS and
-   GeoServer workflows passing against the server, not a function-count.
+5. **Client-driven compatibility.** The definition of done is scripted QGIS,
+   GeoServer, and Martin workflows passing against the server, not a
+   function-count.
 
-## Geometry over the wire
+## Geometry strategy: EWKB everywhere with a real type OID
 
-PostGIS clients exchange geometry as (hex-)EWKB with a server-assigned type
-OID. SedonaDB represents geometry as WKB-encoded Arrow arrays with CRS
-metadata. The compatibility layer:
+The goal is the highest performance/fidelity tradeoff SedonaDB can support today.
+EWKB is the current PostGIS wire standard; GeoArrow is the future but not yet
+PostgreSQL-wire-compatible. We use EWKB at every boundary:
 
-- registers a `geometry` (and `geography`) type OID in the emulated
-  `pg_type`, stable across sessions;
-- encodes result columns as hex-EWKB (text protocol) / EWKB (binary protocol)
-  via an `arrow-pg` extension point;
-- decodes bound parameters from WKB/EWKB/WKT into SedonaDB geometry;
-- carries SRID via EWKB flags backed by DuckLake column metadata.
+```text
+┌────────────┐     WKB Binary     ┌────────────┐    EWKB bytes    ┌────────────┐
+│  Parquet   │ ◄─────────────────►│  SedonaDB  │ ◄──────────────► │   pgwire   │
+│  (storage) │  column_type =     │ (WKB Arrow │  geometry OID    │ (clients)  │
+│            │  "GEOMETRY"        │  Binary)   │  text=hex-EWKB   │            │
+└────────────┘                    └────────────┘  binary=EWKB     └────────────┘
+```
+
+| Layer | Representation | Rationale |
+|---|---|---|
+| **Storage** | WKB in Parquet Binary columns; DuckLake `column_type = "GEOMETRY"` | Forward-compatible with DuckLake 1.0+ and GeoParquet; compact columnar; `geometry_columns` view can discover geometry columns from catalog metadata without scanning data |
+| **Execution** | WKB in Arrow Binary arrays (SedonaDB 0.4 default) | No change from QuackGIS; SedonaDB's GeoRust + GEOS kernels already operate on WKB natively |
+| **Wire (text)** | hex-EWKB string behind a real `geometry` type OID | What `psql` and text-protocol clients display; identical to PostGIS |
+| **Wire (binary)** | raw EWKB bytes behind the same OID | What QGIS/Martin/GeoServer binary cursors and prepared-statement binary params expect; 2× bandwidth saving vs hex-text |
+| **SRID** | Carried in EWKB header flags; sourced from DuckLake column metadata at read time | End-to-end CRS propagation without a separate `geometry_columns` lookup per-row |
+
+### DuckLake geometry column tagging
+
+DuckLake stores column types as strings in `ducklake_column.column_type`. The
+spec recognises `GEOMETRY` as a valid type; datafusion-ducklake maps it to
+Arrow `Binary` internally. QuackGIS marks geometry columns with
+`column_type = "GEOMETRY"` so that:
+
+- the `geometry_columns` view can be populated from catalog metadata alone (no
+  data scan needed to discover which columns hold spatial data);
+- DuckDB's reference `ducklake` extension interoperates (it also recognises
+  GEOMETRY columns);
+- the DuckLake 1.0+ spec is respected (GEOMETRY is a spec-defined type string).
+
+### Implementation path (G1 + G13)
+
+1. **G1 (arrow-pg fork):** register a `geometry` type OID in `pg_type` with
+   text encoding = hex-EWKB, binary encoding = raw EWKB. Encode SedonaDB
+   Binary/WKB result columns as EWKB (prepend SRID flag from column metadata).
+   Decode inbound parameters from EWKB/WKB/WKT.
+2. **G13 (Martin/PostGIS surface):** `PostGIS_Lib_Version()` constant UDF;
+   `geometry_columns` view from DuckLake catalog metadata;
+   `spatial_ref_sys` table from PROJ/EPSG; verify SedonaDB covers
+   `ST_AsMVT`, `ST_AsMVTGeom`, `ST_TileEnvelope`, `ST_Transform`,
+   `ST_Expand`, `ST_CurveToLine`, `&&` operator.
 
 This mirrors the approach datafusion-postgres already ships behind its
 `postgis` feature flag (backed by geodatafusion); QuackGIS swaps the function

@@ -25,14 +25,28 @@ path = "src/lib.rs"
 [dependencies]
 datafusion-postgres = { workspace = true }
 datafusion = { workspace = true }
+datafusion-expr-common = { workspace = true }
+datafusion-functions-aggregate-common = { workspace = true }
 sedona = { workspace = true }
+sedona-proj = { workspace = true }
+sedona-geometry = { workspace = true }
+datafusion-ducklake = { workspace = true }
+object_store = { workspace = true }
+url = { workspace = true }
 
 tokio = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
+async-trait = { workspace = true }
+futures = "0.3"
+proj-wkt = { workspace = true }
+proj-core = { workspace = true }
+regex = { workspace = true }
 
 [dev-dependencies]
 # Pure-Rust pg client for integration tests (no psql binary required in CI).
 tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
+# Each wire test runs against its own fresh DuckLake catalog in a tempdir.
+tempfile = { workspace = true }

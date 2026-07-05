@@ -1,29 +1,54 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Test harness: spin up `quackgis-server` on an ephemeral port for the duration
-//! of a single test. Uses the same context-construction path as the real
-//! binary so wire-test failures reflect real regressions.
+//! Test harness: spin up `quackgis-server` on an ephemeral port with a fresh
+//! DuckLake catalog in a per-test tempdir. Uses the same context-construction
+//! path as the real binary so wire-test failures reflect real regressions.
 
 use std::sync::Arc;
 
 use datafusion::prelude::SessionContext;
-use datafusion_postgres::{serve, ServerOptions};
+use datafusion_postgres::hooks::cursor::CursorStatementHook;
+use datafusion_postgres::hooks::set_show::SetShowHook;
+use datafusion_postgres::hooks::transactions::TransactionStatementHook;
+use datafusion_postgres::hooks::QueryHook;
+use datafusion_postgres::{serve_with_hooks, ServerOptions};
 
-use quackgis_server::context::build_session_context;
+use quackgis_server::context::{build_session_context_with_storage, StoragePaths};
+use quackgis_server::ducklake_sql::DuckLakeSqlHook;
 
 pub struct ServerHandle {
-    /// Host:port clients connect to.
+    /// Host clients connect to.
     host: String,
+    /// Port clients connect to.
     port: u16,
     /// Keeps the server task alive; dropped on `ServerHandle` drop.
     _serve: tokio::task::JoinHandle<()>,
     /// Holds the SessionContext alive for the lifetime of the server.
     _ctx: Arc<SessionContext>,
+    /// Owns the on-disk DuckLake catalog + data files for this test.
+    _tmp: tempfile::TempDir,
 }
 
 impl ServerHandle {
-    /// Start a server bound to `127.0.0.1:0` (OS-assigned ephemeral port) and
-    /// wait until it is accepting connections. Panics on failure — tests only.
+    /// Start a server with a fresh, empty DuckLake tempdir.
+    #[allow(dead_code)]
     pub async fn start() -> Self {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        Self::start_with_tempdir(tmp).await
+    }
+
+    /// Start a server against an existing tempdir. Tests can pre-populate the
+    /// DuckLake (writer API) before calling this to verify the server can read
+    /// a specific on-disk state. The handle owns the tempdir and deletes it on
+    /// drop.
+    pub async fn start_with_tempdir(tmp: tempfile::TempDir) -> Self {
+        let catalog_path = tmp.path().join("quackgis.db");
+        let data_path = tmp.path().join("data");
+        let paths = StoragePaths::new(catalog_path.to_str().unwrap(), data_path.to_str().unwrap())
+            .expect("storage paths");
+        Self::start_with_storage(tmp, paths).await
+    }
+
+    async fn start_with_storage(tmp: tempfile::TempDir, paths: StoragePaths) -> Self {
         // Bind a TCP listener ourselves first so we know the port before
         // handing it to datafusion-postgres (which would otherwise pick its
         // own and race the test).
@@ -33,16 +58,24 @@ impl ServerHandle {
         let addr = listener.local_addr().expect("local_addr");
         drop(listener); // free the port so datafusion-postgres can rebind
 
-        let ctx = build_session_context().await.expect("context builds");
+        let ctx = build_session_context_with_storage(paths.clone())
+            .await
+            .expect("context builds");
         let ctx_for_server = Arc::clone(&ctx);
 
         let opts = ServerOptions::new()
             .with_host("127.0.0.1".to_string())
             .with_port(addr.port());
 
+        let hooks: Vec<Arc<dyn QueryHook>> = vec![
+            Arc::new(DuckLakeSqlHook::new(paths)),
+            Arc::new(CursorStatementHook),
+            Arc::new(SetShowHook),
+            Arc::new(TransactionStatementHook),
+        ];
         let serve_task = tokio::spawn(async move {
             // Run forever; the task is aborted when ServerHandle drops.
-            let _ = serve(ctx_for_server, &opts).await;
+            let _ = serve_with_hooks(ctx_for_server, &opts, hooks).await;
         });
 
         let handle = Self {
@@ -50,6 +83,7 @@ impl ServerHandle {
             port: addr.port(),
             _serve: serve_task,
             _ctx: ctx,
+            _tmp: tmp,
         };
 
         // Wait for the server to actually be listening by polling a TCP
@@ -76,6 +110,23 @@ impl ServerHandle {
             "host={} port={} user=postgres dbname=quackgis",
             self.host, self.port
         )
+    }
+
+    /// Per-test tempdir path (for tests that want to inspect the on-disk
+    /// DuckLake catalog or Parquet files directly).
+    #[allow(dead_code)]
+    pub fn tmp_dir(&self) -> &std::path::Path {
+        self._tmp.path()
+    }
+
+    /// Storage paths backing this test server.
+    #[allow(dead_code)]
+    pub fn storage_paths(&self) -> StoragePaths {
+        StoragePaths::new(
+            self._tmp.path().join("quackgis.db").to_str().unwrap(),
+            self._tmp.path().join("data").to_str().unwrap(),
+        )
+        .expect("storage paths")
     }
 }
 

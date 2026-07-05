@@ -24,7 +24,7 @@ fork). Captured what works, what errors cleanly, and what crashes.
 | `SET client_min_messages='warning'` | OK |
 | `SET application_name='qgis'` then `SHOW application_name` | `qgis` — state tracked |
 | `SET enable_seqscan=off` | OK |
-| `CREATE TABLE x (id INT); INSERT...; SELECT count(*)...; DROP TABLE x;` | full DDL+DML roundtrip works in-memory — M1 contract pinned |
+| `CREATE TABLE x (id INT); INSERT...; SELECT count(*)...; DROP TABLE x;` | full DDL+DML roundtrip works in-memory — not DuckLake-backed |
 
 ## Errors cleanly ✅ (failure is a normal query error, not a crash)
 

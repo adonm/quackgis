@@ -7,7 +7,7 @@ use clap::Parser;
 #[derive(Debug, Clone, Parser)]
 #[command(
     name = "quackgis-server",
-    about = "PostGIS-compatible spatial database server (datafusion-postgres + SedonaDB)",
+    about = "PostGIS-compatible spatial database server (datafusion-postgres + SedonaDB + DuckLake)",
     long_about = None,
     version
 )]
@@ -19,6 +19,17 @@ pub struct Cli {
     /// Bind port. Default 5434 to coexist with a system PostgreSQL on 5432.
     #[arg(long, env = "QUACKGIS_PORT", default_value_t = 5434)]
     pub port: u16,
+
+    /// Path to the DuckLake SQLite catalog file. Created if missing.
+    /// M1: SQLite is the only spec-compliant write backend; PostgreSQL
+    /// catalogs are upstream-experimental and not yet wired in.
+    #[arg(long, env = "QUACKGIS_CATALOG_PATH", default_value = "quackgis.db")]
+    pub catalog_path: String,
+
+    /// Directory under which Parquet data files are stored. Created if
+    /// missing.
+    #[arg(long, env = "QUACKGIS_DATA_PATH", default_value = "./data")]
+    pub data_path: String,
 
     /// Optional TLS certificate path (PEM). If set, `--tls-key` is required.
     #[arg(long, env = "QUACKGIS_TLS_CERT")]

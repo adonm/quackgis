@@ -3,7 +3,7 @@
 Targets for the wire-adaptor architecture (see [ROADMAP.md](../ROADMAP.md) for
 milestone gates). Until a milestone lands, rows are **targets**, not claims.
 `G#` references point to the upstream gap ledger in ROADMAP.md — capabilities
-missing upstream that we build in pinned forks.
+missing upstream that we build in tracked fork branches.
 
 ## Client compatibility targets
 
@@ -13,9 +13,10 @@ missing upstream that we build in pinned forks.
 | psycopg (v3) | ✅ | M2 | text + binary geometry round-trip |
 | GDAL/OGR (`ogr2ogr`) | ✅ | M2 | PG driver load + read-back is the M2 gate |
 | QGIS (postgres provider) | ✅ read | M3 | introspection, binary cursors, extents |
-| QGIS (editing) | ✅ | M4 | needs DuckLake UPDATE/DELETE (upstream) |
+| QGIS (editing) | target | M4 | basic UPDATE/DELETE storage rewrite works; client workflow + RETURNING/keys still pending |
 | GeoServer (PostGIS datastore) | ✅ | M4 | JDBC extended protocol, WMS/WFS-T |
-| pg_featureserv / martin | stretch | M7 | trace-driven |
+| Martin (MapLibre tile server) | ✅ target | M2+ | auto-discover geometry tables; MVT tile serving via ST_AsMVT
+| pg_featureserv | stretch | M7 | trace-driven |
 | `pg_dump` / logical replication | ❌ | — | back up the DuckLake catalog + Parquet instead |
 
 ## Wire protocol surface (datafusion-postgres)
@@ -39,23 +40,22 @@ missing upstream that we build in pinned forks.
 - Function conformance tracked against a curated PostGIS regress subset
   (secondary metric).
 
-## Storage (datafusion-ducklake)
+## Storage (DuckLake 1.0+ via datafusion-ducklake)
 
 | Capability | Status upstream |
 |---|---|
-| Read catalogs: DuckDB, SQLite, PostgreSQL, MySQL | ✅ |
-| Write: SQLite catalog (spec-compliant), CTAS + INSERT | ✅ |
-| Write: PostgreSQL catalog | ⚠️ experimental, non-spec multi-catalog layout (spec layout in our fork when prioritized, G6) |
-| UPDATE / DELETE | ❌ upstream — built in our fork for M4 (G5) |
+| Dev path: SQLite catalog + local Parquet files | ✅ validated in M1 tests |
+| Production target: PostgreSQL catalog + AWS S3 Parquet | 🎯 priority target |
+| datafusion-ducklake main HEAD (DF54) | ✅ current integration target |
+| SQL writes into DuckLake from pgwire | ✅ CTAS, bare CREATE TABLE, INSERT SELECT, INSERT VALUES with column mapping, UPDATE, DELETE (single-table/full-table rewrite) |
+| PostgreSQL catalog writes | ⚠️ upstream path is experimental/non-spec; QuackGIS will extend/fork toward spec-compatible behavior (G6) |
+| UPDATE / DELETE | ✅ QuackGIS full-table rewrite semantics for single-table statements; native delete files still future optimization |
 | Snapshot time travel (SQL `AS OF`) | ❌ programmatic only (G8) |
-| Partition/file pruning | ❌ upstream — built in our fork for M5 (G7) |
+| Generic filter pushdown/pruning path | ✅ datafusion-ducklake declares inexact filter pushdown; predicate path covered by tests. Spatial layout pruning remains M5 |
 | DuckDB-inlined data reads | ❌ — avoid inlining when writing from DuckDB |
-| Object stores | local FS, S3/MinIO |
+| Object stores | local FS validated; S3/AWS production target |
 
-Interop: tables written by QuackGIS must stay readable by DuckDB's `ducklake`
-extension (CI check from M1). Use the SQLite catalog for spec-compliant
-single-node deployments; treat the PostgreSQL catalog as experimental until
-upstream adopts a spec layout.
+Interop target: QuackGIS storage changes should remain forward-compatible with official DuckLake 1.0+ and readable by reference DuckLake readers where practical. SQLite/local is the validated dev path. PostgreSQL/S3 is the production target; extending datafusion-ducklake for that target is explicitly in scope.
 
 ## Known limitations (architecture)
 

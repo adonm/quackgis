@@ -30,17 +30,35 @@ publish = false
 # Wire layer — adonm fork on the quackgis/fixes branch, currently carrying:
 #   - context.rs PgCatalogContextProvider-for-Arc<T> recursion fix (G2 pg_roles
 #     stack overflow, commit 2c43dc6). Upstream PR candidate.
+#   - hooks/cursor.rs DECLARE BINARY CURSOR keyword honoring (G3-BINARY,
+#     commit 98b3865). Upstream PR candidate.
 # Tracks upstream master; rebases at milestone boundaries.
 datafusion-postgres = { git = "https://github.com/adonm/datafusion-postgres", branch = "quackgis/fixes" }
 
-# DataFusion itself, same major as both upstreams (53). Pinned to a major to
-# avoid surprises; minor moves freely.
-datafusion = "53"
+# DataFusion itself, same major as the current stack (54):
+# datafusion-postgres fork + sedona fork + datafusion-ducklake main.
+datafusion = "54"
+datafusion-expr-common = "54"
+datafusion-functions-aggregate-common = "54"
 
 # Spatial engine — SedonaDB main is still on DataFusion 52 at time of writing.
-# Fork adonm/sedona-db@quackgis/df53 (commit f274c942) bumps to DF 53 to align
-# with datafusion-postgres master. Upstream PR candidate; see DIVERGENCE.md.
-sedona = { git = "https://github.com/adonm/sedona-db.git", branch = "quackgis/df53" }
+# Fork adonm/sedona-db@quackgis/df54 (commit 2f00283) bumps to DF 54 to align
+# with datafusion-ducklake main. Upstream PR candidate; see DIVERGENCE.md.
+sedona = { git = "https://github.com/adonm/sedona-db.git", branch = "quackgis/df54", default-features = false, features = ["aws", "azure", "gcp", "http", "geo", "tg", "spatial-join", "proj-rust"] }
+sedona-proj = { git = "https://github.com/adonm/sedona-db.git", branch = "quackgis/df54", package = "sedona-proj", default-features = false, features = ["proj-rust"] }
+sedona-geometry = { git = "https://github.com/adonm/sedona-db.git", branch = "quackgis/df54", package = "sedona-geometry" }
+
+# Storage — DuckLake 1.0+ target. datafusion-ducklake main HEAD is the
+# Rust-native path closest to the official DuckLake 1.0 spec; it currently
+# tracks DataFusion 54. Consumed from adonm fork main so we can patch quickly
+# for G5 (UPDATE/DELETE) and G7 (file pruning) when those milestones land.
+# SQLite catalog write path is spec-compliant; PG-catalog writes remain
+# upstream-experimental/non-spec and are deferred.
+datafusion-ducklake = { git = "https://github.com/adonm/datafusion-ducklake", branch = "main", default-features = false, features = ["metadata-sqlite", "write-sqlite"] }
+
+# Object-store plumbing — versions aligned with DF 54 / ducklake main.
+object_store = { version = "0.13", default-features = false }
+url = "2.5"
 
 # Generic runtime / utility crates.
 tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "signal"] }
@@ -48,6 +66,12 @@ env_logger = "0.11"
 log = "0.4"
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
+tempfile = "3"
+futures = "0.3"
+proj-wkt = "0.8"
+proj-core = "0.8"
+async-trait = "0.1"
+regex = "1"
 
 [profile.release]
 strip = true

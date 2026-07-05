@@ -14,12 +14,9 @@ quackgis-server
 └── DuckLake              (M1) Parquet + catalog
 ```
 
-## Status (M0)
+## Status (M1)
 
-Skeleton server: SedonaDB `SessionContext` served by datafusion-postgres.
-Spatial SQL works (`ST_AsText`, `ST_Area`, `ST_Intersects`, ...). No
-persistence yet — data lives only in the running process. See
-[ROADMAP.md](../../ROADMAP.md) for what's next.
+SedonaDB `SessionContext` is served by datafusion-postgres; DuckLake storage is wired and tested. Dev storage path is SQLite catalog + local Parquet files. Production target is PostgreSQL catalog + AWS S3. Current tests validate SQL CTAS, bare CREATE TABLE, INSERT SELECT, INSERT VALUES with column mapping, UPDATE, DELETE, writer API roundtrip, restart persistence, filter predicates, and WKB geometry persistence. Supported M1 SQL shape targets `quackgis.main.<table>`; advanced multi-table UPDATE/DELETE, RETURNING, and production PostgreSQL/S3 hardening are later milestones.
 
 ## Run
 
@@ -34,6 +31,8 @@ CLI flags (all optional, env-overridable per `clap`'s `env` feature):
 |---|---|---|---|
 | `--host` | `QUACKGIS_HOST` | `127.0.0.1` | bind addr |
 | `--port` | `QUACKGIS_PORT` | `5434` | bind port (5434 to coexist with system PG) |
+| `--catalog-path` | `QUACKGIS_CATALOG_PATH` | `quackgis.db` | SQLite DuckLake catalog path (dev) |
+| `--data-path` | `QUACKGIS_DATA_PATH` | `./data` | local Parquet data dir (dev) |
 | `--tls-cert` / `--tls-key` | — | none | optional TLS |
 | `--log` | `RUST_LOG` | `info` | log filter |
 

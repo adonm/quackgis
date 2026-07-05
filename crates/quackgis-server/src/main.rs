@@ -6,11 +6,15 @@ use std::sync::Arc;
 
 use clap::Parser;
 use datafusion::prelude::SessionContext;
-use datafusion_postgres::{serve, ServerOptions};
+use datafusion_postgres::hooks::cursor::CursorStatementHook;
+use datafusion_postgres::hooks::set_show::SetShowHook;
+use datafusion_postgres::hooks::transactions::TransactionStatementHook;
+use datafusion_postgres::hooks::QueryHook;
+use datafusion_postgres::{serve_with_hooks, ServerOptions};
 use tokio::signal;
 
 use quackgis_server::cli::Cli;
-use quackgis_server::context::build_session_context;
+use quackgis_server::ducklake_sql::DuckLakeSqlHook;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
@@ -20,7 +24,10 @@ async fn main() -> anyhow::Result<()> {
         .write_style(env_logger::WriteStyle::Auto)
         .init();
 
-    let ctx: Arc<SessionContext> = build_session_context().await?;
+    let storage_paths =
+        quackgis_server::context::StoragePaths::new(&cli.catalog_path, &cli.data_path)?;
+    let ctx: Arc<SessionContext> =
+        quackgis_server::context::build_session_context_with_storage(storage_paths.clone()).await?;
 
     let opts = ServerOptions::new()
         .with_host(cli.host.clone())
@@ -50,7 +57,13 @@ async fn main() -> anyhow::Result<()> {
     // signal so Ctrl-C produces a clean exit. The server has no built-in
     // cancellation today — when the signal wins we just exit the process,
     // which closes the listener and drops in-flight connections.
-    let server = tokio::spawn(async move { serve(ctx, &opts).await });
+    let hooks: Vec<Arc<dyn QueryHook>> = vec![
+        Arc::new(DuckLakeSqlHook::new(storage_paths)),
+        Arc::new(CursorStatementHook),
+        Arc::new(SetShowHook),
+        Arc::new(TransactionStatementHook),
+    ];
+    let server = tokio::spawn(async move { serve_with_hooks(ctx, &opts, hooks).await });
     let shutdown = tokio::spawn(async move {
         let _ = signal::ctrl_c().await;
         log::info!("ctrl-c received, exiting");

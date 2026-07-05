@@ -21,7 +21,7 @@ quackgis server (one Rust binary)
 ├── SedonaDB              ST_* kernels · CRS · spatial joins (DataFusion)
 └── datafusion-ducklake   DuckLake catalog + Parquet
         ▼
-catalog DB (SQLite/PG) + Parquet on file/S3
+catalog DB (dev: SQLite, prod: PostgreSQL target) + Parquet (dev: local files, prod: AWS S3 target)
 ```
 
 ## Status
@@ -35,16 +35,19 @@ Current milestone: **M0 — skeleton server** (SedonaDB context served over
 pgwire, psql smoke test). See [ROADMAP.md](./ROADMAP.md) for milestones and
 the risk register.
 
-## Target quick start (post-M1)
+## Quick start (dev storage path)
 
 ```sh
-docker run -e QUACKGIS_PASSWORD=quackgis -p 5432:5432 quackgis:dev
-psql postgres://postgres:quackgis@localhost:5432/quackgis
+mise install              # Rust, just, kind/kubectl/helm, cargo-nextest
+just setup                # also downloads Martin into .tmp/bin
+just server               # runs on 127.0.0.1:5434 with .tmp/dev storage
+psql -h 127.0.0.1 -p 5434 -U postgres
 ```
 
 ```sql
 SELECT ST_AsText(ST_GeomFromText('POINT(1 2)'));        -- POINT(1 2)
-CREATE TABLE parcels (id int, geom geometry);            -- DuckLake + Parquet
+CREATE TABLE quackgis.main.parcels AS SELECT 1::INT AS id; -- DuckLake + Parquet
+INSERT INTO quackgis.main.parcels SELECT 2::INT AS id;
 SELECT postgis_version();                                -- 3.4 QUACKGIS
 ```
 
@@ -63,19 +66,19 @@ SELECT postgis_version();                                -- 3.4 QUACKGIS
 ## Development
 
 ```sh
-cargo build --release          # server binary at target/release/quackgis-server
-cargo test                     # unit + wire integration tests
-cargo run --release -- --host 0.0.0.0 --port 5434
+just --list                    # common entrypoints
+just build                     # server binary
+just test                      # unit + wire integration tests
+just check                     # fmt + clippy + tests
+just martin-sql                # Martin-generated SQL compatibility gate
+just martin-e2e                # opt-in real Martin binary E2E
 ```
 
-M0 dev note: `sedonadb`'s default feature set builds against GEOS, so the
-host needs `libgeos` installed. On Linux: `apt install libgeos-dev`; on macOS
-`brew install geos`. CI installs it automatically.
+The current stack is intentionally zero-native-dependency for QuackGIS itself:
+no libgeos/libproj/libgdal. Client/test tools such as Martin, QGIS, GeoServer,
+and KinD are managed via `mise.toml` environment/tool pins plus Justfile
+recipes.
 
-Upstreams are pinned forks: several needed capabilities don't exist upstream
-yet (DuckLake UPDATE/DELETE + pruning, SQL cursors, deep pg_catalog — see the
-gap ledger in [ROADMAP.md](./ROADMAP.md)), so we build them in our forks and
-upstream opportunistically. This repo owns the PostGIS compatibility surface
-and the glue.
+Upstreams are consumed through fork branches when needed. DuckLake storage is a **priority validated path**, not a placeholder: dev = SQLite catalog + local Parquet files; production target = PostgreSQL catalog + AWS S3 Parquet. Extending datafusion-ducklake to meet QuackGIS storage requirements (SQL DDL routing, UPDATE/DELETE, pruning, PostgreSQL/S3 hardening) is explicitly in scope, while staying forward-compatible with the official DuckLake 1.0+ spec.
 
 Licensed under the [Apache License 2.0](./LICENSE).
