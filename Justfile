@@ -8,7 +8,7 @@ data := env_var_or_default("QUACKGIS_DATA_PATH", ".tmp/dev/data")
 martin_bin := env_var_or_default("MARTIN_BIN", ".tmp/bin/martin")
 martin_version := env_var_or_default("MARTIN_VERSION", "1.11.0")
 martin_port := env_var_or_default("MARTIN_PORT", "3000")
-qgis_image := env_var_or_default("QGIS_IMAGE", "docker.io/qgis/qgis:release-3_40")
+qgis_image := env_var_or_default("QGIS_IMAGE", "docker.io/qgis/qgis:ltr-questing")
 geoserver_image := env_var_or_default("GEOSERVER_IMAGE", "docker.io/kartoza/geoserver:2.26.2")
 kind_cluster := env_var_or_default("KIND_CLUSTER", "quackgis")
 

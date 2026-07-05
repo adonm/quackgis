@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use datafusion::arrow::array::{
     Array, ArrayRef, BinaryArray, BinaryViewArray, Int32Array, Int64Array, NullArray, StringArray,
@@ -30,7 +30,7 @@ use datafusion_postgres::pgwire::api::results::{Response, Tag};
 use datafusion_postgres::pgwire::error::{PgWireError, PgWireResult};
 use object_store::local::LocalFileSystem;
 
-use crate::context::{StoragePaths, DUCKLAKE_CATALOG};
+use crate::context::{DUCKLAKE_CATALOG, StoragePaths};
 
 #[derive(Debug, Clone)]
 pub struct DuckLakeSqlHook {
@@ -448,6 +448,8 @@ impl DuckLakeSqlHook {
         let ducklake = DuckLakeCatalog::with_writer(Arc::new(provider), writer)
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         session_context.register_catalog(DUCKLAKE_CATALOG, Arc::new(ducklake));
+        crate::public_schema::register_public_schema_alias(session_context)
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         Ok(())
     }
 }
@@ -602,7 +604,7 @@ fn sql_type_to_arrow_field(col: &ColumnDef) -> Result<Field> {
             return Err(anyhow!(
                 "unsupported CREATE TABLE column type for {}: {other}",
                 col.name
-            ))
+            ));
         }
     };
     Ok(Field::new(col.name.to_string(), dt, true))

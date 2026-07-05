@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use datafusion_postgres::{serve, ServerOptions};
+use datafusion_postgres::{ServerOptions, serve};
 use sedona::context::SedonaContext;
 
 const HOST: &str = "0.0.0.0";
@@ -41,9 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_host(HOST.to_string())
         .with_port(port);
 
-    eprintln!(
-        "quackgis wire spike: listening on {HOST}:{port}  (no auth, no TLS)"
-    );
+    eprintln!("quackgis wire spike: listening on {HOST}:{port}  (no auth, no TLS)");
     eprintln!(
         "try:  psql -h 127.0.0.1 -p {port} -U postgres -c \"SELECT ST_AsText(ST_GeomFromText('POINT(1 2)'))\""
     );

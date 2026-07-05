@@ -59,7 +59,7 @@ build the capability, ship from the fork.
 | G10 | Multi-statement transactions / rollback for edit sessions | M4 | Missing everywhere (DuckLake commits are per-snapshot). **BEGIN/COMMIT/ROLLBACK accepted as no-ops via v0.15 `TransactionStatementHook`** (M0 spike) | Own it in quackgis: buffer edit-session DML, commit as one DuckLake snapshot; document semantics |
 | G11 | DataFusion version alignment across SedonaDB ↔ datafusion-postgres ↔ datafusion-ducklake | M0/M1 | **Resolved for current stack** by fork-bumps: `adonm/sedona-db@quackgis/df54` and `adonm/datafusion-postgres@quackgis/fixes` align with `datafusion-ducklake` main (DF54 / Arrow58), the DuckLake 1.0+ target path. | Follow upstream heads through fork branches; rebaseline on each milestone. |
 | G12 | Runtime libgeos (sedona-geos default feature) | M0 | **Verified (M0 spike)**: binary needs `libgeos_c.so.1` on `LD_LIBRARY_PATH` | Deploy requirement: install libgeos in container image; document for dev |
-| G13 | Martin tile-server compatibility | M2 | **Done — real binary E2E green.** Martin v1.11.0 connects, discovers tables, and serves MVT tiles (`GET /points/0/0/0` → 200, 12-byte protobuf). All compatibility gaps closed: `PostGIS_Lib_Version()` ✅, `current_setting()` ✅, `geometry_columns` ✅ (dynamic catalog-scanning TableProvider), `spatial_ref_sys` ✅, `ST_AsMVT` ✅, `ST_AsMVTGeom` ✅, `ST_TileEnvelope` ✅ (3/4/5-arg overloads via Sedona WKB helpers), `ST_MakeEnvelope` ✅, `ST_Expand` ✅, `ST_CurveToLine` ✅, `&&` ✅, `::geometry` ✅, `ST_Transform` ✅ (pure-Rust). Fork carries: Martin table-discovery shortcut, function-discovery shortcut, JSONB `properties` encoding, named-`margin` → positional rewrite. | Closed. Feature-attribute MVT tags remain future work. |
+| G13 | Martin tile-server compatibility | M2 | **Done — real binary E2E green.** Martin v1.11.0 connects, discovers tables, and serves MVT tiles (`GET /points/0/0/0` → 200, 12-byte protobuf). All compatibility gaps closed: `PostGIS_Lib_Version()` ✅, `current_setting()` ✅, `geometry_columns` ✅ (dynamic catalog-scanning TableProvider), `spatial_ref_sys` ✅, `ST_AsMVT` ✅, `ST_AsMVTGeom` ✅, `ST_TileEnvelope` ✅ (3/4/5-arg overloads via Sedona WKB helpers), `ST_MakeEnvelope` ✅, `ST_Expand` ✅, `ST_CurveToLine` ✅, `&&` ✅, `::geometry` ✅, `ST_Transform` ✅ (pure-Rust). Fork carries: Martin table/function discovery shortcuts, JSONB `properties` encoding, named-`margin` → positional rewrite, PostGIS fixture DDL rewrites, and deterministic sanitizing for pathological PostgreSQL quoted identifiers. Opt-in upstream Martin table fixture coverage: **18/18** load unmodified. | Closed. Feature-attribute MVT tags remain future work. |
 
 Fork mechanics: forks are consumed as git branch dependencies (not vendored);
 in-tree `vendor/` subtree only if a fork needs deep, long-lived divergence
@@ -207,8 +207,20 @@ Validated against **DuckLake 1.0+ target path**: `datafusion-ducklake` main HEAD
 - Stack now targets DuckLake 1.0+ via `datafusion-ducklake` main HEAD (DF 54).
   Forks: `adonm/sedona-db@quackgis/df54`,
   `adonm/datafusion-postgres@quackgis/fixes`, `adonm/datafusion-ducklake@main`.
+- Workspace toolchain now targets Rust 1.89 / edition 2024 to match the active
+  fork stack and avoid downlevel edition constraints.
 - M1 storage gate validated: CTAS, bare CREATE TABLE, INSERT SELECT/VALUES,
   UPDATE, DELETE, writer API roundtrip through pgwire, restart persistence,
   filter predicates, and WKB geometry persistence all green.
-- Next action: M2 PostGIS surface (`geometry_columns`, `spatial_ref_sys`,
-  `postgis_version()`), plus production PostgreSQL/S3 hardening when ready.
+- M2/Martin compatibility gate is green, including real Martin binary E2E and
+  **18/18** unmodified upstream Martin table fixtures.
+- M3 QGIS read-path probe started with `qgis/qgis:ltr-questing` (QGIS 3.44.11):
+  the provider connects, `public.points` resolves to DuckLake
+  `quackgis.main.points`, `geometry_columns` exposes `public`, and catalog
+  shims cover QGIS startup metadata (`postgis_*`, privilege helpers,
+  `pg_class`/`pg_attribute` probes). Remaining blocker: QGIS still rejects the
+  layer because the `geom` field is advertised on the wire as `bytea`; this is
+  the first hard evidence that QGIS needs a real geometry type/OID or an
+  equivalent RowDescription override.
+- Next action: implement/route geometry OID semantics for WKB columns, then
+  rerun the headless PyQGIS add-layer/render probe.

@@ -19,7 +19,7 @@ use object_store::local::LocalFileSystem;
 use tokio_postgres::NoTls;
 
 use common::ServerHandle;
-use quackgis_server::context::{build_session_context_with_storage, StoragePaths};
+use quackgis_server::context::{StoragePaths, build_session_context_with_storage};
 
 fn point_wkb(x: f64, y: f64) -> Vec<u8> {
     // OGC WKB, little endian, Point type=1, x, y.

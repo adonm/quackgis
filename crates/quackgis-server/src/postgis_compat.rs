@@ -18,6 +18,8 @@ const POSTGIS_VERSION_FULL: &str = "POSTGIS=\"3.4.0\" QUACKGIS";
 
 pub fn register_postgis_compat(ctx: &SessionContext) -> DFResult<()> {
     register_postgis_version_udfs(ctx)?;
+    register_pg_recovery_udf(ctx)?;
+    register_privilege_udfs(ctx)?;
     register_current_setting_udf(ctx)?;
     register_regexp_matches_udf(ctx)?;
     register_jsonb_object_agg(ctx)?;
@@ -43,6 +45,14 @@ fn register_postgis_version_udfs(ctx: &SessionContext) -> DFResult<()> {
         "postgis_extensions_versions",
         POSTGIS_VERSION_FULL.to_string(),
     ));
+    ctx.register_udf(make_const_string_udf(
+        "postgis_geos_version",
+        "3.13.0-CAPI-1.19.0".to_string(),
+    ));
+    ctx.register_udf(make_const_string_udf(
+        "postgis_proj_version",
+        "9.6.0".to_string(),
+    ));
     Ok(())
 }
 
@@ -54,6 +64,37 @@ fn make_const_string_udf(name: &str, value: String) -> datafusion::logical_expr:
         Volatility::Immutable,
         Arc::new(move |_| Ok(datafusion::scalar::ScalarValue::Utf8(Some(value.clone())).into())),
     )
+}
+
+fn register_privilege_udfs(ctx: &SessionContext) -> DFResult<()> {
+    // QGIS checks column-level editability via PostgreSQL privilege helpers.
+    // QuackGIS has no RBAC yet, so the dev/read-write posture is allow-all.
+    ctx.register_udf(datafusion::logical_expr::create_udf(
+        "has_column_privilege",
+        vec![DataType::Utf8, DataType::Utf8, DataType::Utf8],
+        DataType::Boolean,
+        Volatility::Stable,
+        Arc::new(|_| Ok(datafusion::scalar::ScalarValue::Boolean(Some(true)).into())),
+    ));
+    ctx.register_udf(datafusion::logical_expr::create_udf(
+        "pg_has_role",
+        vec![DataType::Int32, DataType::Utf8],
+        DataType::Boolean,
+        Volatility::Stable,
+        Arc::new(|_| Ok(datafusion::scalar::ScalarValue::Boolean(Some(true)).into())),
+    ));
+    Ok(())
+}
+
+fn register_pg_recovery_udf(ctx: &SessionContext) -> DFResult<()> {
+    ctx.register_udf(datafusion::logical_expr::create_udf(
+        "pg_is_in_recovery",
+        vec![],
+        DataType::Boolean,
+        Volatility::Stable,
+        Arc::new(|_| Ok(datafusion::scalar::ScalarValue::Boolean(Some(false)).into())),
+    ));
+    Ok(())
 }
 
 fn register_current_setting_udf(ctx: &SessionContext) -> DFResult<()> {

@@ -9,6 +9,8 @@ pub mod context;
 pub mod ducklake_sql;
 pub mod geometry_columns;
 pub mod postgis_compat;
+pub mod public_schema;
+pub mod qgis_compat;
 
 pub mod mvt;
 pub mod spatial_udfs;

@@ -349,7 +349,7 @@ async fn geometry_columns_discovers_tables_with_geom_column() {
     let table: String = rows[0].get(1);
     let col: String = rows[0].get(2);
     let geom_type: String = rows[0].get(3);
-    assert_eq!(schema, "main");
+    assert_eq!(schema, "public");
     assert_eq!(table, "roads");
     assert_eq!(col, "geom");
     assert_eq!(geom_type, "GEOMETRY");

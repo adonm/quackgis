@@ -1,8 +1,8 @@
 [package]
 name = "m00-wire-spike"
 version = "0.0.1"
-edition = "2021"
-rust-version = "1.88"
+edition = "2024"
+rust-version = "1.89"
 publish = false
 license = "Apache-2.0"
 

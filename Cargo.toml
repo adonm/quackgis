@@ -14,8 +14,8 @@ members = ["crates/quackgis-server"]
 
 [workspace.package]
 version = "0.2.0"
-edition = "2021"
-rust-version = "1.88"
+edition = "2024"
+rust-version = "1.89"
 license = "Apache-2.0"
 authors = ["QuackGIS contributors"]
 repository = "https://github.com/adonm/quackgis"
@@ -47,6 +47,7 @@ datafusion-functions-aggregate-common = "54"
 sedona = { git = "https://github.com/adonm/sedona-db.git", branch = "quackgis/df54", default-features = false, features = ["aws", "azure", "gcp", "http", "geo", "tg", "spatial-join", "proj-rust"] }
 sedona-proj = { git = "https://github.com/adonm/sedona-db.git", branch = "quackgis/df54", package = "sedona-proj", default-features = false, features = ["proj-rust"] }
 sedona-geometry = { git = "https://github.com/adonm/sedona-db.git", branch = "quackgis/df54", package = "sedona-geometry" }
+geo-traits = "0.3"
 
 # Storage — DuckLake 1.0+ target. datafusion-ducklake main HEAD is the
 # Rust-native path closest to the official DuckLake 1.0 spec; it currently

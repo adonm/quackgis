@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context as _, Result};
+use anyhow::{Context as _, Result, anyhow};
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::prelude::{SessionConfig, SessionContext};
@@ -161,6 +161,12 @@ pub async fn build_session_context_with_storage(
     // registration.)
     let sctx = SedonaContext::new_from_context(ctx).map_err(|e| anyhow!(e.to_string()))?;
     let ctx = Arc::new(sctx.ctx);
+
+    // Expose DuckLake `quackgis.main` tables as PostgreSQL-style `public.*`
+    // before pg_catalog is installed so QGIS pg_class/pg_namespace probes see
+    // the alias schema.
+    crate::public_schema::register_public_schema_alias(&ctx)
+        .map_err(|e| anyhow!("register_public_schema_alias failed: {e}"))?;
 
     // 3. pg_catalog attached to the in-memory "datafusion" catalog. Default
     //    AuthManager has the single 'postgres' role; RBAC arrives at M6.

@@ -346,7 +346,7 @@ dependencies = [
 [[package]]
 name = "arrow-pg"
 version = "0.14.0"
-source = "git+https://github.com/adonm/datafusion-postgres?branch=quackgis%2Ffixes#25eab174ecbc67ababeaa02c540864101333de27"
+source = "git+https://github.com/adonm/datafusion-postgres?branch=quackgis%2Ffixes#93f827302b86014106cb1d9100de5fda93c7c81c"
 dependencies = [
  "arrow-schema",
  "bytes",
@@ -2090,7 +2090,7 @@ dependencies = [
 [[package]]
 name = "datafusion-pg-catalog"
 version = "0.17.0"
-source = "git+https://github.com/adonm/datafusion-postgres?branch=quackgis%2Ffixes#25eab174ecbc67ababeaa02c540864101333de27"
+source = "git+https://github.com/adonm/datafusion-postgres?branch=quackgis%2Ffixes#93f827302b86014106cb1d9100de5fda93c7c81c"
 dependencies = [
  "arrow-pg",
  "async-trait",
@@ -2210,7 +2210,7 @@ dependencies = [
 [[package]]
 name = "datafusion-postgres"
 version = "0.17.0"
-source = "git+https://github.com/adonm/datafusion-postgres?branch=quackgis%2Ffixes#25eab174ecbc67ababeaa02c540864101333de27"
+source = "git+https://github.com/adonm/datafusion-postgres?branch=quackgis%2Ffixes#93f827302b86014106cb1d9100de5fda93c7c81c"
 dependencies = [
  "arrow-pg",
  "async-trait",
@@ -2223,6 +2223,7 @@ dependencies = [
  "log",
  "pgwire",
  "postgres-types",
+ "regex",
  "rust_decimal",
  "rustls-pemfile",
  "rustls-pki-types",
@@ -4598,6 +4599,7 @@ dependencies = [
  "datafusion-postgres",
  "env_logger",
  "futures",
+ "geo-traits",
  "log",
  "object_store",
  "proj-core",

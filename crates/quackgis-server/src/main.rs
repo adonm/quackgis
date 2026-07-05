@@ -6,15 +6,16 @@ use std::sync::Arc;
 
 use clap::Parser;
 use datafusion::prelude::SessionContext;
+use datafusion_postgres::hooks::QueryHook;
 use datafusion_postgres::hooks::cursor::CursorStatementHook;
 use datafusion_postgres::hooks::set_show::SetShowHook;
 use datafusion_postgres::hooks::transactions::TransactionStatementHook;
-use datafusion_postgres::hooks::QueryHook;
-use datafusion_postgres::{serve_with_hooks, ServerOptions};
+use datafusion_postgres::{ServerOptions, serve_with_hooks};
 use tokio::signal;
 
 use quackgis_server::cli::Cli;
 use quackgis_server::ducklake_sql::DuckLakeSqlHook;
+use quackgis_server::qgis_compat::QgisCatalogHook;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
@@ -59,6 +60,7 @@ async fn main() -> anyhow::Result<()> {
     // which closes the listener and drops in-flight connections.
     let hooks: Vec<Arc<dyn QueryHook>> = vec![
         Arc::new(DuckLakeSqlHook::new(storage_paths)),
+        Arc::new(QgisCatalogHook),
         Arc::new(CursorStatementHook),
         Arc::new(SetShowHook),
         Arc::new(TransactionStatementHook),

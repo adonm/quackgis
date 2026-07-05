@@ -30,6 +30,7 @@ datafusion-functions-aggregate-common = { workspace = true }
 sedona = { workspace = true }
 sedona-proj = { workspace = true }
 sedona-geometry = { workspace = true }
+geo-traits = { workspace = true }
 datafusion-ducklake = { workspace = true }
 object_store = { workspace = true }
 url = { workspace = true }

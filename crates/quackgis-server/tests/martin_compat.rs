@@ -91,7 +91,7 @@ async fn geometry_columns_survives_insert_refresh() {
         .expect("geometry_columns query");
 
     assert_eq!(rows.len(), 1, "points.geom should be discoverable");
-    assert_eq!(rows[0].get::<_, String>(0), "main");
+    assert_eq!(rows[0].get::<_, String>(0), "public");
     assert_eq!(rows[0].get::<_, String>(1), "points");
     assert_eq!(rows[0].get::<_, String>(2), "geom");
     assert_eq!(rows[0].get::<_, i32>(3), 0);

@@ -32,7 +32,7 @@ Status: 🟢 in sync · 🟡 local patches, upstreamable · 🔴 blocked.
 - **Upstream:** `datafusion-contrib/datafusion-postgres` (`master`, currently
   DF 53 / Arrow 58).
 - **Consumed via:** root `Cargo.toml`, branch `quackgis/fixes`.
-- **Head:** `25eab17`.
+- **Head:** `8958716` (local commit; push pending).
 - **Purpose:** track QuackGIS stack (DF 54) and carry correctness + client-
   compatibility patches found by M2 probes (psql, tokio-postgres, Martin).
 - **Patches:**
@@ -57,6 +57,16 @@ Status: 🟢 in sync · 🟡 local patches, upstreamable · 🔴 blocked.
       (QuackGIS has no tile-generating SQL functions).
   14. `25eab17` — rewrite Martin's `ST_TileEnvelope(..., margin => 0.015625)`
       named argument to positional, matching QuackGIS' margin overload.
+  15. `93f8273` — rewrite PostGIS fixture DDL before parsing:
+      `CREATE EXTENSION ...` and PL/pgSQL `DO $$ ... $$` blocks become no-ops;
+      `serial`/`bigserial` become `int`/`bigint`; `GEOMETRY(...)` and
+      `GEOGRAPHY(...)` column types become `BYTEA` for DataFusion DDL;
+      `CREATE INDEX`, `CLUSTER`, and `COMMENT ON` become no-ops; and
+      `CREATE MATERIALIZED VIEW` is lowered to `CREATE VIEW`.
+  16. `8958716` — sanitize pathological PostgreSQL quoted identifiers into
+      deterministic safe quoted names before sqlparser sees fixture DDL. This
+      closes the upstream Martin `SpacesAndQuotes.sql` fixture without changing
+      the fixture input.
 - **Remaining fork target:** G3(b), extended-protocol `FETCH` RowDescription
   mismatch (`DataRow field count does not match`). Not blocking QGIS/libpq.
 - **Upstream plan:** split into small PRs after local soak: Arc recursion fix

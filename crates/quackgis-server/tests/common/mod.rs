@@ -6,14 +6,15 @@
 use std::sync::Arc;
 
 use datafusion::prelude::SessionContext;
+use datafusion_postgres::hooks::QueryHook;
 use datafusion_postgres::hooks::cursor::CursorStatementHook;
 use datafusion_postgres::hooks::set_show::SetShowHook;
 use datafusion_postgres::hooks::transactions::TransactionStatementHook;
-use datafusion_postgres::hooks::QueryHook;
-use datafusion_postgres::{serve_with_hooks, ServerOptions};
+use datafusion_postgres::{ServerOptions, serve_with_hooks};
 
-use quackgis_server::context::{build_session_context_with_storage, StoragePaths};
+use quackgis_server::context::{StoragePaths, build_session_context_with_storage};
 use quackgis_server::ducklake_sql::DuckLakeSqlHook;
+use quackgis_server::qgis_compat::QgisCatalogHook;
 
 pub struct ServerHandle {
     /// Host clients connect to.
@@ -69,6 +70,7 @@ impl ServerHandle {
 
         let hooks: Vec<Arc<dyn QueryHook>> = vec![
             Arc::new(DuckLakeSqlHook::new(paths)),
+            Arc::new(QgisCatalogHook),
             Arc::new(CursorStatementHook),
             Arc::new(SetShowHook),
             Arc::new(TransactionStatementHook),

@@ -537,7 +537,7 @@ pub fn encode_mvt_value(val: &str) -> Vec<u8> {
     if let Ok(i) = val.parse::<i64>() {
         let mut buf = Vec::new();
         encode_tag(4, 0, &mut buf); // int_value field 4, varint
-                                    // Use sint for negative numbers
+        // Use sint for negative numbers
         if i < 0 {
             encode_tag(6, 0, &mut buf);
             encode_varint(encode_zigzag64(i) as u64, &mut buf);

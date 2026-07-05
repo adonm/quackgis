@@ -16,8 +16,8 @@ use std::sync::Arc;
 use datafusion::arrow::array::{Int32Array, RecordBatch, StringArray};
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::catalog::Session;
-use datafusion::datasource::memory::MemTable;
 use datafusion::datasource::TableProvider;
+use datafusion::datasource::memory::MemTable;
 use datafusion::error::Result as DFResult;
 use datafusion::execution::session_state::SessionState;
 use datafusion::physical_plan::ExecutionPlan;
@@ -35,8 +35,9 @@ const GEOMETRY_COLUMN_NAMES: &[&str] = &[
 ];
 
 /// Catalogs scanned by the provider. The DuckLake catalog `quackgis` is the
-/// primary store; `datafusion` (in-memory) is included for ad-hoc test tables.
-const SCANNED_CATALOGS: &[&str] = &["quackgis", "datafusion"];
+/// authoritative spatial store. Its internal `main` schema is exposed as
+/// PostgreSQL-compatible `public` metadata for clients.
+const SCANNED_CATALOGS: &[&str] = &["quackgis"];
 
 #[derive(Debug)]
 pub struct GeometryColumnsProvider {
@@ -94,7 +95,13 @@ impl GeometryColumnsProvider {
                             continue;
                         }
                         catalogs_arr.push(Some(catalog_name.to_string()));
-                        schemas_arr.push(Some(schema_name.clone()));
+                        let exposed_schema = if catalog_name == "quackgis" && schema_name == "main"
+                        {
+                            "public"
+                        } else {
+                            schema_name.as_str()
+                        };
+                        schemas_arr.push(Some(exposed_schema.to_string()));
                         tables_arr.push(Some(table_name.clone()));
                         cols_arr.push(Some(col_name.clone()));
                         dims_arr.push(Some(2));
