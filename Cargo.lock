@@ -346,7 +346,7 @@ dependencies = [
 [[package]]
 name = "arrow-pg"
 version = "0.14.0"
-source = "git+https://github.com/adonm/datafusion-postgres?branch=quackgis%2Ffixes#93f827302b86014106cb1d9100de5fda93c7c81c"
+source = "git+https://github.com/adonm/datafusion-postgres?branch=quackgis%2Ffixes#2c2e5d9bee77287147f3bc94e4d718d481bb9763"
 dependencies = [
  "arrow-schema",
  "bytes",
@@ -1068,12 +1068,6 @@ dependencies = [
  "quote",
  "syn 1.0.109",
 ]
-
-[[package]]
-name = "bytemuck"
-version = "1.25.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8efb64bd706a16a1bdde310ae86b351e4d21550d98d056f22f8a7f7a2183fec"
 
 [[package]]
 name = "byteorder"
@@ -2090,7 +2084,7 @@ dependencies = [
 [[package]]
 name = "datafusion-pg-catalog"
 version = "0.17.0"
-source = "git+https://github.com/adonm/datafusion-postgres?branch=quackgis%2Ffixes#93f827302b86014106cb1d9100de5fda93c7c81c"
+source = "git+https://github.com/adonm/datafusion-postgres?branch=quackgis%2Ffixes#2c2e5d9bee77287147f3bc94e4d718d481bb9763"
 dependencies = [
  "arrow-pg",
  "async-trait",
@@ -2210,7 +2204,7 @@ dependencies = [
 [[package]]
 name = "datafusion-postgres"
 version = "0.17.0"
-source = "git+https://github.com/adonm/datafusion-postgres?branch=quackgis%2Ffixes#93f827302b86014106cb1d9100de5fda93c7c81c"
+source = "git+https://github.com/adonm/datafusion-postgres?branch=quackgis%2Ffixes#2c2e5d9bee77287147f3bc94e4d718d481bb9763"
 dependencies = [
  "arrow-pg",
  "async-trait",
@@ -2806,21 +2800,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "geo-index"
-version = "0.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f310ad245e63f6b5fcf4a7c2663139708eae1374045396eef95ea3badd242d57"
-dependencies = [
- "bytemuck",
- "float_next_after 1.0.0",
- "geo",
- "geo-traits",
- "num-traits",
- "thiserror 1.0.69",
- "tinyvec",
-]
-
-[[package]]
 name = "geo-traits"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2867,29 +2846,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tinyvec",
-]
-
-[[package]]
-name = "geos"
-version = "11.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d13c464e56cc46077aa9bafef9a02e65610ddafb6347a26a306855e7a7d3133"
-dependencies = [
- "geo-types",
- "geos-sys",
- "libc",
- "wkt 0.10.3",
-]
-
-[[package]]
-name = "geos-sys"
-version = "2.0.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48fc11f837935501a7beb10afd8ecec14e5180274acf87e5a36bf0f770485884"
-dependencies = [
- "libc",
- "pkg-config",
- "semver",
 ]
 
 [[package]]
@@ -4549,7 +4505,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.11.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.118",
@@ -5340,7 +5296,6 @@ dependencies = [
  "sedona-raster-functions",
  "sedona-raster-gdal",
  "sedona-schema",
- "sedona-spatial-join",
  "sedona-testing",
  "sedona-tg",
  "serde",
@@ -5421,7 +5376,7 @@ dependencies = [
  "sedona-schema",
  "serde_json",
  "wkb",
- "wkt 0.14.0",
+ "wkt",
 ]
 
 [[package]]
@@ -5529,27 +5484,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
- "wkb",
-]
-
-[[package]]
-name = "sedona-geos"
-version = "0.4.0"
-source = "git+https://github.com/adonm/sedona-db.git?branch=quackgis%2Fdf54#bdae2c74e90c8d6e734b470ebc092fc885c496ca"
-dependencies = [
- "arrow-array",
- "arrow-schema",
- "bytemuck",
- "byteorder",
- "datafusion-common",
- "datafusion-expr",
- "geo-traits",
- "geos",
- "sedona-common",
- "sedona-expr",
- "sedona-functions",
- "sedona-geometry",
- "sedona-schema",
  "wkb",
 ]
 
@@ -5667,49 +5601,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sedona-spatial-join"
-version = "0.4.0"
-source = "git+https://github.com/adonm/sedona-db.git?branch=quackgis%2Fdf54#bdae2c74e90c8d6e734b470ebc092fc885c496ca"
-dependencies = [
- "arrow",
- "arrow-array",
- "arrow-schema",
- "async-trait",
- "datafusion",
- "datafusion-common",
- "datafusion-common-runtime",
- "datafusion-execution",
- "datafusion-expr",
- "datafusion-physical-expr",
- "datafusion-physical-plan",
- "fastrand",
- "float_next_after 2.0.0",
- "futures",
- "geo",
- "geo-index",
- "geo-traits",
- "geo-types",
- "geos",
- "log",
- "once_cell",
- "parking_lot",
- "pin-project-lite",
- "sedona-common",
- "sedona-expr",
- "sedona-functions",
- "sedona-geo",
- "sedona-geo-generic-alg",
- "sedona-geo-traits-ext",
- "sedona-geometry",
- "sedona-geos",
- "sedona-query-planner",
- "sedona-schema",
- "sedona-tg",
- "tokio",
- "wkb",
-]
-
-[[package]]
 name = "sedona-testing"
 version = "0.4.0"
 source = "git+https://github.com/adonm/sedona-db.git?branch=quackgis%2Fdf54#bdae2c74e90c8d6e734b470ebc092fc885c496ca"
@@ -5731,7 +5622,7 @@ dependencies = [
  "sedona-raster",
  "sedona-schema",
  "wkb",
- "wkt 0.14.0",
+ "wkt",
 ]
 
 [[package]]
@@ -6996,7 +6887,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7287,18 +7178,6 @@ dependencies = [
  "byteorder",
  "geo-traits",
  "num_enum",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "wkt"
-version = "0.10.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3c2252781f8927974e8ba6a67c965a759a2b88ea2b1825f6862426bbb1c8f41"
-dependencies = [
- "geo-types",
- "log",
- "num-traits",
  "thiserror 1.0.69",
 ]
 

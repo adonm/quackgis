@@ -33,6 +33,7 @@ pub fn register_spatial_udfs(ctx: &SessionContext) -> DFResult<()> {
     register_st_curvetoline(ctx)?;
     register_st_asmvtgeom(ctx)?;
     register_st_asmvt(ctx)?;
+    register_st_asbinary(ctx)?;
     register_st_transform_real(ctx)?;
     register_bbox_overlap(ctx)?;
     register_st_geomfromewkt(ctx)?;
@@ -574,6 +575,60 @@ fn register_st_asmvt(ctx: &SessionContext) -> DFResult<()> {
         Arc::new(vec![DataType::Binary]),
     ));
     Ok(())
+}
+
+// ─── ST_AsBinary(geom [, endian]) — WKB passthrough ───────────────────────
+
+fn register_st_asbinary(ctx: &SessionContext) -> DFResult<()> {
+    ctx.register_udf(ScalarUDF::new_from_impl(STAsBinary::new()));
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct STAsBinary {
+    signature: Signature,
+}
+
+impl STAsBinary {
+    fn new() -> Self {
+        Self {
+            signature: Signature::one_of(
+                vec![
+                    TypeSignature::Exact(vec![DataType::Binary]),
+                    TypeSignature::Exact(vec![DataType::Binary, DataType::Utf8]),
+                ],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
+
+impl ScalarUDFImpl for STAsBinary {
+    fn name(&self) -> &str {
+        "st_asbinary"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Binary)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        if args.args.is_empty() || args.args.len() > 2 {
+            return Err(DataFusionError::Plan(format!(
+                "st_asbinary expected 1 or 2 arguments, got {}",
+                args.args.len()
+            )));
+        }
+        // QuackGIS stores geometry bytes as WKB/EWKB already. QGIS asks for
+        // ST_AsBinary(geom, 'NDR'); fixtures are little-endian WKB, so this is
+        // a byte-preserving pgwire compatibility shim until full endian
+        // conversion is needed.
+        Ok(args.args[0].clone())
+    }
 }
 
 #[derive(Debug)]

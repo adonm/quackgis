@@ -9,6 +9,7 @@ mod common;
 
 use common::ServerHandle;
 use tokio_postgres::NoTls;
+use tokio_postgres::SimpleQueryMessage;
 
 fn read_u32(buf: &[u8], off: usize) -> u32 {
     u32::from_le_bytes(buf[off..off + 4].try_into().unwrap())
@@ -157,8 +158,8 @@ async fn st_tileenvelope_supports_postgis_bounds_and_margin() {
 async fn martin_mvt_geom_inner_query_executes() {
     let (_server, client) = connect_with_table().await;
 
-    let rows = client
-        .query(
+    let messages = client
+        .simple_query(
             "SELECT ST_AsMVTGeom(\
                 ST_Transform(ST_CurveToLine(geom::geometry), 3857),\
                 ST_TileEnvelope(0, 0, 0),\
@@ -166,13 +167,19 @@ async fn martin_mvt_geom_inner_query_executes() {
              ) AS geom \
              FROM quackgis.main.points \
              WHERE geom && ST_TileEnvelope(0, 0, 0)",
-            &[],
         )
         .await
         .expect("Martin inner MVT geometry query");
 
+    let rows: Vec<_> = messages
+        .iter()
+        .filter_map(|msg| match msg {
+            SimpleQueryMessage::Row(row) => Some(row),
+            _ => None,
+        })
+        .collect();
     assert_eq!(rows.len(), 1);
-    let geom: Vec<u8> = rows[0].get(0);
+    let geom = rows[0].get(0).expect("geometry text value");
     assert!(!geom.is_empty());
 }
 

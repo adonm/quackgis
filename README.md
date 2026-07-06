@@ -40,6 +40,7 @@ the risk register.
 ```sh
 mise install              # Rust, just, kind/kubectl/helm, cargo-nextest
 just setup                # also downloads Martin into .tmp/bin
+just ref-init             # optional: clone all reference repos into .tmp/ref
 just server               # runs on 127.0.0.1:5434 with .tmp/dev storage
 psql -h 127.0.0.1 -p 5434 -U postgres
 ```
@@ -58,8 +59,8 @@ SELECT postgis_version();                                -- 3.4 QUACKGIS
 - [ROADMAP.md](./ROADMAP.md) — milestones M0–M7, success metrics, risks.
 - [docs/COMPATIBILITY.md](./docs/COMPATIBILITY.md) — client compatibility
   targets and known limitations.
-- [docs/OPERATIONS.md](./docs/OPERATIONS.md) — deploy/backup recipes
-  (v0.1-era; refreshed at M6).
+- [docs/OPERATIONS.md](./docs/OPERATIONS.md) — current local + Kind client-probe
+  workflow for the single Rust pgwire binary.
 - [CHANGELOG.md](./CHANGELOG.md) — history, including the retired v0.1 facade.
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — contribution guide.
 
@@ -72,6 +73,13 @@ just test                      # unit + wire integration tests
 just check                     # fmt + clippy + tests
 just martin-sql                # Martin-generated SQL compatibility gate
 just martin-e2e                # opt-in real Martin binary E2E
+just kind-refresh              # host-cached build/load/deploy into Kind
+just kind-qgis-probe           # headless PyQGIS add-layer/read-feature gate
+
+Reference/source trees for client-trace work live outside the build graph under
+ignored `.tmp/ref/*` (submodule-init equivalent): `just ref-init` materializes
+the QuackGIS forks plus Martin, QGIS, GeoServer, GDAL/OGR (`ogr2ogr`), PostGIS,
+DuckDB/DuckLake/pg_ducklake, and SQLite.
 ```
 
 The current stack is intentionally zero-native-dependency for QuackGIS itself:

@@ -7,7 +7,7 @@ Three DataFusion-native components share one `SessionContext`:
 | Component | Upstream | Role |
 |---|---|---|
 | [datafusion-postgres](https://github.com/datafusion-contrib/datafusion-postgres) | datafusion-contrib | pgwire server, auth/RBAC, TLS, extended query protocol; `datafusion-pg-catalog` (pg_catalog + information_schema), `arrow-pg` (Arrow↔PG type/OID mapping) |
-| [Apache SedonaDB](https://github.com/apache/sedona-db) | Apache Sedona | Spatial execution: ST_* kernels (GeoRust/GEOS/PROJ), geometry/geography types, CRS propagation, spatial joins, GeoParquet |
+| [Apache SedonaDB](https://github.com/apache/sedona-db) | Apache Sedona | Spatial execution: ST_* kernels via Rust-native features in the QuackGIS build (`geo`, `tg`, `proj-rust`), geometry/geography types, CRS propagation, spatial joins, GeoParquet |
 | [datafusion-ducklake](https://github.com/datafusion-contrib/datafusion-ducklake) | datafusion-contrib | Rust-native DuckLake lakehouse targeting the official DuckLake 1.0+ spec: catalog metadata in SQL DB, data in Parquet on file/object storage |
 
 QuackGIS itself is the thin integration layer: PostGIS SQL surface, client
@@ -21,7 +21,7 @@ built immediately in-fork — see the gap ledger in
 ```text
 ┌──────────────────────────────────────────────────────────────┐
 │ PostgreSQL clients                                           │
-│ QGIS · GeoServer · Martin · psql · psycopg · GDAL/OGR · BI     │
+│ QGIS · GeoServer · Martin · GDAL/OGR/ogr2ogr · psql · psycopg  │
 ├──────────────────────────────────────────────────────────────┤
 │ datafusion-postgres                                          │
 │ pgwire · simple+extended protocol · auth · TLS · portals     │
@@ -46,14 +46,15 @@ PostgreSQL in this design is catalog metadata only; it is not the query engine o
 ```
 
 One process, one binary. No PostgreSQL server, no DuckDB, no C extensions, no
-extension ABI coupling.
+extension ABI coupling, and no native GEOS/PROJ/GDAL runtime dependency for the
+QuackGIS binary.
 
 ## Design principles
 
 1. **Wire compatibility, not Postgres.** Running full PostgreSQL to get pgwire
    was the v0.1 approach; it cost a PG server, a vendored pg_ducklake fork, a C
    extension for the geometry type, and a DuckDB-extension ABI treadmill. The
-   target clients (QGIS, GeoServer, OGR, psycopg) need protocol + catalog +
+   target clients (QGIS, GeoServer, Martin, GDAL/OGR/`ogr2ogr`, psycopg) need protocol + catalog +
    PostGIS SQL surface — all servable from Rust.
 
 2. **Pinned upstreams, fork-preferred for gaps.** The best design needs
@@ -71,7 +72,7 @@ extension ABI coupling.
 4. **DuckLake is the only table storage and is priority validated.** Tables live as Parquet + DuckLake catalog metadata. Dev path is SQLite catalog + local files. Production target is PostgreSQL catalog + AWS S3. Extending datafusion-ducklake for QuackGIS requirements is in scope, but changes must remain forward-compatible with the official DuckLake 1.0+ spec and interoperable with reference DuckLake readers where possible.
 
 5. **Client-driven compatibility.** The definition of done is scripted QGIS,
-   GeoServer, and Martin workflows passing against the server, not a
+   GeoServer, Martin, and OGR/`ogr2ogr` workflows passing against the server, not a
    function-count.
 
 ## Geometry strategy: EWKB everywhere with a real type OID
@@ -91,7 +92,7 @@ PostgreSQL-wire-compatible. We use EWKB at every boundary:
 | Layer | Representation | Rationale |
 |---|---|---|
 | **Storage** | WKB in Parquet Binary columns; DuckLake `column_type = "GEOMETRY"` | Forward-compatible with DuckLake 1.0+ and GeoParquet; compact columnar; `geometry_columns` view can discover geometry columns from catalog metadata without scanning data |
-| **Execution** | WKB in Arrow Binary arrays (SedonaDB 0.4 default) | No change from QuackGIS; SedonaDB's GeoRust + GEOS kernels already operate on WKB natively |
+| **Execution** | WKB in Arrow Binary arrays (SedonaDB 0.4 default) | No change from QuackGIS; SedonaDB's Rust-native kernels operate on WKB natively in the selected feature set |
 | **Wire (text)** | hex-EWKB string behind a real `geometry` type OID | What `psql` and text-protocol clients display; identical to PostGIS |
 | **Wire (binary)** | raw EWKB bytes behind the same OID | What QGIS/Martin/GeoServer binary cursors and prepared-statement binary params expect; 2× bandwidth saving vs hex-text |
 | **SRID** | Carried in EWKB header flags; sourced from DuckLake column metadata at read time | End-to-end CRS propagation without a separate `geometry_columns` lookup per-row |

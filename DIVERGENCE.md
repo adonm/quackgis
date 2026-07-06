@@ -32,7 +32,7 @@ Status: 🟢 in sync · 🟡 local patches, upstreamable · 🔴 blocked.
 - **Upstream:** `datafusion-contrib/datafusion-postgres` (`master`, currently
   DF 53 / Arrow 58).
 - **Consumed via:** root `Cargo.toml`, branch `quackgis/fixes`.
-- **Head:** `8958716` (local commit; push pending).
+- **Head:** `2c2e5d9` (pushed to `adonm/datafusion-postgres@quackgis/fixes`).
 - **Purpose:** track QuackGIS stack (DF 54) and carry correctness + client-
   compatibility patches found by M2 probes (psql, tokio-postgres, Martin).
 - **Patches:**
@@ -67,6 +67,25 @@ Status: 🟢 in sync · 🟡 local patches, upstreamable · 🔴 blocked.
       deterministic safe quoted names before sqlparser sees fixture DDL. This
       closes the upstream Martin `SpacesAndQuotes.sql` fixture without changing
       the fixture input.
+  17. `2c35282` — advertise PostGIS-compatible `geometry`/`geography` type OIDs
+      for binary WKB columns whose name matches the spatial naming convention
+      (`geom`, `geometry`, `the_geom`, `wkb_geometry`, `wkb_geom`, `shape`,
+      `way` / `geog`, `geography`, `the_geog`), in both RowDescription
+      (`arrow-pg::datatypes::field_into_pg_type`) and `pg_attribute.atttypid`
+      (`datafusion_field_to_pg_type`). Wire encoding is unchanged (raw WKB /
+      hex-EWKB), so existing bytea clients are unaffected; QGIS/GeoServer now
+      see a distinct spatial type OID instead of `bytea`. Sentinel OIDs
+      `GEOMETRY_OID=90001` / `GEOGRAPHY_OID=90002` are used because the PostGIS
+      type OIDs are dynamic per-install.
+  18. `bc75e99` — handle DataFusion 54's casted oid-string literal shape in
+      the oid coercion analyzer rule (`CAST('public' AS Int32)` /
+      `TRY_CAST(...)`) and update tests to the DF54 `Cast`/`TryCast` API.
+  19. `2c2e5d9` — make custom spatial type OIDs resolvable by clients such as
+      tokio-postgres: oid-like catalog fields now advertise PostgreSQL `oid`,
+      internal type-info queries bind `$1` as `oid`, `oid` parameters deserialize
+      back to DataFusion integer values, and geometry/geography WKB payloads are
+      encoded through bytea-compatible serializers while retaining the advertised
+      geometry/geography OIDs.
 - **Remaining fork target:** G3(b), extended-protocol `FETCH` RowDescription
   mismatch (`DataRow field count does not match`). Not blocking QGIS/libpq.
 - **Upstream plan:** split into small PRs after local soak: Arc recursion fix

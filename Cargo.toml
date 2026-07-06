@@ -11,11 +11,12 @@
 [workspace]
 resolver = "2"
 members = ["crates/quackgis-server"]
+exclude = [".tmp/ref/datafusion-postgres"]
 
 [workspace.package]
 version = "0.2.0"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.95"
 license = "Apache-2.0"
 authors = ["QuackGIS contributors"]
 repository = "https://github.com/adonm/quackgis"
@@ -44,7 +45,7 @@ datafusion-functions-aggregate-common = "54"
 # Spatial engine — SedonaDB main is still on DataFusion 52 at time of writing.
 # Fork adonm/sedona-db@quackgis/df54 (commit 2f00283) bumps to DF 54 to align
 # with datafusion-ducklake main. Upstream PR candidate; see DIVERGENCE.md.
-sedona = { git = "https://github.com/adonm/sedona-db.git", branch = "quackgis/df54", default-features = false, features = ["aws", "azure", "gcp", "http", "geo", "tg", "spatial-join", "proj-rust"] }
+sedona = { git = "https://github.com/adonm/sedona-db.git", branch = "quackgis/df54", default-features = false, features = ["aws", "azure", "gcp", "http", "geo", "tg", "proj-rust"] }
 sedona-proj = { git = "https://github.com/adonm/sedona-db.git", branch = "quackgis/df54", package = "sedona-proj", default-features = false, features = ["proj-rust"] }
 sedona-geometry = { git = "https://github.com/adonm/sedona-db.git", branch = "quackgis/df54", package = "sedona-geometry" }
 geo-traits = "0.3"

@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qgis-probe
+  namespace: quackgis
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: qgis
+          image: docker.io/qgis/qgis:ltr-questing
+          env:
+            - name: QT_QPA_PLATFORM
+              value: offscreen
+            - name: XDG_RUNTIME_DIR
+              value: /tmp/runtime-root
+            - name: QUACKGIS_HOST
+              value: quackgis.quackgis.svc.cluster.local
+            - name: QUACKGIS_PORT
+              value: "5434"
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              mkdir -p "$XDG_RUNTIME_DIR"
+              chmod 700 "$XDG_RUNTIME_DIR"
+              python3 - <<'PY'
+              import os
+              import sys
+              import psycopg2
+              from qgis.core import QgsApplication, QgsDataSourceUri, QgsVectorLayer
+
+              host = os.environ["QUACKGIS_HOST"]
+              port = int(os.environ["QUACKGIS_PORT"])
+
+              conn = psycopg2.connect(host=host, port=port, user="postgres", dbname="quackgis")
+              conn.autocommit = True
+              cur = conn.cursor()
+              cur.execute("CREATE TABLE quackgis.main.points (id INT, geom BINARY, name TEXT)")
+              cur.execute("INSERT INTO quackgis.main.points VALUES (1, X'010100000000000000000000000000000000000000', 'origin')")
+              cur.execute("INSERT INTO quackgis.main.points VALUES (2, X'0101000000000000000000F03F000000000000F03F', 'one')")
+              cur.close()
+              conn.close()
+
+              QgsApplication.setPrefixPath("/usr", True)
+              app = QgsApplication([], False)
+              app.initQgis()
+              uri = QgsDataSourceUri()
+              uri.setConnection(host, str(port), "quackgis", "postgres", "")
+              uri.setDataSource("public", "points", "geom", "", "id")
+              layer = QgsVectorLayer(uri.uri(False), "points", "postgres")
+              print("valid", layer.isValid())
+              print("provider", layer.providerType())
+              print("error", layer.error().message())
+              ok = layer.isValid()
+              if layer.dataProvider():
+                  print("provider_error", layer.dataProvider().error().message())
+                  print("feature_count", layer.featureCount())
+                  print("fields", [f.name() for f in layer.fields()])
+                  features = list(layer.getFeatures())
+                  print("features_read", len(features))
+                  print("feature_attrs", [f.attributes() for f in features])
+                  wkts = [f.geometry().asWkt() if f.hasGeometry() else "" for f in features]
+                  print("feature_wkts", wkts)
+                  ok = ok and len(features) == 2 and all(wkts)
+              app.exitQgis()
+              sys.exit(0 if ok else 2)
+              PY

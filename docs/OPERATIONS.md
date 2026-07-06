@@ -1,171 +1,99 @@
 # Operations
 
-> **Stale — v0.1 stack.** This document describes the retired
-> PostgreSQL + pg_ducklake + DuckDB architecture. The project has been
-> redesigned around a single-binary pgwire server (see
-> [ARCHITECTURE.md](../ARCHITECTURE.md)); this doc is refreshed at milestone
-> M6 ([ROADMAP.md](../ROADMAP.md)).
+QuackGIS v0.2 is a single Rust pgwire server. It does **not** run PostgreSQL,
+DuckDB, pg_ducklake, or C extensions in-process. DuckLake metadata is currently
+SQLite-backed in development and table data is local Parquet; production
+PostgreSQL-catalog/S3 hardening remains a roadmap item.
 
-Deployment, backup, upgrade, migration, and dependencies for QuackGIS.
-
-## Quick start
+## Local development
 
 ```sh
-docker build -t quackgis:dev -f container/Dockerfile .
-docker run -e POSTGRES_PASSWORD=quackgis -p 5432:5432 quackgis:dev
-psql postgres://postgres:quackgis@localhost:5432/postgres
+mise install
+just build
+just server
 ```
 
-## Configuration
-
-Environment variables (or Helm values):
+The default local server listens on `127.0.0.1:5434` and uses:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `POSTGRES_PASSWORD` | required | PG bootstrap auth |
-| `QUACKGIS_DUCKLAKE_DIR` | `/var/lib/quackgis` | DuckLake catalog + data root |
-| `QUACKGIS_DUCKLAKE_DATA_PATH` | `$DUCKLAKE_DIR/data/` | Parquet data path |
-| `QUACKGIS_REWRITE_MODE` | `warn` | `strict`, `warn`, or `off` |
-| `QUACKGIS_DUCKDB_THREADS` | `-1` | DuckDB worker threads |
-| `QUACKGIS_DUCKDB_MEMORY_LIMIT` | `4096` | DuckDB memory cap (MB) |
+| `QUACKGIS_HOST` | `127.0.0.1` | bind host |
+| `QUACKGIS_PORT` | `5434` | pgwire port |
+| `QUACKGIS_CATALOG_PATH` | `.tmp/dev/quackgis.db` | DuckLake SQLite catalog |
+| `QUACKGIS_DATA_PATH` | `.tmp/dev/data` | Parquet data directory |
+| `QUACKGIS_LOG` | `info` | Rust log filter |
 
-## Kubernetes
+Dev auth is intentionally minimal: connect as user `postgres` to database
+`quackgis` with no password unless a future auth layer is enabled.
 
-Helm chart at `deploy/helm/quackgis/`. Plain manifests at `deploy/k8s/`.
+## Kind client probes
 
-```sh
-# Helm
-helm install quackgis deploy/helm/quackgis \
-    --set quackgis.postgresPassword=secret \
-    --set persistence.ducklake.size=100Gi
-
-# Plain
-kubectl apply -f deploy/k8s/quackgis.yaml
-kubectl port-forward svc/quackgis 55432:5432 -n quackgis
-```
-
-Required: PVC for PG data + DuckLake data, Secret for password, ConfigMap for
-settings. Non-root UID 999, capability drops, NetworkPolicy.
-
-## DuckLake spatial layout
-
-Spatial tables should materialize layout columns for pruning. Use `minx/miny/
-maxx/maxy` (not PostgreSQL-reserved `xmin/xmax`):
-
-```sql
-CREATE TABLE parcels USING ducklake AS
-SELECT
-    id, geom,
-    st_xmin(geom) AS minx, st_ymin(geom) AS miny,
-    st_xmax(geom) AS maxx, st_ymax(geom) AS maxy,
-    st_quadkey(geom, 8)  AS spatial_cell,
-    st_hilbert(geom, 16) AS spatial_sort
-FROM raw_parcels
-ORDER BY spatial_sort;
-
-CALL ducklake.set_partition('parcels', 'spatial_cell');
-```
-
-Three-stage query pattern (cell + bbox + exact):
-
-```sql
-SELECT * FROM parcels p
-WHERE p.spatial_cell IN (
-    SELECT quadkey FROM st_covering_quadkeys(
-        st_makeenvelope(-5,-5,5,5), 8, 1000)
-)
-AND p.maxx >= -5 AND p.minx <= 5
-AND p.maxy >= -5 AND p.miny <= 5
-AND st_intersects(p.geom, st_makeenvelope(-5,-5,5,5));
-```
-
-Stages 1–2 are performance filters. Stage 3 (exact predicate) defines correctness.
-
-## PostGIS migration
-
-| PostGIS | QuackGIS | Class |
-|---|---|---|
-| `ST_GeomFromText(wkt)` | same | direct |
-| `'wkt'::geometry` | text→geometry cast | automatic |
-| `geom && other` | bbox predicate or `st_bbox_intersects` | rewrite |
-| `geom <-> q LIMIT k` | `ORDER BY st_distance LIMIT k` | rewrite |
-| `geometry(Point,4326)` | geometry DOMAIN (typmod not enforced) | review |
-| `ST_Collect(a,b)` | `st_collect_scalar(a,b)` | automatic |
-| `ST_MemUnion(g)` | `ST_Union_Agg(g)` | automatic |
-| GiST indexes | DuckLake layout columns | unsupported |
-
-Use `quackgis.rewrite_sql('SELECT ...')` to preview rewrites.
-
-## Backup
-
-**PVC snapshot** (preferred):
+Containerized client tests should run inside Kind, not via host networking. This
+gives stable service DNS, consistent auth, and room to add multi-pod/multi-client
+DuckLake tests later.
 
 ```sh
-kubectl snapshot volumesnapshot quackgis-snap \
-    --persistentvolumeclaim=quackgis-ducklake
+just kind-up
+just kind-refresh
+just kind-qgis-probe
 ```
 
-**pg_dump** (metadata only, use `--insert` to bypass COPY):
+`just kind-refresh` uses the fast dev path: build `quackgis-server` locally with
+Cargo's normal `target/` cache, copy the release binary into a tiny runtime image,
+load that image into Kind, then restart the StatefulSet so the fixed dev tag is
+picked up. Use `just kind-build-image-container` for a slower clean build inside
+the container image.
 
-```sh
-pg_dump --insert --no-owner -t mytable -f backup.sql "$DATABASE_URL"
+The QGIS probe is a read-path gate. Current expected output includes:
+
+```text
+valid True
+feature_count 2
+fields ['id', 'name']
+features_read 2
 ```
 
-DuckLake Parquet files are immutable — snapshot the data volume for crash-
-consistent backup.
+In-cluster clients connect to:
 
-## Restore
-
-From PVC snapshot: create new PVC from snapshot, start new pod.
-From pg_dump: `pg_restore -d postgres backup.sql`.
-
-## Upgrade
-
-```sh
-kubectl set image statefulset/quackgis quackgis=quackgis:0.2.0 -n quackgis
-kubectl rollout status statefulset/quackgis -n quackgis
+```text
+host: quackgis.quackgis.svc.cluster.local
+port: 5434
+user: postgres
+database: quackgis
+password: <empty>
 ```
 
-DuckLake Parquet files are backward-compatible. PostgreSQL major version
-upgrades require `pg_upgrade`. Verify with `SELECT * FROM quackgis.diagnostics;`.
+Relevant files:
 
-Rollback: `kubectl rollout undo statefulset/quackgis -n quackgis`.
+| Path | Purpose |
+|---|---|
+| `deploy/Containerfile.runtime` | runtime-only image used by the cached host-build Kind path |
+| `deploy/Containerfile` | clean container-native fallback image for Kind probes |
+| `deploy/kind/cluster.yaml` | Kind cluster config |
+| `deploy/kind/quackgis.yaml` | QuackGIS StatefulSet + Service |
+| `deploy/kind/qgis-probe.yaml` | headless PyQGIS add-layer probe Job |
 
-## Object-store credentials
+## Persistence model
 
-```sh
-# S3
-kubectl create secret generic quackgis-s3 \
-    --from-literal=AWS_ACCESS_KEY_ID='...' \
-    --from-literal=AWS_SECRET_ACCESS_KEY='...' -n quackgis
+The Kind StatefulSet mounts one `ducklake` PVC at `/var/lib/quackgis` containing:
 
-# Rotate
-kubectl update secret quackgis-s3 ...
-kubectl rollout restart statefulset/quackgis -n quackgis
-```
+- `quackgis.db` — DuckLake SQLite catalog
+- `data/` — Parquet data files
 
-## Dependencies (bundled in image)
+This is suitable for single-pod restart/persistence smoke tests. Multi-server
+tests must move to a shared catalog/data backend (for example PostgreSQL catalog
++ object-store data) before scaling replicas.
 
-| Layer | Dependency | Purpose |
-|---|---|---|
-| Facade | PostgreSQL 18 | pgwire, auth, sessions, catalog |
-| Integration | pg_ducklake | DuckDB lifecycle, DuckLake table AM |
-| Execution | DuckDB | vectorized analytical engine |
-| Spatial | sedonadb extension | PostGIS/SedonaDB `ST_*` kernels |
-| Lakehouse | DuckLake | table metadata, snapshots, Parquet |
-| Topology | GEOS | planar topology, overlay, relate |
-| CRS | PROJ | coordinate transforms |
-| Raster | GDAL | raster I/O |
+## Reference source checkouts
 
-Operator provides: PostgreSQL data volume, DuckLake data volume or object store,
-credentials, TLS config.
+`just ref-init` materializes source trees under ignored `.tmp/ref/*` for fork
+work and client-trace research. This is intentionally submodule-like but outside
+the build graph: Cargo continues to consume canonical git dependencies pinned by
+`Cargo.lock`.
 
-## Release
+## Removed stale v0.1 deploy assets
 
-```sh
-./deploy/release.sh 0.1.0
-```
-
-Runs engine checks → builds image → generates version manifest + SBOM → prints
-tag/push guidance. On tag push, `.github/workflows/release.yml` builds and pushes
-to GHCR with SBOM and image report.
+The old PostgreSQL-container Helm chart, `container/Dockerfile*`, BuildKit
+scripts, `pg_isready` probes, and DuckDB/pg_ducklake environment variables were
+removed from the current deploy path. Git history retains them for archaeology;
+new deployment work should target the single `quackgis-server` binary.

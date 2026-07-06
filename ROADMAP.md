@@ -13,7 +13,10 @@ SedonaDB (spatial) + DuckLake (storage). No PostgreSQL, no DuckDB.
      identify → filter → edit (insert/update/delete) → save.
    - *GeoServer*: register PostGIS datastore → publish layer → WMS GetMap →
      WFS GetFeature (paged) → WFS-T insert/update.
-   - *OGR/GDAL*: `ogr2ogr` load into QuackGIS and read back, both PG drivers.
+   - *OGR/GDAL*: `ogr2ogr` load into QuackGIS and read back, both PostgreSQL
+     wire drivers (`PG:` and PostgreSQL-compatible connection strings). Treat
+     `ogr2ogr` as a first-class PostGIS-wire compatibility target alongside
+     QGIS, GeoServer, and Martin.
 2. **Secondary — PostGIS function conformance.** Pass rate on a curated subset
    of upstream PostGIS regress tests (function semantics, not PG internals).
 
@@ -25,16 +28,16 @@ SedonaDB (spatial) + DuckLake (storage). No PostgreSQL, no DuckDB.
    `SessionContext`. Every layer that existed to host or bridge PG/DuckDB is
    deleted.
 2. **Fork/vendor-preferred.** The three pillars are active Apache-2.0
-   projects: datafusion-postgres (v0.16, pg_catalog + auth + TLS), SedonaDB
+   projects: datafusion-postgres (v0.17-era fork, pg_catalog + auth + TLS), SedonaDB
    (0.4, vector/raster/geography), datafusion-ducklake (0.3, alpha) — but
    several capabilities the best design needs **do not exist upstream yet**
    (see the gap ledger below). We do not block milestones on upstream review:
    pin exact revisions, and the moment a needed capability is missing, fork
    the crate and build it there. Upstreaming is opportunistic, done from the
    fork when convenient — never on the critical path.
-3. **Client-trace-driven testing.** Capture the exact SQL QGIS, GeoServer, and
-   OGR send (query logs), replay as fixtures, fix in priority order. PostGIS
-   regress covers function semantics second.
+3. **Client-trace-driven testing.** Capture the exact SQL QGIS, GeoServer,
+   Martin, and OGR/`ogr2ogr` send (query logs), replay as fixtures, fix in
+   priority order. PostGIS regress covers function semantics second.
 4. **Transparent spatial layout.** Geometry tables get bbox/quadkey/Hilbert
    layout columns at write time; scans prune with them at read time.
 
@@ -47,8 +50,8 @@ build the capability, ship from the fork.
 
 | # | Capability | Needed by | Upstream status | Plan |
 |---|---|---|---|---|
-| G1 | `geometry`/`geography` type OID on the wire | M2 | **Deferred (lowest-maintenance decision).** `::geometry` casts preprocessed to `::bytea` in datafusion-postgres fork (commit 912823e). WKB IS bytea — the type OID only matters for pg_type introspection, not data transfer. Martin/QGIS read geometry bytes fine as bytea. A real OID can be added later if a client strictly requires type-based discovery. | Deferred — no functional gap today. |
-| G2 | pg_catalog depth for QGIS introspection (pg_index, pg_am, regclass casts, `format_type`, array/oidvector columns) | M3 | **Probe (commit 99e3a7d): the common 5 tables + pg_index/pg_proc/pg_namespace/pg_database work natively on master** (counts: 69 pg_class, 617 pg_type, 684 pg_attribute, 164 pg_index). information_schema fully populated. **pg_roles stack overflow FIXED in adonm/datafusion-postgres@quackgis/fixes (commit 2c43dc6)** — blanket `PgCatalogContextProvider for Arc<T>` was self-recursing. Regression test `pg_roles_does_not_crash` added. `pg_postmaster_start_time()` and other metadata funcs still unregistered (small UDF additions later). | Fork active. Upstream PR candidate. Remaining work tracked for M3. |
+| G1 | `geometry`/`geography` type OID on the wire | M2 | **Equivalent OID implemented.** `::geometry`/`::geography` casts still preprocess to `::bytea` (commit 912823e), and binary WKB columns whose name matches the spatial convention are now advertised on the wire and in `pg_attribute.atttypid` with dedicated sentinel type OIDs (`GEOMETRY_OID=90001` / `GEOGRAPHY_OID=90002`) via datafusion-postgres fork `2c35282`, with client type-resolution fixes in `2c2e5d9`. Wire payload is bytea-identical (raw WKB / hex-EWKB), so Martin/psql are unaffected; QGIS/GeoServer now see a distinct spatial type. PostGIS' real OIDs are dynamic per-install, so a fixed sentinel + QuackGIS `pg_type` typname shims keep catalog introspection consistent. | Closed for the equivalent path. A real PostGIS-OID-compatible registration is deferred until a client strictly requires `format_type`/`pg_type` row parity. |
+| G2 | pg_catalog depth for QGIS introspection (pg_index, pg_am, regclass casts, `format_type`, array/oidvector columns) | M3 | **QGIS read-path catalog trace is green.** The common pg_catalog tables work natively, `pg_roles` stack overflow is fixed in `adonm/datafusion-postgres@quackgis/fixes`, and QuackGIS now shims the QGIS-specific gaps: custom geometry/geography `pg_type` rows, layer/style existence checks, description/inherits probes, synthetic `id` unique-index metadata, and key-column lookup. | Closed for the QGIS read path. General PostgreSQL index fidelity and extra metadata funcs remain M4+/GeoServer hardening. |
 | G3 | SQL cursors: `DECLARE ... BINARY CURSOR` / `FETCH FORWARD n` (QGIS feature paging) | M3 | **Cursors work for the simple-query/libpq path** (psql, QGIS, GDAL). **BINARY cursor format FIXED in `adonm/datafusion-postgres@quackgis/fixes` (commit `98b3865`)** — `DECLARE x BINARY CURSOR` now returns raw binary-protocol bytes instead of hex-text bytea. Regression test `binary_cursor_returns_raw_bytes` verifies the wire bytes are i64 BE for `SELECT 42`. **Remaining sub-gap**: FETCH via extended protocol (pgjdbc, tokio-postgres) still fails with `"DataRow field count does not match"` — deeper pgwire investigation; QGIS path unaffected. | Fork active (BINARY patch upstreamable). Extended-protocol FETCH deferred until a real client needs it. |
 | G4 | Portal suspension honoring `Execute.max_rows` (JDBC `setFetchSize`, GeoServer) | M4 | **Extended-protocol PREPARE/EXECUTE verified working through SedonaDB** (M0 spike); `setFetchSize` portal suspension still needs pgjdbc probe | Probe with pgjdbc; fix in the datafusion-postgres fork |
 | G5 | UPDATE/DELETE on DuckLake tables | M4 | **Basic single-table UPDATE/DELETE implemented in QuackGIS** via full-table rewrite/replace semantics over DuckLake writer API. Correct but not optimal; no delete files yet. | Native delete-file UPDATE/DELETE remains future optimization in datafusion-ducklake fork if performance requires it. |
@@ -58,7 +61,7 @@ build the capability, ship from the fork.
 | G9 | SedonaDB Rust crates consumable as a dependency | M0 | **Verified consumable**: not on crates.io but git dependency works. QuackGIS consumes `adonm/sedona-db@quackgis/df54` to align with the DuckLake 1.0+ / DF54 stack. | Track upstream head through fork branch; rebaseline at milestones. |
 | G10 | Multi-statement transactions / rollback for edit sessions | M4 | Missing everywhere (DuckLake commits are per-snapshot). **BEGIN/COMMIT/ROLLBACK accepted as no-ops via v0.15 `TransactionStatementHook`** (M0 spike) | Own it in quackgis: buffer edit-session DML, commit as one DuckLake snapshot; document semantics |
 | G11 | DataFusion version alignment across SedonaDB ↔ datafusion-postgres ↔ datafusion-ducklake | M0/M1 | **Resolved for current stack** by fork-bumps: `adonm/sedona-db@quackgis/df54` and `adonm/datafusion-postgres@quackgis/fixes` align with `datafusion-ducklake` main (DF54 / Arrow58), the DuckLake 1.0+ target path. | Follow upstream heads through fork branches; rebaseline on each milestone. |
-| G12 | Runtime libgeos (sedona-geos default feature) | M0 | **Verified (M0 spike)**: binary needs `libgeos_c.so.1` on `LD_LIBRARY_PATH` | Deploy requirement: install libgeos in container image; document for dev |
+| G12 | Runtime native geometry deps (`libgeos`/`libproj`/`libgdal`) | M0/M6 | **Closed for QuackGIS itself.** The active Sedona dependency disables native default features and uses pure-Rust/vector paths (`geo`, `tg`, `proj-rust`); `cargo tree -p quackgis-server -i geos-sys` has no match. | Keep the Rust binary/runtime image free of native GEOS/PROJ/GDAL. Native libraries may exist only in external client/test containers such as QGIS/GDAL. |
 | G13 | Martin tile-server compatibility | M2 | **Done — real binary E2E green.** Martin v1.11.0 connects, discovers tables, and serves MVT tiles (`GET /points/0/0/0` → 200, 12-byte protobuf). All compatibility gaps closed: `PostGIS_Lib_Version()` ✅, `current_setting()` ✅, `geometry_columns` ✅ (dynamic catalog-scanning TableProvider), `spatial_ref_sys` ✅, `ST_AsMVT` ✅, `ST_AsMVTGeom` ✅, `ST_TileEnvelope` ✅ (3/4/5-arg overloads via Sedona WKB helpers), `ST_MakeEnvelope` ✅, `ST_Expand` ✅, `ST_CurveToLine` ✅, `&&` ✅, `::geometry` ✅, `ST_Transform` ✅ (pure-Rust). Fork carries: Martin table/function discovery shortcuts, JSONB `properties` encoding, named-`margin` → positional rewrite, PostGIS fixture DDL rewrites, and deterministic sanitizing for pathological PostgreSQL quoted identifiers. Opt-in upstream Martin table fixture coverage: **18/18** load unmodified. | Closed. Feature-attribute MVT tags remain future work. |
 
 Fork mechanics: forks are consumed as git branch dependencies (not vendored);
@@ -125,29 +128,57 @@ Validated against **DuckLake 1.0+ target path**: `datafusion-ducklake` main HEAD
 
 ### M3 — QGIS read path — gate: scripted QGIS browse/render/identify
 
+**Status: read path closed for the current headless PyQGIS gate.** The Kind Job
+using `docker.io/qgis/qgis:ltr-questing` creates a WKB-backed DuckLake table,
+adds it through the QGIS postgres provider, validates the layer, sees attributes,
+and reads both geometries through QGIS's binary cursor path (`features_read 2`).
+
 - Fix the introspection surface QGIS's postgres provider uses: pg_class,
   pg_attribute, pg_type, pg_namespace, pg_index (key detection), regclass
-  casts, `format_type`, `version()` — in the datafusion-pg-catalog fork (G2).
+  casts, `format_type`, `version()` — done for the QGIS trace via
+  `QgisCatalogHook` plus the datafusion-postgres fork (G2).
 - Cursors: `DECLARE ... BINARY CURSOR` / `FETCH FORWARD n` (QGIS feature
-  paging) — probe upstream, implement cursor→portal mapping in the
-  datafusion-postgres fork (G3).
+  paging) — done for the simple-query/libpq QGIS path (G3).
+- `ST_AsBinary(geom, 'NDR')` over WKB-backed Binary columns — done as a
+  byte-preserving QuackGIS UDF overload for the QGIS fetch query.
 - Extent queries: `ST_Extent`, `ST_EstimatedExtent` (from DuckLake file
-  stats — cheap and accurate).
+  stats — cheap and accurate) remain a render/UX optimization.
 - Unique-key strategy for tables without declared PKs (row-id synthesis),
-  since there is no ctid.
+  since there is no ctid; current read-path shim exposes conventional `id` as a
+  synthetic unique index.
 - Gate: headless PyQGIS suite in CI — add connection, list layers, render,
   identify, attribute filter.
 
+Remaining M3 hardening before calling the milestone fully CI-ready:
+
+1. Promote the Kind PyQGIS Job into CI and extend it from add/read to render,
+   identify, and attribute-filter assertions.
+2. Generalize QGIS key metadata: use real catalog/schema fields when available;
+   keep the synthetic `id` index only as a fallback and add a row-id fallback for
+   tables with no stable key.
+3. Add `ST_Extent` / `ST_EstimatedExtent` and SRID metadata polish so QGIS layer
+   canvas UX does not rely on full feature scans.
+4. Add an in-cluster GDAL/OGR `ogr2ogr` PostgreSQL-driver load/read probe to keep
+   QGIS and OGR compatibility moving together.
+
 ### M4 — Editing + GeoServer — gate: QGIS edit session, GeoServer WMS/WFS-T
+
+Start M4 with client traces, not abstractions. The first deliverable is a pair
+of failing-but-replayed fixtures: one QGIS edit/save session and one GeoServer
+PostGIS datastore publish + WMS/WFS request.
 
 - UPDATE/DELETE on DuckLake tables — delete-file support built in our
   datafusion-ducklake fork (G5; the highest-risk item, start earliest).
-- `INSERT ... RETURNING` for QGIS/GeoServer feature creation.
+- `INSERT ... RETURNING` / `UPDATE ... RETURNING` for QGIS/GeoServer feature
+  creation and post-save refresh.
 - Edit-session transaction semantics: buffer DML, commit as one DuckLake
-  snapshot (G10).
+  snapshot, and fail closed on rollback/error boundaries (G10).
 - JDBC path: extended-protocol prepared statements, Describe, fetch-size
   portal suspension (G4, datafusion-postgres fork), `bytea` + geometry
   binary params.
+- GeoServer catalog/query gaps: pgjdbc `setFetchSize` portal suspension,
+  geometry/geography parameter binding, role/privilege metadata, and datastore
+  publish SQL.
 - Gate: QGIS edit-and-save suite; GeoServer PostGIS datastore publish, WMS
   GetMap image diff, WFS GetFeature paging, WFS-T insert/update.
 
@@ -164,12 +195,15 @@ Validated against **DuckLake 1.0+ target path**: `datafusion-ducklake` main HEAD
 
 - SCRAM auth, TLS by default, RBAC roles (readonly/readwrite) from
   datafusion-postgres.
-- Distroless/static image: single binary + PROJ data; target < 100 MB
-  (v0.1 was ~500 MB with PG + DuckDB + GDAL).
+- Distroless/static image: single binary + required runtime data; target < 100
+  MB (v0.1 was ~500 MB with PG + DuckDB + GDAL). A development
+  `deploy/Containerfile` now supports Kind probes; production hardening remains
+  M6.
 - Backup/restore = catalog DB file + Parquet prefix; document snapshot
-  workflow. Refresh `docs/OPERATIONS.md` (currently describes the v0.1
-  stack).
-- Helm chart updated for single-container deployment.
+  workflow. `docs/OPERATIONS.md` now describes the current Rust-binary local +
+  Kind workflow.
+- Helm chart reintroduction deferred. Stale v0.1 PostgreSQL/pg_ducklake Helm and
+  plain manifests were removed; current K8s smoke path is `deploy/kind/*`.
 
 ### M7 — Compatibility sprint (ongoing)
 
@@ -198,7 +232,7 @@ Validated against **DuckLake 1.0+ target path**: `datafusion-ducklake` main HEAD
 | `container/init.d/` stubs, bridge table, DOMAIN geometry | Deleted — obsolete by design |
 | PostGIS test harness (`tests/postgis_port/`) | Kept — re-pointed at the new server for the secondary metric |
 | DuckLake layout SQL helpers | Re-implemented in Rust at M5 |
-| KinD/BuildKit dev loop, Helm chart | Kept — simplified to single container at M6 |
+| KinD/BuildKit dev loop, Helm chart | Replaced — stale v0.1 deploy tree removed; current Kind smoke manifests live in `deploy/kind/*` |
 
 ## Current state
 
@@ -207,20 +241,41 @@ Validated against **DuckLake 1.0+ target path**: `datafusion-ducklake` main HEAD
 - Stack now targets DuckLake 1.0+ via `datafusion-ducklake` main HEAD (DF 54).
   Forks: `adonm/sedona-db@quackgis/df54`,
   `adonm/datafusion-postgres@quackgis/fixes`, `adonm/datafusion-ducklake@main`.
-- Workspace toolchain now targets Rust 1.89 / edition 2024 to match the active
+- Workspace toolchain now targets Rust 1.95 / edition 2024 to match the active
   fork stack and avoid downlevel edition constraints.
 - M1 storage gate validated: CTAS, bare CREATE TABLE, INSERT SELECT/VALUES,
   UPDATE, DELETE, writer API roundtrip through pgwire, restart persistence,
   filter predicates, and WKB geometry persistence all green.
 - M2/Martin compatibility gate is green, including real Martin binary E2E and
   **18/18** unmodified upstream Martin table fixtures.
-- M3 QGIS read-path probe started with `qgis/qgis:ltr-questing` (QGIS 3.44.11):
-  the provider connects, `public.points` resolves to DuckLake
-  `quackgis.main.points`, `geometry_columns` exposes `public`, and catalog
-  shims cover QGIS startup metadata (`postgis_*`, privilege helpers,
-  `pg_class`/`pg_attribute` probes). Remaining blocker: QGIS still rejects the
-  layer because the `geom` field is advertised on the wire as `bytea`; this is
-  the first hard evidence that QGIS needs a real geometry type/OID or an
-  equivalent RowDescription override.
-- Next action: implement/route geometry OID semantics for WKB columns, then
-  rerun the headless PyQGIS add-layer/render probe.
+- M3 QGIS read-path Kind probe is green with `qgis/qgis:ltr-questing` (QGIS
+  3.44.11): `valid True`, `feature_count 2`, `fields ['id', 'name']`, and
+  `features_read 2`. The provider connects, `public.points` resolves to
+  DuckLake `quackgis.main.points`, `geometry_columns` exposes `public`, custom
+  geometry OID / `pg_type` lookups resolve sentinels 90001/90002, synthetic
+  `id` key metadata satisfies QGIS primary-key discovery, and
+  `ST_AsBinary(geom, 'NDR')` feeds the binary cursor fetch path. Fork head
+  `2c2e5d9` is pushed and consumed by `Cargo.lock`.
+- Kind image refresh now builds the Rust binary on the host first and copies it
+  into a runtime-only image, keeping normal Cargo `target/` caching in the dev
+  loop. Use `just kind-build-image-container` for a clean container-native
+  rebuild.
+
+## Next logical steps
+
+1. **Lock QGIS read compatibility into CI.** Move `just kind-qgis-probe` into the
+   automated gate, then add render/identify/filter assertions while preserving
+   the current add-layer + binary-cursor feature-read checks.
+2. **Add OGR as the second M3 client probe.** Create a Kind Job using a GDAL/OGR
+   image that runs `ogr2ogr` load and read-back through the PostgreSQL wire path;
+   replay any SQL gaps as focused wire tests.
+3. **Generalize key metadata.** Replace hard-coded `points(id)` QGIS catalog
+   shims with schema-derived unique-key metadata where possible; add a safe
+   row-id fallback for read-only layers without a key.
+4. **Start M4 from traces.** Capture QGIS edit/save and GeoServer
+   datastore/WMS/WFS traces, then implement only the blocking SQL/protocol gaps:
+   `RETURNING`, transaction buffering, pgjdbc fetch-size portals, and remaining
+   catalog/privilege metadata.
+5. **Keep deployment boring.** Keep the runtime image single-binary and native-
+   dependency-free; reintroduce Helm only after the Kind smoke path covers QGIS,
+   OGR, and GeoServer.

@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+# Clean container-native development image for Kind/client-probe smoke tests.
+# Prefer `just kind-build-image` for day-to-day work: it builds the binary with
+# host Cargo caches and uses deploy/Containerfile.runtime. This file remains as
+# a slower clean-build fallback (`just kind-build-image-container`).
+
+FROM docker.io/library/rust:1.95-bookworm AS builder
+WORKDIR /src
+COPY . .
+RUN cargo build -p quackgis-server --release
+
+FROM docker.io/library/debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /src/target/release/quackgis-server /usr/local/bin/quackgis-server
+RUN useradd --system --uid 999 --home /var/lib/quackgis --create-home quackgis
+USER 999:999
+EXPOSE 5434
+ENTRYPOINT ["/usr/local/bin/quackgis-server"]
+CMD ["--host", "0.0.0.0", "--port", "5434", "--catalog-path", "/var/lib/quackgis/quackgis.db", "--data-path", "/var/lib/quackgis/data"]

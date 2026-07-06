@@ -12,10 +12,11 @@ missing upstream that we build in tracked fork branches.
 | `psql` | ✅ | M0 | simple + extended protocol via datafusion-postgres |
 | psycopg (v3) | ✅ | M2 | text + binary geometry round-trip |
 | GDAL/OGR (`ogr2ogr`) | ✅ | M2 | PG driver load + read-back is the M2 gate |
-| QGIS (postgres provider) | ✅ read | M3 | introspection, binary cursors, extents |
+| QGIS (postgres provider) | ✅ read | M3 | Kind PyQGIS add-layer probe green: valid layer, attributes, and two WKB point features fetched through binary cursor |
+| GDAL/OGR `ogr2ogr` (PostgreSQL driver) | target | M3/M4 | load/read via PostGIS wire SQL; first-class compatibility target |
 | QGIS (editing) | target | M4 | basic UPDATE/DELETE storage rewrite works; client workflow + RETURNING/keys still pending |
-| GeoServer (PostGIS datastore) | ✅ | M4 | JDBC extended protocol, WMS/WFS-T |
-| Martin (MapLibre tile server) | ✅ target | M2+ | auto-discover geometry tables; MVT tile serving via ST_AsMVT
+| GeoServer (PostGIS datastore) | target | M4 | JDBC extended protocol, WMS/WFS-T; trace/probe next after QGIS+OGR read gates |
+| Martin (MapLibre tile server) | ✅ | M2+ | auto-discover geometry tables; MVT tile serving via ST_AsMVT |
 | pg_featureserv | stretch | M7 | trace-driven |
 | `pg_dump` / logical replication | ❌ | — | back up the DuckLake catalog + Parquet instead |
 
@@ -26,8 +27,8 @@ missing upstream that we build in tracked fork branches.
 | Simple + extended query protocol | ✅ upstream |
 | TLS, password auth, RBAC roles | ✅ upstream |
 | pg_catalog + information_schema emulation | ✅ upstream (datafusion-pg-catalog) |
-| Portals / fetch-size suspension | probe; built in our fork if missing (G4, M4) |
-| `DECLARE BINARY CURSOR` / `FETCH` | probe; built in our fork if missing (G3, M3) |
+| Portals / fetch-size suspension | target for pgjdbc/GeoServer (G4, M4) |
+| `DECLARE BINARY CURSOR` / `FETCH` | ✅ simple-query/libpq path; extended-protocol FETCH still deferred (G3/G4) |
 | COPY subprotocol | not planned initially; `ogr2ogr`/INSERT for bulk load |
 | LISTEN/NOTIFY, PL/pgSQL, triggers | ❌ non-goals |
 
@@ -61,7 +62,7 @@ Interop target: QuackGIS storage changes should remain forward-compatible with o
 
 - Transactions are accepted (`BEGIN`/`COMMIT`) but DuckLake commits are
   per-statement snapshots; no multi-statement rollback initially.
-- No ctid: tables without primary keys get a synthesized row-id for QGIS
-  editing (M3).
+- No ctid: the QGIS read-path shim exposes a conventional `id` column as a
+  synthetic unique index; general row-id synthesis for editing remains M4.
 - Typmod enforcement (`geometry(Point, 4326)`) is metadata + EWKB-level, not
   PG typmod machinery.

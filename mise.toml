@@ -11,10 +11,11 @@ MARTIN_BIN = "{{config_root}}/.tmp/bin/martin"
 MARTIN_PORT = "3000"
 QGIS_IMAGE = "docker.io/qgis/qgis:ltr-questing"
 GEOSERVER_IMAGE = "docker.io/kartoza/geoserver:2.26.2"
+CONTAINER_ENGINE = "podman"
 KIND_CLUSTER = "quackgis"
 
 [tools]
-rust = "1.89.0"
+rust = "1.95.0"
 "aqua:casey/just" = "1.53.0"
 "aqua:kubernetes-sigs/kind" = "0.29.0"
 "aqua:kubernetes/kubectl" = "1.33.2"

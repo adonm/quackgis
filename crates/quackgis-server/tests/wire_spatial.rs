@@ -372,3 +372,156 @@ async fn geometry_columns_discovers_tables_with_geom_column() {
     let only_col: String = blob_rows[0].get(0);
     assert_eq!(only_col, "geom");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn qgis_pg_type_lookup_resolves_custom_geometry_oid() {
+    let (client, _conn) = connect().await;
+
+    let messages = client
+        .simple_query(
+            "SELECT oid,typname,typtype,typelem,typlen FROM pg_type WHERE oid in (23,90001,25)",
+        )
+        .await
+        .expect("QGIS pg_type lookup");
+
+    let rows: Vec<_> = messages
+        .iter()
+        .filter_map(|message| match message {
+            tokio_postgres::SimpleQueryMessage::Row(row) => Some((
+                row.get("oid").unwrap_or_default().to_string(),
+                row.get("typname").unwrap_or_default().to_string(),
+                row.get("typtype").unwrap_or_default().to_string(),
+                row.get("typelem").unwrap_or_default().to_string(),
+                row.get("typlen").unwrap_or_default().to_string(),
+            )),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        rows.contains(&(
+            "90001".to_string(),
+            "geometry".to_string(),
+            "b".to_string(),
+            "0".to_string(),
+            "-1".to_string()
+        )),
+        "custom geometry oid must be present in {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|(oid, typname, _, _, _)| oid == "23" && typname == "int4"),
+        "lookup should preserve int4 row for mixed QGIS field discovery: {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|(oid, typname, _, _, _)| oid == "25" && typname == "text"),
+        "lookup should preserve text row for mixed QGIS field discovery: {rows:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn qgis_primary_key_catalog_shim_exposes_synthetic_index() {
+    let (client, _conn) = connect().await;
+
+    let index_rows = client
+        .simple_query(
+            "SELECT indexrelid FROM pg_index WHERE indrelid='\"public\".\"points\"'::regclass \
+             AND (indisprimary OR indisunique) ORDER BY CASE WHEN indisprimary THEN 1 ELSE 2 END LIMIT 1",
+        )
+        .await
+        .expect("QGIS indexrelid lookup");
+    let index_oid = index_rows.iter().find_map(|message| match message {
+        tokio_postgres::SimpleQueryMessage::Row(row) => row.get("indexrelid"),
+        _ => None,
+    });
+    assert_eq!(index_oid, Some("90101"));
+
+    let indkey_rows = client
+        .simple_query("SELECT indkey FROM pg_index WHERE indexrelid=90101")
+        .await
+        .expect("QGIS indkey lookup");
+    let indkey = indkey_rows.iter().find_map(|message| match message {
+        tokio_postgres::SimpleQueryMessage::Row(row) => row.get("indkey"),
+        _ => None,
+    });
+    assert_eq!(indkey, Some("1"));
+
+    let key_column_rows = client
+        .simple_query(
+            "SELECT attname,attnotnull FROM pg_index,pg_attribute WHERE indexrelid=90101 \
+             AND indrelid=attrelid AND pg_attribute.attnum=any(pg_index.indkey)",
+        )
+        .await
+        .expect("QGIS primary-key column lookup");
+    let key_column = key_column_rows.iter().find_map(|message| match message {
+        tokio_postgres::SimpleQueryMessage::Row(row) => Some((
+            row.get("attname").unwrap_or_default(),
+            row.get("attnotnull").unwrap_or_default(),
+        )),
+        _ => None,
+    });
+    assert_eq!(key_column, Some(("id", "t")));
+
+    let def_rows = client
+        .simple_query("SELECT pg_get_indexdef(90101)")
+        .await
+        .expect("QGIS pg_get_indexdef lookup");
+    let index_def = def_rows.iter().find_map(|message| match message {
+        tokio_postgres::SimpleQueryMessage::Row(row) => row.get("pg_get_indexdef"),
+        _ => None,
+    });
+    assert_eq!(
+        index_def,
+        Some("CREATE UNIQUE INDEX points_pkey ON public.points (id)")
+    );
+
+    let layer_styles_rows = client
+        .simple_query(
+            "SELECT EXISTS ( SELECT oid FROM pg_catalog.pg_class WHERE relname='layer_styles')",
+        )
+        .await
+        .expect("QGIS layer_styles existence lookup");
+    let layer_styles_exists = layer_styles_rows.iter().find_map(|message| match message {
+        tokio_postgres::SimpleQueryMessage::Row(row) => row.get("exists"),
+        _ => None,
+    });
+    assert_eq!(layer_styles_exists, Some("f"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn qgis_st_asbinary_binary_endian_overload_returns_wkb() {
+    let server = ServerHandle::start().await;
+    let (client, connection) = tokio_postgres::connect(&server.conn_str(), NoTls)
+        .await
+        .expect("connect");
+    let _conn = tokio::spawn(connection);
+
+    client
+        .simple_query("CREATE TABLE quackgis.main.points (id INT, geom BINARY, name TEXT)")
+        .await
+        .expect("create points");
+    client
+        .simple_query(
+            "INSERT INTO quackgis.main.points VALUES \
+             (1, X'010100000000000000000000000000000000000000', 'origin')",
+        )
+        .await
+        .expect("insert point");
+
+    let wkb: Vec<u8> = client
+        .query_one(
+            "SELECT st_asbinary(\"geom\", 'NDR') FROM \"public\".\"points\" WHERE id = 1",
+            &[],
+        )
+        .await
+        .expect("QGIS ST_AsBinary overload")
+        .get(0);
+
+    assert_eq!(
+        wkb,
+        vec![
+            1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+        ]
+    );
+}
