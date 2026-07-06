@@ -278,6 +278,13 @@ kind-qgis-probe:
     kubectl -n quackgis wait job/qgis-probe --for=condition=complete --timeout=180s || (kubectl -n quackgis logs job/qgis-probe; false)
     kubectl -n quackgis logs job/qgis-probe
 
+# Run the GDAL/OGR PostgreSQL-driver read probe as an in-cluster Job.
+kind-ogr-probe:
+    kubectl -n quackgis delete job ogr-probe --ignore-not-found=true
+    kubectl apply -f deploy/kind/ogr-probe.yaml
+    kubectl -n quackgis wait job/ogr-probe --for=condition=complete --timeout=180s || (kubectl -n quackgis logs job/ogr-probe; false)
+    kubectl -n quackgis logs job/ogr-probe
+
 # Show QuackGIS and client-probe logs from Kind.
 kind-logs:
     kubectl -n quackgis logs statefulset/quackgis --tail=200

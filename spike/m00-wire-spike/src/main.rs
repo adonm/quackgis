@@ -11,8 +11,8 @@
 
 use std::sync::Arc;
 
+use datafusion::prelude::SessionContext;
 use datafusion_postgres::{ServerOptions, serve};
-use sedona::context::SedonaContext;
 
 const HOST: &str = "0.0.0.0";
 
@@ -27,11 +27,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(5434);
 
-    // SedonaContext wraps a DataFusion SessionContext and registers the full
-    // SedonaDB function catalog (ST_*, CRS, spatial joins) plus information_schema
-    // and the local filesystem object store.
-    let sctx = SedonaContext::new_local_interactive().await?;
-    let ctx = Arc::new(sctx.ctx);
+    // Register only the pure-Rust SedonaDB function surface needed by the
+    // spike: base geometry functions plus sedona-geo kernels.
+    let ctx = SessionContext::new();
+    register_sedona_function_catalog(&ctx)?;
+    let ctx = Arc::new(ctx);
 
     // Note: deliberately NOT calling setup_pg_catalog here — v0.15 needs an
     // AuthManager/ContextProvider and the spike only validates the wire path
@@ -47,5 +47,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     serve(ctx, &opts).await?;
+    Ok(())
+}
+
+fn register_sedona_function_catalog(ctx: &SessionContext) -> datafusion::common::Result<()> {
+    let mut functions = sedona_functions::register::default_function_set();
+
+    for (name, kernels) in sedona_geo::register::scalar_kernels() {
+        functions.add_scalar_udf_impl(name, kernels)?;
+    }
+    for (name, kernel) in sedona_geo::register::aggregate_kernels() {
+        functions.add_aggregate_udf_kernel(name, kernel)?;
+    }
+
+    for udf in functions.scalar_udfs() {
+        ctx.register_udf(udf.clone().into());
+    }
+    for udaf in functions.aggregate_udfs() {
+        ctx.register_udaf(udaf.clone().into());
+    }
+
     Ok(())
 }

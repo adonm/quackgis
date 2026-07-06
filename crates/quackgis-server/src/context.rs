@@ -17,7 +17,6 @@ use datafusion_ducklake::{
 };
 use datafusion_postgres::auth::AuthManager;
 use datafusion_postgres::datafusion_pg_catalog::setup_pg_catalog;
-use sedona::context::SedonaContext;
 
 /// Default name of the DuckLake catalog as seen by clients. Persisted tables
 /// live under `quackgis.main.<table>`. The default catalog for unqualified
@@ -97,8 +96,8 @@ impl StoragePaths {
 /// Construction order matters:
 ///   1. Build the DuckLake catalog with write support (SQLite backend).
 ///   2. Construct a DataFusion SessionContext with DuckLake as the default
-///      catalog, then wrap with SedonaContext so ST_* functions are
-///      registered. SedonaContext preserves our catalog registration.
+///      catalog, then register the narrow SedonaDB function surface that
+///      QuackGIS needs: base functions, pure-Rust geo kernels, and Rust PROJ.
 ///   3. Attach pg_catalog as a schema in the default catalog so introspection
 ///      queries (`SELECT * FROM pg_catalog.pg_class`) work.
 pub async fn build_session_context() -> Result<Arc<SessionContext>> {
@@ -156,11 +155,9 @@ pub async fn build_session_context_with_storage(
     let ctx = SessionContext::new_with_state(state);
     ctx.register_catalog(DUCKLAKE_CATALOG, Arc::new(ducklake));
 
-    // SedonaContext registers all ST_* UDFs/UDTFs on our context. It does
-    // not replace the catalog registry. (Sync method: pure in-memory
-    // registration.)
-    let sctx = SedonaContext::new_from_context(ctx).map_err(|e| anyhow!(e.to_string()))?;
-    let ctx = Arc::new(sctx.ctx);
+    register_sedona_function_catalog(&ctx)
+        .map_err(|e| anyhow!("register SedonaDB function catalog failed: {e}"))?;
+    let ctx = Arc::new(ctx);
 
     // Expose DuckLake `quackgis.main` tables as PostgreSQL-style `public.*`
     // before pg_catalog is installed so QGIS pg_class/pg_namespace probes see
@@ -184,6 +181,29 @@ pub async fn build_session_context_with_storage(
         .map_err(|e| anyhow!("register_spatial_udfs failed: {e}"))?;
 
     Ok(ctx)
+}
+
+fn register_sedona_function_catalog(ctx: &SessionContext) -> datafusion::common::Result<()> {
+    let mut functions = sedona_functions::register::default_function_set();
+
+    for (name, kernels) in sedona_geo::register::scalar_kernels() {
+        functions.add_scalar_udf_impl(name, kernels)?;
+    }
+    for (name, kernel) in sedona_geo::register::aggregate_kernels() {
+        functions.add_aggregate_udf_kernel(name, kernel)?;
+    }
+    for (name, kernel) in sedona_proj::register::scalar_kernels() {
+        functions.add_scalar_udf_impl(name, kernel)?;
+    }
+
+    for udf in functions.scalar_udfs() {
+        ctx.register_udf(udf.clone().into());
+    }
+    for udaf in functions.aggregate_udfs() {
+        ctx.register_udaf(udaf.clone().into());
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

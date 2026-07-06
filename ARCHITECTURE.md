@@ -30,7 +30,7 @@ built immediately in-fork — see the gap ledger in
 │ geometry type over the wire (OID + WKB/EWKB text/binary)     │
 │ geometry_columns · spatial_ref_sys · postgis_version()       │
 │ pg_catalog additions · session no-ops (SET, client GUCs)     │
-│ cursor + introspection shims for QGIS/GeoServer              │
+│ pg_catalog/cursor shims for PostGIS-style clients            │
 ├──────────────────────────────────────────────────────────────┤
 │ SedonaDB session (DataFusion SessionContext)                 │
 │ ST_* functions · geometry/geography · CRS · spatial joins    │
@@ -134,10 +134,10 @@ catalog for SedonaDB's larger one.
 - QuackGIS adds the PostGIS metadata surface: `geometry_columns`,
   `geography_columns`, `spatial_ref_sys` (from PROJ/EPSG data),
   `postgis_version()`, `postgis_lib_version()`, `postgis_full_version()`.
-- QGIS/GeoServer introspection queries (pg_index for keys, regclass casts,
-  `version()`, format_type) are test fixtures; gaps are fixed in our
-  datafusion-pg-catalog fork where general (gap ledger G2), here where
-  PostGIS-specific.
+- Client introspection queries (pg_index for keys, regclass casts,
+  `format_type`, pg_type/pg_class/pg_attribute shape) are test fixtures; gaps
+  are fixed in our datafusion-pg-catalog fork where general (gap ledger G2), and
+  in QuackGIS's `CatalogCompatHook` where PostGIS/wire-boundary specific.
 
 ## DuckLake spatial layout
 

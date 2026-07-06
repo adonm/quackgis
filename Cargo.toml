@@ -42,10 +42,13 @@ datafusion = "54"
 datafusion-expr-common = "54"
 datafusion-functions-aggregate-common = "54"
 
-# Spatial engine — SedonaDB main is still on DataFusion 52 at time of writing.
-# Fork adonm/sedona-db@quackgis/df54 (commit 2f00283) bumps to DF 54 to align
-# with datafusion-ducklake main. Upstream PR candidate; see DIVERGENCE.md.
-sedona = { git = "https://github.com/adonm/sedona-db.git", branch = "quackgis/df54", default-features = false, features = ["aws", "azure", "gcp", "http", "geo", "tg", "proj-rust"] }
+# Spatial engine — use SedonaDB subcrates directly instead of the umbrella
+# `sedona` crate so QuackGIS does not compile unused GEOS/GDAL/raster/catalog
+# surface. Fork adonm/sedona-db@quackgis/df54 (commit 2f00283) bumps to DF 54
+# to align with datafusion-ducklake main. Upstream PR candidate; see
+# DIVERGENCE.md.
+sedona-functions = { git = "https://github.com/adonm/sedona-db.git", branch = "quackgis/df54", package = "sedona-functions" }
+sedona-geo = { git = "https://github.com/adonm/sedona-db.git", branch = "quackgis/df54", package = "sedona-geo" }
 sedona-proj = { git = "https://github.com/adonm/sedona-db.git", branch = "quackgis/df54", package = "sedona-proj", default-features = false, features = ["proj-rust"] }
 sedona-geometry = { git = "https://github.com/adonm/sedona-db.git", branch = "quackgis/df54", package = "sedona-geometry" }
 geo-traits = "0.3"

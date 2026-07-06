@@ -19,8 +19,10 @@ datafusion-postgres = { git = "https://github.com/datafusion-contrib/datafusion-
 
 # SedonaDB main is still on DataFusion 52; adonm/sedona-db@quackgis/df53 bumps
 # to DF 53 / Arrow 58 / object_store 0.13 to align with datafusion-postgres
-# master. PR upstream when SedonaDB cuts a release on DF 53.
-sedona = { git = "https://github.com/adonm/sedona-db.git", branch = "quackgis/df53" }
+# master. Use the narrow pure-Rust subcrates, not the Sedona umbrella crate.
+datafusion = "53.1.0"
+sedona-functions = { git = "https://github.com/adonm/sedona-db.git", branch = "quackgis/df53", package = "sedona-functions" }
+sedona-geo = { git = "https://github.com/adonm/sedona-db.git", branch = "quackgis/df53", package = "sedona-geo" }
 
 tokio = { version = "1.52", features = ["macros", "rt-multi-thread"] }
 env_logger = "0.11"

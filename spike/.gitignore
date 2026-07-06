@@ -1,7 +1,9 @@
 # Build artifacts (spike is standalone; not part of parent workspace)
 /target/
 **/target/
+# Keep archived spike binaries reproducible in CI.
 Cargo.lock
+!m00-wire-spike/Cargo.lock
 
 # Editor / OS
 *.swp

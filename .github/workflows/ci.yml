@@ -12,14 +12,9 @@ env:
 jobs:
   test:
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install system dependencies (libgeos for sedonadb-geos)
-        run: |
-          sudo apt-get update
-          # No native deps needed — pure Rust build (GEOS and libproj dropped)
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -62,21 +57,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          # No native deps needed — pure Rust build (GEOS and libproj dropped)
-
       - uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache spike target
-        uses: actions/cache@v4
-        with:
-          path: spike/m00-wire-spike/target
-          key: spike-${{ runner.os }}-${{ hashFiles('spike/m00-wire-spike/Cargo.toml') }}
-          restore-keys: |
-            spike-${{ runner.os }}-
 
       - name: Build spike (standalone, not part of workspace)
         working-directory: spike/m00-wire-spike
-        run: cargo build --release
+        run: cargo build --release --locked

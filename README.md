@@ -31,9 +31,9 @@ validated (then retired) a heavier stack: full PostgreSQL + vendored
 pg_ducklake + a C geometry extension + a DuckDB spatial extension. The wire
 adaptor approach replaces all four layers with DataFusion-native components.
 
-Current milestone: **M0 — skeleton server** (SedonaDB context served over
-pgwire, psql smoke test). See [ROADMAP.md](./ROADMAP.md) for milestones and
-the risk register.
+Current milestone focus: **M3/M4 client compatibility**. Martin, QGIS read, and
+OGR read probes are green; QGIS/OGR write paths and GeoServer remain trace-driven
+targets. See [ROADMAP.md](./ROADMAP.md) for milestones and the risk register.
 
 ## Quick start (dev storage path)
 
@@ -75,6 +75,7 @@ just martin-sql                # Martin-generated SQL compatibility gate
 just martin-e2e                # opt-in real Martin binary E2E
 just kind-refresh              # host-cached build/load/deploy into Kind
 just kind-qgis-probe           # headless PyQGIS add-layer/read-feature gate
+just kind-ogr-probe            # GDAL/OGR PostgreSQL-driver read-back gate
 
 Reference/source trees for client-trace work live outside the build graph under
 ignored `.tmp/ref/*` (submodule-init equivalent): `just ref-init` materializes
@@ -86,6 +87,11 @@ The current stack is intentionally zero-native-dependency for QuackGIS itself:
 no libgeos/libproj/libgdal. Client/test tools such as Martin, QGIS, GeoServer,
 and KinD are managed via `mise.toml` environment/tool pins plus Justfile
 recipes.
+
+Pushes to `main` and `v*` tags run the mise-backed CI artifact workflow. It
+validates the pinned dev toolchain, uploads Linux x86_64 binary tarballs, pushes
+the runtime image to GHCR on non-PR refs, and attaches binaries to GitHub
+Releases for version tags.
 
 Upstreams are consumed through fork branches when needed. DuckLake storage is a **priority validated path**, not a placeholder: dev = SQLite catalog + local Parquet files; production target = PostgreSQL catalog + AWS S3 Parquet. Extending datafusion-ducklake to meet QuackGIS storage requirements (SQL DDL routing, UPDATE/DELETE, pruning, PostgreSQL/S3 hardening) is explicitly in scope, while staying forward-compatible with the official DuckLake 1.0+ spec.
 

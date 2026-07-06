@@ -36,6 +36,7 @@ DuckLake tests later.
 just kind-up
 just kind-refresh
 just kind-qgis-probe
+just kind-ogr-probe
 ```
 
 `just kind-refresh` uses the fast dev path: build `quackgis-server` locally with
@@ -51,6 +52,15 @@ valid True
 feature_count 2
 fields ['id', 'name']
 features_read 2
+```
+
+The OGR probe uses GDAL's PostgreSQL driver to read a WKB-backed table and export
+it to GeoJSON. Current expected output includes:
+
+```text
+feature_count 2
+names ['one', 'origin']
+geometry_types ['Point', 'Point']
 ```
 
 In-cluster clients connect to:
@@ -72,6 +82,19 @@ Relevant files:
 | `deploy/kind/cluster.yaml` | Kind cluster config |
 | `deploy/kind/quackgis.yaml` | QuackGIS StatefulSet + Service |
 | `deploy/kind/qgis-probe.yaml` | headless PyQGIS add-layer probe Job |
+| `deploy/kind/ogr-probe.yaml` | GDAL/OGR PostgreSQL-driver read-back probe Job |
+
+## CI artifacts
+
+GitHub Actions uses `mise.toml` as the CI toolchain source of truth. The
+`CI artifacts` workflow runs formatting, tests, clippy, and release builds with
+`mise exec`.
+
+- Pushes to `main` and version tags publish a runtime image to
+  `ghcr.io/adonm/quackgis` with branch/tag/SHA tags.
+- Every workflow run uploads a Linux x86_64 binary tarball as a CI artifact.
+- Version tags matching `v*` also attach that tarball and its `.sha256` file to
+  the corresponding GitHub Release.
 
 ## Persistence model
 

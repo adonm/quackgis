@@ -525,3 +525,204 @@ async fn qgis_st_asbinary_binary_endian_overload_returns_wkb() {
         ]
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ogr_table_listing_query_does_not_cast_pg_class_literal() {
+    let server = ServerHandle::start().await;
+    let (client, connection) = tokio_postgres::connect(&server.conn_str(), NoTls)
+        .await
+        .expect("connect");
+    let _conn = tokio::spawn(connection);
+
+    client
+        .simple_query("CREATE TABLE quackgis.main.ogr_visible (id INT, wkb_geometry BINARY)")
+        .await
+        .expect("create OGR-visible table");
+
+    let rows = client
+        .query(
+            "SELECT c.relname, n.nspname, d.description \
+             FROM pg_class c \
+             JOIN pg_namespace n ON c.relnamespace=n.oid \
+             LEFT JOIN pg_description d \
+               ON d.objoid = c.oid \
+              AND d.classoid = 'pg_class'::regclass::oid \
+              AND d.objsubid = 0 \
+             WHERE (c.relkind in ('r','v','m','f') AND c.relname !~ '^pg_')",
+            &[],
+        )
+        .await
+        .expect("OGR table listing catalog query should not trip oid coercion");
+
+    let names: Vec<(String, String)> = rows
+        .into_iter()
+        .map(|row| (row.get("relname"), row.get("nspname")))
+        .collect();
+    assert!(
+        names.contains(&("ogr_visible".to_string(), "public".to_string())),
+        "OGR table listing should expose DuckLake main as public, got {names:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ogr_postgis_type_probe_returns_empty_oid_typname_shape() {
+    let (client, _conn) = connect().await;
+
+    let messages = client
+        .simple_query(
+            "SELECT oid, typname FROM pg_type \
+             WHERE typname IN ('geometry', 'geography') AND typtype='b'",
+        )
+        .await
+        .expect("OGR PostGIS type probe should return oid/typname shape");
+
+    let rows = messages
+        .iter()
+        .filter(|message| matches!(message, tokio_postgres::SimpleQueryMessage::Row(_)))
+        .count();
+    assert_eq!(rows, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ogr_column_listing_query_returns_matching_field_count() {
+    let (client, _conn) = connect().await;
+
+    let rows = client
+        .query(
+            "SELECT a.attname, t.typname, a.attlen, \
+                    format_type(a.atttypid,a.atttypmod), a.attnotnull, \
+                    def.def, i.indisunique, descr.description \
+             FROM pg_attribute a \
+             JOIN pg_type t ON t.oid = a.atttypid \
+             LEFT JOIN (SELECT adrelid, adnum, pg_get_expr(adbin, adrelid) AS def FROM pg_attrdef) def \
+                    ON def.adrelid = a.attrelid AND def.adnum = a.attnum \
+             LEFT JOIN (SELECT DISTINCT indrelid, indkey, indisunique FROM pg_index WHERE indisunique) i \
+                    ON i.indrelid = a.attrelid AND i.indkey[0] = a.attnum AND i.indkey[1] IS NULL \
+             LEFT JOIN pg_description descr \
+                    ON descr.objoid = a.attrelid \
+                   AND descr.classoid = 'pg_class'::regclass::oid \
+                   AND descr.objsubid = a.attnum \
+             WHERE a.attnum > 0 AND a.attrelid = 16479 \
+             ORDER BY a.attnum",
+            &[],
+        )
+        .await
+        .expect("OGR column listing should return rows matching RowDescription");
+
+    let cols: Vec<(String, String)> = rows
+        .into_iter()
+        .map(|row| (row.get("attname"), row.get("typname")))
+        .collect();
+    assert_eq!(
+        cols,
+        vec![
+            ("id".to_string(), "int4".to_string()),
+            ("wkb_geometry".to_string(), "bytea".to_string()),
+            ("name".to_string(), "text".to_string())
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ogr_primary_key_probe_returns_matching_field_count() {
+    let (client, _conn) = connect().await;
+
+    let rows = client
+        .query(
+            "SELECT a.attname, a.attnum, t.typname, \
+                    t.typname = ANY(ARRAY['int2','int4','int8','serial','bigserial']) AS isfid \
+             FROM pg_attribute a \
+             JOIN pg_type t ON t.oid = a.atttypid \
+             JOIN pg_index i ON i.indrelid = a.attrelid \
+             WHERE a.attnum > 0 \
+               AND a.attrelid = 16395 \
+               AND i.indisprimary = 't' \
+               AND t.typname !~ '^geom' \
+               AND a.attnum = ANY(i.indkey) \
+             ORDER BY a.attnum",
+            &[],
+        )
+        .await
+        .expect("OGR primary-key probe should return a 4-column empty result");
+
+    assert!(rows.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ogr_geography_columns_probe_returns_matching_field_count() {
+    let (client, _conn) = connect().await;
+
+    let rows = client
+        .query(
+            "SELECT type, coord_dimension, srid \
+             FROM geography_columns \
+             WHERE f_table_name = 'ogr_visible' \
+               AND f_geography_column='wkb_geometry' \
+               AND f_table_schema = 'public'",
+            &[],
+        )
+        .await
+        .expect("OGR geography_columns probe should return a 3-column empty result");
+
+    assert!(rows.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ogr_inheritance_parent_probe_returns_relname_shape() {
+    let (client, _conn) = connect().await;
+
+    let rows = client
+        .query(
+            "SELECT pg_class.relname FROM pg_class \
+             WHERE oid = (SELECT pg_inherits.inhparent FROM pg_inherits \
+                          WHERE inhrelid = (SELECT c.oid FROM pg_class c, pg_namespace n \
+                                            WHERE c.relname = 'ogr_visible' \
+                                              AND c.relnamespace=n.oid \
+                                              AND n.nspname = 'public'))",
+            &[],
+        )
+        .await
+        .expect("OGR inheritance parent probe should return relname-shaped rows");
+
+    assert!(rows.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ogr_extended_cursor_fetch_returns_matching_feature_rows() {
+    let server = ServerHandle::start().await;
+    let (client, connection) = tokio_postgres::connect(&server.conn_str(), NoTls)
+        .await
+        .expect("connect");
+    let _conn = tokio::spawn(connection);
+
+    client
+        .simple_query(
+            "CREATE TABLE quackgis.main.ogr_cursor (id INT, wkb_geometry BINARY, name TEXT)",
+        )
+        .await
+        .expect("create OGR cursor table");
+    client
+        .simple_query(
+            "INSERT INTO quackgis.main.ogr_cursor VALUES \
+             (1, X'010100000000000000000000000000000000000000', 'origin')",
+        )
+        .await
+        .expect("insert OGR cursor row");
+
+    client.query("BEGIN", &[]).await.expect("begin");
+    client
+        .query(
+            "DECLARE OGRPGLayerReader0xabc CURSOR FOR \
+             SELECT \"wkb_geometry\", \"id\", \"name\" FROM \"ogr_cursor\"",
+            &[],
+        )
+        .await
+        .expect("declare OGR cursor");
+    let rows = client
+        .query("FETCH 500 IN OGRPGLayerReader0xabc", &[])
+        .await
+        .expect("fetch OGR cursor via extended protocol");
+    client.query("COMMIT", &[]).await.expect("commit");
+
+    assert_eq!(rows.len(), 1);
+}

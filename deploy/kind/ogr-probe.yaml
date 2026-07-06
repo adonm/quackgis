@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ogr-probe
+  namespace: quackgis
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: ogr
+          image: docker.io/qgis/qgis:ltr-questing
+          env:
+            - name: QUACKGIS_HOST
+              value: quackgis.quackgis.svc.cluster.local
+            - name: QUACKGIS_PORT
+              value: "5434"
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              run_ogr() {
+                "$@" 2> >(grep -v -e 'unexpected field count in "D" message' -e '^ERROR 1: *$' >&2)
+              }
+              export QUACKGIS_TABLE="ogr_probe_${RANDOM}_$(date +%s)"
+              python3 - <<'PY'
+              import os
+              import psycopg2
+
+              host = os.environ["QUACKGIS_HOST"]
+              port = int(os.environ["QUACKGIS_PORT"])
+              table = os.environ["QUACKGIS_TABLE"]
+
+              conn = psycopg2.connect(host=host, port=port, user="postgres", dbname="quackgis")
+              conn.autocommit = True
+              cur = conn.cursor()
+              cur.execute(f"CREATE TABLE quackgis.main.{table} (id INT, wkb_geometry BINARY, name TEXT)")
+              cur.execute(
+                  f"INSERT INTO quackgis.main.{table} VALUES "
+                  "(1, X'010100000000000000000000000000000000000000', 'origin')"
+              )
+              cur.execute(
+                  f"INSERT INTO quackgis.main.{table} VALUES "
+                  "(2, X'0101000000000000000000F03F000000000000F03F', 'one')"
+              )
+              cur.close()
+              conn.close()
+              PY
+
+              dsn="PG:host=${QUACKGIS_HOST} port=${QUACKGIS_PORT} user=postgres dbname=quackgis"
+              run_ogr ogrinfo "$dsn" "$QUACKGIS_TABLE" -so
+              run_ogr ogr2ogr -f GeoJSON /tmp/out.geojson "$dsn" "$QUACKGIS_TABLE"
+
+              python3 - <<'PY'
+              import json
+
+              with open("/tmp/out.geojson", "r", encoding="utf-8") as f:
+                  fc = json.load(f)
+
+              features = fc["features"]
+              names = sorted(feature["properties"].get("name") for feature in features)
+              geometry_types = [feature["geometry"]["type"] for feature in features]
+              print("feature_count", len(features))
+              print("names", names)
+              print("geometry_types", geometry_types)
+
+              assert len(features) == 2, features
+              assert names == ["one", "origin"], names
+              assert geometry_types == ["Point", "Point"], geometry_types
+              PY
