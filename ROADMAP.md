@@ -51,10 +51,10 @@ build the capability, ship from the fork.
 | # | Capability | Needed by | Upstream status | Plan |
 |---|---|---|---|---|
 | G1 | `geometry`/`geography` type OID on the wire | M2 | **Equivalent OID implemented.** `::geometry`/`::geography` casts still preprocess to `::bytea` (commit 912823e), and binary WKB columns whose name matches the spatial convention are now advertised on the wire and in `pg_attribute.atttypid` with dedicated sentinel type OIDs (`GEOMETRY_OID=90001` / `GEOGRAPHY_OID=90002`) via datafusion-postgres fork `2c35282`, with client type-resolution fixes in `2c2e5d9`. Wire payload is bytea-identical (raw WKB / hex-EWKB), so Martin/psql are unaffected; QGIS/GeoServer now see a distinct spatial type. PostGIS' real OIDs are dynamic per-install, so a fixed sentinel + QuackGIS `pg_type` typname shims keep catalog introspection consistent. | Closed for the equivalent path. A real PostGIS-OID-compatible registration is deferred until a client strictly requires `format_type`/`pg_type` row parity. |
-| G2 | pg_catalog depth for spatial-client introspection (pg_index, pg_am, regclass casts, `format_type`, array/oidvector columns) | M3 | **QGIS and OGR read-path catalog traces are green.** The common pg_catalog tables work natively, `pg_roles` stack overflow is fixed in `adonm/datafusion-postgres@quackgis/fixes`, and QuackGIS's `CatalogCompatHook` now shims PostGIS-wire boundary gaps by catalog surface: custom geometry/geography `pg_type` rows, layer/style existence checks, pg_class/pg_attribute/pg_index shape probes, description/inherits probes, synthetic `id` unique-index metadata, and key-column lookup. | Closed for QGIS + OGR read paths. General PostgreSQL index fidelity and extra metadata funcs remain M4+/GeoServer hardening. |
+| G2 | pg_catalog depth for spatial-client introspection (pg_index, pg_am, regclass casts, `format_type`, array/oidvector columns) | M3 | **QGIS and OGR catalog traces are green.** The common pg_catalog tables work natively, `pg_roles` stack overflow is fixed in `adonm/datafusion-postgres@quackgis/fixes`, and QuackGIS's `CatalogCompatHook` now shims PostGIS-wire boundary gaps by catalog surface: custom geometry/geography `pg_type` rows, layer/style existence checks, pg_class/pg_attribute/pg_index shape probes, description/inherits probes, schema-derived synthetic `id` unique-index metadata, and key-column lookup. | Closed for QGIS + OGR read/load paths. General PostgreSQL index fidelity and extra metadata funcs remain M4+/GeoServer hardening. |
 | G3 | SQL cursors: `DECLARE ... BINARY CURSOR` / `FETCH FORWARD n` (feature paging) | M3 | **Cursors work for the simple-query/libpq path** (psql, QGIS, GDAL). **BINARY cursor format FIXED in `adonm/datafusion-postgres@quackgis/fixes` (commit `98b3865`)** — `DECLARE x BINARY CURSOR` now returns raw binary-protocol bytes instead of hex-text bytea. Regression test `binary_cursor_returns_raw_bytes` verifies the wire bytes are i64 BE for `SELECT 42`. QuackGIS also carries a narrow PostgreSQL-driver cursor shim for OGR's `DECLARE OGRPGLayerReader...` / `FETCH ...` read path. **Remaining sub-gap**: general extended-protocol FETCH/portal suspension for pgjdbc/tokio-postgres still needs deeper pgwire work. | Fork active (BINARY patch upstreamable). General extended-protocol FETCH deferred until GeoServer/pgjdbc requires it. |
 | G4 | Portal suspension honoring `Execute.max_rows` (JDBC `setFetchSize`, GeoServer) | M4 | **Extended-protocol PREPARE/EXECUTE verified working through SedonaDB** (M0 spike); `setFetchSize` portal suspension still needs pgjdbc probe | Probe with pgjdbc; fix in the datafusion-postgres fork |
-| G5 | UPDATE/DELETE on DuckLake tables | M4 | **Basic single-table UPDATE/DELETE implemented in QuackGIS** via full-table rewrite/replace semantics over DuckLake writer API. Correct but not optimal; no delete files yet. | Native delete-file UPDATE/DELETE remains future optimization in datafusion-ducklake fork if performance requires it. |
+| G5 | UPDATE/DELETE on DuckLake tables | M4 | **Basic single-table DML implemented in QuackGIS** via full-table rewrite/replace semantics over DuckLake writer API. `INSERT`/`UPDATE`/`DELETE ... RETURNING` now returns edit-client refresh rows for simple and extended pgwire paths. Correct but not optimal; no delete files yet. | Native delete-file UPDATE/DELETE remains future optimization in datafusion-ducklake fork if performance requires it. |
 | G6 | Spec-compliant single-catalog PostgreSQL writes | M4+ | Missing — PG writes only via experimental non-spec multi-catalog layout | Extend the ducklake fork; SQLite catalog unblocks single-node until then |
 | G7 | File/partition pruning from DuckLake stats (bbox/quadkey layout) | M5 | **Generic predicate pushdown path validated**: datafusion-ducklake marks filters Inexact so Parquet can use stats and DataFusion reapplies filters. Spatial-layout pruning (bbox/quadkey/Hilbert) still missing. | Implement spatial layout columns + predicate rewrite at M5; fork datafusion-ducklake only if generic pruning hooks are insufficient. |
 | G8 | SQL time travel (`AS OF`) over DuckLake snapshots | M7 (nice-to-have) | Missing — programmatic snapshot selection only | Fork if/when prioritized |
@@ -141,11 +141,18 @@ and reads both geometries through QGIS's binary cursor path (`features_read 2`).
   paging) — done for the simple-query/libpq QGIS path (G3).
 - `ST_AsBinary(geom, 'NDR')` over WKB-backed Binary columns — done as a
   byte-preserving QuackGIS UDF overload for the QGIS fetch query.
-- Extent queries: `ST_Extent`, `ST_EstimatedExtent` (from DuckLake file
-  stats — cheap and accurate) remain a render/UX optimization.
-- Unique-key strategy for tables without declared PKs (row-id synthesis),
-  since there is no ctid; current read-path shim exposes conventional `id` as a
-  synthetic unique index.
+- Extent/SRID metadata: exact `ST_Extent` now returns PostGIS-style BOX bounds,
+  `ST_EstimatedExtent` returns NULL when no statistics are available so clients
+  can fall back to exact bounds, and `Find_SRID` mirrors the current
+  `geometry_columns.srid = 0` metadata. Per-row EWKB SRID tags now round-trip
+  through `ST_SetSRID`, `ST_GeomFromEWKT`, `ST_MakeEnvelope`, and
+  `ST_Transform`. DuckLake file-stat estimates and declared-SRID column
+  metadata remain future render/UX optimizations.
+- Unique-key strategy: real conventional `id` columns are exposed as
+  schema-derived synthetic unique indexes, and keyless spatial tables now get
+  `_quackgis_rowid` metadata plus a read projection (persisted for SQL-created
+  keyless tables, virtual for writer-backed tables). There is still no ctid;
+  edit-session row-id/RETURNING hardening remains M4.
 - Gate: headless PyQGIS suite in CI — add connection, list layers, render,
   identify, attribute filter.
 
@@ -153,14 +160,14 @@ Remaining M3 hardening before calling the milestone fully CI-ready:
 
 1. Promote the Kind PyQGIS Job into CI and extend it from add/read to render,
    identify, and attribute-filter assertions.
-2. Generalize QGIS key metadata: use real catalog/schema fields when available;
-   keep the synthetic `id` index only as a fallback and add a row-id fallback for
-   tables with no stable key.
-3. Add `ST_Extent` / `ST_EstimatedExtent` and SRID metadata polish so QGIS layer
-   canvas UX does not rely on full feature scans.
-4. Extend the in-cluster GDAL/OGR PostgreSQL-driver read probe into a full
-   load/read probe by adding the missing OGR write-path pieces (`ALTER TABLE`,
-   COPY or `PG_USE_COPY=NO` insert mode, and append metadata).
+2. Harden row-id fallback through QGIS edit/save traces; read-path metadata and
+   projection now cover both schema-derived `id` fields and keyless spatial
+   layers.
+3. Add DuckLake file-stat-backed `ST_EstimatedExtent` and declared-SRID
+   metadata so QGIS layer canvas UX does not rely on full feature scans.
+4. Promote the in-cluster GDAL/OGR PostgreSQL-driver load/read probe into CI;
+   the maintained gate now covers `ALTER TABLE ... ADD COLUMN` and
+   `PG_USE_COPY=NO` INSERT-mode append.
 
 ### M4 — Editing + GeoServer — gate: QGIS edit session, GeoServer WMS/WFS-T
 
@@ -170,8 +177,10 @@ PostGIS datastore publish + WMS/WFS request.
 
 - UPDATE/DELETE on DuckLake tables — delete-file support built in our
   datafusion-ducklake fork (G5; the highest-risk item, start earliest).
-- `INSERT ... RETURNING` / `UPDATE ... RETURNING` for QGIS/GeoServer feature
-  creation and post-save refresh.
+- `INSERT ... RETURNING` / `UPDATE ... RETURNING` / `DELETE ... RETURNING` for
+  QGIS/GeoServer feature creation and post-save refresh — basic single-table
+  simple/extended pgwire shapes now route through the DuckLake full-table
+  rewrite path.
 - Edit-session transaction semantics: buffer DML, commit as one DuckLake
   snapshot, and fail closed on rollback/error boundaries (G10).
 - JDBC path: extended-protocol prepared statements, Describe, fetch-size
@@ -261,9 +270,14 @@ PostGIS datastore publish + WMS/WFS request.
   into a runtime-only image, keeping normal Cargo `target/` caching in the dev
   loop. Use `just kind-build-image-container` for a clean container-native
   rebuild.
-- M3 OGR read-path Kind probe is green with GDAL's PostgreSQL driver:
-  `ogrinfo` sees the WKB-backed layer and `ogr2ogr -f GeoJSON` reads two Point
-  features back through pgwire. Write/load remains M4.
+- M3/M4 OGR load/read Kind probe is green with GDAL's PostgreSQL driver:
+  `ogrinfo` sees the WKB-backed layer, `ogr2ogr -f GeoJSON` reads two Point
+  features back through pgwire, and `ogr2ogr -append -addfields` loads GeoJSON
+  geometries/attributes through `PG_USE_COPY=NO` INSERT mode after
+  `ALTER TABLE ... ADD COLUMN`.
+- QGIS synthetic key metadata is schema-derived for conventional `id` fields:
+  `pg_index.indexrelid`, `indkey`, key-column lookup, and `pg_get_indexdef()` now
+  track the target table/column instead of hard-coding `points(id)`.
 - CI artifact workflow is mise-backed: pushes to `main`/`v*` validate the pinned
   dev toolchain, publish GHCR runtime images on non-PR refs, upload Linux x86_64
   binaries, and attach binaries to `v*` GitHub Releases.
@@ -273,13 +287,12 @@ PostGIS datastore publish + WMS/WFS request.
 1. **Lock QGIS read compatibility into CI.** Move `just kind-qgis-probe` into the
    automated gate, then add render/identify/filter assertions while preserving
    the current add-layer + binary-cursor feature-read checks.
-2. **Finish OGR write compatibility.** The Kind OGR read probe is in place;
-   next close the write path by supporting OGR's `ALTER TABLE ... ADD COLUMN`,
-   COPY/insert mode, and append metadata queries, then promote it to load +
-   read-back.
-3. **Generalize key metadata.** Replace hard-coded `points(id)` catalog shims
-   with schema-derived unique-key metadata where possible; add a safe row-id
-   fallback for read-only layers without a key.
+2. **Promote OGR load/read into CI.** The maintained Kind probe now covers OGR
+   read-back plus INSERT-mode append with `ALTER TABLE ... ADD COLUMN`; next
+   wire it into automation and replace hard-coded append metadata with
+   schema-derived catalog rows.
+3. **Add keyless-layer fallback.** Schema-derived `id` key metadata is in place;
+   next add a safe row-id fallback for read-only layers without an `id` column.
 4. **Start M4 from traces.** Capture QGIS edit/save and GeoServer
    datastore/WMS/WFS traces, then implement only the blocking SQL/protocol gaps:
    `RETURNING`, transaction buffering, pgjdbc fetch-size portals, and remaining

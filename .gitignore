@@ -2,9 +2,6 @@
 /target/
 **/target/
 
-# Spike build cache (spike is a standalone throwaway crate, not a workspace member)
-/spike/m00-wire-spike/target/
-
 # Local dev output (DuckLake catalogs, benchmark parquet, spill files, build cache)
 /build/
 

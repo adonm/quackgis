@@ -5,11 +5,23 @@
 
 mod common;
 
+use std::sync::Arc;
+
+use datafusion::arrow::array::{BinaryArray, StringArray};
+use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use datafusion::arrow::record_batch::RecordBatch;
+use datafusion_ducklake::{DuckLakeTableWriter, MetadataWriter, SqliteMetadataWriter};
+use object_store::local::LocalFileSystem;
+use quackgis_server::context::StoragePaths;
 use tokio_postgres::NoTls;
 
 use common::ServerHandle;
 
-async fn connect() -> (tokio_postgres::Client, tokio::task::JoinHandle<()>) {
+async fn connect() -> (
+    ServerHandle,
+    tokio_postgres::Client,
+    tokio::task::JoinHandle<()>,
+) {
     let server = ServerHandle::start().await;
     let (client, connection) = tokio_postgres::connect(&server.conn_str(), NoTls)
         .await
@@ -17,12 +29,56 @@ async fn connect() -> (tokio_postgres::Client, tokio::task::JoinHandle<()>) {
     let conn_task = tokio::spawn(async move {
         let _ = connection.await;
     });
-    (client, conn_task)
+    (server, client, conn_task)
+}
+
+fn point_wkb(x: f64, y: f64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(21);
+    out.push(1);
+    out.extend_from_slice(&1_u32.to_le_bytes());
+    out.extend_from_slice(&x.to_le_bytes());
+    out.extend_from_slice(&y.to_le_bytes());
+    out
+}
+
+async fn write_keyless_geo(paths: &StoragePaths, table: &str) {
+    let writer = Arc::new(
+        SqliteMetadataWriter::new_with_init(&paths.catalog_conn)
+            .await
+            .expect("writer"),
+    );
+    writer
+        .set_data_path(&paths.data_path)
+        .expect("set data path");
+    let snapshot = writer.create_snapshot().expect("snapshot");
+    writer
+        .get_or_create_schema("main", None, snapshot)
+        .expect("main schema");
+
+    let wkbs = [point_wkb(0.0, 0.0), point_wkb(1.0, 1.0)];
+    let geom_values: Vec<Option<&[u8]>> = wkbs.iter().map(|v| Some(v.as_slice())).collect();
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("name", DataType::Utf8, true),
+            Field::new("geom", DataType::Binary, true),
+        ])),
+        vec![
+            Arc::new(StringArray::from(vec!["a", "b"])),
+            Arc::new(BinaryArray::from(geom_values)),
+        ],
+    )
+    .expect("batch");
+    let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(LocalFileSystem::new());
+    DuckLakeTableWriter::new(writer, object_store)
+        .expect("table writer")
+        .write_table("main", table, &[batch])
+        .await
+        .expect("write keyless geo table");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn wire_spatial_queries_execute() {
-    let (client, _conn) = connect().await;
+    let (_server, client, _conn) = connect().await;
 
     // Spatial function execution through the wire.
     let point: String = client
@@ -72,10 +128,10 @@ async fn wire_spatial_queries_execute() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn ddl_in_memory_table_roundtrip() {
-    // M0 has no persistence — but in-process DataFusion tables should round-trip
-    // within a single SessionContext. This pins the contract for M1 (DuckLake):
-    // whatever CREATE TABLE semantics land at M1 must keep this test green.
-    let (client, _conn) = connect().await;
+    // Unqualified public tables should round-trip within a single
+    // SessionContext. Clients may use these names for scratch or default-schema
+    // writes, and QuackGIS routes them to the DuckLake-backed public alias.
+    let (_server, client, _conn) = connect().await;
 
     client
         .batch_execute(
@@ -104,7 +160,7 @@ async fn wire_cursors_declare_fetch_close() {
     // "DataRow field count does not match the number of columns" — the
     // CursorStatementHook stores a StoredStatement with no schema and FETCH
     // doesn't emit a matching RowDescription. Tracked as a G3 follow-up.
-    let (client, _conn) = connect().await;
+    let (_server, client, _conn) = connect().await;
 
     let declare_rows = client
         .simple_query("DECLARE c CURSOR FOR SELECT n FROM generate_series(1, 5) AS t(n)")
@@ -162,7 +218,7 @@ async fn wire_extended_protocol_describe() {
     // Some clients (psycopg3, pgjdbc) rely on Describe to learn the parameter
     // types of a prepared statement before binding. This test exercises that
     // path through tokio-postgres' prepared-statement caching.
-    let (client, _conn) = connect().await;
+    let (_server, client, _conn) = connect().await;
 
     let stmt = client
         .prepare("SELECT ST_AsText(ST_GeomFromText($1))")
@@ -187,7 +243,7 @@ async fn pg_roles_does_not_crash() {
     // the inner T), causing stack overflow on any access to pg_roles. The
     // fix lives in adonm/datafusion-postgres@quackgis/fixes (commit 2c43dc6).
     // If this test starts failing again, the upstream regression returned.
-    let (client, _conn) = connect().await;
+    let (_server, client, _conn) = connect().await;
 
     let rows = client
         .query(
@@ -214,7 +270,7 @@ async fn binary_cursor_returns_raw_bytes() {
     // We verify via tokio-postgres' simple_query (the path that already works
     // for cursors): the text cursor returns ASCII digits, the binary cursor
     // returns raw big-endian bytes.
-    let (client, _conn) = connect().await;
+    let (_server, client, _conn) = connect().await;
 
     client
         .simple_query("DECLARE bc CURSOR FOR SELECT 42")
@@ -280,7 +336,7 @@ async fn binary_cursor_returns_raw_bytes() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn postgis_metadata_surface_works() {
-    let (client, _conn) = connect().await;
+    let (_server, client, _conn) = connect().await;
 
     // PostGIS_Lib_Version() — Martin startup gate
     let ver: String = client
@@ -316,6 +372,96 @@ async fn postgis_metadata_surface_works() {
         .expect("spatial_ref_sys")
         .get(0);
     assert_eq!(srid_count, 2);
+
+    let found_srid: i32 = client
+        .query_one("SELECT Find_SRID('public', 'points', 'geom')", &[])
+        .await
+        .expect("Find_SRID metadata lookup")
+        .get(0);
+    assert_eq!(found_srid, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn postgis_extent_surface_returns_box2d_bounds() {
+    let server = ServerHandle::start().await;
+    let (client, connection) = tokio_postgres::connect(&server.conn_str(), NoTls)
+        .await
+        .expect("connect");
+    let _conn = tokio::spawn(connection);
+
+    client
+        .batch_execute(
+            "CREATE TABLE quackgis.main.extent_points (id INT, geom BINARY);
+             INSERT INTO quackgis.main.extent_points VALUES
+               (1, X'010100000000000000000000000000000000000000'),
+               (2, X'010100000000000000000000400000000000000840'),
+               (3, NULL);",
+        )
+        .await
+        .expect("create extent fixtures");
+
+    let exact: String = client
+        .query_one("SELECT ST_Extent(geom) FROM public.extent_points", &[])
+        .await
+        .expect("exact PostGIS extent")
+        .get(0);
+    assert_eq!(exact, "BOX(0 0,2 3)");
+
+    let exact_cast: String = client
+        .query_one(
+            "SELECT ST_Extent(geom::geometry) FROM public.extent_points",
+            &[],
+        )
+        .await
+        .expect("exact PostGIS extent with geometry cast")
+        .get(0);
+    assert_eq!(exact_cast, "BOX(0 0,2 3)");
+
+    // Without PostgreSQL statistics, PostGIS may return NULL here; clients
+    // such as QGIS/GDAL then fall back to exact ST_Extent for layer bounds.
+    let estimated: Option<String> = client
+        .query_one(
+            "SELECT ST_EstimatedExtent('public', 'extent_points', 'geom')",
+            &[],
+        )
+        .await
+        .expect("estimated PostGIS extent")
+        .get(0);
+    assert_eq!(estimated, None);
+
+    let estimated_parent_only: Option<String> = client
+        .query_one(
+            "SELECT ST_EstimatedExtent('public', 'extent_points', 'geom', true)",
+            &[],
+        )
+        .await
+        .expect("estimated PostGIS extent parent-only overload")
+        .get(0);
+    assert_eq!(estimated_parent_only, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn postgis_srid_metadata_functions_roundtrip_ewkb_tags() {
+    let (_server, client, _conn) = connect().await;
+
+    let row = client
+        .query_one(
+            "SELECT \
+               ST_SRID(ST_SetSRID(ST_GeomFromText('POINT(1 2)'), 4326)), \
+               ST_SRID(ST_GeomFromEWKT('SRID=27700;POINT(1 2)')), \
+               ST_SRID(ST_SetSRID(ST_GeomFromEWKT('SRID=27700;POINT(1 2)'), 0)), \
+               ST_SRID(ST_MakeEnvelope(0.0, 0.0, 1.0, 1.0, 3857)), \
+               ST_SRID(ST_Transform(ST_SetSRID(ST_GeomFromText('POINT(0 0)'), 4326), 3857))",
+            &[],
+        )
+        .await
+        .expect("SRID metadata function roundtrip");
+
+    assert_eq!(row.get::<_, i32>(0), 4326);
+    assert_eq!(row.get::<_, i32>(1), 27700);
+    assert_eq!(row.get::<_, i32>(2), 0);
+    assert_eq!(row.get::<_, i32>(3), 3857);
+    assert_eq!(row.get::<_, i32>(4), 3857);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -375,7 +521,7 @@ async fn geometry_columns_discovers_tables_with_geom_column() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn qgis_pg_type_lookup_resolves_custom_geometry_oid() {
-    let (client, _conn) = connect().await;
+    let (_server, client, _conn) = connect().await;
 
     let messages = client
         .simple_query(
@@ -422,7 +568,7 @@ async fn qgis_pg_type_lookup_resolves_custom_geometry_oid() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn qgis_primary_key_catalog_shim_exposes_synthetic_index() {
-    let (client, _conn) = connect().await;
+    let (_server, client, _conn) = connect().await;
 
     let index_rows = client
         .simple_query(
@@ -487,6 +633,305 @@ async fn qgis_primary_key_catalog_shim_exposes_synthetic_index() {
         _ => None,
     });
     assert_eq!(layer_styles_exists, Some("f"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn qgis_primary_key_catalog_shim_uses_table_schema() {
+    let server = ServerHandle::start().await;
+    let (client, connection) = tokio_postgres::connect(&server.conn_str(), NoTls)
+        .await
+        .expect("connect");
+    let _conn = tokio::spawn(connection);
+
+    client
+        .simple_query("CREATE TABLE quackgis.main.roads_keyed (name TEXT, id INT, geom BINARY)")
+        .await
+        .expect("create keyed table");
+
+    let index_rows = client
+        .simple_query(
+            "SELECT indexrelid FROM pg_index WHERE indrelid='\"public\".\"roads_keyed\"'::regclass \
+             AND (indisprimary OR indisunique) ORDER BY CASE WHEN indisprimary THEN 1 ELSE 2 END LIMIT 1",
+        )
+        .await
+        .expect("schema-derived indexrelid lookup");
+    let index_oid = index_rows.iter().find_map(|message| match message {
+        tokio_postgres::SimpleQueryMessage::Row(row) => row.get("indexrelid"),
+        _ => None,
+    });
+    let index_oid = index_oid.expect("synthetic index oid for roads_keyed");
+    assert_ne!(
+        index_oid, "90101",
+        "non-points tables should not reuse the legacy points synthetic OID"
+    );
+
+    let indkey_rows = client
+        .simple_query(&format!(
+            "SELECT indkey FROM pg_index WHERE indexrelid={index_oid}"
+        ))
+        .await
+        .expect("schema-derived indkey lookup");
+    let indkey = indkey_rows.iter().find_map(|message| match message {
+        tokio_postgres::SimpleQueryMessage::Row(row) => row.get("indkey"),
+        _ => None,
+    });
+    assert_eq!(indkey, Some("2"), "id is the second column");
+
+    let key_column_rows = client
+        .simple_query(&format!(
+            "SELECT attname,attnotnull FROM pg_index,pg_attribute WHERE indexrelid={index_oid} \
+             AND indrelid=attrelid AND pg_attribute.attnum=any(pg_index.indkey)"
+        ))
+        .await
+        .expect("schema-derived primary-key column lookup");
+    let key_column = key_column_rows.iter().find_map(|message| match message {
+        tokio_postgres::SimpleQueryMessage::Row(row) => Some((
+            row.get("attname").unwrap_or_default(),
+            row.get("attnotnull").unwrap_or_default(),
+        )),
+        _ => None,
+    });
+    assert_eq!(key_column, Some(("id", "t")));
+
+    let def_rows = client
+        .simple_query(&format!("SELECT pg_get_indexdef({index_oid})"))
+        .await
+        .expect("schema-derived pg_get_indexdef lookup");
+    let index_def = def_rows.iter().find_map(|message| match message {
+        tokio_postgres::SimpleQueryMessage::Row(row) => row.get("pg_get_indexdef"),
+        _ => None,
+    });
+    assert_eq!(
+        index_def,
+        Some("CREATE UNIQUE INDEX roads_keyed_pkey ON public.roads_keyed (id)")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn qgis_keyless_layer_gets_synthetic_rowid_metadata_and_projection() {
+    let server = ServerHandle::start().await;
+    let (client, connection) = tokio_postgres::connect(&server.conn_str(), NoTls)
+        .await
+        .expect("connect");
+    let _conn = tokio::spawn(connection);
+
+    client
+        .batch_execute(
+            "CREATE TABLE quackgis.main.keyless_qgis (name TEXT, geom BINARY);
+             INSERT INTO quackgis.main.keyless_qgis (name, geom) VALUES
+               ('a', X'010100000000000000000000000000000000000000'),
+               ('b', X'0101000000000000000000f03f000000000000f03f');",
+        )
+        .await
+        .expect("create keyless spatial table");
+
+    let rows = client
+        .query(
+            "SELECT \"_quackgis_rowid\", name FROM public.keyless_qgis ORDER BY \"_quackgis_rowid\"",
+            &[],
+        )
+        .await
+        .expect("QGIS synthetic rowid feature projection");
+    let got: Vec<(i64, String)> = rows
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    assert_eq!(got, vec![(1, "a".to_string()), (2, "b".to_string())]);
+
+    let index_rows = client
+        .simple_query(
+            "SELECT indexrelid FROM pg_index WHERE indrelid='\"public\".\"keyless_qgis\"'::regclass \
+             AND (indisprimary OR indisunique) ORDER BY CASE WHEN indisprimary THEN 1 ELSE 2 END LIMIT 1",
+        )
+        .await
+        .expect("QGIS keyless indexrelid lookup");
+    let index_oid = index_rows
+        .iter()
+        .find_map(|message| match message {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get("indexrelid"),
+            _ => None,
+        })
+        .expect("synthetic rowid index oid");
+
+    let indkey_rows = client
+        .simple_query(&format!(
+            "SELECT indkey FROM pg_index WHERE indexrelid={index_oid}"
+        ))
+        .await
+        .expect("QGIS keyless indkey lookup");
+    let indkey = indkey_rows.iter().find_map(|message| match message {
+        tokio_postgres::SimpleQueryMessage::Row(row) => row.get("indkey"),
+        _ => None,
+    });
+    assert_eq!(indkey, Some("1"));
+
+    let key_column_rows = client
+        .simple_query(&format!(
+            "SELECT attname,attnotnull FROM pg_index,pg_attribute WHERE indexrelid={index_oid} \
+             AND indrelid=attrelid AND pg_attribute.attnum=any(pg_index.indkey)"
+        ))
+        .await
+        .expect("QGIS keyless primary-key column lookup");
+    let key_column = key_column_rows.iter().find_map(|message| match message {
+        tokio_postgres::SimpleQueryMessage::Row(row) => Some((
+            row.get("attname").unwrap_or_default(),
+            row.get("attnotnull").unwrap_or_default(),
+        )),
+        _ => None,
+    });
+    assert_eq!(key_column, Some(("_quackgis_rowid", "t")));
+
+    let def_rows = client
+        .simple_query(&format!("SELECT pg_get_indexdef({index_oid})"))
+        .await
+        .expect("QGIS keyless pg_get_indexdef lookup");
+    let index_def = def_rows.iter().find_map(|message| match message {
+        tokio_postgres::SimpleQueryMessage::Row(row) => row.get("pg_get_indexdef"),
+        _ => None,
+    });
+    assert_eq!(
+        index_def,
+        Some("CREATE UNIQUE INDEX keyless_qgis_pkey ON public.keyless_qgis (_quackgis_rowid)")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn qgis_keyless_writer_table_gets_virtual_rowid_projection() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let paths = StoragePaths::new(
+        tmp.path().join("quackgis.db").to_str().unwrap(),
+        tmp.path().join("data").to_str().unwrap(),
+    )
+    .expect("storage paths");
+    write_keyless_geo(&paths, "writer_keyless_qgis").await;
+
+    let server = ServerHandle::start_with_tempdir(tmp).await;
+    let (client, connection) = tokio_postgres::connect(&server.conn_str(), NoTls)
+        .await
+        .expect("connect");
+    let _conn = tokio::spawn(connection);
+
+    let rows = client
+        .query(
+            "SELECT \"_quackgis_rowid\", name FROM public.writer_keyless_qgis ORDER BY \"_quackgis_rowid\"",
+            &[],
+        )
+        .await
+        .expect("virtual rowid projection for writer-backed keyless table");
+    let got: Vec<(i64, String)> = rows
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    assert_eq!(got, vec![(1, "a".to_string()), (2, "b".to_string())]);
+
+    let index_rows = client
+        .simple_query(
+            "SELECT indexrelid FROM pg_index WHERE indrelid='\"public\".\"writer_keyless_qgis\"'::regclass \
+             AND (indisprimary OR indisunique) ORDER BY CASE WHEN indisprimary THEN 1 ELSE 2 END LIMIT 1",
+        )
+        .await
+        .expect("QGIS writer-backed keyless indexrelid lookup");
+    let index_oid = index_rows
+        .iter()
+        .find_map(|message| match message {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get("indexrelid"),
+            _ => None,
+        })
+        .expect("virtual synthetic rowid index oid");
+
+    let indkey_rows = client
+        .simple_query(&format!(
+            "SELECT indkey FROM pg_index WHERE indexrelid={index_oid}"
+        ))
+        .await
+        .expect("QGIS writer-backed keyless indkey lookup");
+    let indkey = indkey_rows.iter().find_map(|message| match message {
+        tokio_postgres::SimpleQueryMessage::Row(row) => row.get("indkey"),
+        _ => None,
+    });
+    assert_eq!(indkey, Some("1"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn qgis_edit_save_shape_dml_returning_roundtrips_rowid() {
+    let server = ServerHandle::start().await;
+    let (client, connection) = tokio_postgres::connect(&server.conn_str(), NoTls)
+        .await
+        .expect("connect");
+    let _conn = tokio::spawn(connection);
+
+    client
+        .batch_execute("CREATE TABLE public.qgis_edit_returning (name TEXT, geom BINARY)")
+        .await
+        .expect("create keyless edit table");
+
+    let inserted = client
+        .query(
+            "INSERT INTO public.qgis_edit_returning (name, geom) VALUES
+              ('draft', X'010100000000000000000000000000000000000000')
+             RETURNING \"_quackgis_rowid\", name, ST_AsText(ST_GeomFromWKB(geom))",
+            &[],
+        )
+        .await
+        .expect("QGIS-shaped INSERT RETURNING");
+    assert_eq!(inserted.len(), 1);
+    let rowid: i64 = inserted[0].get(0);
+    let name: String = inserted[0].get(1);
+    let wkt: String = inserted[0].get(2);
+    assert_eq!(rowid, 1);
+    assert_eq!(name, "draft");
+    assert_eq!(wkt, "POINT(0 0)");
+
+    let updated = client
+        .query(
+            "UPDATE public.qgis_edit_returning
+             SET name = 'saved'
+             WHERE \"_quackgis_rowid\" = 1
+             RETURNING \"_quackgis_rowid\", name",
+            &[],
+        )
+        .await
+        .expect("QGIS-shaped UPDATE RETURNING");
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].get::<_, i64>(0), 1);
+    assert_eq!(updated[0].get::<_, String>(1), "saved");
+
+    let deleted = client
+        .query(
+            "DELETE FROM public.qgis_edit_returning
+             WHERE \"_quackgis_rowid\" = 1
+             RETURNING \"_quackgis_rowid\", name",
+            &[],
+        )
+        .await
+        .expect("QGIS-shaped DELETE RETURNING");
+    assert_eq!(deleted.len(), 1);
+    assert_eq!(deleted[0].get::<_, i64>(0), 1);
+    assert_eq!(deleted[0].get::<_, String>(1), "saved");
+
+    let count: i64 = client
+        .query_one("SELECT count(*) FROM public.qgis_edit_returning", &[])
+        .await
+        .expect("post-delete count")
+        .get(0);
+    assert_eq!(count, 0);
+
+    let simple_insert = client
+        .simple_query(
+            "INSERT INTO public.qgis_edit_returning (name, geom) VALUES
+              ('simple', X'0101000000000000000000f03f000000000000f03f')
+             RETURNING \"_quackgis_rowid\", name",
+        )
+        .await
+        .expect("simple-query INSERT RETURNING");
+    let simple_row = simple_insert.iter().find_map(|message| match message {
+        tokio_postgres::SimpleQueryMessage::Row(row) => Some((
+            row.get("_quackgis_rowid").unwrap_or_default().to_string(),
+            row.get("name").unwrap_or_default().to_string(),
+        )),
+        _ => None,
+    });
+    assert_eq!(simple_row, Some(("1".to_string(), "simple".to_string())));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -566,7 +1011,7 @@ async fn ogr_table_listing_query_does_not_cast_pg_class_literal() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn ogr_postgis_type_probe_returns_empty_oid_typname_shape() {
-    let (client, _conn) = connect().await;
+    let (_server, client, _conn) = connect().await;
 
     let messages = client
         .simple_query(
@@ -585,7 +1030,7 @@ async fn ogr_postgis_type_probe_returns_empty_oid_typname_shape() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn ogr_column_listing_query_returns_matching_field_count() {
-    let (client, _conn) = connect().await;
+    let (_server, client, _conn) = connect().await;
 
     let rows = client
         .query(
@@ -625,7 +1070,7 @@ async fn ogr_column_listing_query_returns_matching_field_count() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn ogr_primary_key_probe_returns_matching_field_count() {
-    let (client, _conn) = connect().await;
+    let (_server, client, _conn) = connect().await;
 
     let rows = client
         .query(
@@ -650,7 +1095,7 @@ async fn ogr_primary_key_probe_returns_matching_field_count() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn ogr_geography_columns_probe_returns_matching_field_count() {
-    let (client, _conn) = connect().await;
+    let (_server, client, _conn) = connect().await;
 
     let rows = client
         .query(
@@ -669,7 +1114,7 @@ async fn ogr_geography_columns_probe_returns_matching_field_count() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn ogr_inheritance_parent_probe_returns_relname_shape() {
-    let (client, _conn) = connect().await;
+    let (_server, client, _conn) = connect().await;
 
     let rows = client
         .query(
@@ -725,4 +1170,77 @@ async fn ogr_extended_cursor_fetch_returns_matching_feature_rows() {
     client.query("COMMIT", &[]).await.expect("commit");
 
     assert_eq!(rows.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ogr_write_load_shape_alter_add_column_and_insert_roundtrips() {
+    let server = ServerHandle::start().await;
+    let (client, connection) = tokio_postgres::connect(&server.conn_str(), NoTls)
+        .await
+        .expect("connect");
+    let _conn = tokio::spawn(connection);
+
+    // OGR append-with-addfields writes through the PostgreSQL `public` schema,
+    // first creating/inspecting a spatial table and then adding source fields
+    // before INSERT. The actual Kind probe keeps this test name as provenance;
+    // this Rust regression pins the DuckLake write-routing pieces directly.
+    client
+        .batch_execute(
+            "CREATE TABLE public.ogr_write_load (id INT, wkb_geometry GEOMETRY(Point,4326));
+             ALTER TABLE public.ogr_write_load ADD COLUMN name VARCHAR;",
+        )
+        .await
+        .expect("OGR-shaped CREATE/ALTER");
+
+    client
+        .execute(
+            "ALTER TABLE \"ogr_write_load\" ADD COLUMN \"category\" VARCHAR",
+            &[],
+        )
+        .await
+        .expect("OGR extended ALTER ADD COLUMN");
+    client
+        .execute(
+            r#"INSERT INTO "ogr_write_load" ("wkb_geometry" , "name", "category") VALUES (E'\\001\\001\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000@\\000\\000\\000\\000\\000\\000\\000@', 'load-a', 'client')"#,
+            &[],
+        )
+        .await
+        .expect("OGR extended INSERT first feature");
+    client
+        .execute(
+            r#"INSERT INTO "ogr_write_load" ("wkb_geometry" , "name", "category") VALUES (E'\\001\\001\\000\\000\\000\\000\\000\\000\\000\\000\\000\\010@\\000\\000\\000\\000\\000\\000\\010@', 'load-b', 'client')"#,
+            &[],
+        )
+        .await
+        .expect("OGR extended INSERT second feature");
+
+    let rows = client
+        .query(
+            "SELECT name, ST_AsText(ST_GeomFromWKB(wkb_geometry)), category
+             FROM public.ogr_write_load
+             ORDER BY name",
+            &[],
+        )
+        .await
+        .expect("read back OGR-loaded rows");
+
+    let got: Vec<(String, String, Option<String>)> = rows
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2)))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (
+                "load-a".to_string(),
+                "POINT(2 2)".to_string(),
+                Some("client".to_string())
+            ),
+            (
+                "load-b".to_string(),
+                "POINT(3 3)".to_string(),
+                Some("client".to_string())
+            ),
+        ]
+    );
 }

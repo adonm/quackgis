@@ -142,7 +142,7 @@ fn is_binary_type(dt: &datafusion::arrow::datatypes::DataType) -> bool {
     )
 }
 
-fn is_geometry_column_name(name: &str) -> bool {
+pub(crate) fn is_geometry_column_name(name: &str) -> bool {
     let lower = name.to_lowercase();
     GEOMETRY_COLUMN_NAMES.contains(&lower.as_str())
 }

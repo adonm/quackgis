@@ -21,6 +21,7 @@ pub fn register_postgis_compat(ctx: &SessionContext) -> DFResult<()> {
     register_pg_recovery_udf(ctx)?;
     register_privilege_udfs(ctx)?;
     register_current_setting_udf(ctx)?;
+    register_find_srid_udf(ctx)?;
     register_regexp_matches_udf(ctx)?;
     register_jsonb_object_agg(ctx)?;
     register_geography_columns(ctx)?;
@@ -124,6 +125,41 @@ fn register_current_setting_udf(ctx: &SessionContext) -> DFResult<()> {
                 _ => String::new(),
             };
             Ok(datafusion::scalar::ScalarValue::Utf8(Some(val)).into())
+        }),
+    ));
+    Ok(())
+}
+
+fn register_find_srid_udf(ctx: &SessionContext) -> DFResult<()> {
+    // PostGIS Find_SRID(schema, table, column) resolves typmod/catalog metadata.
+    // QuackGIS stores geometry as WKB bytes and currently exposes unknown SRID
+    // as 0 in geometry_columns, so mirror that catalog value. Clients use this
+    // as metadata discovery; exact CRS tagging remains per-row EWKB.
+    ctx.register_udf(datafusion::logical_expr::create_udf(
+        "find_srid",
+        vec![DataType::Utf8, DataType::Utf8, DataType::Utf8],
+        DataType::Int32,
+        Volatility::Stable,
+        Arc::new(|args| {
+            let n = args
+                .iter()
+                .find_map(|arg| match arg {
+                    ColumnarValue::Array(arr) => Some(arr.len()),
+                    ColumnarValue::Scalar(_) => None,
+                })
+                .unwrap_or(1);
+            let values = (0..n).map(|row| {
+                match (
+                    string_arg_value(&args[0], row)?,
+                    string_arg_value(&args[1], row)?,
+                    string_arg_value(&args[2], row)?,
+                ) {
+                    (Some(_), Some(_), Some(_)) => Ok(Some(0_i32)),
+                    _ => Ok(None),
+                }
+            });
+            let values = values.collect::<DFResult<Vec<_>>>()?;
+            Ok(ColumnarValue::Array(Arc::new(Int32Array::from(values))))
         }),
     ));
     Ok(())

@@ -211,8 +211,8 @@ mod tests {
     use super::*;
 
     /// Smoke: context builds, exposes SedonaDB ST_* functions, and answers
-    /// spatial SQL. Same gate as the M0 wire spike but driven in-process —
-    /// catches regressions in either upstream without needing psql on the host.
+    /// spatial SQL in-process so regressions in either upstream are caught
+    /// without needing psql on the host.
     #[tokio::test(flavor = "multi_thread")]
     async fn context_executes_spatial_sql() {
         let tmp = tempfile::TempDir::new().expect("tempdir");

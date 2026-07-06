@@ -7,7 +7,8 @@
 use std::sync::Arc;
 
 use datafusion::arrow::array::{
-    Array, ArrayRef, BinaryArray, BooleanArray, Float64Array, Int32Array, Int64Array, StringArray,
+    Array, ArrayRef, BinaryArray, BinaryViewArray, BooleanArray, Float64Array, Int32Array,
+    Int64Array, StringArray,
 };
 use datafusion::arrow::datatypes::DataType;
 use datafusion::common::{DataFusionError, Result as DFResult};
@@ -33,6 +34,8 @@ pub fn register_spatial_udfs(ctx: &SessionContext) -> DFResult<()> {
     register_st_curvetoline(ctx)?;
     register_st_asmvtgeom(ctx)?;
     register_st_asmvt(ctx)?;
+    register_st_extent(ctx)?;
+    register_st_estimatedextent(ctx)?;
     register_st_asbinary(ctx)?;
     register_st_transform_real(ctx)?;
     register_bbox_overlap(ctx)?;
@@ -318,10 +321,11 @@ fn rect_from_wkb(wkb: &[u8]) -> DFResult<Option<Rect>> {
     }))
 }
 
-fn rect_wkb(min_x: f64, min_y: f64, max_x: f64, max_y: f64, _srid: i64) -> DFResult<Vec<u8>> {
-    wkb_rect(min_x, min_y, max_x, max_y).map_err(|e| {
+fn rect_wkb(min_x: f64, min_y: f64, max_x: f64, max_y: f64, srid: i64) -> DFResult<Vec<u8>> {
+    let wkb = wkb_rect(min_x, min_y, max_x, max_y).map_err(|e| {
         DataFusionError::Execution(format!("failed to write WKB rectangle with Sedona: {e}"))
-    })
+    })?;
+    tag_wkb_srid_i64(&wkb, srid)
 }
 
 // ─── Array extraction helpers ──────────────────────────────────────────────
@@ -374,6 +378,30 @@ fn as_boolean_array_ref(arr: &ArrayRef) -> DFResult<&BooleanArray> {
 }
 
 fn register_qgis_geometry_metadata(ctx: &SessionContext) -> DFResult<()> {
+    ctx.register_udf(create_udf(
+        "st_setsrid",
+        vec![DataType::Binary, DataType::Int64],
+        DataType::Binary,
+        Volatility::Immutable,
+        Arc::new(|args| {
+            let arrays = columnar_values_to_arrays(args)?;
+            let geom = as_binary_array_ref(&arrays[0])?;
+            let srid = as_i64_array_ref(&arrays[1])?;
+            let out: Vec<Option<Vec<u8>>> = (0..geom.len())
+                .map(|i| {
+                    if geom.is_null(i) || srid.is_null(i) {
+                        None
+                    } else {
+                        tag_wkb_srid_i64(geom.value(i), srid.value(i)).ok()
+                    }
+                })
+                .collect();
+            Ok(ColumnarValue::Array(Arc::new(BinaryArray::from_iter(
+                out.iter().map(|v| v.as_deref()),
+            ))))
+        }),
+    ));
+
     ctx.register_udf(create_udf(
         "st_srid",
         vec![DataType::Binary],
@@ -488,6 +516,50 @@ fn wkb_srid(wkb: &[u8]) -> Option<i32> {
     }
 }
 
+fn tag_wkb_srid_i64(wkb: &[u8], srid: i64) -> DFResult<Vec<u8>> {
+    let srid = i32::try_from(srid).map_err(|_| {
+        DataFusionError::Execution(format!("SRID {srid} is outside the supported i32 range"))
+    })?;
+    tag_wkb_srid(wkb, srid).ok_or_else(|| {
+        DataFusionError::Execution("failed to write EWKB SRID tag on invalid WKB".into())
+    })
+}
+
+fn tag_wkb_srid(wkb: &[u8], srid: i32) -> Option<Vec<u8>> {
+    if wkb.len() < 5 {
+        return None;
+    }
+    let raw = wkb_type_id(wkb)?;
+    let has_srid = (raw & 0x2000_0000) != 0;
+    let body_offset = if has_srid { 9 } else { 5 };
+    if wkb.len() < body_offset {
+        return None;
+    }
+
+    let tagged_type = if srid == 0 {
+        raw & !0x2000_0000
+    } else {
+        raw | 0x2000_0000
+    };
+    let mut out = Vec::with_capacity(wkb.len() + if srid == 0 || has_srid { 0 } else { 4 });
+    out.push(wkb[0]);
+    write_u32_endian(&mut out, tagged_type, wkb[0])?;
+    if srid != 0 {
+        write_u32_endian(&mut out, srid as u32, wkb[0])?;
+    }
+    out.extend_from_slice(&wkb[body_offset..]);
+    Some(out)
+}
+
+fn write_u32_endian(out: &mut Vec<u8>, value: u32, byte_order: u8) -> Option<()> {
+    match byte_order {
+        0 => out.extend_from_slice(&value.to_be_bytes()),
+        1 => out.extend_from_slice(&value.to_le_bytes()),
+        _ => return None,
+    }
+    Some(())
+}
+
 // ─── ST_AsMVTGeom(geom, bounds, extent, buffer, clip_geom) ─────────────────
 
 fn register_st_asmvtgeom(ctx: &SessionContext) -> DFResult<()> {
@@ -575,6 +647,89 @@ fn register_st_asmvt(ctx: &SessionContext) -> DFResult<()> {
         Arc::new(vec![DataType::Binary]),
     ));
     Ok(())
+}
+
+// ─── ST_Extent — aggregate bbox as PostGIS BOX text ────────────────────────
+
+fn register_st_extent(ctx: &SessionContext) -> DFResult<()> {
+    use datafusion_functions_aggregate_common::accumulator::AccumulatorArgs;
+    use datafusion_functions_aggregate_common::accumulator::AccumulatorFactoryFunction;
+
+    let accumulator: AccumulatorFactoryFunction = Arc::new(|_args: AccumulatorArgs| {
+        Ok(Box::<ExtentAccumulator>::default()
+            as Box<
+                dyn datafusion_expr_common::accumulator::Accumulator,
+            >)
+    });
+
+    ctx.register_udaf(datafusion::logical_expr::create_udaf(
+        "st_extent",
+        vec![DataType::Binary],
+        Arc::new(DataType::Utf8),
+        Volatility::Immutable,
+        accumulator,
+        Arc::new(vec![
+            DataType::Float64,
+            DataType::Float64,
+            DataType::Float64,
+            DataType::Float64,
+        ]),
+    ));
+    Ok(())
+}
+
+// ─── ST_EstimatedExtent — no statistics yet; NULL triggers exact fallback ──
+
+fn register_st_estimatedextent(ctx: &SessionContext) -> DFResult<()> {
+    ctx.register_udf(ScalarUDF::new_from_impl(STEstimatedExtent::new()));
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct STEstimatedExtent {
+    signature: Signature,
+}
+
+impl STEstimatedExtent {
+    fn new() -> Self {
+        Self {
+            signature: Signature::one_of(
+                vec![
+                    TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8]),
+                    TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8, DataType::Utf8]),
+                    TypeSignature::Exact(vec![
+                        DataType::Utf8,
+                        DataType::Utf8,
+                        DataType::Utf8,
+                        DataType::Boolean,
+                    ]),
+                ],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
+
+impl ScalarUDFImpl for STEstimatedExtent {
+    fn name(&self) -> &str {
+        "st_estimatedextent"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Utf8)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let arrays = columnar_values_to_arrays(&args.args)?;
+        let len = arrays.first().map_or(1, |array| array.len());
+        Ok(ColumnarValue::Array(Arc::new(StringArray::from_iter(
+            std::iter::repeat_n(None::<&str>, len),
+        ))))
+    }
 }
 
 // ─── ST_AsBinary(geom [, endian]) — WKB passthrough ───────────────────────
@@ -690,6 +845,130 @@ impl datafusion::logical_expr::Accumulator for MvtAccumulator {
     }
 }
 
+#[derive(Debug, Default)]
+struct ExtentAccumulator {
+    extent: Option<Rect>,
+}
+
+impl ExtentAccumulator {
+    fn update_wkb(&mut self, wkb: &[u8]) -> DFResult<()> {
+        if let Some(rect) = rect_from_wkb(wkb)? {
+            self.update_rect(rect);
+        }
+        Ok(())
+    }
+
+    fn update_rect(&mut self, rect: Rect) {
+        self.extent = Some(match self.extent {
+            Some(current) => Rect {
+                min_x: current.min_x.min(rect.min_x),
+                min_y: current.min_y.min(rect.min_y),
+                max_x: current.max_x.max(rect.max_x),
+                max_y: current.max_y.max(rect.max_y),
+            },
+            None => rect,
+        });
+    }
+}
+
+impl datafusion::logical_expr::Accumulator for ExtentAccumulator {
+    fn update_batch(&mut self, values: &[ArrayRef]) -> DFResult<()> {
+        let geom = values.first().ok_or_else(|| {
+            datafusion::common::DataFusionError::Internal(
+                "st_extent expected one geometry argument".into(),
+            )
+        })?;
+        if let Some(binary) = geom.as_any().downcast_ref::<BinaryArray>() {
+            for row in 0..binary.len() {
+                if !binary.is_null(row) {
+                    self.update_wkb(binary.value(row))?;
+                }
+            }
+            return Ok(());
+        }
+        if let Some(binary_view) = geom.as_any().downcast_ref::<BinaryViewArray>() {
+            for row in 0..binary_view.len() {
+                if !binary_view.is_null(row) {
+                    self.update_wkb(binary_view.value(row))?;
+                }
+            }
+            return Ok(());
+        }
+        Err(datafusion::common::DataFusionError::Internal(
+            "st_extent expected Binary geometry".into(),
+        ))
+    }
+
+    fn merge_batch(&mut self, states: &[ArrayRef]) -> DFResult<()> {
+        if states.len() != 4 {
+            return Err(datafusion::common::DataFusionError::Internal(format!(
+                "st_extent expected four state arrays, got {}",
+                states.len()
+            )));
+        }
+        let min_x = as_f64_array_ref(&states[0])?;
+        let min_y = as_f64_array_ref(&states[1])?;
+        let max_x = as_f64_array_ref(&states[2])?;
+        let max_y = as_f64_array_ref(&states[3])?;
+        for row in 0..min_x.len() {
+            if min_x.is_null(row) || min_y.is_null(row) || max_x.is_null(row) || max_y.is_null(row)
+            {
+                continue;
+            }
+            self.update_rect(Rect {
+                min_x: min_x.value(row),
+                min_y: min_y.value(row),
+                max_x: max_x.value(row),
+                max_y: max_y.value(row),
+            });
+        }
+        Ok(())
+    }
+
+    fn evaluate(&mut self) -> DFResult<ScalarValue> {
+        Ok(ScalarValue::Utf8(self.extent.map(format_box2d)))
+    }
+
+    fn size(&self) -> usize {
+        std::mem::size_of::<Self>()
+    }
+
+    fn state(&mut self) -> DFResult<Vec<ScalarValue>> {
+        Ok(match self.extent {
+            Some(rect) => vec![
+                ScalarValue::Float64(Some(rect.min_x)),
+                ScalarValue::Float64(Some(rect.min_y)),
+                ScalarValue::Float64(Some(rect.max_x)),
+                ScalarValue::Float64(Some(rect.max_y)),
+            ],
+            None => vec![
+                ScalarValue::Float64(None),
+                ScalarValue::Float64(None),
+                ScalarValue::Float64(None),
+                ScalarValue::Float64(None),
+            ],
+        })
+    }
+}
+
+fn format_box2d(rect: Rect) -> String {
+    format!(
+        "BOX({} {},{} {})",
+        format_box_coord(rect.min_x),
+        format_box_coord(rect.min_y),
+        format_box_coord(rect.max_x),
+        format_box_coord(rect.max_y)
+    )
+}
+
+fn format_box_coord(value: f64) -> String {
+    if value == 0.0 {
+        "0".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
 // ─── ST_Transform — real CRS transform with proj-wkt ───────────────────────
 
 fn register_st_transform_real(ctx: &SessionContext) -> DFResult<()> {
@@ -732,7 +1011,7 @@ fn transform_wkb_crs(wkb: &[u8], target_srid: i32) -> std::result::Result<Vec<u8
     let parsed = crate::mvt::parse_wkb(wkb).ok_or("WKB parse failed")?;
     let source_srid = parsed.srid.unwrap_or(4326);
     if source_srid == target_srid {
-        return Ok(wkb.to_vec()); // identity
+        return tag_wkb_srid(wkb, target_srid).ok_or_else(|| "failed to tag SRID".to_string());
     }
     let source = format!("EPSG:{source_srid}");
     let target = format!("EPSG:{target_srid}");
@@ -742,7 +1021,8 @@ fn transform_wkb_crs(wkb: &[u8], target_srid: i32) -> std::result::Result<Vec<u8
         Ok((nx, ny)) => (nx, ny),
         Err(_) => (x, y),
     });
-    Ok(transformed.to_wkb())
+    tag_wkb_srid(&transformed.to_wkb(), target_srid)
+        .ok_or_else(|| "failed to tag transformed SRID".to_string())
 }
 
 // ─── && operator (bbox overlap) as function ────────────────────────────────
@@ -822,7 +1102,7 @@ fn register_st_geomfromewkt(ctx: &SessionContext) -> DFResult<()> {
 /// Curve types are linearized to their control points.
 fn ewkt_to_wkb(ewkt: &str) -> std::result::Result<Vec<u8>, String> {
     let ewkt = ewkt.trim();
-    let (_srid, wkt) = if let Some(rest) = ewkt.strip_prefix("SRID=") {
+    let (srid, wkt) = if let Some(rest) = ewkt.strip_prefix("SRID=") {
         let semi = rest.find(';').ok_or("missing ; after SRID=")?;
         let s = rest[..semi]
             .trim()
@@ -834,7 +1114,12 @@ fn ewkt_to_wkb(ewkt: &str) -> std::result::Result<Vec<u8>, String> {
     };
     let wkt = wkt.trim();
     let (type_kw, body) = split_wkt(wkt)?;
-    encode_wkt(&type_kw.to_uppercase(), &body)
+    let wkb = encode_wkt(&type_kw.to_uppercase(), &body)?;
+    if let Some(srid) = srid {
+        tag_wkb_srid(&wkb, srid).ok_or_else(|| "failed to write EWKB SRID tag".to_string())
+    } else {
+        Ok(wkb)
+    }
 }
 
 fn split_wkt(wkt: &str) -> std::result::Result<(String, String), String> {

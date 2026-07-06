@@ -29,14 +29,24 @@ use datafusion_postgres::pgwire::error::{PgWireError, PgWireResult};
 const GEOMETRY_OID: u32 = 90_001;
 const GEOGRAPHY_OID: u32 = 90_002;
 const SYNTHETIC_PK_INDEX_OID: u32 = 90_101;
+pub(crate) const SYNTHETIC_ROWID_COLUMN: &str = "_quackgis_rowid";
 
 static POSTGRES_DRIVER_CURSORS: LazyLock<Mutex<HashMap<String, PostgresDriverCursor>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static SYNTHETIC_INDEXES: LazyLock<Mutex<HashMap<u32, SyntheticIndex>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Clone)]
 struct PostgresDriverCursor {
     table: String,
     offset: usize,
+}
+
+#[derive(Debug, Clone)]
+struct SyntheticIndex {
+    table: String,
+    key_column: String,
+    key_attnum: i16,
 }
 
 #[derive(Debug)]
@@ -54,7 +64,7 @@ impl QueryHook for CatalogCompatHook {
         session_context: &SessionContext,
         _client: &mut dyn HookClient,
     ) -> Option<PgWireResult<Response>> {
-        catalog_query_response(statement, session_context)
+        catalog_query_response(statement, session_context).await
     }
 
     async fn handle_extended_parse_query(
@@ -85,9 +95,10 @@ impl QueryHook for CatalogCompatHook {
         session_context: &SessionContext,
         _client: &mut dyn HookClient,
     ) -> Option<PgWireResult<Response>> {
-        if let Some(response) = pg_type_extended_info_response(statement, params)
-            .or_else(|| catalog_query_response(statement, session_context))
-        {
+        if let Some(response) = pg_type_extended_info_response(statement, params) {
+            return Some(response);
+        }
+        if let Some(response) = catalog_query_response(statement, session_context).await {
             return Some(response);
         }
         postgres_driver_cursor_response(statement, session_context).await
@@ -153,7 +164,7 @@ fn typeinfo_row(typname: &str, oid: u32) -> PgWireResult<QueryResponse> {
     Ok(QueryResponse::new(Arc::new(fields), Box::pin(row_stream)))
 }
 
-fn catalog_query_response(
+async fn catalog_query_response(
     statement: &Statement,
     session_context: &SessionContext,
 ) -> Option<PgWireResult<Response>> {
@@ -227,22 +238,20 @@ fn catalog_query_response(
         && sql.contains("attnotnull")
         && sql.contains("indexrelid")
     {
-        return Some(single_id_attnotnull_row().map(Response::Query));
+        return Some(pg_index_key_column_response(&sql).map(Response::Query));
     }
     if sql.contains("pg_index") && sql.contains("indrelid") {
-        return Some(single_oid_row("indexrelid", SYNTHETIC_PK_INDEX_OID).map(Response::Query));
+        return Some(
+            pg_index_for_table_response(&sql, session_context)
+                .await
+                .map(Response::Query),
+        );
     }
     if sql.contains("pg_index") && sql.contains("indkey") {
-        return Some(single_text_row("indkey", "1").map(Response::Query));
+        return Some(pg_index_indkey_response(&sql).map(Response::Query));
     }
     if sql.contains("pg_get_indexdef") {
-        return Some(
-            single_text_row(
-                "pg_get_indexdef",
-                "CREATE UNIQUE INDEX points_pkey ON public.points (id)",
-            )
-            .map(Response::Query),
-        );
+        return Some(pg_get_indexdef_response(&sql).map(Response::Query));
     }
     if sql.contains("relkind") && sql.contains("pg_class") && sql.contains("regclass") {
         return Some(single_text_row("relkind", "r").map(Response::Query));
@@ -633,6 +642,158 @@ fn pg_index_primary_key_probe_response() -> PgWireResult<QueryResponse> {
     Ok(QueryResponse::new(Arc::new(fields), Box::pin(row_stream)))
 }
 
+async fn pg_index_for_table_response(
+    sql: &str,
+    session_context: &SessionContext,
+) -> PgWireResult<QueryResponse> {
+    let table = parse_regclass_table(sql).unwrap_or_else(|| "points".to_string());
+    let index = synthetic_index_for_table(session_context, &table).await;
+    let index_oid = synthetic_index_oid_for_table(&index.table);
+    if let Ok(mut indexes) = SYNTHETIC_INDEXES.lock() {
+        indexes.insert(index_oid, index);
+    }
+    single_oid_row("indexrelid", index_oid)
+}
+
+fn pg_index_indkey_response(sql: &str) -> PgWireResult<QueryResponse> {
+    let index = parse_indexrelid(sql).and_then(lookup_synthetic_index);
+    let attnum = index.map(|idx| idx.key_attnum).unwrap_or(1);
+    single_text_row("indkey", &attnum.to_string())
+}
+
+fn pg_index_key_column_response(sql: &str) -> PgWireResult<QueryResponse> {
+    let index = parse_indexrelid(sql).and_then(lookup_synthetic_index);
+    let key_column = index
+        .map(|idx| idx.key_column)
+        .unwrap_or_else(|| "id".to_string());
+    single_attname_attnotnull_row(&key_column, true)
+}
+
+fn pg_get_indexdef_response(sql: &str) -> PgWireResult<QueryResponse> {
+    let index = parse_pg_get_indexdef_oid(sql)
+        .and_then(lookup_synthetic_index)
+        .unwrap_or_else(|| SyntheticIndex {
+            table: "points".to_string(),
+            key_column: "id".to_string(),
+            key_attnum: 1,
+        });
+    let def = format!(
+        "CREATE UNIQUE INDEX {}_pkey ON public.{} ({})",
+        index.table, index.table, index.key_column
+    );
+    single_text_row("pg_get_indexdef", &def)
+}
+
+async fn synthetic_index_for_table(
+    session_context: &SessionContext,
+    table: &str,
+) -> SyntheticIndex {
+    let (key_column, key_attnum) = table_key_column(session_context, table)
+        .await
+        .unwrap_or_else(|| ("id".to_string(), 1));
+    SyntheticIndex {
+        table: table.to_string(),
+        key_column,
+        key_attnum,
+    }
+}
+
+async fn table_key_column(
+    session_context: &SessionContext,
+    table_name: &str,
+) -> Option<(String, i16)> {
+    let state = session_context.state();
+    let catalog_list = state.catalog_list();
+    let catalog = catalog_list.catalog("quackgis")?;
+    let schema = catalog.schema("main")?;
+    let table = schema.table(table_name).await.ok().flatten()?;
+    let schema = table.schema();
+    if let Some(key) = schema
+        .fields()
+        .iter()
+        .enumerate()
+        .find(|(_, field)| field.name().eq_ignore_ascii_case("id"))
+        .and_then(|(idx, field)| Some((field.name().clone(), i16::try_from(idx + 1).ok()?)))
+    {
+        return Some(key);
+    }
+
+    if let Some(key) = schema
+        .fields()
+        .iter()
+        .enumerate()
+        .find(|(_, field)| field.name().eq_ignore_ascii_case(SYNTHETIC_ROWID_COLUMN))
+        .and_then(|(idx, field)| Some((field.name().clone(), i16::try_from(idx + 1).ok()?)))
+    {
+        return Some(key);
+    }
+
+    schema
+        .fields()
+        .iter()
+        .any(|field| crate::geometry_columns::is_geometry_column_name(field.name()))
+        .then_some((SYNTHETIC_ROWID_COLUMN.to_string(), 1))
+}
+
+fn lookup_synthetic_index(index_oid: u32) -> Option<SyntheticIndex> {
+    if index_oid == SYNTHETIC_PK_INDEX_OID {
+        return Some(SyntheticIndex {
+            table: "points".to_string(),
+            key_column: "id".to_string(),
+            key_attnum: 1,
+        });
+    }
+    SYNTHETIC_INDEXES
+        .lock()
+        .ok()
+        .and_then(|indexes| indexes.get(&index_oid).cloned())
+}
+
+fn synthetic_index_oid_for_table(table: &str) -> u32 {
+    if table.eq_ignore_ascii_case("points") {
+        return SYNTHETIC_PK_INDEX_OID;
+    }
+    let hash = table.bytes().fold(0_u32, |acc, b| {
+        acc.wrapping_mul(31).wrapping_add(u32::from(b))
+    });
+    90_200 + (hash % 10_000)
+}
+
+fn parse_regclass_table(sql: &str) -> Option<String> {
+    let markers = ["'\"public\".\"", "'public.", "\"public\".\""];
+    for marker in markers {
+        if let Some(start) = sql.find(marker) {
+            let table_start = start + marker.len();
+            let end_marker = if marker.ends_with('"') { "\"" } else { "'" };
+            let table_end = sql[table_start..].find(end_marker)? + table_start;
+            let table = sql[table_start..table_end].trim_matches('"');
+            if !table.is_empty() {
+                return Some(table.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn parse_indexrelid(sql: &str) -> Option<u32> {
+    let start = sql.find("indexrelid")? + "indexrelid".len();
+    parse_first_u32(&sql[start..])
+}
+
+fn parse_pg_get_indexdef_oid(sql: &str) -> Option<u32> {
+    let start = sql.find("pg_get_indexdef")? + "pg_get_indexdef".len();
+    parse_first_u32(&sql[start..])
+}
+
+fn parse_first_u32(s: &str) -> Option<u32> {
+    let digit_start = s.find(|c: char| c.is_ascii_digit())?;
+    let digits = s[digit_start..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>();
+    digits.parse().ok()
+}
+
 fn pg_class_table_listing_response(
     session_context: &SessionContext,
 ) -> PgWireResult<QueryResponse> {
@@ -822,7 +983,7 @@ fn single_oid_row(name: &str, value: u32) -> PgWireResult<QueryResponse> {
     Ok(QueryResponse::new(Arc::new(fields), Box::pin(row_stream)))
 }
 
-fn single_id_attnotnull_row() -> PgWireResult<QueryResponse> {
+fn single_attname_attnotnull_row(attname: &str, attnotnull: bool) -> PgWireResult<QueryResponse> {
     let fields = vec![
         FieldInfo::new(
             "attname".to_string(),
@@ -840,8 +1001,8 @@ fn single_id_attnotnull_row() -> PgWireResult<QueryResponse> {
         ),
     ];
     let mut encoder = DataRowEncoder::new(Arc::new(fields.clone()));
-    encoder.encode_field(&Some("id"))?;
-    encoder.encode_field(&Some(true))?;
+    encoder.encode_field(&Some(attname))?;
+    encoder.encode_field(&Some(attnotnull))?;
     let row = Ok(encoder.take_row());
     let row_stream = futures::stream::once(async move { row });
     Ok(QueryResponse::new(Arc::new(fields), Box::pin(row_stream)))

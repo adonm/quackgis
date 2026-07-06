@@ -3,11 +3,6 @@
 # QuackGIS workspace. See ARCHITECTURE.md for the layer model and
 # ROADMAP.md for the gap ledger (G1-G12) driving fork decisions.
 #
-# The spike at spike/m00-wire-spike is intentionally NOT a workspace member:
-# it's a standalone throwaway crate used to validate the wire assumption
-# without dragging in the rest of the workspace. The real server lives in
-# crates/quackgis-server.
-
 [workspace]
 resolver = "2"
 members = ["crates/quackgis-server"]

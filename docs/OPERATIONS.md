@@ -54,13 +54,18 @@ fields ['id', 'name']
 features_read 2
 ```
 
-The OGR probe uses GDAL's PostgreSQL driver to read a WKB-backed table and export
-it to GeoJSON. Current expected output includes:
+The OGR probe uses GDAL's PostgreSQL driver to read a WKB-backed table, append a
+GeoJSON layer with `PG_USE_COPY=NO` + `-addfields`, and export both paths to
+GeoJSON. Current expected output includes:
 
 ```text
 feature_count 2
 names ['one', 'origin']
 geometry_types ['Point', 'Point']
+loaded_rows [('load-a', 'client', 'POINT(2 2)'), ('load-b', 'client', 'POINT(3 3)')]
+load_feature_count 2
+load_names ['load-a', 'load-b']
+load_geometry_types ['Point', 'Point']
 ```
 
 In-cluster clients connect to:
@@ -82,7 +87,7 @@ Relevant files:
 | `deploy/kind/cluster.yaml` | Kind cluster config |
 | `deploy/kind/quackgis.yaml` | QuackGIS StatefulSet + Service |
 | `deploy/kind/qgis-probe.yaml` | headless PyQGIS add-layer probe Job |
-| `deploy/kind/ogr-probe.yaml` | GDAL/OGR PostgreSQL-driver read-back probe Job |
+| `deploy/kind/ogr-probe.yaml` | GDAL/OGR PostgreSQL-driver load/read probe Job |
 
 ## CI artifacts
 

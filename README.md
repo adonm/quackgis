@@ -32,7 +32,7 @@ pg_ducklake + a C geometry extension + a DuckDB spatial extension. The wire
 adaptor approach replaces all four layers with DataFusion-native components.
 
 Current milestone focus: **M3/M4 client compatibility**. Martin, QGIS read, and
-OGR read probes are green; QGIS/OGR write paths and GeoServer remain trace-driven
+OGR load/read probes are green; QGIS editing and GeoServer remain trace-driven
 targets. See [ROADMAP.md](./ROADMAP.md) for milestones and the risk register.
 
 ## Quick start (dev storage path)
@@ -75,7 +75,7 @@ just martin-sql                # Martin-generated SQL compatibility gate
 just martin-e2e                # opt-in real Martin binary E2E
 just kind-refresh              # host-cached build/load/deploy into Kind
 just kind-qgis-probe           # headless PyQGIS add-layer/read-feature gate
-just kind-ogr-probe            # GDAL/OGR PostgreSQL-driver read-back gate
+just kind-ogr-probe            # GDAL/OGR PostgreSQL-driver load/read gate
 
 Reference/source trees for client-trace work live outside the build graph under
 ignored `.tmp/ref/*` (submodule-init equivalent): `just ref-init` materializes

@@ -24,12 +24,14 @@ fn rect_bbox(wkb: &[u8]) -> (f64, f64, f64, f64) {
         wkb[0], 1,
         "Sedona WKB helper should write little endian WKB"
     );
-    assert_eq!(read_u32(wkb, 1), 3, "expected Polygon WKB");
-    assert_eq!(read_u32(wkb, 5), 1, "expected one polygon ring");
-    let points = read_u32(wkb, 9) as usize;
+    let raw_type = read_u32(wkb, 1);
+    assert_eq!(raw_type & 0x0fff, 3, "expected Polygon WKB/EWKB");
+    let data_offset = if raw_type & 0x2000_0000 != 0 { 9 } else { 5 };
+    assert_eq!(read_u32(wkb, data_offset), 1, "expected one polygon ring");
+    let points = read_u32(wkb, data_offset + 4) as usize;
     let mut xs = Vec::with_capacity(points);
     let mut ys = Vec::with_capacity(points);
-    let mut off = 13;
+    let mut off = data_offset + 8;
     for _ in 0..points {
         xs.push(read_f64(wkb, off));
         ys.push(read_f64(wkb, off + 8));
