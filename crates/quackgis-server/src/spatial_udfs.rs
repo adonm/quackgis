@@ -31,17 +31,103 @@ pub fn register_spatial_udfs(ctx: &SessionContext) -> DFResult<()> {
     register_st_makeenvelope(ctx)?;
     register_st_tileenvelope(ctx)?;
     register_st_expand(ctx)?;
+    register_st_envelope(ctx)?;
     register_st_curvetoline(ctx)?;
+    register_st_force2d(ctx)?;
+    register_st_hasarc(ctx)?;
+    register_st_simplify(ctx)?;
     register_st_asmvtgeom(ctx)?;
     register_st_asmvt(ctx)?;
     register_st_extent(ctx)?;
     register_st_estimatedextent(ctx)?;
+    register_st_astext(ctx)?;
     register_st_asbinary(ctx)?;
     register_st_transform_real(ctx)?;
     register_bbox_overlap(ctx)?;
     register_st_geomfromewkt(ctx)?;
     register_qgis_geometry_metadata(ctx)?;
     Ok(())
+}
+
+// ─── ST_Envelope(geom|box2d) — bbox polygon ────────────────────────────────
+fn register_st_envelope(ctx: &SessionContext) -> DFResult<()> {
+    ctx.register_udf(ScalarUDF::new_from_impl(STEnvelope::new()));
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Hash)]
+struct STEnvelope {
+    signature: Signature,
+}
+
+impl Eq for STEnvelope {}
+
+impl STEnvelope {
+    fn new() -> Self {
+        Self {
+            signature: Signature::one_of(
+                vec![
+                    TypeSignature::Exact(vec![DataType::Binary]),
+                    // GeoTools layer bounds uses ST_Envelope(ST_Extent(geom)).
+                    // ST_Extent is represented here as PostGIS BOX text.
+                    TypeSignature::Exact(vec![DataType::Utf8]),
+                ],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
+
+impl ScalarUDFImpl for STEnvelope {
+    fn name(&self) -> &str {
+        "st_envelope"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Binary)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let arrays = columnar_values_to_arrays(&args.args)?;
+        let input = arrays
+            .first()
+            .ok_or_else(|| DataFusionError::Internal("st_envelope expected one argument".into()))?;
+        let out: Vec<Option<Vec<u8>>> = if let Some(geom) =
+            input.as_any().downcast_ref::<BinaryArray>()
+        {
+            (0..geom.len())
+                .map(|i| {
+                    if geom.is_null(i) {
+                        Ok(None)
+                    } else {
+                        rect_from_wkb(geom.value(i)).and_then(|rect| rect_to_wkb_option(rect, 0))
+                    }
+                })
+                .collect::<DFResult<_>>()?
+        } else if let Some(box_text) = input.as_any().downcast_ref::<StringArray>() {
+            (0..box_text.len())
+                .map(|i| {
+                    if box_text.is_null(i) {
+                        Ok(None)
+                    } else {
+                        parse_box2d(box_text.value(i)).and_then(|rect| rect_to_wkb_option(rect, 0))
+                    }
+                })
+                .collect::<DFResult<_>>()?
+        } else {
+            return Err(DataFusionError::Internal(
+                "st_envelope expected Binary geometry or Utf8 BOX text".into(),
+            ));
+        };
+
+        Ok(ColumnarValue::Array(Arc::new(BinaryArray::from_iter(
+            out.iter().map(|v| v.as_deref()),
+        ))))
+    }
 }
 
 // ─── ST_Transform — passthrough for now; real CRS in Path B ────────────────
@@ -266,6 +352,136 @@ fn register_st_curvetoline(ctx: &SessionContext) -> DFResult<()> {
     Ok(())
 }
 
+// ─── ST_Force2D(geom) — identity for QuackGIS 2D WKB storage ───────────────
+fn register_st_force2d(ctx: &SessionContext) -> DFResult<()> {
+    ctx.register_udf(create_udf(
+        "st_force2d",
+        vec![DataType::Binary],
+        DataType::Binary,
+        Volatility::Immutable,
+        Arc::new(|args| Ok(args[0].clone())),
+    ));
+    Ok(())
+}
+
+// ─── ST_HasArc(geom) — no curved geometries in WKB storage ─────────────────
+fn register_st_hasarc(ctx: &SessionContext) -> DFResult<()> {
+    ctx.register_udf(create_udf(
+        "st_hasarc",
+        vec![DataType::Binary],
+        DataType::Boolean,
+        Volatility::Immutable,
+        Arc::new(|args| {
+            let arrays = columnar_values_to_arrays(args)?;
+            let geom = as_binary_array_ref(&arrays[0])?;
+            let out = (0..geom.len()).map(|i| (!geom.is_null(i)).then_some(false));
+            Ok(ColumnarValue::Array(Arc::new(BooleanArray::from_iter(out))))
+        }),
+    ));
+    Ok(())
+}
+
+// ─── ST_Simplify(geom, tolerance) — identity fallback for renderer probes ──
+fn register_st_simplify(ctx: &SessionContext) -> DFResult<()> {
+    ctx.register_udf(ScalarUDF::new_from_impl(STSimplify::new()));
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct STSimplify {
+    signature: Signature,
+}
+
+impl STSimplify {
+    fn new() -> Self {
+        Self {
+            signature: Signature::user_defined(Volatility::Immutable),
+        }
+    }
+}
+
+impl ScalarUDFImpl for STSimplify {
+    fn name(&self) -> &str {
+        "st_simplify"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Binary)
+    }
+
+    fn coerce_types(&self, arg_types: &[DataType]) -> DFResult<Vec<DataType>> {
+        match arg_types.len() {
+            2 => Ok(vec![DataType::Binary, DataType::Float64]),
+            3 => Ok(vec![DataType::Binary, DataType::Float64, DataType::Boolean]),
+            len => Err(DataFusionError::Plan(format!(
+                "st_simplify expected 2 or 3 arguments, got {len}"
+            ))),
+        }
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let arrays = columnar_values_to_arrays(&args.args)?;
+        Ok(ColumnarValue::Array(arrays[0].clone()))
+    }
+}
+
+// ─── ST_AsText(geom) — WKB → WKT ───────────────────────────────────────────
+fn register_st_astext(ctx: &SessionContext) -> DFResult<()> {
+    ctx.register_udf(ScalarUDF::new_from_impl(STAsText::new()));
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct STAsText {
+    signature: Signature,
+}
+
+impl STAsText {
+    fn new() -> Self {
+        Self {
+            signature: Signature::one_of(
+                vec![
+                    TypeSignature::Exact(vec![DataType::Binary]),
+                    TypeSignature::Exact(vec![DataType::BinaryView]),
+                ],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
+
+impl ScalarUDFImpl for STAsText {
+    fn name(&self) -> &str {
+        "st_astext"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Utf8)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let arrays = columnar_values_to_arrays(&args.args)?;
+        let geom = arrays
+            .first()
+            .ok_or_else(|| DataFusionError::Internal("st_astext expected one argument".into()))?;
+        let out = (0..geom.len())
+            .map(|i| match binary_value_at(geom, i, "st_astext")? {
+                Some(wkb) => wkb_to_wkt(wkb).map(Some),
+                None => Ok(None),
+            })
+            .collect::<DFResult<Vec<_>>>()?;
+        Ok(ColumnarValue::Array(Arc::new(StringArray::from_iter(out))))
+    }
+}
+
 // ─── WKB construction helpers ──────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug)]
@@ -328,6 +544,165 @@ fn rect_wkb(min_x: f64, min_y: f64, max_x: f64, max_y: f64, srid: i64) -> DFResu
     tag_wkb_srid_i64(&wkb, srid)
 }
 
+fn rect_to_wkb_option(rect: Option<Rect>, srid: i64) -> DFResult<Option<Vec<u8>>> {
+    rect.map(|rect| rect_wkb(rect.min_x, rect.min_y, rect.max_x, rect.max_y, srid))
+        .transpose()
+}
+
+fn parse_box2d(value: &str) -> DFResult<Option<Rect>> {
+    let trimmed = value.trim();
+    let Some(rest) = trimmed
+        .strip_prefix("BOX(")
+        .or_else(|| trimmed.strip_prefix("box("))
+    else {
+        return Err(DataFusionError::Execution(format!(
+            "st_envelope expected BOX text, got {trimmed:?}"
+        )));
+    };
+    let Some(inner) = rest.strip_suffix(')') else {
+        return Err(DataFusionError::Execution(format!(
+            "st_envelope expected BOX text, got {trimmed:?}"
+        )));
+    };
+    let (min, max) = inner.split_once(',').ok_or_else(|| {
+        DataFusionError::Execution(format!("st_envelope expected BOX text, got {trimmed:?}"))
+    })?;
+    let mut min_parts = min.split_whitespace();
+    let min_x = parse_box_coord(min_parts.next(), trimmed)?;
+    let min_y = parse_box_coord(min_parts.next(), trimmed)?;
+    if min_parts.next().is_some() {
+        return Err(DataFusionError::Execution(format!(
+            "st_envelope expected BOX text, got {trimmed:?}"
+        )));
+    }
+    let mut max_parts = max.split_whitespace();
+    let max_x = parse_box_coord(max_parts.next(), trimmed)?;
+    let max_y = parse_box_coord(max_parts.next(), trimmed)?;
+    if max_parts.next().is_some() {
+        return Err(DataFusionError::Execution(format!(
+            "st_envelope expected BOX text, got {trimmed:?}"
+        )));
+    }
+    Ok(Some(Rect {
+        min_x,
+        min_y,
+        max_x,
+        max_y,
+    }))
+}
+
+fn parse_box_coord(value: Option<&str>, original: &str) -> DFResult<f64> {
+    let value = value.ok_or_else(|| {
+        DataFusionError::Execution(format!("st_envelope expected BOX text, got {original:?}"))
+    })?;
+    value.parse::<f64>().map_err(|_| {
+        DataFusionError::Execution(format!("st_envelope expected BOX text, got {original:?}"))
+    })
+}
+
+fn wkb_to_wkt(wkb: &[u8]) -> DFResult<String> {
+    let parsed = crate::mvt::parse_wkb(wkb)
+        .ok_or_else(|| DataFusionError::Execution("st_astext expected valid 2D WKB/EWKB".into()))?;
+    Ok(format_wkt(&parsed))
+}
+
+fn format_wkt(geom: &crate::mvt::ParsedGeom) -> String {
+    match geom.geom_type {
+        crate::mvt::GeomType::Point => geom
+            .rings
+            .first()
+            .and_then(|ring| ring.first())
+            .map(|point| format!("POINT({})", format_wkt_coord(*point)))
+            .unwrap_or_else(|| "POINT EMPTY".to_string()),
+        crate::mvt::GeomType::LineString => geom
+            .rings
+            .first()
+            .map(|ring| format!("LINESTRING({})", format_wkt_coords(ring)))
+            .unwrap_or_else(|| "LINESTRING EMPTY".to_string()),
+        crate::mvt::GeomType::Polygon => format_wkt_polygon(&geom.rings),
+        crate::mvt::GeomType::MultiPoint => geom
+            .rings
+            .first()
+            .map(|points| {
+                let parts: Vec<String> = points
+                    .iter()
+                    .map(|point| format!("({})", format_wkt_coord(*point)))
+                    .collect();
+                format!("MULTIPOINT({})", parts.join(","))
+            })
+            .unwrap_or_else(|| "MULTIPOINT EMPTY".to_string()),
+        crate::mvt::GeomType::MultiLineString => {
+            if geom.rings.is_empty() {
+                "MULTILINESTRING EMPTY".to_string()
+            } else {
+                let parts: Vec<String> = geom
+                    .rings
+                    .iter()
+                    .map(|ring| format!("({})", format_wkt_coords(ring)))
+                    .collect();
+                format!("MULTILINESTRING({})", parts.join(","))
+            }
+        }
+        crate::mvt::GeomType::MultiPolygon => format_wkt_multipolygon(geom),
+        crate::mvt::GeomType::GeometryCollection | crate::mvt::GeomType::Unknown(_) => {
+            "GEOMETRYCOLLECTION EMPTY".to_string()
+        }
+    }
+}
+
+fn format_wkt_polygon(rings: &[Vec<(f64, f64)>]) -> String {
+    if rings.is_empty() {
+        return "POLYGON EMPTY".to_string();
+    }
+    format!("POLYGON{}", format_wkt_polygon_body(rings))
+}
+
+fn format_wkt_multipolygon(geom: &crate::mvt::ParsedGeom) -> String {
+    if geom.rings.is_empty() {
+        return "MULTIPOLYGON EMPTY".to_string();
+    }
+    let counts = geom
+        .sub_geom_ring_counts
+        .clone()
+        .unwrap_or_else(|| vec![geom.rings.len()]);
+    let mut ring_idx = 0usize;
+    let mut polygons = Vec::with_capacity(counts.len());
+    for count in counts {
+        let end = (ring_idx + count).min(geom.rings.len());
+        polygons.push(format_wkt_polygon_body(&geom.rings[ring_idx..end]));
+        ring_idx = end;
+    }
+    format!("MULTIPOLYGON({})", polygons.join(","))
+}
+
+fn format_wkt_polygon_body(rings: &[Vec<(f64, f64)>]) -> String {
+    let parts: Vec<String> = rings
+        .iter()
+        .map(|ring| format!("({})", format_wkt_coords(ring)))
+        .collect();
+    format!("({})", parts.join(","))
+}
+
+fn format_wkt_coords(coords: &[(f64, f64)]) -> String {
+    coords
+        .iter()
+        .map(|coord| format_wkt_coord(*coord))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn format_wkt_coord((x, y): (f64, f64)) -> String {
+    format!("{} {}", format_wkt_number(x), format_wkt_number(y))
+}
+
+fn format_wkt_number(value: f64) -> String {
+    if value == 0.0 {
+        "0".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
 // ─── Array extraction helpers ──────────────────────────────────────────────
 
 /// Convert a slice of ColumnarValue into arrays, broadcasting scalars to match
@@ -356,6 +731,22 @@ fn as_binary_array_ref(arr: &ArrayRef) -> DFResult<&BinaryArray> {
     arr.as_any()
         .downcast_ref::<BinaryArray>()
         .ok_or_else(|| datafusion::common::DataFusionError::Internal("expected Binary".into()))
+}
+
+fn binary_value_at<'a>(
+    arr: &'a ArrayRef,
+    row: usize,
+    function: &str,
+) -> DFResult<Option<&'a [u8]>> {
+    if let Some(binary) = arr.as_any().downcast_ref::<BinaryArray>() {
+        return Ok((!binary.is_null(row)).then(|| binary.value(row)));
+    }
+    if let Some(binary_view) = arr.as_any().downcast_ref::<BinaryViewArray>() {
+        return Ok((!binary_view.is_null(row)).then(|| binary_view.value(row)));
+    }
+    Err(datafusion::common::DataFusionError::Internal(format!(
+        "{function} expected Binary or BinaryView"
+    )))
 }
 
 fn as_i64_array_ref(arr: &ArrayRef) -> DFResult<&Int64Array> {
@@ -735,18 +1126,21 @@ impl ScalarUDFImpl for STEstimatedExtent {
 // ─── ST_AsBinary(geom [, endian]) — WKB passthrough ───────────────────────
 
 fn register_st_asbinary(ctx: &SessionContext) -> DFResult<()> {
-    ctx.register_udf(ScalarUDF::new_from_impl(STAsBinary::new()));
+    ctx.register_udf(ScalarUDF::new_from_impl(STAsBinary::new("st_asbinary")));
+    ctx.register_udf(ScalarUDF::new_from_impl(STAsBinary::new("st_asewkb")));
     Ok(())
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct STAsBinary {
+    name: &'static str,
     signature: Signature,
 }
 
 impl STAsBinary {
-    fn new() -> Self {
+    fn new(name: &'static str) -> Self {
         Self {
+            name,
             signature: Signature::one_of(
                 vec![
                     TypeSignature::Exact(vec![DataType::Binary]),
@@ -760,7 +1154,7 @@ impl STAsBinary {
 
 impl ScalarUDFImpl for STAsBinary {
     fn name(&self) -> &str {
-        "st_asbinary"
+        self.name
     }
 
     fn signature(&self) -> &Signature {
@@ -779,8 +1173,8 @@ impl ScalarUDFImpl for STAsBinary {
             )));
         }
         // QuackGIS stores geometry bytes as WKB/EWKB already. QGIS asks for
-        // ST_AsBinary(geom, 'NDR'); fixtures are little-endian WKB, so this is
-        // a byte-preserving pgwire compatibility shim until full endian
+        // ST_AsBinary(geom, 'NDR') and GeoTools asks for ST_AsEWKB(geom), so
+        // this is a byte-preserving pgwire compatibility shim until full endian
         // conversion is needed.
         Ok(args.args[0].clone())
     }
@@ -1028,35 +1422,69 @@ fn transform_wkb_crs(wkb: &[u8], target_srid: i32) -> std::result::Result<Vec<u8
 // ─── && operator (bbox overlap) as function ────────────────────────────────
 
 fn register_bbox_overlap(ctx: &SessionContext) -> DFResult<()> {
-    ctx.register_udf(create_udf(
-        "st_overlaps_bbox",
-        vec![DataType::Binary, DataType::Binary],
-        DataType::Boolean,
-        Volatility::Immutable,
-        Arc::new(|args| {
-            let arrays = columnar_values_to_arrays(args)?;
-            let a = as_binary_array_ref(&arrays[0])?;
-            let b = as_binary_array_ref(&arrays[1])?;
-            let n = a.len();
-            let mut out = BooleanArray::builder(n);
-            for i in 0..n {
-                if a.is_null(i) || b.is_null(i) {
-                    out.append_null();
-                    continue;
-                }
-                let bbox_a = crate::mvt::parse_wkb(a.value(i)).and_then(|g| g.bbox());
-                let bbox_b = crate::mvt::parse_wkb(b.value(i)).and_then(|g| g.bbox());
-                match (bbox_a, bbox_b) {
-                    (Some((ax1, ay1, ax2, ay2)), Some((bx1, by1, bx2, by2))) => {
-                        out.append_value(ax1 <= bx2 && ax2 >= bx1 && ay1 <= by2 && ay2 >= by1);
-                    }
-                    _ => out.append_null(),
-                }
-            }
-            Ok(ColumnarValue::Array(Arc::new(out.finish())))
-        }),
-    ));
+    ctx.register_udf(ScalarUDF::new_from_impl(STOverlapsBBox::new()));
     Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct STOverlapsBBox {
+    signature: Signature,
+}
+
+impl STOverlapsBBox {
+    fn new() -> Self {
+        let binary = DataType::Binary;
+        let binary_view = DataType::BinaryView;
+        Self {
+            signature: Signature::one_of(
+                vec![
+                    TypeSignature::Exact(vec![binary.clone(), binary.clone()]),
+                    TypeSignature::Exact(vec![binary.clone(), binary_view.clone()]),
+                    TypeSignature::Exact(vec![binary_view.clone(), binary.clone()]),
+                    TypeSignature::Exact(vec![binary_view.clone(), binary_view]),
+                ],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
+
+impl ScalarUDFImpl for STOverlapsBBox {
+    fn name(&self) -> &str {
+        "st_overlaps_bbox"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Boolean)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let arrays = columnar_values_to_arrays(&args.args)?;
+        let n = arrays[0].len();
+        let mut out = BooleanArray::builder(n);
+        for i in 0..n {
+            let a = binary_value_at(&arrays[0], i, "st_overlaps_bbox")?;
+            let b = binary_value_at(&arrays[1], i, "st_overlaps_bbox")?;
+            match (a, b) {
+                (Some(a), Some(b)) => {
+                    let bbox_a = crate::mvt::parse_wkb(a).and_then(|g| g.bbox());
+                    let bbox_b = crate::mvt::parse_wkb(b).and_then(|g| g.bbox());
+                    match (bbox_a, bbox_b) {
+                        (Some((ax1, ay1, ax2, ay2)), Some((bx1, by1, bx2, by2))) => {
+                            out.append_value(ax1 <= bx2 && ax2 >= bx1 && ay1 <= by2 && ay2 >= by1);
+                        }
+                        _ => out.append_null(),
+                    }
+                }
+                _ => out.append_null(),
+            }
+        }
+        Ok(ColumnarValue::Array(Arc::new(out.finish())))
+    }
 }
 
 // ─── ST_GeomFromEWKT / GeomFromEWKT — EWKT → WKB ───────────────────────────

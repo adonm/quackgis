@@ -11,11 +11,11 @@ missing upstream that we build in tracked fork branches.
 |---|---|---|---|
 | `psql` | ✅ | M0 | simple + extended protocol via datafusion-postgres |
 | psycopg (v3) | ✅ | M2 | text + binary geometry round-trip |
-| QGIS (postgres provider) | ✅ read | M3 | Kind PyQGIS add-layer probe green: valid layer, attributes, and two WKB point features fetched through binary cursor |
+| QGIS (postgres provider) | ✅ read/edit smoke | M3/M4 | Kind PyQGIS read probe green; edit probe opens a keyless spatial layer and commits insert/update/delete/save through `_quackgis_rowid` |
 | GDAL/OGR `ogr2ogr` (PostgreSQL driver) | ✅ load/read | M3/M4 | Kind OGR probe seeds a WKB-backed layer, reads it with `ogrinfo`/GeoJSON export, then appends GeoJSON with `PG_USE_COPY=NO` + `-addfields` and verifies SQL + GeoJSON read-back |
 | GDAL/OGR write/load hardening | target | M4 | COPY subprotocol and schema-derived append metadata remain future hardening; current maintained gate uses OGR INSERT mode |
-| QGIS (editing) | target | M4 | basic UPDATE/DELETE storage rewrite works; client workflow + RETURNING/keys still pending |
-| GeoServer (PostGIS datastore) | target | M4 | JDBC extended protocol, WMS/WFS-T; trace/probe next after QGIS+OGR read gates |
+| QGIS (editing) | ✅ smoke | M4 | `INSERT`/`UPDATE`/`DELETE ... RETURNING`, parameterized WKB edits, synthetic rowid metadata, and single-table explicit transaction rollback/commit pass wire regressions; Kind PyQGIS edit/save gate passes |
+| GeoServer (PostGIS datastore) | ✅ WFS/WMS smoke | M4 | Official GeoServer 3.0.0 Kind probe registers a PostGIS datastore, publishes a WKB-backed layer, verifies WFS GeoJSON feature count, and receives a WMS PNG; WFS-T remains future hardening |
 | Martin (MapLibre tile server) | ✅ | M2+ | auto-discover geometry tables; MVT tile serving via ST_AsMVT |
 | pg_featureserv | stretch | M7 | trace-driven |
 | `pg_dump` / logical replication | ❌ | — | back up the DuckLake catalog + Parquet instead |
@@ -27,7 +27,7 @@ missing upstream that we build in tracked fork branches.
 | Simple + extended query protocol | ✅ upstream |
 | TLS, password auth, RBAC roles | ✅ upstream |
 | pg_catalog + information_schema emulation | ✅ upstream (datafusion-pg-catalog) |
-| Portals / fetch-size suspension | target for pgjdbc/GeoServer (G4, M4) |
+| Portals / fetch-size suspension | general `setFetchSize` suspension still deferred (G4); maintained GeoServer WFS/WMS smoke does not require it |
 | `DECLARE BINARY CURSOR` / `FETCH` | ✅ simple-query/libpq path; narrow PostgreSQL-driver extended cursor shim for OGR read; general extended-protocol FETCH still deferred (G3/G4) |
 | COPY subprotocol | deferred; maintained `ogr2ogr` gate uses `PG_USE_COPY=NO` INSERT mode |
 | LISTEN/NOTIFY, PL/pgSQL, triggers | ❌ non-goals |
@@ -69,12 +69,18 @@ Interop target: QuackGIS storage changes should remain forward-compatible with o
 
 ## Known limitations (architecture)
 
-- Transactions are accepted (`BEGIN`/`COMMIT`) but DuckLake commits are
-  per-statement snapshots; no multi-statement rollback initially.
+- Explicit `BEGIN`/`COMMIT`/`ROLLBACK` now stage single-table DuckLake DML for
+  edit sessions: `ROLLBACK` discards staged changes, and `COMMIT` publishes the
+  final table through one DuckLake writer snapshot with optimistic conflict
+  detection. This is not full PostgreSQL transaction emulation yet: DDL and
+  multi-table write transactions fail closed, and ordinary `SELECT` statements
+  inside the transaction read the committed catalog rather than private staged
+  rows.
 - No PostgreSQL ctid. The catalog compatibility layer exposes a real
   conventional `id` column as a schema-derived synthetic unique index when
   present; keyless spatial layers get `_quackgis_rowid` metadata and a stable
-  read projection for QGIS/GDAL feature identity. Edit-session row-id semantics
-  still need M4 transaction/RETURNING hardening.
+  read projection for QGIS/GDAL feature identity. QGIS edit/save smoke tests now
+  pass on `_quackgis_rowid`; multi-table transaction semantics remain future
+  hardening.
 - Typmod enforcement (`geometry(Point, 4326)`) is metadata + EWKB-level, not
   PG typmod machinery.

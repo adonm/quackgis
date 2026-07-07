@@ -77,3 +77,12 @@ regex = "1"
 strip = true
 lto = "thin"
 codegen-units = 1
+
+# Faster binary for local Kind probe loops. Keeps release-like optimization but
+# skips thin-LTO/single-codegen-unit, which dominates rebuild time during probe
+# triage. Production/release artifacts still use [profile.release] above.
+[profile.probe]
+inherits = "release"
+strip = false
+lto = false
+codegen-units = 16

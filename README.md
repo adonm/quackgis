@@ -31,14 +31,15 @@ validated (then retired) a heavier stack: full PostgreSQL + vendored
 pg_ducklake + a C geometry extension + a DuckDB spatial extension. The wire
 adaptor approach replaces all four layers with DataFusion-native components.
 
-Current milestone focus: **M3/M4 client compatibility**. Martin, QGIS read, and
-OGR load/read probes are green; QGIS editing and GeoServer remain trace-driven
-targets. See [ROADMAP.md](./ROADMAP.md) for milestones and the risk register.
+Current milestone focus: **M3/M4 client compatibility**. Martin, QGIS read/edit,
+OGR load/read, and GeoServer WFS/WMS smoke probes are green. See
+[ROADMAP.md](./ROADMAP.md) for milestones and the risk register.
 
 ## Quick start (dev storage path)
 
 ```sh
 mise install              # Rust, just, kind/kubectl/helm, cargo-nextest
+eval "$(mise activate bash)" # activate pinned tools/env for this shell
 just setup                # also downloads Martin into .tmp/bin
 just ref-init             # optional: clone all reference repos into .tmp/ref
 just server               # runs on 127.0.0.1:5434 with .tmp/dev storage
@@ -61,21 +62,33 @@ SELECT postgis_version();                                -- 3.4 QUACKGIS
   targets and known limitations.
 - [docs/OPERATIONS.md](./docs/OPERATIONS.md) — current local + Kind client-probe
   workflow for the single Rust pgwire binary.
+- [docs/OSM_POSTGIS_PARITY.md](./docs/OSM_POSTGIS_PARITY.md) — real OSM data
+  side-by-side PostGIS parity roadmap and copy/sync recipes.
 - [CHANGELOG.md](./CHANGELOG.md) — history, including the retired v0.1 facade.
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — contribution guide.
 
 ## Development
 
+Activate mise once per shell, then run `just`/`cargo` directly:
+
 ```sh
+eval "$(mise activate bash)"
 just --list                    # common entrypoints
 just build                     # server binary
 just test                      # unit + wire integration tests
+just test-fast                 # non-ignored QuackGIS regression loop only
 just check                     # fmt + clippy + tests
+just check-fast                # fmt + clippy + focused regression loop
 just martin-sql                # Martin-generated SQL compatibility gate
 just martin-e2e                # opt-in real Martin binary E2E
 just kind-refresh              # host-cached build/load/deploy into Kind
+just kind-refresh-fast         # faster no-LTO probe build/load/deploy loop
+just kind-probes               # QGIS read/edit + OGR + GeoServer jobs in one wait
 just kind-qgis-probe           # headless PyQGIS add-layer/read-feature gate
+just kind-qgis-edit-probe      # headless PyQGIS insert/update/delete/save gate
 just kind-ogr-probe            # GDAL/OGR PostgreSQL-driver load/read gate
+just kind-geoserver-probe      # GeoServer 3.0.0 datastore + WFS/WMS gate
+just kind-osm-postgis-parity   # opt-in real OSM PostGIS -> QuackGIS parity
 
 Reference/source trees for client-trace work live outside the build graph under
 ignored `.tmp/ref/*` (submodule-init equivalent): `just ref-init` materializes

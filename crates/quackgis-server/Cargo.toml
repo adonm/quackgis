@@ -46,6 +46,7 @@ futures = "0.3"
 proj-wkt = { workspace = true }
 proj-core = { workspace = true }
 regex = { workspace = true }
+rust_decimal = "1.42"
 
 [dev-dependencies]
 # Pure-Rust pg client for integration tests (no psql binary required in CI).

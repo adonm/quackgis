@@ -1,0 +1,235 @@
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: osm-postgis-parity
+  namespace: quackgis
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: osm-parity
+          image: docker.io/qgis/qgis:ltr-questing
+          env:
+            - name: QUACKGIS_HOST
+              value: quackgis.quackgis.svc.cluster.local
+            - name: QUACKGIS_PORT
+              value: "5434"
+            - name: POSTGIS_HOST
+              value: postgis-osm.quackgis.svc.cluster.local
+            - name: POSTGIS_PORT
+              value: "5432"
+            - name: OSM_EXTRACT_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: osm-parity-config
+                  key: OSM_EXTRACT_URL
+            - name: OSM_POINT_LIMIT
+              valueFrom:
+                configMapKeyRef:
+                  name: osm-parity-config
+                  key: OSM_POINT_LIMIT
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              run_ogr() {
+                "$@" 2> >(grep -v -e 'unexpected field count in "D" message' -e '^ERROR 1: *$' >&2)
+              }
+
+              export OGR_INTERLEAVED_READING=YES
+              export PG_USE_COPY=NO
+              export QUACKGIS_TABLE="osm_real_points_${POD_UID//-/_}"
+              postgis_dsn="PG:host=${POSTGIS_HOST} port=${POSTGIS_PORT} user=postgres dbname=osm"
+              quackgis_dsn="PG:host=${QUACKGIS_HOST} port=${QUACKGIS_PORT} user=postgres dbname=quackgis"
+
+              python3 - <<'PY'
+              import os
+              import time
+              import urllib.request
+
+              import psycopg2
+
+              def wait_pg(label, host, port, dbname):
+                  last = None
+                  for _ in range(120):
+                      try:
+                          conn = psycopg2.connect(host=host, port=int(port), user="postgres", dbname=dbname)
+                          conn.close()
+                          return
+                      except Exception as exc:  # pragma: no cover - probe diagnostics
+                          last = exc
+                          time.sleep(1)
+                  raise RuntimeError(f"{label} not ready: {last}")
+
+              wait_pg("postgis", os.environ["POSTGIS_HOST"], os.environ["POSTGIS_PORT"], "osm")
+              wait_pg("quackgis", os.environ["QUACKGIS_HOST"], os.environ["QUACKGIS_PORT"], "quackgis")
+
+              url = os.environ["OSM_EXTRACT_URL"]
+              print("osm_extract_url", url)
+              target = "/tmp/osm_extract.osm.pbf"
+              for attempt in range(1, 4):
+                  try:
+                      urllib.request.urlretrieve(url, target)
+                      break
+                  except Exception:
+                      if attempt == 3:
+                          raise
+                      time.sleep(2 * attempt)
+              print("osm_extract_bytes", os.path.getsize(target))
+              PY
+
+              run_ogr ogrinfo /tmp/osm_extract.osm.pbf points -so
+              run_ogr ogr2ogr \
+                -f PostgreSQL "${postgis_dsn}" /tmp/osm_extract.osm.pbf points \
+                -overwrite -nln osm_raw_points -nlt POINT -lco GEOMETRY_NAME=geom
+
+              python3 - <<'PY'
+              import os
+
+              import psycopg2
+
+              point_limit = int(os.environ.get("OSM_POINT_LIMIT", "50"))
+              postgis = psycopg2.connect(
+                  host=os.environ["POSTGIS_HOST"],
+                  port=int(os.environ["POSTGIS_PORT"]),
+                  user="postgres",
+                  dbname="osm",
+              )
+              postgis.autocommit = True
+              cur = postgis.cursor()
+              cur.execute("DROP TABLE IF EXISTS public.osm_named_points")
+              cur.execute(
+                  """
+                  CREATE TABLE public.osm_named_points AS
+                  SELECT row_number() OVER (ORDER BY osm_id)::int AS id,
+                         osm_id::text AS osm_id,
+                         name::text AS name,
+                         geom::geometry(Point, 4326) AS geom
+                  FROM public.osm_raw_points
+                  WHERE geom IS NOT NULL AND name IS NOT NULL
+                  ORDER BY osm_id
+                  LIMIT %s
+                  """,
+                  (point_limit,),
+              )
+              cur.execute("SELECT count(*) FROM public.osm_named_points")
+              postgis_count = cur.fetchone()[0]
+              print("postgis_osm_named_points_count", postgis_count)
+              if postgis_count <= 0:
+                  raise RuntimeError("real OSM extract produced no named points")
+              cur.close()
+              postgis.close()
+
+              quackgis = psycopg2.connect(
+                  host=os.environ["QUACKGIS_HOST"],
+                  port=int(os.environ["QUACKGIS_PORT"]),
+                  user="postgres",
+                  dbname="quackgis",
+              )
+              quackgis.autocommit = True
+              cur = quackgis.cursor()
+              table = os.environ["QUACKGIS_TABLE"]
+              cur.execute(
+                  f'CREATE TABLE public."{table}" '
+                  "(id INT, wkb_geometry BINARY, name TEXT)"
+              )
+              cur.close()
+              quackgis.close()
+              print("quackgis_osm_table", table)
+              PY
+
+              run_ogr ogr2ogr \
+                -f PostgreSQL "${quackgis_dsn}" "${postgis_dsn}" \
+                -sql "SELECT id, osm_id, name, geom FROM public.osm_named_points ORDER BY id" \
+                -append -addfields -nln "${QUACKGIS_TABLE}" -nlt POINT -lco GEOMETRY_NAME=wkb_geometry
+
+              run_ogr ogrinfo "${quackgis_dsn}" "${QUACKGIS_TABLE}" -so
+              run_ogr ogr2ogr -f GeoJSON /tmp/postgis_points.geojson "${postgis_dsn}" osm_named_points
+              run_ogr ogr2ogr -f GeoJSON /tmp/quackgis_points.geojson "${quackgis_dsn}" "${QUACKGIS_TABLE}"
+
+              python3 - <<'PY'
+              import json
+              import os
+
+              import psycopg2
+
+              def load(path):
+                  with open(path, "r", encoding="utf-8") as f:
+                      return json.load(f)["features"]
+
+              def feature_key(feature):
+                  props = feature["properties"]
+                  return str(props.get("id"))
+
+              def bbox(features):
+                  xs = []
+                  ys = []
+                  for feature in features:
+                      geom = feature["geometry"]
+                      if geom["type"] != "Point":
+                          raise AssertionError(f"expected Point, got {geom['type']}")
+                      x, y = geom["coordinates"][:2]
+                      xs.append(round(float(x), 9))
+                      ys.append(round(float(y), 9))
+                  return (min(xs), min(ys), max(xs), max(ys))
+
+              postgis_features = load("/tmp/postgis_points.geojson")
+              quackgis_features = load("/tmp/quackgis_points.geojson")
+              postgis_keys = sorted(feature_key(feature) for feature in postgis_features)
+              quackgis_keys = sorted(feature_key(feature) for feature in quackgis_features)
+              postgis_bbox = bbox(postgis_features)
+              quackgis_bbox = bbox(quackgis_features)
+
+              print("postgis_osm_geojson_count", len(postgis_features))
+              print("quackgis_osm_geojson_count", len(quackgis_features))
+              print("osm_geojson_sample_ids", quackgis_keys[:5])
+              print("postgis_osm_bbox", postgis_bbox)
+              print("quackgis_osm_bbox", quackgis_bbox)
+
+              assert len(postgis_features) == len(quackgis_features), (len(postgis_features), len(quackgis_features))
+              assert postgis_keys == quackgis_keys, (postgis_keys[:5], quackgis_keys[:5])
+              assert postgis_bbox == quackgis_bbox, (postgis_bbox, quackgis_bbox)
+
+              conn = psycopg2.connect(
+                  host=os.environ["QUACKGIS_HOST"],
+                  port=int(os.environ["QUACKGIS_PORT"]),
+                  user="postgres",
+                  dbname="quackgis",
+              )
+              cur = conn.cursor()
+              table = os.environ["QUACKGIS_TABLE"]
+              cur.execute(f'SELECT count(*) FROM public."{table}"')
+              quackgis_count = cur.fetchone()[0]
+              print("quackgis_osm_named_points_count", quackgis_count)
+              assert quackgis_count == len(postgis_features), quackgis_count
+              cur.execute(f'SELECT id, osm_id, name FROM public."{table}" ORDER BY id')
+              quackgis_sample_rows = [(row[0], str(row[1]), row[2]) for row in cur.fetchall()]
+              quackgis_rows = [(id, osm_id, name) for id, osm_id, name in quackgis_sample_rows]
+              cur.close()
+              conn.close()
+
+              postgis = psycopg2.connect(
+                  host=os.environ["POSTGIS_HOST"],
+                  port=int(os.environ["POSTGIS_PORT"]),
+                  user="postgres",
+                  dbname="osm",
+              )
+              cur = postgis.cursor()
+              cur.execute('SELECT id, osm_id, name FROM public.osm_named_points ORDER BY id')
+              postgis_sample_rows = [(row[0], str(row[1]), row[2]) for row in cur.fetchall()]
+              postgis_rows = [(id, osm_id, name) for id, osm_id, name in postgis_sample_rows]
+              cur.close()
+              postgis.close()
+              print("postgis_osm_sql_sample", postgis_sample_rows[:5])
+              print("quackgis_osm_sql_sample", quackgis_sample_rows[:5])
+              assert quackgis_rows == postgis_rows, (postgis_rows[:5], quackgis_rows[:5])
+
+              print("osm_postgis_to_quackgis_copy_ok True")
+              PY

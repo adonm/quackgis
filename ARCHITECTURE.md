@@ -154,6 +154,37 @@ stage 3 is correctness. Pruning happens in the DataFusion scan against DuckLake
 file statistics — missing upstream, built in our datafusion-ducklake fork
 (gap ledger G7).
 
+## Transaction semantics over DuckLake snapshots
+
+Autocommit QuackGIS DML remains correct-but-coarse: each
+`INSERT`/`UPDATE`/`DELETE` is written through the DuckLake writer API and
+published as its own snapshot.
+
+Explicit transaction blocks now provide a DuckLake-native, transactionish path
+for edit-client DML on one table:
+
+1. **Pin on first touch.** The first DML statement for a table opens a public
+   `datafusion-ducklake` table write session in `Replace` mode. That captures the
+   DuckLake base snapshot used for optimistic conflict detection.
+2. **Stage writes, do not publish.** QuackGIS materializes the table into a
+   private in-memory table for the connection. Later `INSERT`/`UPDATE`/`DELETE`
+   statements in the same transaction read and rewrite that staged table; the
+   visible DuckLake snapshot is unchanged.
+3. **Publish at `COMMIT`.** The staged final table is written through the held
+   DuckLake writer session and published as one DuckLake snapshot. If another
+   writer published a newer generation after the base snapshot, DuckLake conflict
+   detection aborts the commit and the client must retry.
+4. **Discard at `ROLLBACK` or error.** QuackGIS drops the private staged table;
+   the visible DuckLake snapshot never changes.
+
+This is intentionally narrower than PostgreSQL transaction emulation: DDL inside
+explicit transactions and multi-table write transactions fail closed, and
+ordinary `SELECT` statements inside a transaction still read the committed
+DuckLake catalog rather than the private staged table. Native delete files,
+partial-file rewrites, and multi-table single-snapshot commits remain future
+performance/semantic hardening; the current semantic boundary is a single-table
+snapshot commit.
+
 ## Trust boundaries
 
 1. **Client connections**: datafusion-postgres owns auth (password/RBAC) and

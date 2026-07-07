@@ -29,19 +29,21 @@ spec:
               chmod 700 "$XDG_RUNTIME_DIR"
               python3 - <<'PY'
               import os
+              import random
               import sys
               import psycopg2
               from qgis.core import QgsApplication, QgsDataSourceUri, QgsVectorLayer
 
               host = os.environ["QUACKGIS_HOST"]
               port = int(os.environ["QUACKGIS_PORT"])
+              table = f"qgis_probe_{os.getpid()}_{random.randint(1, 1_000_000_000)}"
 
               conn = psycopg2.connect(host=host, port=port, user="postgres", dbname="quackgis")
               conn.autocommit = True
               cur = conn.cursor()
-              cur.execute("CREATE TABLE quackgis.main.points (id INT, geom BINARY, name TEXT)")
-              cur.execute("INSERT INTO quackgis.main.points VALUES (1, X'010100000000000000000000000000000000000000', 'origin')")
-              cur.execute("INSERT INTO quackgis.main.points VALUES (2, X'0101000000000000000000F03F000000000000F03F', 'one')")
+              cur.execute(f"CREATE TABLE quackgis.main.{table} (id INT, geom BINARY, name TEXT)")
+              cur.execute(f"INSERT INTO quackgis.main.{table} VALUES (1, X'010100000000000000000000000000000000000000', 'origin')")
+              cur.execute(f"INSERT INTO quackgis.main.{table} VALUES (2, X'0101000000000000000000F03F000000000000F03F', 'one')")
               cur.close()
               conn.close()
 
@@ -50,8 +52,8 @@ spec:
               app.initQgis()
               uri = QgsDataSourceUri()
               uri.setConnection(host, str(port), "quackgis", "postgres", "")
-              uri.setDataSource("public", "points", "geom", "", "id")
-              layer = QgsVectorLayer(uri.uri(False), "points", "postgres")
+              uri.setDataSource("public", table, "geom", "", "id")
+              layer = QgsVectorLayer(uri.uri(False), table, "postgres")
               print("valid", layer.isValid())
               print("provider", layer.providerType())
               print("error", layer.error().message())

@@ -3839,6 +3839,7 @@ dependencies = [
  "proj-core",
  "proj-wkt",
  "regex",
+ "rust_decimal",
  "sedona-functions",
  "sedona-geo",
  "sedona-geometry",

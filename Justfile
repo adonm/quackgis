@@ -9,7 +9,10 @@ martin_bin := env_var_or_default("MARTIN_BIN", ".tmp/bin/martin")
 martin_version := env_var_or_default("MARTIN_VERSION", "1.11.0")
 martin_port := env_var_or_default("MARTIN_PORT", "3000")
 qgis_image := env_var_or_default("QGIS_IMAGE", "docker.io/qgis/qgis:ltr-questing")
-geoserver_image := env_var_or_default("GEOSERVER_IMAGE", "docker.io/kartoza/geoserver:2.26.2")
+geoserver_image := env_var_or_default("GEOSERVER_IMAGE", "docker.osgeo.org/geoserver:3.0.0")
+postgis_image := env_var_or_default("POSTGIS_IMAGE", "docker.io/postgis/postgis:16-3.4")
+osm_extract_url := env_var_or_default("OSM_EXTRACT_URL", "https://download.geofabrik.de/europe/monaco-latest.osm.pbf")
+osm_point_limit := env_var_or_default("OSM_POINT_LIMIT", "50")
 container_engine := env_var_or_default("CONTAINER_ENGINE", "podman")
 kind_cluster := env_var_or_default("KIND_CLUSTER", "quackgis")
 quackgis_image := env_var_or_default("QUACKGIS_IMAGE", "localhost/quackgis:dev")
@@ -176,18 +179,25 @@ fmt-check:
 
 # Run clippy with repository warning policy.
 clippy:
-    LD_LIBRARY_PATH= cargo clippy --workspace --all-targets -- -D warnings
+    cargo clippy --workspace --all-targets -- -D warnings
 
 # Run all default tests.
 test:
-    LD_LIBRARY_PATH= cargo test --workspace
+    cargo test --workspace
+
+# Faster local regression loop: only QuackGIS's non-ignored integration gates.
+test-fast:
+    cargo test -p quackgis-server --lib --test ducklake_persistence --test martin_compat --test wire_spatial
 
 # Run nextest when installed by mise.
 nextest:
-    LD_LIBRARY_PATH= cargo nextest run --workspace
+    cargo nextest run --workspace
 
 # Full local verification gate.
 check: fmt-check clippy test
+
+# Faster local verification gate for edit/probe triage.
+check-fast: fmt-check clippy test-fast
 
 # Run the dev QuackGIS server on QUACKGIS_HOST/QUACKGIS_PORT.
 server:
@@ -212,11 +222,11 @@ install-martin:
 
 # Run QuackGIS's passing Martin SQL compatibility gate.
 martin-sql:
-    LD_LIBRARY_PATH= cargo test -p quackgis-server --test martin_compat -- --nocapture
+    cargo test -p quackgis-server --test martin_compat -- --nocapture
 
 # Run the real Martin binary E2E (ignored by default; requires MARTIN_BIN).
 martin-e2e: install-martin
-    MARTIN_BIN="$(pwd)/{{martin_bin}}" LD_LIBRARY_PATH= cargo test -p quackgis-server --test martin_real_e2e -- --ignored --nocapture
+    MARTIN_BIN="$(pwd)/{{martin_bin}}" cargo test -p quackgis-server --test martin_real_e2e -- --ignored --nocapture
 
 # Start Martin against an already-running QuackGIS server (auto-discovery path).
 martin:
@@ -236,7 +246,7 @@ geoserver-pull:
 
 # Run GeoServer locally on http://127.0.0.1:8080/geoserver.
 geoserver:
-    {{container_engine}} run --rm -it --network host -e GEOSERVER_ADMIN_PASSWORD=geoserver {{geoserver_image}}
+    {{container_engine}} run --rm -it --network host -e SKIP_DEMO_DATA=true -e GEOSERVER_ADMIN_PASSWORD=geoserver {{geoserver_image}}
 
 # Create a local Kind cluster for in-cluster client probes.
 kind-up:
@@ -248,6 +258,14 @@ kind-build-image:
     rm -rf .tmp/kind/runtime
     mkdir -p .tmp/kind/runtime
     cp target/release/quackgis-server .tmp/kind/runtime/quackgis-server
+    {{container_engine}} build -t {{quackgis_image}} -f deploy/Containerfile.runtime .tmp/kind/runtime
+
+# Faster Kind image for probe loops: optimized enough, no release thin-LTO.
+kind-build-image-fast:
+    cargo build -p quackgis-server --profile probe
+    rm -rf .tmp/kind/runtime
+    mkdir -p .tmp/kind/runtime
+    cp target/probe/quackgis-server .tmp/kind/runtime/quackgis-server
     {{container_engine}} build -t {{quackgis_image}} -f deploy/Containerfile.runtime .tmp/kind/runtime
 
 # Build the QuackGIS development image entirely inside the container build.
@@ -271,6 +289,19 @@ kind-deploy:
 # Build, load, and deploy QuackGIS into Kind.
 kind-refresh: kind-build-image kind-load-image kind-deploy
 
+# Faster build, load, and deploy loop for client-probe triage.
+kind-refresh-fast: kind-build-image-fast kind-load-image kind-deploy
+
+# Run all maintained in-cluster client probes in one Kubernetes wait.
+kind-probes:
+    kubectl -n quackgis delete job qgis-probe qgis-edit-probe ogr-probe geoserver-probe --ignore-not-found=true
+    kubectl apply -f deploy/kind/qgis-probe.yaml -f deploy/kind/qgis-edit-probe.yaml -f deploy/kind/ogr-probe.yaml -f deploy/kind/geoserver-probe.yaml
+    kubectl -n quackgis wait job/qgis-probe job/qgis-edit-probe job/ogr-probe job/geoserver-probe --for=condition=complete --timeout=600s || (kubectl -n quackgis logs job/qgis-probe || true; kubectl -n quackgis logs job/qgis-edit-probe || true; kubectl -n quackgis logs job/ogr-probe || true; kubectl -n quackgis logs job/geoserver-probe || true; false)
+    kubectl -n quackgis logs job/qgis-probe
+    kubectl -n quackgis logs job/qgis-edit-probe
+    kubectl -n quackgis logs job/ogr-probe
+    kubectl -n quackgis logs job/geoserver-probe
+
 # Run the headless QGIS client probe as an in-cluster Job.
 kind-qgis-probe:
     kubectl -n quackgis delete job qgis-probe --ignore-not-found=true
@@ -278,12 +309,49 @@ kind-qgis-probe:
     kubectl -n quackgis wait job/qgis-probe --for=condition=complete --timeout=180s || (kubectl -n quackgis logs job/qgis-probe; false)
     kubectl -n quackgis logs job/qgis-probe
 
+# Run the headless QGIS edit/save probe as an in-cluster Job.
+kind-qgis-edit-probe:
+    kubectl -n quackgis delete job qgis-edit-probe --ignore-not-found=true
+    kubectl apply -f deploy/kind/qgis-edit-probe.yaml
+    kubectl -n quackgis wait job/qgis-edit-probe --for=condition=complete --timeout=240s || (kubectl -n quackgis logs job/qgis-edit-probe; false)
+    kubectl -n quackgis logs job/qgis-edit-probe
+
 # Run the GDAL/OGR PostgreSQL-driver load/read probe as an in-cluster Job.
 kind-ogr-probe:
     kubectl -n quackgis delete job ogr-probe --ignore-not-found=true
     kubectl apply -f deploy/kind/ogr-probe.yaml
     kubectl -n quackgis wait job/ogr-probe --for=condition=complete --timeout=180s || (kubectl -n quackgis logs job/ogr-probe; false)
     kubectl -n quackgis logs job/ogr-probe
+
+# Run the GeoServer PostGIS datastore/WFS/WMS probe as an in-cluster Job.
+kind-geoserver-probe:
+    kubectl -n quackgis delete job geoserver-probe --ignore-not-found=true
+    kubectl apply -f deploy/kind/geoserver-probe.yaml
+    kubectl -n quackgis wait job/geoserver-probe --for=condition=complete --timeout=600s || (kubectl -n quackgis logs job/geoserver-probe; false)
+    kubectl -n quackgis logs job/geoserver-probe
+
+# Start the opt-in real-OSM PostGIS reference deployment used by parity probes.
+kind-postgis-osm-up:
+    kubectl apply -f deploy/kind/postgis-osm.yaml
+    kubectl -n quackgis set image deployment/postgis-osm postgis={{postgis_image}}
+    kubectl -n quackgis rollout status deployment/postgis-osm --timeout=180s
+    kubectl -n quackgis wait pod -l app=postgis-osm --for=condition=ready --timeout=180s
+
+# Stop the opt-in real-OSM PostGIS reference deployment.
+kind-postgis-osm-down:
+    kubectl -n quackgis delete job osm-postgis-parity --ignore-not-found=true
+    kubectl -n quackgis delete configmap osm-parity-config --ignore-not-found=true
+    kubectl -n quackgis delete deployment postgis-osm --ignore-not-found=true
+    kubectl -n quackgis delete service postgis-osm --ignore-not-found=true
+
+# Run the opt-in real OSM PostGIS -> QuackGIS copy/read parity probe.
+kind-osm-postgis-parity: kind-postgis-osm-up
+    kubectl -n quackgis delete job osm-postgis-parity --ignore-not-found=true
+    kubectl -n quackgis delete configmap osm-parity-config --ignore-not-found=true
+    kubectl -n quackgis create configmap osm-parity-config --from-literal=OSM_EXTRACT_URL="{{osm_extract_url}}" --from-literal=OSM_POINT_LIMIT="{{osm_point_limit}}"
+    kubectl apply -f deploy/kind/osm-postgis-parity-probe.yaml
+    kubectl -n quackgis wait job/osm-postgis-parity --for=condition=complete --timeout=900s || (kubectl -n quackgis logs job/osm-postgis-parity; false)
+    kubectl -n quackgis logs job/osm-postgis-parity
 
 # Show QuackGIS and client-probe logs from Kind.
 kind-logs:

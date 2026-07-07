@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-//! PostGIS compatibility surface: metadata functions and views that clients
-//! like Martin, QGIS, and GeoServer expect on connection.
+//! PostgreSQL/PostGIS compatibility surface: metadata functions and views that
+//! clients like Martin, QGIS, and GeoServer expect on connection.
 
 use std::sync::Arc;
 
 use datafusion::arrow::array::{
-    Array, Int32Array, ListBuilder, RecordBatch, StringArray, StringBuilder,
+    Array, Int32Array, Int64Array, ListArray, ListBuilder, RecordBatch, StringArray, StringBuilder,
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::Result as DFResult;
@@ -20,7 +20,9 @@ pub fn register_postgis_compat(ctx: &SessionContext) -> DFResult<()> {
     register_postgis_version_udfs(ctx)?;
     register_pg_recovery_udf(ctx)?;
     register_privilege_udfs(ctx)?;
+    register_pg_serial_sequence_udf(ctx)?;
     register_current_setting_udf(ctx)?;
+    register_pg_array_search_path_udfs(ctx)?;
     register_find_srid_udf(ctx)?;
     register_regexp_matches_udf(ctx)?;
     register_jsonb_object_agg(ctx)?;
@@ -87,6 +89,20 @@ fn register_privilege_udfs(ctx: &SessionContext) -> DFResult<()> {
     Ok(())
 }
 
+fn register_pg_serial_sequence_udf(ctx: &SessionContext) -> DFResult<()> {
+    // GeoTools/pgjdbc asks this while mapping generated columns. QuackGIS does
+    // not synthesize PostgreSQL sequences for plain integer ids, so mirror
+    // PostgreSQL's "no serial sequence" result with NULL text.
+    ctx.register_udf(datafusion::logical_expr::create_udf(
+        "pg_get_serial_sequence",
+        vec![DataType::Utf8, DataType::Utf8],
+        DataType::Utf8,
+        Volatility::Stable,
+        Arc::new(|_| Ok(datafusion::scalar::ScalarValue::Utf8(None).into())),
+    ));
+    Ok(())
+}
+
 fn register_pg_recovery_udf(ctx: &SessionContext) -> DFResult<()> {
     ctx.register_udf(datafusion::logical_expr::create_udf(
         "pg_is_in_recovery",
@@ -128,6 +144,144 @@ fn register_current_setting_udf(ctx: &SessionContext) -> DFResult<()> {
         }),
     ));
     Ok(())
+}
+
+fn register_pg_array_search_path_udfs(ctx: &SessionContext) -> DFResult<()> {
+    // pgjdbc's TypeInfoCache walks the PostgreSQL search path with:
+    //   generate_series(1, array_upper(current_schemas(false), 1))
+    // Keep that catalog probe inside QuackGIS instead of failing planning on
+    // PostgreSQL array helpers that DataFusion does not provide natively.
+    let text_list = DataType::List(Arc::new(Field::new_list_field(DataType::Utf8, true)));
+    ctx.register_udf(datafusion::logical_expr::create_udf(
+        "current_schemas",
+        vec![DataType::Boolean],
+        text_list.clone(),
+        Volatility::Stable,
+        Arc::new(|args| {
+            let include_implicit = bool_arg_value(&args[0], 0)?.unwrap_or(false);
+            let mut schemas = Vec::new();
+            if include_implicit {
+                schemas.push(datafusion::scalar::ScalarValue::Utf8(Some(
+                    "pg_catalog".to_string(),
+                )));
+            }
+            schemas.push(datafusion::scalar::ScalarValue::Utf8(Some(
+                "public".to_string(),
+            )));
+            Ok(datafusion::scalar::ScalarValue::List(
+                datafusion::scalar::ScalarValue::new_list_nullable(&schemas, &DataType::Utf8),
+            )
+            .into())
+        }),
+    ));
+    ctx.register_udf(datafusion::logical_expr::create_udf(
+        "array_upper",
+        vec![text_list, DataType::Int64],
+        DataType::Int64,
+        Volatility::Immutable,
+        Arc::new(array_upper_utf8_list),
+    ));
+    Ok(())
+}
+
+fn array_upper_utf8_list(args: &[ColumnarValue]) -> DFResult<ColumnarValue> {
+    let row_count = args
+        .iter()
+        .find_map(|arg| match arg {
+            ColumnarValue::Array(arr) => Some(arr.len()),
+            ColumnarValue::Scalar(_) => None,
+        })
+        .unwrap_or(1);
+    if row_count == 1
+        && args
+            .iter()
+            .all(|arg| matches!(arg, ColumnarValue::Scalar(_)))
+    {
+        return Ok(datafusion::scalar::ScalarValue::Int64(array_upper_value(args, 0)?).into());
+    }
+    let values = (0..row_count)
+        .map(|row| array_upper_value(args, row))
+        .collect::<DFResult<Vec<_>>>()?;
+    Ok(ColumnarValue::Array(Arc::new(Int64Array::from(values))))
+}
+
+fn array_upper_value(args: &[ColumnarValue], row: usize) -> DFResult<Option<i64>> {
+    if int_arg_value(&args[1], row)? != Some(1) {
+        return Ok(None);
+    }
+    list_arg_len(&args[0], row)
+}
+
+fn list_arg_len(arg: &ColumnarValue, row: usize) -> DFResult<Option<i64>> {
+    let list = match arg {
+        ColumnarValue::Scalar(datafusion::scalar::ScalarValue::List(list)) => list.as_ref(),
+        ColumnarValue::Array(arr) => arr.as_any().downcast_ref::<ListArray>().ok_or_else(|| {
+            datafusion::common::DataFusionError::Internal("expected Utf8 list".into())
+        })?,
+        _ => {
+            return Err(datafusion::common::DataFusionError::Internal(
+                "expected Utf8 list".into(),
+            ));
+        }
+    };
+    if list.is_null(row) {
+        Ok(None)
+    } else {
+        Ok(Some(i64::from(list.value_length(row))))
+    }
+}
+
+fn bool_arg_value(arg: &ColumnarValue, row: usize) -> DFResult<Option<bool>> {
+    match arg {
+        ColumnarValue::Scalar(datafusion::scalar::ScalarValue::Boolean(value)) => Ok(*value),
+        ColumnarValue::Array(arr) => {
+            let bools = arr
+                .as_any()
+                .downcast_ref::<datafusion::arrow::array::BooleanArray>()
+                .ok_or_else(|| {
+                    datafusion::common::DataFusionError::Internal("expected Boolean".into())
+                })?;
+            if bools.is_null(row) {
+                Ok(None)
+            } else {
+                Ok(Some(bools.value(row)))
+            }
+        }
+        _ => Err(datafusion::common::DataFusionError::Internal(
+            "expected Boolean".into(),
+        )),
+    }
+}
+
+fn int_arg_value(arg: &ColumnarValue, row: usize) -> DFResult<Option<i64>> {
+    match arg {
+        ColumnarValue::Scalar(datafusion::scalar::ScalarValue::Int64(value)) => Ok(*value),
+        ColumnarValue::Scalar(datafusion::scalar::ScalarValue::Int32(value)) => {
+            Ok(value.map(i64::from))
+        }
+        ColumnarValue::Array(arr) => {
+            if let Some(ints) = arr.as_any().downcast_ref::<Int64Array>() {
+                return if ints.is_null(row) {
+                    Ok(None)
+                } else {
+                    Ok(Some(ints.value(row)))
+                };
+            }
+            if let Some(ints) = arr.as_any().downcast_ref::<Int32Array>() {
+                return if ints.is_null(row) {
+                    Ok(None)
+                } else {
+                    Ok(Some(i64::from(ints.value(row))))
+                };
+            }
+            Err(datafusion::common::DataFusionError::Internal(
+                "expected Int64".into(),
+            ))
+        }
+        _ => Err(datafusion::common::DataFusionError::Internal(
+            "expected Int64".into(),
+        )),
+    }
 }
 
 fn register_find_srid_udf(ctx: &SessionContext) -> DFResult<()> {

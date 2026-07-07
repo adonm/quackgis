@@ -14,6 +14,7 @@ use datafusion_ducklake::{DuckLakeTableWriter, MetadataWriter, SqliteMetadataWri
 use object_store::local::LocalFileSystem;
 use quackgis_server::context::StoragePaths;
 use tokio_postgres::NoTls;
+use tokio_postgres::types::Type;
 
 use common::ServerHandle;
 
@@ -150,6 +151,244 @@ async fn ddl_in_memory_table_roundtrip() {
         .expect("SELECT");
     let labels: Vec<String> = rows.into_iter().map(|r| r.get::<_, String>(1)).collect();
     assert_eq!(labels, vec!["a", "b", "c"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ducklake_transaction_rollback_discards_insert() {
+    let (_server, client, _conn) = connect().await;
+
+    client
+        .batch_execute(
+            "CREATE TABLE tx_rollback (id INT, label VARCHAR);\
+             INSERT INTO tx_rollback VALUES (1, 'a');",
+        )
+        .await
+        .expect("seed table");
+
+    client
+        .batch_execute(
+            "BEGIN;\
+             INSERT INTO tx_rollback VALUES (2, 'b');\
+             ROLLBACK;",
+        )
+        .await
+        .expect("rollback staged insert");
+
+    let count: i64 = client
+        .query_one("SELECT COUNT(*) FROM tx_rollback", &[])
+        .await
+        .expect("count after rollback")
+        .get(0);
+    assert_eq!(count, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ducklake_transaction_commit_publishes_grouped_inserts() {
+    let (_server, client, _conn) = connect().await;
+
+    client
+        .batch_execute(
+            "CREATE TABLE tx_commit (id INT, label VARCHAR);\
+             INSERT INTO tx_commit VALUES (1, 'a');\
+             BEGIN;\
+             INSERT INTO tx_commit VALUES (2, 'b');\
+             INSERT INTO tx_commit VALUES (3, 'c');\
+             COMMIT;",
+        )
+        .await
+        .expect("commit staged inserts");
+
+    let rows = client
+        .query("SELECT id, label FROM tx_commit ORDER BY id", &[])
+        .await
+        .expect("select after commit");
+    let values: Vec<(i32, String)> = rows
+        .into_iter()
+        .map(|r| (r.get::<_, i32>(0), r.get::<_, String>(1)))
+        .collect();
+    assert_eq!(
+        values,
+        vec![(1, "a".into()), (2, "b".into()), (3, "c".into())]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ogr_mojibaked_utf8_insert_literal_is_repaired() {
+    let server = ServerHandle::start().await;
+    let (client, connection) = tokio_postgres::connect(&server.conn_str(), NoTls)
+        .await
+        .expect("connect");
+    let _conn = tokio::spawn(connection);
+
+    client
+        .batch_execute("CREATE TABLE public.ogr_mojibake (name TEXT)")
+        .await
+        .expect("create OGR mojibake table");
+
+    let double_mojibaked_name = "Quai des Ã\u{83}Â\u{89}tats-Unis";
+    let insert_sql = format!(
+        "INSERT INTO public.ogr_mojibake (name) VALUES ('{}')",
+        double_mojibaked_name.replace('\'', "''")
+    );
+    client
+        .execute(&insert_sql, &[])
+        .await
+        .expect("OGR-shaped INSERT repairs mojibaked UTF-8 literal");
+
+    let double_mojibaked_name = "La PÃ\u{83}Âªcherie U Luvassu";
+    let insert_sql = format!(
+        "INSERT INTO public.ogr_mojibake (name) VALUES ('{}')",
+        double_mojibaked_name.replace('\'', "''")
+    );
+    client
+        .execute(&insert_sql, &[])
+        .await
+        .expect("OGR-shaped INSERT repairs second mojibaked UTF-8 literal");
+
+    let rows = client
+        .query("SELECT name FROM public.ogr_mojibake ORDER BY name", &[])
+        .await
+        .expect("read repaired OGR names");
+    let names: Vec<String> = rows.into_iter().map(|row| row.get(0)).collect();
+    assert_eq!(
+        names,
+        vec![
+            "La Pêcherie U Luvassu".to_string(),
+            "Quai des États-Unis".to_string(),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ducklake_transaction_commit_rewrites_staged_table_once() {
+    let (_server, client, _conn) = connect().await;
+
+    client
+        .batch_execute(
+            "CREATE TABLE tx_rewrite (id INT, label VARCHAR);\
+             INSERT INTO tx_rewrite VALUES (1, 'a'), (2, 'b'), (3, 'c');\
+             BEGIN;\
+             UPDATE tx_rewrite SET label = 'bb' WHERE id = 2;\
+             DELETE FROM tx_rewrite WHERE id = 1;\
+             INSERT INTO tx_rewrite VALUES (4, 'd');\
+             COMMIT;",
+        )
+        .await
+        .expect("commit staged rewrite");
+
+    let rows = client
+        .query("SELECT id, label FROM tx_rewrite ORDER BY id", &[])
+        .await
+        .expect("select after rewrite commit");
+    let values: Vec<(i32, String)> = rows
+        .into_iter()
+        .map(|r| (r.get::<_, i32>(0), r.get::<_, String>(1)))
+        .collect();
+    assert_eq!(
+        values,
+        vec![(2, "bb".into()), (3, "c".into()), (4, "d".into())]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ducklake_transaction_stages_alter_add_column_for_ogr_append() {
+    let (_server, client, _conn) = connect().await;
+
+    client
+        .batch_execute(
+            "CREATE TABLE tx_alter (id INT, name VARCHAR);\
+             BEGIN;\
+             ALTER TABLE tx_alter ADD COLUMN category VARCHAR;\
+             INSERT INTO tx_alter (id, name, category) VALUES (1, 'a', 'client');\
+             COMMIT;",
+        )
+        .await
+        .expect("commit staged alter + insert");
+
+    let row = client
+        .query_one("SELECT id, name, category FROM tx_alter", &[])
+        .await
+        .expect("select altered table");
+    assert_eq!(row.get::<_, i32>(0), 1);
+    assert_eq!(row.get::<_, String>(1), "a");
+    assert_eq!(row.get::<_, String>(2), "client");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn qgis_deallocate_statement_name_does_not_abort_staged_transaction() {
+    let (_server, client, _conn) = connect().await;
+
+    client
+        .batch_execute(
+            "CREATE TABLE tx_deallocate (id INT, label VARCHAR);\
+             BEGIN;\
+             INSERT INTO tx_deallocate VALUES (1, 'a');\
+             DEALLOCATE addfeatures;\
+             COMMIT;",
+        )
+        .await
+        .expect("QGIS-style DEALLOCATE should not abort transaction");
+
+    let label: String = client
+        .query_one("SELECT label FROM tx_deallocate", &[])
+        .await
+        .expect("select after deallocate + commit")
+        .get(0);
+    assert_eq!(label, "a");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ducklake_transaction_commit_detects_concurrent_replace_conflict() {
+    let server = ServerHandle::start().await;
+    let (client1, connection1) = tokio_postgres::connect(&server.conn_str(), NoTls)
+        .await
+        .expect("connect first client");
+    let conn1 = tokio::spawn(async move {
+        let _ = connection1.await;
+    });
+    let (client2, connection2) = tokio_postgres::connect(&server.conn_str(), NoTls)
+        .await
+        .expect("connect second client");
+    let conn2 = tokio::spawn(async move {
+        let _ = connection2.await;
+    });
+
+    client1
+        .batch_execute(
+            "CREATE TABLE tx_conflict (id INT, label VARCHAR);\
+             INSERT INTO tx_conflict VALUES (1, 'a');",
+        )
+        .await
+        .expect("seed conflict table");
+
+    client1
+        .batch_execute(
+            "BEGIN;\
+             UPDATE tx_conflict SET label = 'one' WHERE id = 1;",
+        )
+        .await
+        .expect("stage first-client rewrite");
+    client2
+        .batch_execute("INSERT INTO tx_conflict VALUES (2, 'two');")
+        .await
+        .expect("concurrent autocommit insert");
+
+    client1
+        .batch_execute("COMMIT;")
+        .await
+        .expect_err("commit should detect stale base snapshot");
+
+    let rows = client2
+        .query("SELECT id, label FROM tx_conflict ORDER BY id", &[])
+        .await
+        .expect("select after conflict");
+    let values: Vec<(i32, String)> = rows
+        .into_iter()
+        .map(|r| (r.get::<_, i32>(0), r.get::<_, String>(1)))
+        .collect();
+    assert_eq!(values, vec![(1, "a".into()), (2, "two".into())]);
+
+    drop((conn1, conn2));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -525,7 +764,7 @@ async fn qgis_pg_type_lookup_resolves_custom_geometry_oid() {
 
     let messages = client
         .simple_query(
-            "SELECT oid,typname,typtype,typelem,typlen FROM pg_type WHERE oid in (23,90001,25)",
+            "SELECT oid,typname,typtype,typelem,typlen FROM pg_type WHERE oid in (20,23,90001,25)",
         )
         .await
         .expect("QGIS pg_type lookup");
@@ -553,6 +792,11 @@ async fn qgis_pg_type_lookup_resolves_custom_geometry_oid() {
             "-1".to_string()
         )),
         "custom geometry oid must be present in {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|(oid, typname, _, _, _)| oid == "20" && typname == "int8"),
+        "lookup should preserve int8 row for synthetic rowid field discovery: {rows:?}"
     );
     assert!(
         rows.iter()
@@ -705,6 +949,283 @@ async fn qgis_primary_key_catalog_shim_uses_table_schema() {
         index_def,
         Some("CREATE UNIQUE INDEX roads_keyed_pkey ON public.roads_keyed (id)")
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn geoserver_pgjdbc_table_metadata_uses_jdbc_column_labels() {
+    let (_server, client, _conn) = connect().await;
+
+    client
+        .simple_query("CREATE TABLE public.geoserver_meta (id INT, geom BINARY, name TEXT)")
+        .await
+        .expect("create GeoServer metadata table");
+
+    let messages = client
+        .simple_query(
+            "SELECT current_database() AS \"TABLE_CAT\", n.nspname AS \"TABLE_SCHEM\", \
+                    c.relname AS \"TABLE_NAME\", CASE WHEN n.nspname = 'pg_catalog' OR \
+                    n.nspname = 'pg_toast' THEN CASE WHEN c.relkind = 'r' THEN 'SYSTEM TABLE' \
+                    WHEN c.relkind = 'v' THEN 'SYSTEM VIEW' WHEN c.relkind = 'i' THEN 'SYSTEM INDEX' \
+                    ELSE NULL END WHEN c.relkind = 'r' THEN 'TABLE' WHEN c.relkind = 'p' THEN 'PARTITIONED TABLE' \
+                    WHEN c.relkind = 'v' THEN 'VIEW' WHEN c.relkind = 'i' THEN 'INDEX' \
+                    WHEN c.relkind = 'f' THEN 'FOREIGN TABLE' WHEN c.relkind = 'm' THEN 'MATERIALIZED VIEW' \
+                    ELSE NULL END AS \"TABLE_TYPE\", d.description AS \"REMARKS\", \
+                    '' AS \"TYPE_CAT\", '' AS \"TYPE_SCHEM\", '' AS \"TYPE_NAME\", \
+                    '' AS \"SELF_REFERENCING_COL_NAME\", '' AS \"REF_GENERATION\" \
+             FROM pg_catalog.pg_namespace n, pg_catalog.pg_class c \
+             LEFT JOIN pg_catalog.pg_description d ON (c.oid = d.objoid AND d.objsubid = 0) \
+             WHERE c.relnamespace = n.oid AND c.relkind IN ('r','p','v','f','m') \
+             ORDER BY \"TABLE_TYPE\", \"TABLE_SCHEM\", \"TABLE_NAME\"",
+        )
+        .await
+        .expect("pgjdbc getTables shape");
+
+    let rows: Vec<_> = messages
+        .iter()
+        .filter_map(|message| match message {
+            tokio_postgres::SimpleQueryMessage::Row(row) => Some((
+                row.get("TABLE_CAT").unwrap_or_default().to_string(),
+                row.get("TABLE_SCHEM").unwrap_or_default().to_string(),
+                row.get("TABLE_NAME").unwrap_or_default().to_string(),
+                row.get("TABLE_TYPE").unwrap_or_default().to_string(),
+            )),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        rows.contains(&(
+            "quackgis".to_string(),
+            "public".to_string(),
+            "geoserver_meta".to_string(),
+            "TABLE".to_string()
+        )),
+        "GeoServer/pgjdbc getTables must expose non-null JDBC table labels: {rows:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn geoserver_pgjdbc_primary_key_metadata_handles_expandarray_query() {
+    let (_server, client, _conn) = connect().await;
+
+    client
+        .simple_query("CREATE TABLE public.geoserver_pk (id INT, geom BINARY, name TEXT)")
+        .await
+        .expect("create GeoServer primary-key table");
+
+    let rows = client
+        .query(
+            "SELECT result.TABLE_CAT AS \"TABLE_CAT\", result.TABLE_SCHEM AS \"TABLE_SCHEM\", \
+                    result.TABLE_NAME AS \"TABLE_NAME\", result.COLUMN_NAME AS \"COLUMN_NAME\", \
+                    result.KEY_SEQ AS \"KEY_SEQ\", result.PK_NAME AS \"PK_NAME\" \
+             FROM (SELECT current_database() AS TABLE_CAT, n.nspname AS TABLE_SCHEM, \
+                          ct.relname AS TABLE_NAME, a.attname AS COLUMN_NAME, \
+                          (information_schema._pg_expandarray(i.indkey)).n AS KEY_SEQ, \
+                          ci.relname AS PK_NAME, information_schema._pg_expandarray(i.indkey) AS KEYS, \
+                          a.attnum AS A_ATTNUM, i.indnkeyatts AS KEY_COUNT \
+                   FROM pg_catalog.pg_class ct \
+                   JOIN pg_catalog.pg_attribute a ON (ct.oid = a.attrelid) \
+                   JOIN pg_catalog.pg_namespace n ON (ct.relnamespace = n.oid) \
+                   JOIN pg_catalog.pg_index i ON (a.attrelid = i.indrelid) \
+                   JOIN pg_catalog.pg_class ci ON (ci.oid = i.indexrelid) \
+                   WHERE true AND n.nspname = $1 AND ct.relname = $2 AND i.indisprimary) result \
+             WHERE result.A_ATTNUM = (result.KEYS).x AND result.KEY_SEQ <= KEY_COUNT \
+             ORDER BY result.table_name, result.pk_name, result.key_seq",
+            &[&"public", &"geoserver_pk"],
+        )
+        .await
+        .expect("pgjdbc getPrimaryKeys shape");
+
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    let table_cat: String = row.get("TABLE_CAT");
+    let table_schema: String = row.get("TABLE_SCHEM");
+    let table_name: String = row.get("TABLE_NAME");
+    let column_name: String = row.get("COLUMN_NAME");
+    let key_seq: i32 = row.get("KEY_SEQ");
+    let pk_name: String = row.get("PK_NAME");
+
+    assert_eq!(table_cat, "quackgis");
+    assert_eq!(table_schema, "public");
+    assert_eq!(table_name, "geoserver_pk");
+    assert_eq!(column_name, "id");
+    assert_eq!(key_seq, 1);
+    assert_eq!(pk_name, "geoserver_pk_pkey");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn geoserver_pgjdbc_generated_key_probe_handles_pg_get_serial_sequence() {
+    let (_server, client, _conn) = connect().await;
+
+    client
+        .simple_query("CREATE TABLE public.geoserver_serial (id INT, geom BINARY, name TEXT)")
+        .await
+        .expect("create GeoServer serial metadata table");
+
+    let row = client
+        .query_one(
+            "SELECT pg_get_serial_sequence('\"public\".\"geoserver_serial\"', 'id')",
+            &[],
+        )
+        .await
+        .expect("GeoServer/pgjdbc generated-key sequence probe");
+    let sequence: Option<String> = row.get(0);
+    assert_eq!(sequence, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn geoserver_pgjdbc_type_info_probe_handles_current_schemas_array_upper() {
+    let (_server, client, _conn) = connect().await;
+
+    let upper: i64 = client
+        .query_one("SELECT array_upper(current_schemas(false), 1)", &[])
+        .await
+        .expect("array_upper(current_schemas(false), 1)")
+        .get(0);
+    assert_eq!(upper, 1);
+
+    let _rows = client
+        .query(
+            "SELECT typinput='pg_catalog.array_in'::regproc as is_array, typtype, typname, pg_type.oid \
+             FROM pg_catalog.pg_type \
+             LEFT JOIN (select ns.oid as nspoid, ns.nspname, r.r \
+                         from pg_namespace as ns \
+                         join ( select s.r, (current_schemas(false))[s.r] as nspname \
+                                  from generate_series(1, array_upper(current_schemas(false), 1)) as s(r) ) as r \
+                        using ( nspname ) \
+                      ) as sp \
+                   ON sp.nspoid = typnamespace \
+             WHERE pg_type.oid = 23 \
+             ORDER BY sp.r, pg_type.oid DESC",
+            &[],
+        )
+        .await
+        .expect("pgjdbc TypeInfoCache getSQLType search-path probe");
+
+    let rows = client
+        .query(
+            "SELECT typinput='pg_catalog.array_in'::regproc as is_array, typtype, typname, pg_type.oid \
+             FROM pg_catalog.pg_type \
+             LEFT JOIN (select ns.oid as nspoid, ns.nspname, r.r \
+                         from pg_namespace as ns \
+                         join ( select s.r, (current_schemas(false))[s.r] as nspname \
+                                  from generate_series(1, array_upper(current_schemas(false), 1)) as s(r) ) as r \
+                        using ( nspname ) \
+                      ) as sp \
+                   ON sp.nspoid = typnamespace \
+             WHERE pg_type.oid = $1 \
+             ORDER BY sp.r, pg_type.oid DESC",
+            &[&90_001_i32],
+        )
+        .await
+        .expect("pgjdbc TypeInfoCache getSQLType custom geometry oid probe");
+    assert_eq!(rows.len(), 1);
+    assert!(!rows[0].get::<_, bool>("is_array"));
+    assert_eq!(rows[0].get::<_, i8>("typtype") as u8, b'b');
+    assert_eq!(rows[0].get::<_, String>("typname"), "geometry");
+    assert_eq!(rows[0].get::<_, u32>("oid"), 90_001);
+
+    let row = client
+        .query_one(
+            "SELECT n.nspname = ANY(current_schemas(true)), n.nspname, t.typname \
+             FROM pg_catalog.pg_type t \
+             JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid \
+             WHERE t.oid = $1",
+            &[&90_001_u32],
+        )
+        .await
+        .expect("pgjdbc TypeInfoCache getPGType custom geometry oid probe");
+    assert!(row.get::<_, bool>(0));
+    assert_eq!(row.get::<_, String>("nspname"), "public");
+    assert_eq!(row.get::<_, String>("typname"), "geometry");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn geoserver_pgjdbc_column_metadata_marks_geom_as_geometry_oid() {
+    let (_server, client, _conn) = connect().await;
+
+    client
+        .simple_query("CREATE TABLE public.geoserver_columns (id INT, geom BINARY, name TEXT)")
+        .await
+        .expect("create GeoServer column metadata table");
+
+    let rows = client
+        .query(
+            "SELECT * FROM (SELECT current_database() AS current_database, n.nspname,c.relname,\
+                    a.attname,a.atttypid,a.attnotnull OR (t.typtype = 'd' AND t.typnotnull) AS attnotnull,\
+                    a.atttypmod,a.attlen,t.typtypmod,row_number() OVER (PARTITION BY a.attrelid ORDER BY a.attnum) AS attnum,\
+                    nullif(a.attidentity, '') AS attidentity,nullif(a.attgenerated, '') AS attgenerated,\
+                    pg_catalog.pg_get_expr(def.adbin, def.adrelid) AS adsrc,dsc.description,t.typbasetype,t.typtype \
+             FROM pg_catalog.pg_namespace n \
+             JOIN pg_catalog.pg_class c ON (c.relnamespace = n.oid) \
+             JOIN pg_catalog.pg_attribute a ON (a.attrelid=c.oid) \
+             JOIN pg_catalog.pg_type t ON (a.atttypid = t.oid) \
+             LEFT JOIN pg_catalog.pg_attrdef def ON (a.attrelid=def.adrelid AND a.attnum = def.adnum) \
+             LEFT JOIN pg_catalog.pg_description dsc ON (c.oid=dsc.objoid AND a.attnum = dsc.objsubid) \
+             WHERE c.relkind in ('r','p','v','f','m') AND a.attnum > 0 AND NOT a.attisdropped \
+               AND n.nspname LIKE $1 AND c.relname LIKE $2) c \
+             WHERE true AND attname LIKE $3 ORDER BY nspname,c.relname,attnum",
+            &[&"public", &"geoserver_columns", &"%"],
+        )
+        .await
+        .expect("pgjdbc getColumns shape");
+
+    let columns: Vec<(String, u32)> = rows
+        .iter()
+        .map(|row| (row.get("attname"), row.get("atttypid")))
+        .collect();
+
+    assert_eq!(
+        columns,
+        vec![
+            ("id".to_string(), 23),
+            ("geom".to_string(), 90_001),
+            ("name".to_string(), 25),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn geoserver_pgjdbc_column_metadata_accepts_escaped_name_patterns() {
+    let (_server, client, _conn) = connect().await;
+
+    client
+        .simple_query(
+            "CREATE TABLE public.geoserver_columns_escaped (id INT, geom BINARY, name TEXT)",
+        )
+        .await
+        .expect("create GeoServer column metadata table with underscores");
+
+    let rows = client
+        .query(
+            "SELECT * FROM (SELECT current_database() AS current_database, n.nspname,c.relname,\
+                    a.attname,a.atttypid,a.attnotnull OR (t.typtype = 'd' AND t.typnotnull) AS attnotnull,\
+                    a.atttypmod,a.attlen,t.typtypmod,row_number() OVER (PARTITION BY a.attrelid ORDER BY a.attnum) AS attnum,\
+                    nullif(a.attidentity, '') AS attidentity,nullif(a.attgenerated, '') AS attgenerated,\
+                    pg_catalog.pg_get_expr(def.adbin, def.adrelid) AS adsrc,dsc.description,t.typbasetype,t.typtype \
+             FROM pg_catalog.pg_namespace n \
+             JOIN pg_catalog.pg_class c ON (c.relnamespace = n.oid) \
+             JOIN pg_catalog.pg_attribute a ON (a.attrelid=c.oid) \
+             JOIN pg_catalog.pg_type t ON (a.atttypid = t.oid) \
+             LEFT JOIN pg_catalog.pg_attrdef def ON (a.attrelid=def.adrelid AND a.attnum = def.adnum) \
+             LEFT JOIN pg_catalog.pg_description dsc ON (c.oid=dsc.objoid AND a.attnum = dsc.objsubid) \
+             WHERE c.relkind in ('r','p','v','f','m') AND a.attnum > 0 AND NOT a.attisdropped \
+               AND n.nspname LIKE $1 AND c.relname LIKE $2) c \
+             WHERE true AND attname LIKE $3 ORDER BY nspname,c.relname,attnum",
+            &[&"public", &"geoserver\\_columns\\_escaped", &"id"],
+        )
+        .await
+        .expect("pgjdbc getColumns shape with escaped exact-name pattern");
+
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    let table_name: String = row.get("relname");
+    let column_name: String = row.get("attname");
+    let type_oid: u32 = row.get("atttypid");
+
+    assert_eq!(table_name, "geoserver_columns_escaped");
+    assert_eq!(column_name, "id");
+    assert_eq!(type_oid, 23);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -935,6 +1456,39 @@ async fn qgis_edit_save_shape_dml_returning_roundtrips_rowid() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn qgis_edit_save_parameterized_insert_generates_rowid() {
+    let (_server, client, _conn) = connect().await;
+
+    client
+        .batch_execute("CREATE TABLE public.qgis_edit_params (name TEXT, geom BINARY)")
+        .await
+        .expect("create parameterized edit table");
+
+    let rowid_param: Option<i64> = None;
+    let statement = client
+        .prepare_typed(
+            "INSERT INTO public.qgis_edit_params (geom, \"_quackgis_rowid\", name)
+             VALUES (ST_GeomFromWKB($1::bytea,0), $2, 'inserted')
+             RETURNING \"_quackgis_rowid\", name, ST_AsText(ST_GeomFromWKB(geom))",
+            &[Type::BYTEA, Type::INT8],
+        )
+        .await
+        .expect("prepare QGIS-style parameterized insert");
+    let rows = client
+        .query(&statement, &[&point_wkb(1.0, 1.0), &rowid_param])
+        .await
+        .expect("parameterized QGIS-style insert returning rowid");
+
+    assert_eq!(rows.len(), 1);
+    let rowid: i64 = rows[0].get(0);
+    let name: String = rows[0].get(1);
+    let wkt: String = rows[0].get(2);
+    assert_eq!(rowid, 1);
+    assert_eq!(name, "inserted");
+    assert_eq!(wkt, "POINT(1 1)");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn qgis_st_asbinary_binary_endian_overload_returns_wkb() {
     let server = ServerHandle::start().await;
     let (client, connection) = tokio_postgres::connect(&server.conn_str(), NoTls)
@@ -969,6 +1523,164 @@ async fn qgis_st_asbinary_binary_endian_overload_returns_wkb() {
             1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
         ]
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn geoserver_wfs_st_asewkb_binary_passthrough_returns_wkb() {
+    let (_server, client, _conn) = connect().await;
+
+    client
+        .simple_query("CREATE TABLE public.geoserver_wfs_read (id INT, geom BINARY, name TEXT)")
+        .await
+        .expect("create GeoServer WFS read table");
+    client
+        .simple_query(
+            "INSERT INTO public.geoserver_wfs_read VALUES \
+             (1, X'010100000000000000000000000000000000000000', 'origin')",
+        )
+        .await
+        .expect("insert GeoServer WFS read row");
+
+    let ewkb: Vec<u8> = client
+        .query_one(
+            "SELECT ST_AsEWKB(geom) AS geom FROM public.geoserver_wfs_read WHERE id = 1",
+            &[],
+        )
+        .await
+        .expect("GeoTools ST_AsEWKB projection")
+        .get(0);
+
+    assert_eq!(ewkb, point_wkb(0.0, 0.0));
+
+    let as_binary = client
+        .prepare("SELECT ST_AsBinary(geom) AS geom FROM public.geoserver_wfs_read WHERE id = 1")
+        .await
+        .expect("prepare GeoTools ST_AsBinary projection");
+    let row = client
+        .query_one(&as_binary, &[])
+        .await
+        .expect("GeoTools ST_AsBinary projection keeps bytea RowDescription");
+
+    assert_eq!(*row.columns()[0].type_(), Type::BYTEA);
+    assert_eq!(row.get::<_, Vec<u8>>(0), point_wkb(0.0, 0.0));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn geoserver_wfs_bounds_st_envelope_accepts_st_extent_box_text() {
+    let (_server, client, _conn) = connect().await;
+
+    client
+        .simple_query("CREATE TABLE public.geoserver_bounds (id INT, geom BINARY, name TEXT)")
+        .await
+        .expect("create GeoServer bounds table");
+    client
+        .simple_query(
+            "INSERT INTO public.geoserver_bounds VALUES \
+             (1, X'010100000000000000000000000000000000000000', 'origin'), \
+             (2, X'010100000000000000000000400000000000000840', 'far')",
+        )
+        .await
+        .expect("insert GeoServer bounds rows");
+
+    let roundtrip_extent: String = client
+        .query_one(
+            "SELECT ST_Extent(bounds) \
+             FROM (SELECT ST_Envelope(ST_Extent(ST_Force2D(geom))) AS bounds \
+                   FROM public.geoserver_bounds) q",
+            &[],
+        )
+        .await
+        .expect("GeoTools ST_Envelope(ST_Extent(ST_Force2D)) bounds query")
+        .get(0);
+
+    assert_eq!(roundtrip_extent, "BOX(0 0,2 3)");
+
+    let bounds_wkt: String = client
+        .query_one(
+            "SELECT ST_AsText(ST_Envelope(ST_Extent(ST_Force2D(geom)))) \
+             FROM public.geoserver_bounds",
+            &[],
+        )
+        .await
+        .expect("GeoTools ST_AsText bounds query")
+        .get(0);
+
+    assert!(
+        bounds_wkt.starts_with("POLYGON(("),
+        "unexpected bounds WKT: {bounds_wkt}"
+    );
+
+    let has_arc: bool = client
+        .query_one(
+            "SELECT ST_HasArc(geom) FROM public.geoserver_bounds WHERE id = 1",
+            &[],
+        )
+        .await
+        .expect("GeoTools ST_HasArc reader guard")
+        .get(0);
+
+    assert!(!has_arc);
+
+    let simplified: Vec<u8> = client
+        .query_one(
+            "SELECT ST_Simplify(geom, 0.0, true) FROM public.geoserver_bounds WHERE id = 1",
+            &[],
+        )
+        .await
+        .expect("GeoTools ST_Simplify reader projection")
+        .get(0);
+
+    assert_eq!(simplified, point_wkb(0.0, 0.0));
+
+    let overlaps_literal_bbox: bool = client
+        .query_one(
+            "SELECT st_overlaps_bbox(geom, \
+                    X'010100000000000000000000000000000000000000') \
+             FROM public.geoserver_bounds WHERE id = 1",
+            &[],
+        )
+        .await
+        .expect("GeoTools bbox filter with BinaryView literal")
+        .get(0);
+
+    assert!(overlaps_literal_bbox);
+
+    let wms_projection = client
+        .prepare_typed(
+            "SELECT ST_Simplify(ST_Force2D(geom), $1, true) AS geom \
+             FROM public.geoserver_bounds WHERE id = 1",
+            &[Type::FLOAT8],
+        )
+        .await
+        .expect("prepare GeoTools WMS projection");
+    let row = client
+        .query_one(&wms_projection, &[&0.0_f64])
+        .await
+        .expect("GeoTools WMS parameterized binary geometry projection");
+
+    assert_eq!(*row.columns()[0].type_(), Type::BYTEA);
+    assert_eq!(row.get::<_, Vec<u8>>(0), point_wkb(0.0, 0.0));
+
+    let wms_case_projection = client
+        .prepare_typed(
+            "SELECT ST_AsBinary(
+                 CASE
+                   WHEN ST_HasArc(ST_Force2D(geom))
+                   THEN ST_CurveToLine(ST_Force2D(geom))
+                   ELSE ST_Simplify(ST_Force2D(geom), $1, true)
+                 END) AS geom
+             FROM public.geoserver_bounds WHERE id = 1",
+            &[Type::FLOAT8],
+        )
+        .await
+        .expect("prepare GeoTools WMS CASE binary geometry projection");
+    let row = client
+        .query_one(&wms_case_projection, &[&0.0_f64])
+        .await
+        .expect("GeoTools WMS CASE projection keeps WKB as bytea");
+
+    assert_eq!(*row.columns()[0].type_(), Type::BYTEA);
+    assert_eq!(row.get::<_, Vec<u8>>(0), point_wkb(0.0, 0.0));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1064,6 +1776,77 @@ async fn ogr_column_listing_query_returns_matching_field_count() {
             ("id".to_string(), "int4".to_string()),
             ("wkb_geometry".to_string(), "bytea".to_string()),
             ("name".to_string(), "text".to_string())
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ogr_column_listing_query_is_schema_derived_for_appended_fields() {
+    let (_server, client, _conn) = connect().await;
+
+    client
+        .batch_execute(
+            "CREATE TABLE public.ogr_osm_fields \
+             (id INT, wkb_geometry BINARY, name TEXT, osm_id TEXT)",
+        )
+        .await
+        .expect("create OGR OSM-shaped table");
+
+    let oid_messages = client
+        .simple_query(
+            "SELECT c.oid, c.relname FROM pg_catalog.pg_class c \
+             WHERE c.relname ~ '^(ogr_osm_fields)$' \
+             ORDER BY 2, 3",
+        )
+        .await
+        .expect("OGR pg_class oid lookup");
+    let (table_oid, relname) = oid_messages
+        .iter()
+        .find_map(|message| match message {
+            tokio_postgres::SimpleQueryMessage::Row(row) => Some((
+                row.get("oid")?.parse::<u32>().ok()?,
+                row.get("relname")?.to_string(),
+            )),
+            _ => None,
+        })
+        .expect("synthetic OGR table oid row");
+    assert_eq!(relname, "ogr_osm_fields");
+
+    let rows = client
+        .query(
+            &format!(
+                "SELECT a.attname, t.typname, a.attlen, \
+                        format_type(a.atttypid,a.atttypmod), a.attnotnull, \
+                        def.def, i.indisunique, descr.description \
+                 FROM pg_attribute a \
+                 JOIN pg_type t ON t.oid = a.atttypid \
+                 LEFT JOIN (SELECT adrelid, adnum, pg_get_expr(adbin, adrelid) AS def FROM pg_attrdef) def \
+                        ON def.adrelid = a.attrelid AND def.adnum = a.attnum \
+                 LEFT JOIN (SELECT DISTINCT indrelid, indkey, indisunique FROM pg_index WHERE indisunique) i \
+                        ON i.indrelid = a.attrelid AND i.indkey[0] = a.attnum AND i.indkey[1] IS NULL \
+                 LEFT JOIN pg_description descr \
+                        ON descr.objoid = a.attrelid \
+                       AND descr.classoid = 'pg_class'::regclass::oid \
+                       AND descr.objsubid = a.attnum \
+                 WHERE a.attnum > 0 AND a.attrelid = {table_oid} \
+                 ORDER BY a.attnum"
+            ),
+            &[],
+        )
+        .await
+        .expect("OGR column listing should reflect table schema");
+
+    let cols: Vec<(String, String)> = rows
+        .into_iter()
+        .map(|row| (row.get("attname"), row.get("typname")))
+        .collect();
+    assert_eq!(
+        cols,
+        vec![
+            ("id".to_string(), "int4".to_string()),
+            ("wkb_geometry".to_string(), "bytea".to_string()),
+            ("name".to_string(), "text".to_string()),
+            ("osm_id".to_string(), "text".to_string()),
         ]
     );
 }
@@ -1213,6 +1996,13 @@ async fn ogr_write_load_shape_alter_add_column_and_insert_roundtrips() {
         )
         .await
         .expect("OGR extended INSERT second feature");
+    client
+        .execute(
+            r#"INSERT INTO "ogr_write_load" ("wkb_geometry" , "name", "category") VALUES (E'\\001\\001\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000@\\000\\000\\000\\000\\000\\000\\000@', E'Quai des \\303\\211tats-Unis', 'client')"#,
+            &[],
+        )
+        .await
+        .expect("OGR extended INSERT preserves UTF-8 text octal escapes");
 
     let rows = client
         .query(
@@ -1231,6 +2021,11 @@ async fn ogr_write_load_shape_alter_add_column_and_insert_roundtrips() {
     assert_eq!(
         got,
         vec![
+            (
+                "Quai des États-Unis".to_string(),
+                "POINT(2 2)".to_string(),
+                Some("client".to_string())
+            ),
             (
                 "load-a".to_string(),
                 "POINT(2 2)".to_string(),

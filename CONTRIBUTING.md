@@ -18,6 +18,7 @@ Fork rules:
 
 ```sh
 mise install                   # pinned Rust/tool bootstrap
+eval "$(mise activate bash)"   # use pinned tools/env in this shell
 just --list                    # discover common tasks
 just build                     # server binary
 just test                      # unit + wire integration tests
@@ -26,8 +27,8 @@ just check                     # fmt + clippy + tests
 ```
 
 The repo uses `mise.toml` for tool/env management and `Justfile` as the stable
-entrypoint for newcomers. Prefer adding reusable local workflows there instead
-of documenting one-off shell snippets.
+entrypoint for newcomers. Prefer an activated mise shell and reusable Justfile
+recipes over one-off `mise exec ...` snippets.
 
 Compatibility work is trace-driven: capture the SQL a client (QGIS, GeoServer,
 OGR) actually sends, add it as a replay fixture, then fix. See

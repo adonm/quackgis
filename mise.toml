@@ -2,6 +2,8 @@
 # Repo-local tool/env bootstrap. Run `mise install`, then use `just --list`.
 
 [env]
+# Keep repo Rust/test commands isolated from host GIS/native-library paths.
+LD_LIBRARY_PATH = ""
 QUACKGIS_HOST = "127.0.0.1"
 QUACKGIS_PORT = "5434"
 QUACKGIS_CATALOG_PATH = "{{config_root}}/.tmp/dev/quackgis.db"
@@ -10,7 +12,10 @@ MARTIN_VERSION = "1.11.0"
 MARTIN_BIN = "{{config_root}}/.tmp/bin/martin"
 MARTIN_PORT = "3000"
 QGIS_IMAGE = "docker.io/qgis/qgis:ltr-questing"
-GEOSERVER_IMAGE = "docker.io/kartoza/geoserver:2.26.2"
+GEOSERVER_IMAGE = "docker.osgeo.org/geoserver:3.0.0"
+POSTGIS_IMAGE = "docker.io/postgis/postgis:16-3.4"
+OSM_EXTRACT_URL = "https://download.geofabrik.de/europe/monaco-latest.osm.pbf"
+OSM_POINT_LIMIT = "50"
 CONTAINER_ENGINE = "podman"
 KIND_CLUSTER = "quackgis"
 
