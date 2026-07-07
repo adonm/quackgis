@@ -198,12 +198,34 @@ GetMap. WFS-T remains future hardening.
 
 ### M5 — Spatial layout + performance — gate: pruning benchmark
 
-- Auto-materialize `minx/miny/maxx/maxy`, `spatial_cell` (quadkey),
-  `spatial_sort` (Hilbert) on geometry tables at write time.
+Design direction: [DuckLake spatial-temporal layout](docs/DUCKLAKE_SPATIAL_LAYOUT.md).
+
+- Auto-materialize hidden bbox, coarse spatial bucket, spatial sort key,
+  temporal bounds, and coarse time bucket on geometry tables at write time.
+- Keep M5 WKB-first: use Sedona's WKB bounds parser to compute layout columns in
+  one write-batch pass; tag fields as `geoarrow.wkb` only for interoperability,
+  not as a dependency for pruning.
+- Support type tiers: first-class OGC simple-feature `geometry`/`geography` for
+  SQL, high-fidelity CAD/BIM/reality-capture sidecars for curves/meshes/source
+  objects, and asset-index rows for point clouds, COG rasters, and 3D tiles.
+- Preserve coordinate fidelity metadata: full CRS definitions, vertical datums,
+  coordinate/acquisition epoch, transform pipeline, accuracy, and tessellation
+  tolerance so aerial/CAD data can be reprocessed as datums drift over time.
+- Default to automatic area + time partitioning: WebMercator/quadkey for
+  geographic data, table-local Hilbert buckets for projected/CAD coordinates,
+  adaptive time buckets when a timestamp column is present.
+- Keep partition fanout bounded for trillion-row / 10 TB+ ingest: target large
+  Parquet files, avoid per-feature partitions, and rely on sorted row groups plus
+  file statistics for fine pruning.
+- Support many parallel writers by avoiding mutable global spatial indexes;
+  writers produce independent bucketed files and DuckLake snapshots, with
+  bucket-local compaction as the maintenance path.
 - Scan-time pruning against DuckLake file statistics, built in the ducklake
-  fork (G7); spatial predicate → bbox prune rewrite in the quackgis layer.
-- SpatialBench + tile-rendering benchmark vs PostGIS baseline; publish
-  numbers in `benchmarks/`.
+  fork if needed (G7); spatial predicate → bbox/time prune rewrite in the
+  quackgis layer, exact SedonaDB predicate recheck for correctness.
+- LayoutBench `sf0` exact-vs-pruned oracle in CI, then `sf1+` ingest/query/
+  compaction benchmarks vs PostGIS/DuckLake baselines; publish numbers in
+  `benchmarks/`.
 
 ### M6 — Ops + slim image — gate: released container
 
@@ -312,6 +334,9 @@ GetMap. WFS-T remains future hardening.
    PostgreSQL catalog surface. Keep migrating trace fixtures into surface-focused
    tests (`pg_class`, `pg_attribute`, `pg_index`, `pg_type`) before adding new
    client-specific branches.
-6. **Keep deployment boring.** Keep the runtime image single-binary and native-
+6. **Start the M5 layout spike.** Implement hidden bbox/time/layout columns in
+   the DuckLake write path first, then add predicate rewrites and prove pruning
+   with a benchmark before adding more indexing abstractions.
+7. **Keep deployment boring.** Keep the runtime image single-binary and native-
    dependency-free; reintroduce Helm only after the Kind smoke path covers QGIS,
    OGR, and GeoServer.

@@ -22,6 +22,7 @@ eval "$(mise activate bash)"   # use pinned tools/env in this shell
 just --list                    # discover common tasks
 just doctor                    # verify the pinned local toolchain
 just smoke                     # smallest server + spatial query smoke
+just demo-local                # local host demo with stable public.demo_* layers
 just demo-kind                 # local Kind demo with stable public.demo_* layers
 just ci                        # same fast gate used by GitHub Actions
 just build                     # server binary

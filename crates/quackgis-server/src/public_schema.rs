@@ -48,8 +48,8 @@ impl SchemaProvider for PublicSchemaAlias {
         let Some(table) = self.ducklake_main.table(name).await? else {
             return Ok(None);
         };
-        if needs_virtual_rowid(table.schema().as_ref()) {
-            return Ok(Some(Arc::new(RowIdTableAlias::new(name, table.schema()))));
+        if needs_public_table_alias(table.schema().as_ref()) {
+            return Ok(Some(Arc::new(PublicTableAlias::new(name, table.schema()))));
         }
         Ok(Some(table))
     }
@@ -79,36 +79,68 @@ impl SchemaProvider for PublicSchemaAlias {
 }
 
 #[derive(Debug)]
-struct RowIdTableAlias {
+struct PublicTableAlias {
     table_name: String,
     schema: SchemaRef,
+    visible_columns: Vec<String>,
+    add_virtual_rowid: bool,
 }
 
-impl RowIdTableAlias {
+impl PublicTableAlias {
     fn new(table_name: &str, base_schema: SchemaRef) -> Self {
-        let mut fields = vec![Arc::new(Field::new(
-            SYNTHETIC_ROWID_COLUMN,
-            DataType::Int64,
-            false,
-        ))];
-        fields.extend(base_schema.fields().iter().cloned());
+        let add_virtual_rowid = needs_virtual_rowid(base_schema.as_ref());
+        let visible_columns = base_schema
+            .fields()
+            .iter()
+            .filter(|field| !crate::ducklake_sql::layout::is_layout_column(field.name()))
+            .map(|field| field.name().clone())
+            .collect::<Vec<_>>();
+        let mut fields = Vec::new();
+        if add_virtual_rowid {
+            fields.push(Arc::new(Field::new(
+                SYNTHETIC_ROWID_COLUMN,
+                DataType::Int64,
+                false,
+            )));
+        }
+        fields.extend(
+            base_schema
+                .fields()
+                .iter()
+                .filter(|field| !crate::ducklake_sql::layout::is_layout_column(field.name()))
+                .cloned(),
+        );
         Self {
             table_name: table_name.to_string(),
             schema: Arc::new(Schema::new(fields)),
+            visible_columns,
+            add_virtual_rowid,
         }
     }
 
     fn sql(&self) -> String {
+        let mut select_items = Vec::new();
+        if self.add_virtual_rowid {
+            select_items.push(format!(
+                "CAST(ROW_NUMBER() OVER () AS BIGINT) AS {}",
+                quote_ident(SYNTHETIC_ROWID_COLUMN)
+            ));
+        }
+        select_items.extend(
+            self.visible_columns
+                .iter()
+                .map(|column| quote_ident(column)),
+        );
         format!(
-            "SELECT CAST(ROW_NUMBER() OVER () AS BIGINT) AS {}, * FROM {DUCKLAKE_CATALOG}.main.{}",
-            quote_ident(SYNTHETIC_ROWID_COLUMN),
+            "SELECT {} FROM {DUCKLAKE_CATALOG}.main.{}",
+            select_items.join(", "),
             quote_ident(&self.table_name)
         )
     }
 }
 
 #[async_trait]
-impl TableProvider for RowIdTableAlias {
+impl TableProvider for PublicTableAlias {
     fn schema(&self) -> SchemaRef {
         Arc::clone(&self.schema)
     }
@@ -135,7 +167,7 @@ impl TableProvider for RowIdTableAlias {
             .as_any()
             .downcast_ref::<SessionState>()
             .ok_or_else(|| {
-                DataFusionError::Internal("RowIdTableAlias requires SessionState".into())
+                DataFusionError::Internal("PublicTableAlias requires SessionState".into())
             })?;
         let mut plan = LogicalPlanBuilder::from(state.create_logical_plan(&self.sql()).await?);
 
@@ -162,6 +194,14 @@ impl TableProvider for RowIdTableAlias {
 
         session.create_physical_plan(&plan.build()?).await
     }
+}
+
+fn needs_public_table_alias(schema: &Schema) -> bool {
+    needs_virtual_rowid(schema)
+        || schema
+            .fields()
+            .iter()
+            .any(|field| crate::ducklake_sql::layout::is_layout_column(field.name()))
 }
 
 pub(crate) fn needs_virtual_rowid(schema: &Schema) -> bool {

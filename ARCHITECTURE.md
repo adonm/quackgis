@@ -78,8 +78,9 @@ QuackGIS binary.
 ## Geometry strategy: EWKB everywhere with a real type OID
 
 The goal is the highest performance/fidelity tradeoff SedonaDB can support today.
-EWKB is the current PostGIS wire standard; GeoArrow is the future but not yet
-PostgreSQL-wire-compatible. We use EWKB at every boundary:
+EWKB is the current PostGIS wire standard. GeoArrow is useful metadata and a
+future native-array optimization, but it is not the primary physical format for
+M5. We use EWKB/WKB at every durable/client boundary:
 
 ```text
 ┌────────────┐     WKB Binary     ┌────────────┐    EWKB bytes    ┌────────────┐
@@ -91,11 +92,11 @@ PostgreSQL-wire-compatible. We use EWKB at every boundary:
 
 | Layer | Representation | Rationale |
 |---|---|---|
-| **Storage** | WKB in Parquet Binary columns; DuckLake `column_type = "GEOMETRY"` | Forward-compatible with DuckLake 1.0+ and GeoParquet; compact columnar; `geometry_columns` view can discover geometry columns from catalog metadata without scanning data |
-| **Execution** | WKB in Arrow Binary arrays (SedonaDB 0.4 default) | No change from QuackGIS; SedonaDB's Rust-native kernels operate on WKB natively in the selected feature set |
+| **Storage** | WKB in Parquet Binary columns; DuckLake `column_type = "GEOMETRY"`; optional Arrow `geoarrow.wkb` metadata | Forward-compatible with DuckLake 1.0+ and GeoParquet; compact columnar; `geometry_columns` view can discover geometry columns from catalog metadata without scanning data |
+| **Execution** | WKB in Arrow Binary arrays (SedonaDB 0.4 default) plus hidden layout columns | No format pivot; SedonaDB's Rust-native kernels operate on WKB, and QuackGIS computes bbox/layout once per write batch |
 | **Wire (text)** | hex-EWKB string behind a real `geometry` type OID | What `psql` and text-protocol clients display; identical to PostGIS |
 | **Wire (binary)** | raw EWKB bytes behind the same OID | What QGIS/Martin/GeoServer binary cursors and prepared-statement binary params expect; 2× bandwidth saving vs hex-text |
-| **SRID** | Carried in EWKB header flags; sourced from DuckLake column metadata at read time | End-to-end CRS propagation without a separate `geometry_columns` lookup per-row |
+| **SRID/epoch/fidelity metadata** | SRID in EWKB plus DuckLake/table metadata for CRS WKT2/projjson, vertical datum, coordinate epoch, transform pipeline, accuracy, and conversion tolerance | End-to-end CRS propagation and reproducible high-accuracy CAD/aerial transforms without a separate `geometry_columns` lookup per-row |
 
 ### DuckLake geometry column tagging
 
@@ -126,6 +127,19 @@ This mirrors the approach datafusion-postgres already ships behind its
 `postgis` feature flag (backed by geodatafusion); QuackGIS swaps the function
 catalog for SedonaDB's larger one.
 
+GeoArrow direction: tag WKB Arrow fields as `geoarrow.wkb` when doing so is
+interoperable, but keep durable geometry bytes as WKB/EWKB. A local GeoArrow 0.8
+probe confirmed that Arrow Binary + `geoarrow.wkb` metadata is recognized and
+row-readable; it did not provide a better batch bbox primitive than Sedona's WKB
+bounds path, so M5 layout is WKB-first.
+
+CAD/reality-capture direction: queryable SQL columns stay OGC simple-feature
+`geometry`/`geography` WKB/EWKB. High-fidelity source content such as CAD curves,
+splines, meshes, point clouds, rasters, and BIM objects is represented as derived
+query geometries plus provenance/asset sidecars rather than destructively forcing
+everything into simple polygons. See the spatial layout design for the type tiers
+and coordinate-epoch metadata.
+
 ## Catalog and introspection
 
 - `datafusion-pg-catalog` provides `pg_catalog` (pg_class, pg_namespace,
@@ -141,18 +155,21 @@ catalog for SedonaDB's larger one.
 
 ## DuckLake spatial layout
 
-Unchanged from v0.1 — spatial tables materialize deterministic layout columns:
+Spatial tables materialize deterministic hidden layout columns at write time:
+bbox, coarse spatial bucket, spatial sort key, optional temporal bounds, and a
+coarse time bucket. QuackGIS computes geometry-derived layout values in one
+vectorized WKB pass using Sedona bounds helpers. Query planning prunes by time
+bucket → spatial bucket → DuckLake/Parquet bbox statistics → exact SedonaDB
+predicate.
 
-| Column | Purpose |
-|---|---|
-| `minx/miny/maxx/maxy` | File-level zone-map pruning |
-| `spatial_cell` (quadkey) | Partition pruning |
-| `spatial_sort` (Hilbert) | Spatial clustering within files |
+The design deliberately avoids mutable GiST/R-tree side indexes. Parallel writers
+can write independent files and publish DuckLake snapshots; compaction later
+rewrites only coarse time/space buckets when small files accumulate.
 
-Query: cell prune → bbox prune → exact predicate. Stages 1–2 are performance;
-stage 3 is correctness. Pruning happens in the DataFusion scan against DuckLake
-file statistics — missing upstream, built in our datafusion-ducklake fork
-(gap ledger G7).
+See [DuckLake spatial-temporal layout](docs/DUCKLAKE_SPATIAL_LAYOUT.md) for the
+automatic partitioning/indexing direction, including huge aerial captures,
+local-coordinate CAD data, geography/geometry type tiers, coordinate drift
+metadata, and trillion-row table targets (gap ledger G7).
 
 ## Transaction semantics over DuckLake snapshots
 

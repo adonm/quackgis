@@ -14,7 +14,23 @@ just doctor
 Podman is the default local container runtime. `mise.toml` pins Rust, Just, Kind,
 kubectl, Helm, and cargo-nextest.
 
-## 2. Run the five-minute demo
+## 2. Run a local demo without Kubernetes
+
+```sh
+just demo-local
+```
+
+This starts QuackGIS on `127.0.0.1:5434`, seeds `public.demo_points` and
+`public.demo_polygons`, prints QGIS/OGR connection hints, and keeps the server in
+the foreground until Ctrl-C.
+
+Seed only, after `just server` or another local deployment is already running:
+
+```sh
+just seed-local-demo
+```
+
+## 3. Run the five-minute Kind demo
 
 ```sh
 just demo-kind
@@ -34,7 +50,7 @@ Seed only, after an existing deployment is ready:
 just seed-kind-demo
 ```
 
-## 3. Connect clients inside Kind
+## 4. Connect clients inside Kind
 
 The in-cluster connection is:
 
@@ -53,7 +69,7 @@ Example OGR command from a container/job using the cluster DNS:
 ogrinfo 'PG:host=quackgis.quackgis.svc.cluster.local port=5434 user=postgres dbname=quackgis' demo_points -so
 ```
 
-## 4. Run the full client gate
+## 5. Run the full client gate
 
 ```sh
 just kind-compatibility
@@ -66,6 +82,7 @@ QGIS read/edit, OGR load/read, and GeoServer WFS/WMS/WFS-T status.
 ## Troubleshooting
 
 - `just kind-ready` validates Podman, Kind, kubectl, and current cluster state.
+- `examples/` has QGIS, OGR, and GeoServer setup notes for the stable demo layers.
 - `just kind-status` shows nodes plus QuackGIS namespace pods/jobs/services.
 - `just kind-logs` prints the QuackGIS server log tail.
 - `just kind-down` deletes the local Kind cluster if you want a clean slate.

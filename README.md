@@ -62,6 +62,8 @@ SELECT postgis_version();                                -- 3.4 QUACKGIS
   targets and known limitations.
 - [docs/OPERATIONS.md](./docs/OPERATIONS.md) — current local + Kind client-probe
   workflow for the single Rust pgwire binary.
+- [examples/](./examples/) — QGIS, GDAL/OGR, and GeoServer examples using stable
+  demo layers.
 - [docs/OSM_POSTGIS_PARITY.md](./docs/OSM_POSTGIS_PARITY.md) — real OSM data
   side-by-side PostGIS parity roadmap and copy/sync recipes.
 - [CHANGELOG.md](./CHANGELOG.md) — history, including the retired v0.1 facade.
@@ -78,6 +80,7 @@ eval "$(mise activate bash)"
 just --list                    # common entrypoints
 just doctor                    # verify pinned local dev tools are available
 just smoke                     # smallest pgwire + spatial query smoke test
+just demo-local                # host-local demo on 127.0.0.1:5434, Ctrl-C to stop
 just demo-kind                 # 5-minute Kind demo; see docs/QUICKSTART.md
 just ci                        # same fast gate used by GitHub Actions
 just build                     # server binary
@@ -90,6 +93,7 @@ just martin-e2e                # opt-in real Martin binary E2E
 just kind-refresh              # host-cached build/load/deploy into Kind
 just kind-refresh-fast         # faster no-LTO probe build/load/deploy loop
 just kind-ready                # validate podman + create/reuse local Kind cluster
+just seed-local-demo           # seed stable public.demo_* layers in a running local server
 just seed-kind-demo            # seed stable public.demo_* layers in an existing cluster
 just kind-probes               # QGIS read/edit + OGR + GeoServer WFS/WMS/WFS-T jobs
 just kind-qgis-probe           # headless PyQGIS add-layer/read-feature gate

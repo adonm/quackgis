@@ -60,6 +60,17 @@ jobs:
           set -euo pipefail
           mise exec -- just kind-compat-report
 
+      - name: Add compatibility report to job summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f .tmp/compatibility/README.md ]; then
+            cat .tmp/compatibility/README.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf 'Compatibility report was not generated.\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Upload compatibility report
         if: always()
         uses: actions/upload-artifact@v4
@@ -67,6 +78,16 @@ jobs:
           name: compatibility-report-${{ github.run_id }}
           path: .tmp/compatibility
           if-no-files-found: ignore
+
+      - name: Fail on reported compatibility failures
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f .tmp/compatibility/README.md ] && grep -q '❌ fail' .tmp/compatibility/README.md; then
+            grep '^Summary:' .tmp/compatibility/README.md || true
+            exit 1
+          fi
 
       - name: Delete Kind cluster
         if: always()

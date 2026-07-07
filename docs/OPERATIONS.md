@@ -13,6 +13,7 @@ eval "$(mise activate bash)"
 just ci
 just build
 just server
+just demo-local
 ```
 
 Use an activated mise shell for interactive work; this keeps the pinned Rust,
@@ -32,6 +33,12 @@ The default local server listens on `127.0.0.1:5434` and uses:
 
 Dev auth is intentionally minimal: connect as user `postgres` to database
 `quackgis` with no password unless a future auth layer is enabled.
+
+`just demo-local` uses isolated `.tmp/demo` storage, starts the local server,
+seeds stable `public.demo_points` and `public.demo_polygons` layers, prints
+client hints, and keeps the server running until Ctrl-C. Use
+`just seed-local-demo` to seed the same stable layers into an already-running
+local server.
 
 ## Kind client probes
 
@@ -211,8 +218,9 @@ same Justfile recipes as local development through `mise exec -- just ...`.
 - `CI` runs `just ci` (`check-fast`) on pushes to `main` and pull requests.
 - `Compatibility probes` runs the Kind QGIS read/edit, OGR, and GeoServer probes
   with `just kind-compatibility` on a nightly schedule and by manual dispatch. It
-  uploads logs collected by `just kind-compat-report` as a compatibility report
-  artifact.
+  appends `.tmp/compatibility/README.md` to the GitHub job summary, uploads logs
+  collected by `just kind-compat-report` as a compatibility report artifact, and
+  fails explicitly if the rendered report contains a failed probe row.
 - The nightly compatibility run also executes the opt-in real OSM PostGIS parity
   probe; manual dispatch can enable it with the `run_osm` input.
 

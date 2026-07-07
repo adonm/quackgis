@@ -1,4 +1,69 @@
-# SpatialBench benchmarks (local DuckLake)
+# Benchmarks
+
+## QuackGIS LayoutBench (planned M5)
+
+LayoutBench is the planned synthetic validation suite for DuckLake
+spatial-temporal layout. It is deterministic by seed and scale factor so CI,
+local dev, nightly, and manual stress runs exercise the same distributions at
+different sizes.
+
+`sf0` now exists as a Rust integration oracle:
+
+```sh
+just layoutbench-sf0
+```
+
+Current pinned `sf0` counts:
+
+```text
+layoutbench_sf0 aerial=18 cad=12 assets=18 control=7
+```
+
+The test creates the planned table families, verifies `_qg_*` layout projection,
+and checks bbox-prefiltered query shapes return the same counts as exact SedonaDB
+predicates. Larger scales remain planned generator/benchmark work.
+
+| Scale | Purpose |
+|---|---|
+| `sf0` | CI oracle: implemented; small enough to compare prefiltered results against exact SedonaDB predicates |
+| `sf1` | local benchmark: 1M-5M mixed rows for ingest/query iteration |
+| `sf10` | nightly benchmark: 10M-50M rows for pruning/compaction regressions |
+| `sf100+` | manual stress: generated-streaming proxy for 10 TB aerial/CAD ingest |
+
+Synthetic tables:
+
+- `layoutbench_aerial_frames`: overlapping drone/aerial photo footprints along
+  flight strips with capture time, camera, GSD, altitude, mission id, and CRS
+  metadata.
+- `layoutbench_cad_objects`: local-coordinate architectural/site features with
+  floor/level, object type, source id, Z range, transform/tolerance sidecars, and
+  millimetre-scale detail near large project-grid offsets.
+- `layoutbench_assets`: footprint rows for COPC/LAZ/E57 point clouds,
+  COG/GeoTIFF rasters, 3D Tiles/glTF meshes, and IFC/CityGML/LandXML/DXF-derived
+  layers.
+- `layoutbench_control_points`: multi-epoch survey/control points with known
+  synthetic drift, vertical datum metadata, and expected residual thresholds.
+
+Gate queries:
+
+1. tile/time aerial window;
+2. mission strip crossing many spatial buckets;
+3. CAD viewport by floor/level in local coordinates;
+4. asset discovery by footprint/time/resolution/accuracy;
+5. coordinate-drift residual check;
+6. `sf0` exact-vs-pruned equality oracle;
+7. append-small-files → compact-by-bucket → unchanged results + improved skip
+   ratio.
+
+Record: ingest rows/sec, file/row-group sizes, DuckLake metadata rows, max open
+partitions per writer, partition/file/row-group skip ratios, bytes scanned,
+exact-predicate candidate false-positive ratio, query time, compaction time, and
+coordinate residual error.
+
+See `docs/DUCKLAKE_SPATIAL_LAYOUT.md` for the type/fidelity model and layout
+details.
+
+## SpatialBench benchmarks (legacy local DuckLake)
 
 Runs the [Apache SpatialBench](https://github.com/apache/sedona-spatialbench)
 queries against the **sedonadb** extension over a **local DuckLake** (DuckDB file

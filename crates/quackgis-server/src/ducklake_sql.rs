@@ -40,8 +40,10 @@ use tokio::sync::Mutex;
 use crate::catalog_compat::SYNTHETIC_ROWID_COLUMN;
 use crate::context::{DUCKLAKE_CATALOG, StoragePaths};
 
+pub(crate) mod layout;
 mod names;
 mod params;
+mod pruning;
 mod rewrites;
 
 use names::{
@@ -106,6 +108,18 @@ impl QueryHook for DuckLakeSqlHook {
         session_context: &SessionContext,
         client: &mut dyn HookClient,
     ) -> Option<PgWireResult<Response>> {
+        if let Some(rewritten_query) =
+            pruning::rewrite_spatial_pruning_query(statement, session_context).await
+        {
+            return Some(
+                collect_query_batches(session_context, &rewritten_query)
+                    .await
+                    .and_then(|batches| {
+                        query_response_from_batches_with_format(batches, Format::UnifiedText)
+                    })
+                    .map(Response::Query),
+            );
+        }
         match statement {
             datafusion::sql::sqlparser::ast::Statement::StartTransaction { .. } => {
                 Some(self.handle_begin(client).await)
@@ -183,6 +197,20 @@ impl QueryHook for DuckLakeSqlHook {
         }
         if ducklake_statement_parts(statement).is_some() {
             return Some(Ok(empty_logical_plan()));
+        }
+        if let Some(rewritten_query) =
+            pruning::rewrite_spatial_pruning_query(statement, session_context).await
+        {
+            return Some(
+                session_context
+                    .sql(&rewritten_query)
+                    .await
+                    .map_err(|e| PgWireError::ApiError(Box::new(e)))
+                    .and_then(|df| {
+                        df.into_optimized_plan()
+                            .map_err(|e| PgWireError::ApiError(Box::new(e)))
+                    }),
+            );
         }
         None
     }
@@ -580,6 +608,7 @@ impl DuckLakeSqlHook {
             .await?;
         let query = format!("SELECT * FROM {table_ref}");
         let (batches, _) = collect_normalized_query_batches(session_context, &query).await?;
+        let batches = layout::project_batches(batches).map_err(user_error)?;
         self.register_staged_batches(session_context, &temp_table, &batches)?;
         Ok(StagedTable {
             temp_table,
@@ -639,6 +668,7 @@ impl DuckLakeSqlHook {
         staged: &mut StagedTable,
         batches: Vec<RecordBatch>,
     ) -> PgWireResult<()> {
+        let batches = layout::project_batches(batches).map_err(user_error)?;
         staged.batches = batches;
         self.register_staged_batches(session_context, &staged.temp_table, &staged.batches)
     }
@@ -1373,7 +1403,9 @@ impl DuckLakeSqlHook {
             // so Parquet/DuckLake persists the real column names.
             let mut source_idx = 1_usize;
             for field in schema_ref.fields() {
-                if field.name().eq_ignore_ascii_case(SYNTHETIC_ROWID_COLUMN) {
+                if field.name().eq_ignore_ascii_case(SYNTHETIC_ROWID_COLUMN)
+                    || layout::is_layout_column(field.name())
+                {
                     continue;
                 }
                 insert_positions.insert(field.name().clone(), source_idx);
@@ -1383,7 +1415,9 @@ impl DuckLakeSqlHook {
             for (idx, name) in insert_columns.iter().enumerate() {
                 let col = object_name_last(name)
                     .ok_or_else(|| user_error(anyhow!("invalid INSERT column")))?;
-                if col.eq_ignore_ascii_case(SYNTHETIC_ROWID_COLUMN) {
+                if col.eq_ignore_ascii_case(SYNTHETIC_ROWID_COLUMN)
+                    || layout::is_layout_column(&col)
+                {
                     continue;
                 }
                 insert_positions.insert(col, idx + 1); // VALUES columns are column1, column2, ...
@@ -1467,6 +1501,12 @@ impl DuckLakeSqlHook {
         batches: &[RecordBatch],
         disposition: WriteDisposition,
     ) -> PgWireResult<usize> {
+        let batches = if matches!(disposition, WriteDisposition::Replace) {
+            layout::ensure_columns_for_spatial_batches(batches.to_vec()).map_err(user_error)?
+        } else {
+            batches.to_vec()
+        };
+        let batches = layout::project_batches(batches).map_err(user_error)?;
         let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         let writer = Arc::new(
             SqliteMetadataWriter::new_with_init(&self.paths.catalog_conn)
@@ -1487,11 +1527,11 @@ impl DuckLakeSqlHook {
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         match disposition {
             WriteDisposition::Replace => table_writer
-                .write_table(schema, table, batches)
+                .write_table(schema, table, &batches)
                 .await
                 .map_err(|e| PgWireError::ApiError(Box::new(e)))?,
             WriteDisposition::Append => table_writer
-                .append_table(schema, table, batches)
+                .append_table(schema, table, &batches)
                 .await
                 .map_err(|e| PgWireError::ApiError(Box::new(e)))?,
         };

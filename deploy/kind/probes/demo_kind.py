@@ -26,7 +26,12 @@ def polygon_wkb_hex(coords: list[tuple[float, float]]) -> str:
 
 
 def reset_table(cur, table: str):
-    cur.execute(f"CREATE TABLE public.{quote_ident(table)} (id INT, geom BINARY, name TEXT)")
+    table_ref = f"public.{quote_ident(table)}"
+    try:
+        cur.execute(f"DELETE FROM {table_ref}")
+    except Exception:
+        cur.connection.rollback()
+        cur.execute(f"CREATE TABLE {table_ref} (id INT, geom BINARY, name TEXT)")
 
 
 def main() -> int:

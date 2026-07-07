@@ -3,6 +3,8 @@ set dotenv-load := true
 
 host := env_var_or_default("QUACKGIS_HOST", "127.0.0.1")
 port := env_var_or_default("QUACKGIS_PORT", "5434")
+smoke_host := env_var_or_default("QUACKGIS_SMOKE_HOST", "127.0.0.1")
+smoke_port := env_var_or_default("QUACKGIS_SMOKE_PORT", "15434")
 catalog := env_var_or_default("QUACKGIS_CATALOG_PATH", ".tmp/dev/quackgis.db")
 data := env_var_or_default("QUACKGIS_DATA_PATH", ".tmp/dev/data")
 martin_bin := env_var_or_default("MARTIN_BIN", ".tmp/bin/martin")
@@ -206,7 +208,11 @@ test:
 
 # Faster local regression loop: only QuackGIS's non-ignored integration gates.
 test-fast:
-    cargo test -p quackgis-server --lib --test ducklake_persistence --test martin_compat --test wire_spatial
+    cargo test -p quackgis-server --lib --test ducklake_persistence --test layoutbench_sf0 --test martin_compat --test wire_spatial
+
+# Run the deterministic LayoutBench sf0 oracle for spatial-layout work.
+layoutbench-sf0:
+    cargo test -p quackgis-server --test layoutbench_sf0 -- --nocapture
 
 # Run nextest when installed by mise.
 nextest:
@@ -219,8 +225,7 @@ check: fmt-check clippy test
 check-fast: fmt-check clippy test-fast
 
 # Run the same fast gate used by GitHub Actions CI.
-ci:
-    just check-fast
+ci: check-fast smoke-local-demo
 
 # Run the dev QuackGIS server on QUACKGIS_HOST/QUACKGIS_PORT.
 server:
@@ -230,6 +235,47 @@ server:
 # Connect with psql to a running dev server.
 psql:
     psql -h {{host}} -p {{port}} -U postgres -d quackgis
+
+# Seed stable demo layers in an already-running local server.
+seed-local-demo:
+    cargo run -p quackgis-server --example seed_demo -- --host {{host}} --port {{port}}
+
+# CI/local smoke: start a temporary server, seed stable demo layers, verify, and exit.
+smoke-local-demo:
+    @set -eu; \
+    rm -rf .tmp/demo-smoke; \
+    mkdir -p .tmp/demo-smoke/data; \
+    log=.tmp/demo-smoke/quackgis-server.log; \
+    seed_log=.tmp/demo-smoke/seed.log; \
+    QUACKGIS_CATALOG_PATH=.tmp/demo-smoke/quackgis.db QUACKGIS_DATA_PATH=.tmp/demo-smoke/data cargo run -p quackgis-server -- --host {{smoke_host}} --port {{smoke_port}} > "$log" 2>&1 & \
+    server_pid=$!; \
+    trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT INT TERM; \
+    python3 scripts/wait_for_tcp.py {{smoke_host}} {{smoke_port}} "$server_pid" "$log"; \
+    if ! QUACKGIS_HOST={{smoke_host}} QUACKGIS_PORT={{smoke_port}} cargo run -p quackgis-server --example seed_demo -- --host {{smoke_host}} --port {{smoke_port}} > "$seed_log" 2>&1; then \
+        python3 -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace"), end="")' "$seed_log"; \
+        exit 1; \
+    fi; \
+    python3 -c 'import pathlib, sys; text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace"); print(text, end=""); sys.exit(0 if "demo_ok True" in text else 1)' "$seed_log"; \
+    kill "$server_pid" 2>/dev/null || true; \
+    wait "$server_pid" 2>/dev/null || true; \
+    trap - EXIT INT TERM
+
+# One-command host-local demo: start QuackGIS, seed stable layers, and keep it running.
+demo-local:
+    @set -eu; \
+    rm -rf .tmp/demo; \
+    mkdir -p .tmp/demo/data; \
+    log=.tmp/demo/quackgis-server.log; \
+    QUACKGIS_CATALOG_PATH=.tmp/demo/quackgis.db QUACKGIS_DATA_PATH=.tmp/demo/data cargo run -p quackgis-server -- --host {{host}} --port {{port}} > "$log" 2>&1 & \
+    server_pid=$!; \
+    trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT INT TERM; \
+    python3 scripts/wait_for_tcp.py {{host}} {{port}} "$server_pid" "$log"; \
+    QUACKGIS_HOST={{host}} QUACKGIS_PORT={{port}} cargo run -p quackgis-server --example seed_demo -- --host {{host}} --port {{port}}; \
+    printf '\nLocal demo is running on host={{host}} port={{port}}. Press Ctrl-C to stop.\n'; \
+    status=0; \
+    wait "$server_pid" || status=$?; \
+    if [ "$status" -eq 130 ] || [ "$status" -eq 143 ]; then exit 0; fi; \
+    exit "$status"
 
 # Remove local dev DuckLake catalog/data.
 clean-dev:
