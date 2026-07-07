@@ -39,7 +39,7 @@ OGR load/read, and GeoServer WFS/WMS smoke probes are green. See
 
 ```sh
 mise install              # Rust, just, kind/kubectl/helm, cargo-nextest
-eval "$(mise activate bash)" # activate pinned tools/env for this shell
+eval "$(mise activate bash)" # optional: activate pinned tools/env for this shell
 just setup                # also downloads Martin into .tmp/bin
 just ref-init             # optional: clone all reference repos into .tmp/ref
 just server               # runs on 127.0.0.1:5434 with .tmp/dev storage
@@ -69,11 +69,17 @@ SELECT postgis_version();                                -- 3.4 QUACKGIS
 
 ## Development
 
-Activate mise once per shell, then run `just`/`cargo` directly:
+Use `mise` for pinned tools/env and `just` for repo workflows. For an
+interactive shell, activate mise once, then run recipes directly. For the
+guided path, start with [docs/QUICKSTART.md](./docs/QUICKSTART.md).
 
 ```sh
 eval "$(mise activate bash)"
 just --list                    # common entrypoints
+just doctor                    # verify pinned local dev tools are available
+just smoke                     # smallest pgwire + spatial query smoke test
+just demo-kind                 # 5-minute Kind demo; see docs/QUICKSTART.md
+just ci                        # same fast gate used by GitHub Actions
 just build                     # server binary
 just test                      # unit + wire integration tests
 just test-fast                 # non-ignored QuackGIS regression loop only
@@ -83,28 +89,39 @@ just martin-sql                # Martin-generated SQL compatibility gate
 just martin-e2e                # opt-in real Martin binary E2E
 just kind-refresh              # host-cached build/load/deploy into Kind
 just kind-refresh-fast         # faster no-LTO probe build/load/deploy loop
-just kind-probes               # QGIS read/edit + OGR + GeoServer jobs in one wait
+just kind-ready                # validate podman + create/reuse local Kind cluster
+just seed-kind-demo            # seed stable public.demo_* layers in an existing cluster
+just kind-probes               # QGIS read/edit + OGR + GeoServer WFS/WMS/WFS-T jobs
 just kind-qgis-probe           # headless PyQGIS add-layer/read-feature gate
 just kind-qgis-edit-probe      # headless PyQGIS insert/update/delete/save gate
 just kind-ogr-probe            # GDAL/OGR PostgreSQL-driver load/read gate
-just kind-geoserver-probe      # GeoServer 3.0.0 datastore + WFS/WMS gate
+just kind-geoserver-probe      # GeoServer 3.0.0 datastore + WFS/WMS/WFS-T gate
+just kind-compatibility        # build/deploy + QGIS/OGR/GeoServer compatibility probes
 just kind-osm-postgis-parity   # opt-in real OSM PostGIS -> QuackGIS parity
+```
+
+For one-off commands without shell activation, keep the same recipes and let mise
+inject the pinned environment:
+
+```sh
+mise exec -- just ci
+mise exec -- just kind-compatibility
+```
 
 Reference/source trees for client-trace work live outside the build graph under
 ignored `.tmp/ref/*` (submodule-init equivalent): `just ref-init` materializes
 the QuackGIS forks plus Martin, QGIS, GeoServer, GDAL/OGR (`ogr2ogr`), PostGIS,
 DuckDB/DuckLake/pg_ducklake, and SQLite.
-```
 
 The current stack is intentionally zero-native-dependency for QuackGIS itself:
 no libgeos/libproj/libgdal. Client/test tools such as Martin, QGIS, GeoServer,
 and KinD are managed via `mise.toml` environment/tool pins plus Justfile
 recipes.
 
-Pushes to `main` and `v*` tags run the mise-backed CI artifact workflow. It
-validates the pinned dev toolchain, uploads Linux x86_64 binary tarballs, pushes
-the runtime image to GHCR on non-PR refs, and attaches binaries to GitHub
-Releases for version tags.
+Pushes to `main` and pull requests run the mise-backed fast Rust gate. The
+scheduled/manual compatibility workflow builds the Kind image, runs QGIS
+read/edit, OGR, GeoServer, and optionally real OSM PostGIS parity probes, then
+uploads probe logs as a compatibility report artifact.
 
 Upstreams are consumed through fork branches when needed. DuckLake storage is a **priority validated path**, not a placeholder: dev = SQLite catalog + local Parquet files; production target = PostgreSQL catalog + AWS S3 Parquet. Extending datafusion-ducklake to meet QuackGIS storage requirements (SQL DDL routing, UPDATE/DELETE, pruning, PostgreSQL/S3 hardening) is explicitly in scope, while staying forward-compatible with the official DuckLake 1.0+ spec.
 

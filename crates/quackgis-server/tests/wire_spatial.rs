@@ -1684,6 +1684,68 @@ async fn geoserver_wfs_bounds_st_envelope_accepts_st_extent_box_text() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn geoserver_wfst_trace_dml_shapes_roundtrip() {
+    let (_server, client, _conn) = connect().await;
+
+    client
+        .batch_execute("CREATE TABLE public.geoserver_wfst (id INT, geom BINARY, name TEXT)")
+        .await
+        .expect("create GeoServer WFS-T table");
+
+    let insert = client
+        .prepare_typed(
+            "INSERT INTO public.geoserver_wfst (id, geom, name)
+             VALUES ($1, ST_GeomFromWKB($2::bytea, 4326), $3)
+             RETURNING id, name, ST_AsText(ST_GeomFromWKB(geom))",
+            &[Type::INT4, Type::BYTEA, Type::TEXT],
+        )
+        .await
+        .expect("prepare GeoServer WFS-T INSERT trace shape");
+    let insert_wkb = point_wkb(4.0, 5.0);
+    let insert_name = "inserted";
+    let inserted = client
+        .query(&insert, &[&7_i32, &insert_wkb, &insert_name])
+        .await
+        .expect("GeoServer WFS-T INSERT trace shape");
+    assert_eq!(inserted.len(), 1);
+    assert_eq!(inserted[0].get::<_, i32>(0), 7);
+    assert_eq!(inserted[0].get::<_, String>(1), "inserted");
+    assert_eq!(inserted[0].get::<_, String>(2), "POINT(4 5)");
+
+    let update = client
+        .prepare_typed(
+            "UPDATE public.geoserver_wfst
+             SET geom = ST_GeomFromWKB($1::bytea, 4326), name = $2
+             WHERE id = $3
+             RETURNING id, name, ST_AsText(ST_GeomFromWKB(geom))",
+            &[Type::BYTEA, Type::TEXT, Type::INT4],
+        )
+        .await
+        .expect("prepare GeoServer WFS-T UPDATE trace shape");
+    let update_wkb = point_wkb(6.0, 7.0);
+    let update_name = "updated";
+    let updated = client
+        .query(&update, &[&update_wkb, &update_name, &7_i32])
+        .await
+        .expect("GeoServer WFS-T UPDATE trace shape");
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].get::<_, i32>(0), 7);
+    assert_eq!(updated[0].get::<_, String>(1), "updated");
+    assert_eq!(updated[0].get::<_, String>(2), "POINT(6 7)");
+
+    let deleted = client
+        .query(
+            "DELETE FROM public.geoserver_wfst WHERE id = 7 RETURNING id, name",
+            &[],
+        )
+        .await
+        .expect("GeoServer WFS-T DELETE trace shape");
+    assert_eq!(deleted.len(), 1);
+    assert_eq!(deleted[0].get::<_, i32>(0), 7);
+    assert_eq!(deleted[0].get::<_, String>(1), "updated");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn ogr_table_listing_query_does_not_cast_pg_class_literal() {
     let server = ServerHandle::start().await;
     let (client, connection) = tokio_postgres::connect(&server.conn_str(), NoTls)
@@ -1722,7 +1784,7 @@ async fn ogr_table_listing_query_does_not_cast_pg_class_literal() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn ogr_postgis_type_probe_returns_empty_oid_typname_shape() {
+async fn ogr_postgis_type_probe_returns_oid_typname_shape() {
     let (_server, client, _conn) = connect().await;
 
     let messages = client
@@ -1733,11 +1795,76 @@ async fn ogr_postgis_type_probe_returns_empty_oid_typname_shape() {
         .await
         .expect("OGR PostGIS type probe should return oid/typname shape");
 
-    let rows = messages
+    let typnames: Vec<String> = messages
         .iter()
-        .filter(|message| matches!(message, tokio_postgres::SimpleQueryMessage::Row(_)))
-        .count();
-    assert_eq!(rows, 0);
+        .filter_map(|message| match message {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get("typname").map(str::to_string),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        typnames,
+        vec!["geometry".to_string(), "geography".to_string()]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ogr_normalized_bytea_type_probe_resolves_spatial_oids() {
+    let (_server, client, _conn) = connect().await;
+
+    let messages = client
+        .simple_query(
+            "SELECT oid, typname FROM pg_catalog.pg_type \
+             WHERE typname IN ('bytea', 'bytea') AND typtype='b'",
+        )
+        .await
+        .expect("OGR normalized bytea type probe should resolve spatial oids");
+
+    let got: Vec<(u32, String)> = messages
+        .iter()
+        .filter_map(|message| match message {
+            tokio_postgres::SimpleQueryMessage::Row(row) => Some((
+                row.get("oid")?.parse::<u32>().ok()?,
+                row.get("typname")?.to_string(),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (90_001, "geometry".to_string()),
+            (90_002, "geography".to_string()),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ogr_table_description_probe_returns_description_shape() {
+    let (_server, client, _conn) = connect().await;
+
+    client
+        .batch_execute("CREATE TABLE public.ogr_desc_visible (id INT)")
+        .await
+        .expect("create OGR description-visible table");
+
+    let rows = client
+        .query(
+            "SELECT d.description FROM pg_class c \
+             JOIN pg_namespace n ON c.relnamespace=n.oid \
+             JOIN pg_description d \
+               ON d.objoid = c.oid \
+              AND d.classoid = 'pg_class'::regclass::oid \
+              AND d.objsubid = 0 \
+             WHERE c.relname = 'ogr_desc_visible' \
+               AND n.nspname = 'public' \
+               AND c.relkind in ('r', 'v')",
+            &[],
+        )
+        .await
+        .expect("OGR table-description probe should return description-shaped rows");
+
+    assert!(rows.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1776,6 +1903,46 @@ async fn ogr_column_listing_query_returns_matching_field_count() {
             ("id".to_string(), "int4".to_string()),
             ("wkb_geometry".to_string(), "bytea".to_string()),
             ("name".to_string(), "text".to_string())
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ogr_column_listing_query_accepts_attgenerated_shape() {
+    let (_server, client, _conn) = connect().await;
+
+    let rows = client
+        .query(
+            "SELECT a.attname, t.typname, a.attlen, \
+                    format_type(a.atttypid,a.atttypmod), a.attnotnull, \
+                    def.def, i.indisunique, descr.description, a.attgenerated \
+             FROM pg_attribute a \
+             JOIN pg_type t ON t.oid = a.atttypid \
+             LEFT JOIN (SELECT adrelid, adnum, pg_get_expr(adbin, adrelid) AS def FROM pg_attrdef) def \
+                    ON def.adrelid = a.attrelid AND def.adnum = a.attnum \
+             LEFT JOIN (SELECT DISTINCT indrelid, indkey, indisunique FROM pg_index WHERE indisunique) i \
+                    ON i.indrelid = a.attrelid AND i.indkey[0] = a.attnum AND i.indkey[1] IS NULL \
+             LEFT JOIN pg_description descr \
+                    ON descr.objoid = a.attrelid \
+                   AND descr.classoid = 'pg_class'::regclass::oid \
+                   AND descr.objsubid = a.attnum \
+             WHERE a.attnum > 0 AND a.attrelid = 16479 \
+             ORDER BY a.attnum",
+            &[],
+        )
+        .await
+        .expect("OGR PostgreSQL-12+ column listing should include attgenerated shape");
+
+    let cols: Vec<(String, String)> = rows
+        .into_iter()
+        .map(|row| (row.get("attname"), row.get("attgenerated")))
+        .collect();
+    assert_eq!(
+        cols,
+        vec![
+            ("id".to_string(), "".to_string()),
+            ("wkb_geometry".to_string(), "".to_string()),
+            ("name".to_string(), "".to_string()),
         ]
     );
 }
@@ -1848,6 +2015,98 @@ async fn ogr_column_listing_query_is_schema_derived_for_appended_fields() {
             ("name".to_string(), "text".to_string()),
             ("osm_id".to_string(), "text".to_string()),
         ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ogr_column_listing_resolves_relname_equality_and_regclass_attrelid() {
+    let (_server, client, _conn) = connect().await;
+
+    client
+        .batch_execute(
+            "CREATE TABLE public.ogr_osm_fields_eq \
+             (id INT, wkb_geometry BINARY, name TEXT, osm_id TEXT, category TEXT)",
+        )
+        .await
+        .expect("create OGR equality lookup table");
+
+    let oid_messages = client
+        .simple_query(
+            "SELECT c.oid, n.nspname, c.relname \
+             FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.relname = 'ogr_osm_fields_eq' AND n.nspname = 'public'",
+        )
+        .await
+        .expect("OGR equality pg_class oid lookup");
+    let (table_oid, nspname, relname) = oid_messages
+        .iter()
+        .find_map(|message| match message {
+            tokio_postgres::SimpleQueryMessage::Row(row) => Some((
+                row.get("oid")?.parse::<u32>().ok()?,
+                row.get("nspname")?.to_string(),
+                row.get("relname")?.to_string(),
+            )),
+            _ => None,
+        })
+        .expect("synthetic OGR equality table oid row");
+    assert_eq!(nspname, "public");
+    assert_eq!(relname, "ogr_osm_fields_eq");
+
+    let rows = client
+        .query(
+            &format!(
+                "SELECT a.attname, t.typname, a.attlen, \
+                        format_type(a.atttypid,a.atttypmod), a.attnotnull, \
+                        def.def, i.indisunique, descr.description \
+                 FROM pg_attribute a \
+                 JOIN pg_type t ON t.oid = a.atttypid \
+                 LEFT JOIN (SELECT adrelid, adnum, pg_get_expr(adbin, adrelid) AS def FROM pg_attrdef) def \
+                        ON def.adrelid = a.attrelid AND def.adnum = a.attnum \
+                 LEFT JOIN (SELECT DISTINCT indrelid, indkey, indisunique FROM pg_index WHERE indisunique) i \
+                        ON i.indrelid = a.attrelid AND i.indkey[0] = a.attnum AND i.indkey[1] IS NULL \
+                 LEFT JOIN pg_description descr \
+                        ON descr.objoid = a.attrelid \
+                       AND descr.classoid = 'pg_class'::regclass::oid \
+                       AND descr.objsubid = a.attnum \
+                 WHERE a.attnum > 0 AND a.attrelid = {table_oid} \
+                 ORDER BY a.attnum"
+            ),
+            &[],
+        )
+        .await
+        .expect("OGR equality column listing should reflect table schema");
+    let cols: Vec<String> = rows.into_iter().map(|row| row.get("attname")).collect();
+    assert_eq!(
+        cols,
+        vec!["id", "wkb_geometry", "name", "osm_id", "category"]
+    );
+
+    let rows = client
+        .query(
+            "SELECT a.attname, t.typname, a.attlen, \
+                    format_type(a.atttypid,a.atttypmod), a.attnotnull, \
+                    def.def, i.indisunique, descr.description \
+             FROM pg_attribute a \
+             JOIN pg_type t ON t.oid = a.atttypid \
+             LEFT JOIN (SELECT adrelid, adnum, pg_get_expr(adbin, adrelid) AS def FROM pg_attrdef) def \
+                    ON def.adrelid = a.attrelid AND def.adnum = a.attnum \
+             LEFT JOIN (SELECT DISTINCT indrelid, indkey, indisunique FROM pg_index WHERE indisunique) i \
+                    ON i.indrelid = a.attrelid AND i.indkey[0] = a.attnum AND i.indkey[1] IS NULL \
+             LEFT JOIN pg_description descr \
+                    ON descr.objoid = a.attrelid \
+                   AND descr.classoid = 'pg_class'::regclass::oid \
+                   AND descr.objsubid = a.attnum \
+             WHERE a.attnum > 0 AND a.attrelid = '\"public\".\"ogr_osm_fields_eq\"'::regclass::oid \
+             ORDER BY a.attnum",
+            &[],
+        )
+        .await
+        .expect("OGR regclass column listing should reflect table schema");
+    let cols: Vec<String> = rows.into_iter().map(|row| row.get("attname")).collect();
+    assert_eq!(
+        cols,
+        vec!["id", "wkb_geometry", "name", "osm_id", "category"]
     );
 }
 
@@ -1925,14 +2184,15 @@ async fn ogr_extended_cursor_fetch_returns_matching_feature_rows() {
 
     client
         .simple_query(
-            "CREATE TABLE quackgis.main.ogr_cursor (id INT, wkb_geometry BINARY, name TEXT)",
+            "CREATE TABLE quackgis.main.ogr_cursor \
+             (id INT, wkb_geometry BINARY, name TEXT, category TEXT)",
         )
         .await
         .expect("create OGR cursor table");
     client
         .simple_query(
             "INSERT INTO quackgis.main.ogr_cursor VALUES \
-             (1, X'010100000000000000000000000000000000000000', 'origin')",
+             (1, X'010100000000000000000000000000000000000000', 'origin', 'client')",
         )
         .await
         .expect("insert OGR cursor row");
@@ -1941,7 +2201,7 @@ async fn ogr_extended_cursor_fetch_returns_matching_feature_rows() {
     client
         .query(
             "DECLARE OGRPGLayerReader0xabc CURSOR FOR \
-             SELECT \"wkb_geometry\", \"id\", \"name\" FROM \"ogr_cursor\"",
+             SELECT \"wkb_geometry\", \"id\", \"name\", \"category\" FROM \"ogr_cursor\"",
             &[],
         )
         .await
@@ -1953,6 +2213,13 @@ async fn ogr_extended_cursor_fetch_returns_matching_feature_rows() {
     client.query("COMMIT", &[]).await.expect("commit");
 
     assert_eq!(rows.len(), 1);
+    let columns: Vec<&str> = rows[0]
+        .columns()
+        .iter()
+        .map(|column| column.name())
+        .collect();
+    assert_eq!(columns, vec!["wkb_geometry", "id", "name", "category"]);
+    assert_eq!(rows[0].get::<_, String>("category"), "client");
 }
 
 #[tokio::test(flavor = "multi_thread")]

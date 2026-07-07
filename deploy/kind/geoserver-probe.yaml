@@ -12,6 +12,10 @@ spec:
       volumes:
         - name: geoserver-libs
           emptyDir: {}
+        - name: probe-scripts
+          configMap:
+            name: quackgis-probe-scripts
+            defaultMode: 0755
       initContainers:
         - name: pgjdbc
           image: docker.osgeo.org/geoserver:3.0.0
@@ -39,28 +43,10 @@ spec:
           args:
             - |
               set -euo pipefail
-              export QUACKGIS_TABLE="geoserver_probe_${POD_UID//-/_}"
-              python3 - <<'PY'
-              import os
-              import psycopg2
-
-              host = os.environ["QUACKGIS_HOST"]
-              port = int(os.environ["QUACKGIS_PORT"])
-              table = os.environ["QUACKGIS_TABLE"]
-
-              conn = psycopg2.connect(host=host, port=port, user="postgres", dbname="quackgis")
-              conn.autocommit = True
-              cur = conn.cursor()
-              cur.execute(f'CREATE TABLE public."{table}" (id INT, geom BINARY, name TEXT)')
-              cur.execute(
-                  f'INSERT INTO public."{table}" VALUES '
-                  "(1, X'010100000000000000000000000000000000000000', 'origin'),"
-                  "(2, X'0101000000000000000000F03F000000000000F03F', 'one')"
-              )
-              cur.close()
-              conn.close()
-              print("geoserver_seed_table", table)
-              PY
+              PYTHONPATH=/opt/quackgis-probes python3 /opt/quackgis-probes/geoserver_seed.py
+          volumeMounts:
+            - name: probe-scripts
+              mountPath: /opt/quackgis-probes
       containers:
         - name: geoserver
           image: docker.osgeo.org/geoserver:3.0.0
@@ -82,136 +68,10 @@ spec:
           volumeMounts:
             - name: geoserver-libs
               mountPath: /opt/additional_libs
+            - name: probe-scripts
+              mountPath: /opt/quackgis-probes
           command: ["bash", "-lc"]
           args:
             - |
               set -euo pipefail
-
-              table="geoserver_probe_${POD_UID//-/_}"
-              workspace="quackgis"
-              store="quackgis"
-              base="http://127.0.0.1:8080/geoserver"
-              auth=(-u "${GEOSERVER_ADMIN_USER}:${GEOSERVER_ADMIN_PASSWORD}")
-
-              cleanup() {
-                status=$?
-                if [ -f /tmp/geoserver.log ]; then
-                  echo "--- geoserver log tail ---"
-                  tail -300 /tmp/geoserver.log || true
-                fi
-                if [ -n "${gs_pid:-}" ]; then
-                  kill "${gs_pid}" 2>/dev/null || true
-                fi
-                exit "$status"
-              }
-              trap cleanup EXIT
-
-              /opt/startup.sh > /tmp/geoserver.log 2>&1 &
-              gs_pid=$!
-
-              for _ in $(seq 1 180); do
-                if curl -fsS "${auth[@]}" "${base}/rest/about/version.json" >/tmp/version.json 2>/tmp/geoserver-ready.err; then
-                  break
-                fi
-                if ! kill -0 "${gs_pid}" 2>/dev/null; then
-                  echo "GeoServer exited before readiness"
-                  cat /tmp/geoserver-ready.err || true
-                  exit 1
-                fi
-                sleep 2
-              done
-              curl -fsS "${auth[@]}" "${base}/rest/about/version.json" | tee /tmp/version.json
-
-              cat > /tmp/workspace.xml <<XML
-              <workspace><name>${workspace}</name></workspace>
-              XML
-              curl -fsS "${auth[@]}" -H "Content-Type: text/xml" \
-                -d @/tmp/workspace.xml \
-                "${base}/rest/workspaces" >/tmp/workspace.out
-
-              cat > /tmp/store.xml <<XML
-              <dataStore>
-                <name>${store}</name>
-                <enabled>true</enabled>
-                <connectionParameters>
-                  <entry key="dbtype">postgis</entry>
-                  <entry key="host">${QUACKGIS_HOST}</entry>
-                  <entry key="port">${QUACKGIS_PORT}</entry>
-                  <entry key="database">quackgis</entry>
-                  <entry key="schema">public</entry>
-                  <entry key="user">postgres</entry>
-                  <entry key="passwd"></entry>
-                  <entry key="namespace">${workspace}</entry>
-                  <entry key="Expose primary keys">true</entry>
-                  <entry key="Loose bbox">true</entry>
-                  <entry key="Estimated extends">false</entry>
-                  <entry key="validate connections">false</entry>
-                  <entry key="preparedStatements">true</entry>
-                  <entry key="fetch size">50</entry>
-                </connectionParameters>
-              </dataStore>
-              XML
-              curl -fsS "${auth[@]}" -H "Content-Type: text/xml" \
-                -d @/tmp/store.xml \
-                "${base}/rest/workspaces/${workspace}/datastores" >/tmp/store.out
-
-              cat > /tmp/featuretype.xml <<XML
-              <featureType>
-                <name>${table}</name>
-                <nativeName>${table}</nativeName>
-                <title>${table}</title>
-                <srs>EPSG:4326</srs>
-                <nativeCRS>EPSG:4326</nativeCRS>
-                <projectionPolicy>FORCE_DECLARED</projectionPolicy>
-                <nativeBoundingBox>
-                  <minx>-1</minx><maxx>2</maxx>
-                  <miny>-1</miny><maxy>2</maxy>
-                  <crs>EPSG:4326</crs>
-                </nativeBoundingBox>
-                <latLonBoundingBox>
-                  <minx>-1</minx><maxx>2</maxx>
-                  <miny>-1</miny><maxy>2</maxy>
-                  <crs>EPSG:4326</crs>
-                </latLonBoundingBox>
-                <attributes>
-                  <attribute>
-                    <name>id</name>
-                    <binding>java.lang.Integer</binding>
-                    <minOccurs>0</minOccurs><maxOccurs>1</maxOccurs><nillable>true</nillable>
-                  </attribute>
-                  <attribute>
-                    <name>geom</name>
-                    <binding>org.locationtech.jts.geom.Point</binding>
-                    <minOccurs>0</minOccurs><maxOccurs>1</maxOccurs><nillable>true</nillable>
-                  </attribute>
-                  <attribute>
-                    <name>name</name>
-                    <binding>java.lang.String</binding>
-                    <minOccurs>0</minOccurs><maxOccurs>1</maxOccurs><nillable>true</nillable>
-                  </attribute>
-                </attributes>
-                <enabled>true</enabled>
-              </featureType>
-              XML
-              curl -fsS "${auth[@]}" -H "Content-Type: text/xml" \
-                -d @/tmp/featuretype.xml \
-                "${base}/rest/workspaces/${workspace}/datastores/${store}/featuretypes" \
-                >/tmp/featuretype.out
-
-              curl -fsS "${auth[@]}" \
-                "${base}/${workspace}/ows?service=WFS&version=1.0.0&request=GetFeature&typeName=${workspace}:${table}&outputFormat=application/json" \
-                -o /tmp/features.json
-              grep -q '"name"[[:space:]]*:[[:space:]]*"origin"' /tmp/features.json
-              grep -q '"name"[[:space:]]*:[[:space:]]*"one"' /tmp/features.json
-              point_count="$(grep -o '"type"[[:space:]]*:[[:space:]]*"Point"' /tmp/features.json | wc -l | tr -d ' ')"
-              echo "wfs_point_count ${point_count}"
-              test "${point_count}" -ge 2
-
-              curl -fsS "${auth[@]}" \
-                "${base}/${workspace}/wms?service=WMS&version=1.1.1&request=GetMap&layers=${workspace}:${table}&styles=&bbox=-1,-1,2,2&width=128&height=128&srs=EPSG:4326&format=image/png" \
-                -o /tmp/map.png
-              png_header="$(od -An -tx1 -N8 /tmp/map.png | tr -d ' \n')"
-              echo "wms_png_header ${png_header}"
-              test "${png_header}" = "89504e470d0a1a0a"
-
-              echo "geoserver_probe_ok True"
+              bash /opt/quackgis-probes/geoserver_probe.sh

@@ -10,13 +10,15 @@ PostgreSQL-catalog/S3 hardening remains a roadmap item.
 ```sh
 mise install
 eval "$(mise activate bash)"
+just ci
 just build
 just server
 ```
 
-Assume an activated mise shell for the commands below; this keeps the pinned
-Rust, container, Kubernetes, and probe-tool environment on `PATH` without
-wrapping every command in `mise exec`.
+Use an activated mise shell for interactive work; this keeps the pinned Rust,
+container, Kubernetes, and probe-tool environment on `PATH`. In CI or one-off
+scripts, keep the same Justfile entrypoints and prefix them with mise instead,
+for example `mise exec -- just ci`.
 
 The default local server listens on `127.0.0.1:5434` and uses:
 
@@ -39,12 +41,21 @@ DuckLake tests later.
 
 ```sh
 eval "$(mise activate bash)"
+just kind-ready          # validate Podman/Kind and create or reuse the cluster
+just demo-kind           # deploy, seed stable public.demo_* layers, print hints
 just kind-up
-just kind-refresh-fast   # probe loop: no release thin-LTO
-just kind-probes         # QGIS read/edit + OGR + GeoServer in one wait
+just kind-compatibility  # build/deploy + QGIS read/edit, OGR, GeoServer probes
 ```
 
-`just kind-refresh` builds the release binary locally with Cargo's normal
+`mise.toml` pins Rust, Just, Kind, kubectl, Helm, and cargo-nextest; Podman is the
+host container runtime. The repo defaults `CONTAINER_ENGINE=podman`,
+`KIND_EXPERIMENTAL_PROVIDER=podman`, `KIND_CLUSTER=quackgis`, and
+`QUACKGIS_IMAGE=localhost/quackgis:dev`, so the same commands work in activated
+shells and under `mise exec -- ...`.
+
+`just kind-up` is idempotent: it reuses the `quackgis` cluster when present and
+creates it when missing. `just kind-status` prints cluster/node/QuackGIS namespace
+state. `just kind-refresh` builds the release binary locally with Cargo's normal
 `target/` cache, copies it into a tiny runtime image, loads that image into Kind,
 then restarts the StatefulSet so the fixed dev tag is picked up. For iterative
 probe triage, `just kind-refresh-fast` uses Cargo's `probe` profile (release-like
@@ -52,10 +63,20 @@ but no thin-LTO/single-codegen-unit) to reduce rebuild latency. Use
 `just kind-build-image-container` for a slower clean build inside the container
 image.
 
-`just kind-probes` starts the maintained QGIS read, QGIS edit, OGR, and
-GeoServer Jobs together and waits once. Individual `kind-qgis-probe`,
+Client probe scripts are versioned under `deploy/kind/probes/` and published into
+the cluster by `just kind-probe-scripts` as a `quackgis-probe-scripts` ConfigMap.
+The QGIS, OGR, GeoServer, and demo Jobs all use this shared probe core instead of
+embedding large scripts directly in YAML.
+
+`just seed-kind-demo` refreshes stable `public.demo_points` and
+`public.demo_polygons` layers in an existing deployment. `just demo-kind` wraps
+cluster readiness, deployment refresh, and that seed job for quick onboarding.
+
+`just kind-probes` starts the maintained QGIS read/render/identify/filter, QGIS edit, OGR, and
+GeoServer WFS/WMS/WFS-T Jobs together and waits once. Individual `kind-qgis-probe`,
 `kind-qgis-edit-probe`, `kind-ogr-probe`, and `kind-geoserver-probe` targets
-remain available for focused reruns.
+remain available for focused reruns. `just kind-compatibility` is the stable
+full local/CI recipe: it runs `kind-refresh-fast` and then `kind-probes`.
 
 The QGIS probe is a read-path gate. Current expected output includes:
 
@@ -64,6 +85,9 @@ valid True
 feature_count 2
 fields ['id', 'name']
 features_read 2
+filter_names ['one']
+identify_names ['one']
+render_ok True
 ```
 
 The QGIS edit probe opens a keyless spatial table through the postgres provider,
@@ -93,12 +117,13 @@ load_geometry_types ['Point', 'Point']
 
 The GeoServer probe uses official `docker.osgeo.org/geoserver:3.0.0`, supplies a
 pgjdbc jar, registers QuackGIS as a PostGIS datastore, publishes a WKB-backed
-layer, and exercises WFS GeoJSON plus WMS PNG rendering. Current expected output
-includes:
+layer, and exercises WFS GeoJSON, WMS PNG rendering, and real WFS-T
+insert/update/delete. Current expected output includes:
 
 ```text
 wfs_point_count 2
 wms_png_header 89504e470d0a1a0a
+wfst_transaction_ok True
 geoserver_probe_ok True
 ```
 
@@ -120,10 +145,12 @@ Relevant files:
 | `deploy/Containerfile` | clean container-native fallback image for Kind probes |
 | `deploy/kind/cluster.yaml` | Kind cluster config |
 | `deploy/kind/quackgis.yaml` | QuackGIS StatefulSet + Service |
+| `deploy/kind/demo.yaml` | one-command demo Job |
+| `deploy/kind/probes/` | shared probe scripts and common probe core |
 | `deploy/kind/qgis-probe.yaml` | headless PyQGIS add-layer probe Job |
 | `deploy/kind/qgis-edit-probe.yaml` | headless PyQGIS edit/save probe Job |
 | `deploy/kind/ogr-probe.yaml` | GDAL/OGR PostgreSQL-driver load/read probe Job |
-| `deploy/kind/geoserver-probe.yaml` | official GeoServer 3.0.0 datastore + WFS/WMS probe Job |
+| `deploy/kind/geoserver-probe.yaml` | official GeoServer 3.0.0 datastore + WFS/WMS/WFS-T probe Job |
 | `deploy/kind/postgis-osm.yaml` | opt-in PostGIS reference deployment for real OSM parity |
 | `deploy/kind/osm-postgis-parity-probe.yaml` | opt-in real OSM PostGIS → QuackGIS copy/read parity Job |
 
@@ -131,9 +158,9 @@ Relevant files:
 
 The real-data parity track is intentionally outside `just kind-probes` because it
 pulls a PostGIS image and downloads a live OSM extract. It uses Geofabrik Monaco
-by default, loads real OSM points into PostGIS, copies a deterministic named
-Point sample into QuackGIS with `ogr2ogr`, and compares GeoJSON exports plus SQL
-samples from both databases.
+by default, loads real OSM points, lines, and multipolygons into PostGIS, copies
+deterministic samples into QuackGIS with `ogr2ogr`, and compares GeoJSON exports
+plus SQL samples from both databases.
 
 ```sh
 eval "$(mise activate bash)"
@@ -146,6 +173,10 @@ Current expected output includes:
 ```text
 postgis_osm_named_points_count 50
 quackgis_osm_named_points_count 50
+postgis_osm_named_lines_count 50
+quackgis_osm_named_lines_count 50
+postgis_osm_named_multipolygons_count 50
+quackgis_osm_named_multipolygons_count 50
 osm_postgis_to_quackgis_copy_ok True
 ```
 
@@ -158,6 +189,8 @@ Useful overrides:
 ```sh
 OSM_EXTRACT_URL=https://download.geofabrik.de/europe/andorra-latest.osm.pbf \
 OSM_POINT_LIMIT=100 \
+OSM_LINE_LIMIT=100 \
+OSM_POLYGON_LIMIT=100 \
 just kind-osm-postgis-parity
 ```
 
@@ -170,18 +203,18 @@ just kind-postgis-osm-down
 See [OSM_POSTGIS_PARITY.md](./OSM_POSTGIS_PARITY.md) for the long roadmap and
 copy/sync recipes.
 
-## CI artifacts
+## CI and compatibility reports
 
-GitHub Actions uses `mise.toml` as the CI toolchain source of truth. The
-`CI artifacts` workflow runs formatting, tests, clippy, and release builds with
-mise. For local work, prefer an activated mise shell over repeated `mise exec`
-wrappers.
+GitHub Actions uses `mise.toml` as the CI toolchain source of truth and calls the
+same Justfile recipes as local development through `mise exec -- just ...`.
 
-- Pushes to `main` and version tags publish a runtime image to
-  `ghcr.io/adonm/quackgis` with branch/tag/SHA tags.
-- Every workflow run uploads a Linux x86_64 binary tarball as a CI artifact.
-- Version tags matching `v*` also attach that tarball and its `.sha256` file to
-  the corresponding GitHub Release.
+- `CI` runs `just ci` (`check-fast`) on pushes to `main` and pull requests.
+- `Compatibility probes` runs the Kind QGIS read/edit, OGR, and GeoServer probes
+  with `just kind-compatibility` on a nightly schedule and by manual dispatch. It
+  uploads logs collected by `just kind-compat-report` as a compatibility report
+  artifact.
+- The nightly compatibility run also executes the opt-in real OSM PostGIS parity
+  probe; manual dispatch can enable it with the `run_osm` input.
 
 ## Persistence model
 

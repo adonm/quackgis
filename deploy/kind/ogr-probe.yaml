@@ -9,6 +9,11 @@ spec:
   template:
     spec:
       restartPolicy: Never
+      volumes:
+        - name: probe-scripts
+          configMap:
+            name: quackgis-probe-scripts
+            defaultMode: 0755
       containers:
         - name: ogr
           image: docker.io/qgis/qgis:ltr-questing
@@ -17,126 +22,11 @@ spec:
               value: quackgis.quackgis.svc.cluster.local
             - name: QUACKGIS_PORT
               value: "5434"
+          volumeMounts:
+            - name: probe-scripts
+              mountPath: /opt/quackgis-probes
           command: ["bash", "-lc"]
           args:
             - |
               set -euo pipefail
-              run_ogr() {
-                "$@" 2> >(grep -v -e 'unexpected field count in "D" message' -e '^ERROR 1: *$' >&2)
-              }
-              export QUACKGIS_TABLE="ogr_probe_${RANDOM}_$(date +%s)"
-              export QUACKGIS_LOAD_TABLE="ogr_load_${RANDOM}_$(date +%s)"
-              python3 - <<'PY'
-              import os
-              import psycopg2
-
-              host = os.environ["QUACKGIS_HOST"]
-              port = int(os.environ["QUACKGIS_PORT"])
-              table = os.environ["QUACKGIS_TABLE"]
-              load_table = os.environ["QUACKGIS_LOAD_TABLE"]
-
-              conn = psycopg2.connect(host=host, port=port, user="postgres", dbname="quackgis")
-              conn.autocommit = True
-              cur = conn.cursor()
-              cur.execute(f"CREATE TABLE quackgis.main.{table} (id INT, wkb_geometry BINARY, name TEXT)")
-              cur.execute(
-                  f"INSERT INTO quackgis.main.{table} VALUES "
-                  "(1, X'010100000000000000000000000000000000000000', 'origin')"
-              )
-              cur.execute(
-                  f"INSERT INTO quackgis.main.{table} VALUES "
-                  "(2, X'0101000000000000000000F03F000000000000F03F', 'one')"
-              )
-              # Existing layer for ogr2ogr -append -addfields: the source has an
-              # extra `category` field, so GDAL's PostgreSQL driver must issue
-              # ALTER TABLE ... ADD COLUMN before INSERT.
-              cur.execute(f"CREATE TABLE quackgis.main.{load_table} (id INT, wkb_geometry BINARY, name TEXT)")
-              cur.close()
-              conn.close()
-              PY
-
-              dsn="PG:host=${QUACKGIS_HOST} port=${QUACKGIS_PORT} user=postgres dbname=quackgis"
-              run_ogr ogrinfo "$dsn" "$QUACKGIS_TABLE" -so
-              run_ogr ogr2ogr -f GeoJSON /tmp/out.geojson "$dsn" "$QUACKGIS_TABLE"
-
-              python3 - <<'PY'
-              import json
-
-              with open("/tmp/out.geojson", "r", encoding="utf-8") as f:
-                  fc = json.load(f)
-
-              features = fc["features"]
-              names = sorted(feature["properties"].get("name") for feature in features)
-              geometry_types = [feature["geometry"]["type"] for feature in features]
-              print("feature_count", len(features))
-              print("names", names)
-              print("geometry_types", geometry_types)
-
-              assert len(features) == 2, features
-              assert names == ["one", "origin"], names
-              assert geometry_types == ["Point", "Point"], geometry_types
-              PY
-
-              cat > /tmp/load.geojson <<'JSON'
-              {
-                "type": "FeatureCollection",
-                "features": [
-                  {
-                    "type": "Feature",
-                    "properties": {"name": "load-a", "category": "client"},
-                    "geometry": {"type": "Point", "coordinates": [2.0, 2.0]}
-                  },
-                  {
-                    "type": "Feature",
-                    "properties": {"name": "load-b", "category": "client"},
-                    "geometry": {"type": "Point", "coordinates": [3.0, 3.0]}
-                  }
-                ]
-              }
-              JSON
-
-              export PG_USE_COPY=NO
-              run_ogr ogr2ogr \
-                -f PostgreSQL "$dsn" /tmp/load.geojson \
-                -append -addfields -nln "$QUACKGIS_LOAD_TABLE" -nlt POINT \
-                -lco GEOMETRY_NAME=wkb_geometry
-              run_ogr ogr2ogr -f GeoJSON /tmp/load_out.geojson "$dsn" "$QUACKGIS_LOAD_TABLE"
-
-              python3 - <<'PY'
-              import json
-              import os
-              import psycopg2
-
-              host = os.environ["QUACKGIS_HOST"]
-              port = int(os.environ["QUACKGIS_PORT"])
-              table = os.environ["QUACKGIS_LOAD_TABLE"]
-
-              conn = psycopg2.connect(host=host, port=port, user="postgres", dbname="quackgis")
-              cur = conn.cursor()
-              cur.execute(
-                  f"SELECT name, category, ST_AsText(ST_GeomFromWKB(wkb_geometry)) "
-                  f"FROM public.{table} ORDER BY name"
-              )
-              rows = cur.fetchall()
-              print("loaded_rows", rows)
-              assert rows == [
-                  ("load-a", "client", "POINT(2 2)"),
-                  ("load-b", "client", "POINT(3 3)"),
-              ], rows
-              cur.close()
-              conn.close()
-
-              with open("/tmp/load_out.geojson", "r", encoding="utf-8") as f:
-                  fc = json.load(f)
-
-              features = fc["features"]
-              names = sorted(feature["properties"].get("name") for feature in features)
-              geometry_types = [feature["geometry"]["type"] for feature in features]
-              print("load_feature_count", len(features))
-              print("load_names", names)
-              print("load_geometry_types", geometry_types)
-
-              assert len(features) == 2, features
-              assert names == ["load-a", "load-b"], names
-              assert geometry_types == ["Point", "Point"], geometry_types
-              PY
+              PYTHONPATH=/opt/quackgis-probes python3 /opt/quackgis-probes/ogr_probe.py

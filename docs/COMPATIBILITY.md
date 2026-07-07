@@ -11,11 +11,11 @@ missing upstream that we build in tracked fork branches.
 |---|---|---|---|
 | `psql` | ✅ | M0 | simple + extended protocol via datafusion-postgres |
 | psycopg (v3) | ✅ | M2 | text + binary geometry round-trip |
-| QGIS (postgres provider) | ✅ read/edit smoke | M3/M4 | Kind PyQGIS read probe green; edit probe opens a keyless spatial layer and commits insert/update/delete/save through `_quackgis_rowid` |
-| GDAL/OGR `ogr2ogr` (PostgreSQL driver) | ✅ load/read | M3/M4 | Kind OGR probe seeds a WKB-backed layer, reads it with `ogrinfo`/GeoJSON export, then appends GeoJSON with `PG_USE_COPY=NO` + `-addfields` and verifies SQL + GeoJSON read-back |
-| GDAL/OGR write/load hardening | target | M4 | COPY subprotocol and schema-derived append metadata remain future hardening; current maintained gate uses OGR INSERT mode |
+| QGIS (postgres provider) | ✅ read/render/identify/filter + edit smoke | M3/M4 | Kind PyQGIS probe validates layer open, feature read, attribute filter, feature-id identify, and headless render; edit probe opens a keyless spatial layer and commits insert/update/delete/save through `_quackgis_rowid` |
+| GDAL/OGR `ogr2ogr` (PostgreSQL driver) | ✅ load/read | M3/M4 | Kind OGR probe seeds a WKB-backed layer, reads it with `ogrinfo`/GeoJSON export, then appends GeoJSON with `PG_USE_COPY=NO` + `-addfields` and verifies SQL + GeoJSON read-back including appended fields |
+| GDAL/OGR write/load hardening | target | M4 | COPY subprotocol remains future hardening; current maintained gate uses OGR INSERT mode with schema-derived append metadata |
 | QGIS (editing) | ✅ smoke | M4 | `INSERT`/`UPDATE`/`DELETE ... RETURNING`, parameterized WKB edits, synthetic rowid metadata, and single-table explicit transaction rollback/commit pass wire regressions; Kind PyQGIS edit/save gate passes |
-| GeoServer (PostGIS datastore) | ✅ WFS/WMS smoke | M4 | Official GeoServer 3.0.0 Kind probe registers a PostGIS datastore, publishes a WKB-backed layer, verifies WFS GeoJSON feature count, and receives a WMS PNG; WFS-T remains future hardening |
+| GeoServer (PostGIS datastore) | ✅ WFS/WMS/WFS-T smoke | M4 | Official GeoServer 3.0.0 Kind probe registers a PostGIS datastore, publishes a WKB-backed layer, verifies WFS GeoJSON feature count, receives a WMS PNG, and performs real WFS-T insert/update/delete transactions; Rust wire tests keep trace-shaped DML coverage |
 | Martin (MapLibre tile server) | ✅ | M2+ | auto-discover geometry tables; MVT tile serving via ST_AsMVT |
 | pg_featureserv | stretch | M7 | trace-driven |
 | `pg_dump` / logical replication | ❌ | — | back up the DuckLake catalog + Parquet instead |

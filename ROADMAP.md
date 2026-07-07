@@ -292,24 +292,26 @@ GetMap. WFS-T remains future hardening.
 
 ## Next logical steps
 
-1. **Lock QGIS read compatibility into CI.** Move `just kind-qgis-probe` into the
-   automated gate, then add render/identify/filter assertions while preserving
-   the current add-layer + binary-cursor feature-read checks.
-2. **Promote OGR load/read into CI.** The maintained Kind probe now covers OGR
-   read-back plus INSERT-mode append with `ALTER TABLE ... ADD COLUMN`; next
-   wire it into automation and replace hard-coded append metadata with
-   schema-derived catalog rows.
-3. **Add keyless-layer fallback.** Schema-derived `id` key metadata is in place;
-   next add a safe row-id fallback for read-only layers without an `id` column.
+1. **Keep compatibility assertions evidence-rich.** The nightly/manual
+   `Compatibility probes` workflow now runs Kind QGIS read/render/identify/filter,
+   QGIS edit, OGR, GeoServer WFS/WMS/WFS-T, and scheduled real OSM parity
+   reports. Keep the uploaded probe logs as the compatibility record, and add new
+   client trace gaps as small shared probe scripts under `deploy/kind/probes/`.
+2. **Extend real OSM client coverage.** OGR multi-layer OSM copy/read parity now
+   covers points, lines, and multipolygons. Next open those copied layers through
+   QGIS, GeoServer, and Martin in the side-by-side matrix.
+3. **Harden keyless-layer fallback across clients.** Schema-derived `id` key
+   metadata and `_quackgis_rowid` fallback are in place; keep adding client
+   traces that prove keyless read/edit identity through QGIS, OGR, and GeoServer.
 4. **Extend M4 from traces.** Keep the green QGIS edit/save and GeoServer
-   WFS/WMS probes as gates, then capture WFS-T insert/update traces and implement
-   only the blocking SQL/protocol gaps: pgjdbc fetch-size portals if required,
-   geometry/geography write parameters, and remaining catalog/privilege metadata.
-5. **Build real OSM side-by-side parity.** Use real Geofabrik extracts loaded
-   into PostGIS as the source of truth, copy selected layers into QuackGIS with
-   documented `ogr2ogr` workflows, and compare access through OGR, QGIS,
-   GeoServer, and Martin. Track the detailed plan in
-   `docs/OSM_POSTGIS_PARITY.md`.
+   WFS/WMS/WFS-T probes as gates. Continue implementing only blocking
+   SQL/protocol gaps discovered by real clients: pgjdbc fetch-size portals if
+   required, geometry/geography write parameters, and remaining
+   catalog/privilege metadata.
+5. **Harden catalog-surface shims.** The simple-query router is now organized by
+   PostgreSQL catalog surface. Keep migrating trace fixtures into surface-focused
+   tests (`pg_class`, `pg_attribute`, `pg_index`, `pg_type`) before adding new
+   client-specific branches.
 6. **Keep deployment boring.** Keep the runtime image single-binary and native-
    dependency-free; reintroduce Helm only after the Kind smoke path covers QGIS,
    OGR, and GeoServer.

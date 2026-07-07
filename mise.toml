@@ -16,8 +16,12 @@ GEOSERVER_IMAGE = "docker.osgeo.org/geoserver:3.0.0"
 POSTGIS_IMAGE = "docker.io/postgis/postgis:16-3.4"
 OSM_EXTRACT_URL = "https://download.geofabrik.de/europe/monaco-latest.osm.pbf"
 OSM_POINT_LIMIT = "50"
+OSM_LINE_LIMIT = "50"
+OSM_POLYGON_LIMIT = "50"
 CONTAINER_ENGINE = "podman"
+KIND_EXPERIMENTAL_PROVIDER = "podman"
 KIND_CLUSTER = "quackgis"
+QUACKGIS_IMAGE = "localhost/quackgis:dev"
 
 [tools]
 rust = "1.95.0"

@@ -30,18 +30,18 @@ goal here is to make this workflow boring:
 
 ### Phase 0 — opt-in real-data plumbing
 
-Status: initial opt-in gate is green for Monaco named Point count, stable IDs,
-`osm_id`, UTF-8 names, geometry type, and bbox. GeoJSON exports currently assert
-count/ID/bbox parity, while SQL asserts the full `id`/`osm_id`/`name` sample so
-dynamically appended fields are not hidden by OGR export metadata limits.
+Status: the opt-in gate covers Monaco `points`, `lines`, and `multipolygons`.
+It asserts deterministic count, stable IDs, `osm_id`, UTF-8 names, geometry type
+distribution, and bbox through GeoJSON exports, then repeats the
+`id`/`osm_id`/`name` comparison through SQL.
 
 - Add a Kind PostGIS reference deployment in the `quackgis` namespace.
 - Add an opt-in `just kind-osm-postgis-parity` target, separate from the default
   fast `just kind-probes` loop.
 - Download Monaco `.osm.pbf` at runtime.
-- Load real OSM points into PostGIS with GDAL/OGR.
-- Create a small named-point sample from the real PostGIS table.
-- Pre-create the equivalent WKB-backed QuackGIS table.
+- Load real OSM points, lines, and multipolygons into PostGIS with GDAL/OGR.
+- Create small deterministic samples from the real PostGIS tables.
+- Pre-create equivalent WKB-backed QuackGIS tables.
 - Copy PostGIS → QuackGIS with `ogr2ogr` using `PG_USE_COPY=NO` and
   `-addfields` so real OSM attributes such as `osm_id` are added by the same OGR
   path users will run.
@@ -50,14 +50,17 @@ dynamically appended fields are not hidden by OGR export metadata limits.
 
 ### Phase 1 — multi-layer OSM copy parity
 
-Expand the Phase 0 probe from named points to the standard OGR OSM layers:
+Status: implemented for OGR's standard OSM `points`, `lines`, and
+`multipolygons` layers.
+
+The current probe copies these standard OGR OSM layers:
 
 - `points` → `osm_points` / `wkb_geometry` Point.
 - `lines` → `osm_lines` LineString/MultiLineString-compatible WKB.
 - `multipolygons` → `osm_multipolygons` Polygon/MultiPolygon-compatible WKB.
-- Keep each sample deterministic: stable `ORDER BY`, explicit limits, explicit
-  table names, and printed counts.
-- Compare:
+- Samples are deterministic: stable `ORDER BY`, explicit limits, explicit table
+  names, and printed counts.
+- The gate compares:
   - feature count;
   - selected attributes (`osm_id`, `name`, class tags where available);
   - geometry type distribution;
@@ -68,9 +71,9 @@ Expected compatibility gaps to flush out:
 - GDAL layer creation defaults that assume real PostgreSQL DDL/type support.
 - Geometry type promotion (`POLYGON` vs `MULTIPOLYGON`, line variants).
 - Attribute type mapping and long `other_tags` strings.
-- Schema-derived OGR metadata for arbitrary appended columns; Phase 0 verifies
-  added attributes through SQL, while later phases should make OGR/QGIS/GeoServer
-  see the full dynamic field list too.
+- Schema-derived OGR metadata for arbitrary appended columns. The maintained OGR
+  probe now fails if an appended field is missing from GeoJSON export; repeat
+  this coverage as QGIS/GeoServer OSM-layer probes are added.
 - Keep UTF-8 text handling under real-data regression. Phase 0 now verifies
   Monaco names such as `Quai des États-Unis` and `La Pêcherie U Luvassu`; later
   phases should repeat that coverage across all copied OSM layers.
@@ -190,7 +193,7 @@ quackgis_osm_sql_sample [...]
 osm_postgis_to_quackgis_copy_ok True
 ```
 
-This proves real OSM → PostGIS → QuackGIS copy/read parity for a deterministic
-named Point sample across stable IDs, OSM IDs, UTF-8 names, geometry type, and
-bbox. Later phases widen layer coverage, client coverage, and dynamic OGR field
-metadata visibility.
+This proves real OSM → PostGIS → QuackGIS copy/read parity for deterministic
+Point, LineString, and MultiPolygon-compatible samples across stable IDs, OSM
+IDs, UTF-8 names, geometry type distribution, and bbox. Later phases widen
+client coverage beyond OGR.

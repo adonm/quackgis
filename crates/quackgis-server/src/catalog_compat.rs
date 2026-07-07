@@ -13,9 +13,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
 use async_trait::async_trait;
-use datafusion::arrow::array::{Array, BinaryArray, BinaryViewArray, Int32Array, StringArray};
+use datafusion::arrow::array::{
+    Array, BinaryArray, BinaryViewArray, Int16Array, Int32Array, Int64Array, LargeBinaryArray,
+    LargeStringArray, StringArray, UInt16Array, UInt32Array, UInt64Array,
+};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
-use datafusion::common::{DFSchema, ParamValues, ScalarValue};
+use datafusion::arrow::util::display::array_value_to_string;
+use datafusion::common::{DFSchema, ParamValues};
 use datafusion::logical_expr::{Expr, LogicalPlan, Projection};
 use datafusion::prelude::SessionContext;
 use datafusion::sql::parser::Statement as DataFusionStatement;
@@ -31,6 +35,20 @@ use datafusion_postgres::pgwire::api::{ClientInfo, DEFAULT_NAME};
 use datafusion_postgres::pgwire::error::{PgWireError, PgWireResult};
 use futures::StreamExt;
 
+mod params;
+mod sql_parse;
+mod surfaces;
+
+use params::{first_oid_param, last_string_param, string_param};
+use sql_parse::{
+    count_positional_placeholders, escape_identifier, parse_first_u32, parse_single_quoted_literal,
+    select_item_output_name, select_items, strip_trailing_semicolon,
+};
+use surfaces::{
+    CatalogSurface, classify_catalog_surface, is_ogr_pg_class_oid_lookup, is_pgjdbc_columns_query,
+    is_pgjdbc_primary_keys_query, is_pgjdbc_typeinfo_name_query, is_pgjdbc_typeinfo_sqltype_query,
+};
+
 const GEOMETRY_OID: u32 = 90_001;
 const GEOGRAPHY_OID: u32 = 90_002;
 const SYNTHETIC_PK_INDEX_OID: u32 = 90_101;
@@ -45,8 +63,28 @@ static SYNTHETIC_TABLE_OIDS: LazyLock<Mutex<HashMap<u32, String>>> =
 
 #[derive(Debug, Clone)]
 struct PostgresDriverCursor {
-    table: String,
+    select_sql: String,
+    columns: Vec<CursorColumn>,
     offset: usize,
+}
+
+#[derive(Debug, Clone)]
+struct CursorColumn {
+    name: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CursorFieldKind {
+    BinaryHexText,
+    Text,
+    Int32,
+    Int64,
+}
+
+#[derive(Debug, Clone)]
+struct CursorFieldSpec {
+    name: String,
+    kind: CursorFieldKind,
 }
 
 #[derive(Debug, Clone)]
@@ -81,27 +119,39 @@ impl QueryHook for CatalogCompatHook {
         _client: &(dyn ClientInfo + Send + Sync),
     ) -> Option<PgWireResult<LogicalPlan>> {
         let sql = statement.to_string();
+        let sql_lower = sql.to_lowercase();
+        let param_count = count_positional_placeholders(&sql);
         if sql.to_uppercase().contains("OGRPGLAYERREADER") {
             if let Some((cursor, _limit)) = parse_postgres_driver_fetch(&sql) {
-                let table = POSTGRES_DRIVER_CURSORS
+                let state = POSTGRES_DRIVER_CURSORS
                     .lock()
                     .ok()
-                    .and_then(|cursors| cursors.get(&cursor).map(|state| state.table.clone()));
-                return Some(cursor_feature_logical_plan(session_context, table.as_deref()).await);
+                    .and_then(|cursors| cursors.get(&cursor).cloned());
+                return Some(cursor_feature_logical_plan(session_context, state.as_ref()).await);
             }
             return Some(dummy_logical_plan(session_context).await);
         }
-        if is_ogr_pg_class_oid_lookup(&sql.to_lowercase()) {
-            return Some(ogr_pg_class_oid_lookup_logical_plan(session_context).await);
+        if is_pgjdbc_typeinfo_sqltype_query(&sql_lower) {
+            return Some(pgjdbc_typeinfo_sqltype_logical_plan(session_context, param_count).await);
         }
-        if is_geotools_binary_geometry_query(&sql.to_lowercase()) {
+        if is_pgjdbc_typeinfo_name_query(&sql_lower) {
+            return Some(pgjdbc_typeinfo_name_logical_plan(session_context, param_count).await);
+        }
+        if matches!(
+            classify_catalog_surface(&sql_lower),
+            Some(CatalogSurface::PgTypePostgisProbe)
+        ) {
+            return Some(pg_type_oid_typname_logical_plan(session_context, param_count).await);
+        }
+        if is_ogr_pg_class_oid_lookup(&sql_lower) {
+            return Some(ogr_pg_class_oid_lookup_logical_plan(&sql, session_context).await);
+        }
+        if is_geotools_binary_geometry_query(&sql_lower) {
             return Some(
                 geotools_binary_geometry_describe_plan(&sql, statement, session_context).await,
             );
         }
-        let param_count = count_positional_placeholders(&sql);
-        let sql = sql.to_lowercase();
-        if is_pgjdbc_primary_keys_query(&sql) {
+        if is_pgjdbc_primary_keys_query(&sql_lower) {
             return Some(
                 pgjdbc_primary_keys_logical_plan(session_context, param_count.max(2)).await,
             );
@@ -185,23 +235,6 @@ fn custom_postgis_type(oid: u32) -> Option<(&'static str, u32)> {
     }
 }
 
-fn is_pgjdbc_typeinfo_sqltype_query(sql: &str) -> bool {
-    sql.contains("typinput")
-        && sql.contains("array_in")
-        && sql.contains("typtype")
-        && sql.contains("typname")
-        && sql.contains("pg_type.oid")
-        && sql.contains("array_upper(current_schemas")
-}
-
-fn is_pgjdbc_typeinfo_name_query(sql: &str) -> bool {
-    sql.contains("current_schemas")
-        && sql.contains("nspname")
-        && sql.contains("t.typname")
-        && sql.contains("pg_catalog.pg_type")
-        && sql.contains("pg_catalog.pg_namespace")
-}
-
 fn pgjdbc_typeinfo_sqltype_row(
     typname: &str,
     oid: u32,
@@ -271,55 +304,6 @@ fn pgjdbc_typeinfo_name_row(
     Ok(QueryResponse::new(fields, Box::pin(row_stream)))
 }
 
-fn first_oid_param(params: &ParamValues) -> Option<u32> {
-    let value = match params {
-        ParamValues::List(values) => values.first()?.value.clone(),
-        ParamValues::Map(values) => values.get("$1").or_else(|| values.get("1"))?.value.clone(),
-    };
-    match value {
-        ScalarValue::UInt32(Some(value)) => Some(value),
-        ScalarValue::Int32(Some(value)) if value >= 0 => Some(value as u32),
-        ScalarValue::Int64(Some(value)) if value >= 0 => u32::try_from(value).ok(),
-        _ => None,
-    }
-}
-
-fn last_string_param(params: &ParamValues) -> Option<String> {
-    match params {
-        ParamValues::List(values) => values
-            .iter()
-            .rev()
-            .find_map(|value| scalar_string(&value.value)),
-        ParamValues::Map(values) => (1..=values.len()).rev().find_map(|idx| {
-            values
-                .get(&format!("${idx}"))
-                .or_else(|| values.get(&idx.to_string()))
-                .and_then(|value| scalar_string(&value.value))
-        }),
-    }
-}
-
-fn string_param(params: &ParamValues, idx: usize) -> Option<String> {
-    match params {
-        ParamValues::List(values) => values
-            .get(idx.checked_sub(1)?)
-            .and_then(|value| scalar_string(&value.value)),
-        ParamValues::Map(values) => values
-            .get(&format!("${idx}"))
-            .or_else(|| values.get(&idx.to_string()))
-            .and_then(|value| scalar_string(&value.value)),
-    }
-}
-
-fn scalar_string(value: &ScalarValue) -> Option<String> {
-    match value {
-        ScalarValue::Utf8(Some(value)) => Some(value.clone()),
-        ScalarValue::LargeUtf8(Some(value)) => Some(value.clone()),
-        ScalarValue::Utf8View(Some(value)) => Some(value.clone()),
-        _ => None,
-    }
-}
-
 fn typeinfo_row(typname: &str, oid: u32) -> PgWireResult<QueryResponse> {
     let format = FieldFormat::Binary;
     let fields = vec![
@@ -353,136 +337,75 @@ async fn catalog_query_response(
     if let Some(response) = pg_type_oid_in_response(&sql) {
         return Some(response.map(Response::Query));
     }
-    if sql.contains("pg_type")
-        && sql.contains("oid")
-        && sql.contains("typname")
-        && sql.contains("typtype")
-    {
-        return Some(pg_type_postgis_probe_response().map(Response::Query));
-    }
-    if (sql.contains("qgis_editor_widget_styles") || sql.contains("layer_styles"))
-        && sql.contains("exists")
-    {
-        return Some(single_bool_row("exists", false).map(Response::Query));
-    }
-    if sql.contains("table_cat")
-        && sql.contains("table_schem")
-        && sql.contains("table_name")
-        && sql.contains("table_type")
-        && sql.contains("pg_class")
-        && sql.contains("pg_namespace")
-    {
-        return Some(pgjdbc_table_listing_response(session_context).map(Response::Query));
-    }
-    if is_pgjdbc_primary_keys_query(&sql) {
-        return Some(
+
+    let surface = classify_catalog_surface(&sql)?;
+    match surface {
+        CatalogSurface::PgTypePostgisProbe => {
+            Some(pg_type_oid_typname_probe_response(&sql).map(Response::Query))
+        }
+        CatalogSurface::StyleTableExists => {
+            Some(single_bool_row("exists", false).map(Response::Query))
+        }
+        CatalogSurface::PgJdbcTableListing => {
+            Some(pgjdbc_table_listing_response(session_context).map(Response::Query))
+        }
+        CatalogSurface::PgJdbcPrimaryKeys => Some(
             pgjdbc_primary_keys_response(session_context, None, FieldFormat::Text)
                 .await
                 .map(Response::Query),
-        );
-    }
-    if is_pgjdbc_columns_query(&sql) {
-        return Some(
+        ),
+        CatalogSurface::PgJdbcColumns => Some(
             pgjdbc_columns_response(session_context, None, None, None, FieldFormat::Text)
                 .await
                 .map(Response::Query),
-        );
-    }
-    if sql.contains("pg_class")
-        && sql.contains("pg_namespace")
-        && sql.contains("pg_description")
-        && sql.contains("d.classoid")
-        && sql.contains("d.objsubid")
-        && sql.contains("relkind")
-        && sql.contains("relname")
-        && sql.contains("nspname")
-    {
-        return Some(pg_class_table_listing_response(session_context).map(Response::Query));
-    }
-    if is_ogr_pg_class_oid_lookup(&sql) {
-        return Some(pg_class_oid_lookup_response(&sql, FieldFormat::Text).map(Response::Query));
-    }
-    if sql.contains("pg_inherits") && sql.contains("inhparent") && sql.contains("relname") {
-        return Some(empty_response("relname", Type::VARCHAR).map(Response::Query));
-    }
-    if sql.contains("pg_inherits") && sql.contains("inhparent") {
-        return Some(single_i64_row("count", 0).map(Response::Query));
-    }
-    if sql.contains("pg_attribute")
-        && sql.contains("pg_type")
-        && sql.contains("format_type")
-        && sql.contains("pg_attrdef")
-        && sql.contains("pg_index")
-        && sql.contains("pg_description")
-        && sql.contains("attnotnull")
-        && sql.contains("indisunique")
-    {
-        return Some(
+        ),
+        CatalogSurface::PgClassTableListing => {
+            Some(pg_class_table_listing_response(session_context).map(Response::Query))
+        }
+        CatalogSurface::PgClassOidLookup => {
+            Some(pg_class_oid_lookup_response(&sql, FieldFormat::Text).map(Response::Query))
+        }
+        CatalogSurface::PgInheritsRelname => {
+            Some(empty_response("relname", Type::VARCHAR).map(Response::Query))
+        }
+        CatalogSurface::PgInheritsCount => Some(single_i64_row("count", 0).map(Response::Query)),
+        CatalogSurface::PgAttributeColumnListing => Some(
             pg_attribute_column_listing_response(&sql, session_context)
                 .await
                 .map(Response::Query),
-        );
-    }
-    if sql.contains("from geography_columns")
-        && sql.contains("type")
-        && sql.contains("coord_dimension")
-        && sql.contains("srid")
-    {
-        return Some(geography_columns_probe_response().map(Response::Query));
-    }
-    if sql.contains("pg_description") && sql.contains("regclass") {
-        return Some(empty_response("description", Type::VARCHAR).map(Response::Query));
-    }
-    if sql.contains("pg_attribute")
-        && sql.contains("pg_type")
-        && sql.contains("pg_index")
-        && sql.contains("attnum")
-        && sql.contains("typname")
-        && sql.contains("isfid")
-        && sql.contains("indisprimary")
-    {
-        return Some(pg_index_primary_key_probe_response().map(Response::Query));
-    }
-    if sql.contains("pg_index")
-        && sql.contains("pg_attribute")
-        && sql.contains("attname")
-        && sql.contains("attnotnull")
-        && sql.contains("indexrelid")
-    {
-        return Some(pg_index_key_column_response(&sql).map(Response::Query));
-    }
-    if sql.contains("pg_index") && sql.contains("indrelid") {
-        return Some(
+        ),
+        CatalogSurface::GeographyColumnsProbe => {
+            Some(geography_columns_probe_response().map(Response::Query))
+        }
+        CatalogSurface::PgDescriptionRegclass => {
+            Some(empty_response("description", Type::VARCHAR).map(Response::Query))
+        }
+        CatalogSurface::PgIndexPrimaryKeyProbe => {
+            Some(pg_index_primary_key_probe_response().map(Response::Query))
+        }
+        CatalogSurface::PgIndexKeyColumn => {
+            Some(pg_index_key_column_response(&sql).map(Response::Query))
+        }
+        CatalogSurface::PgIndexForTable => Some(
             pg_index_for_table_response(&sql, session_context)
                 .await
                 .map(Response::Query),
-        );
+        ),
+        CatalogSurface::PgIndexIndkey => Some(pg_index_indkey_response(&sql).map(Response::Query)),
+        CatalogSurface::PgGetIndexdef => Some(pg_get_indexdef_response(&sql).map(Response::Query)),
+        CatalogSurface::PgClassRelkindRegclass => {
+            Some(single_text_row("relkind", "r").map(Response::Query))
+        }
+        CatalogSurface::PgAttributeRegclassIdentity => {
+            Some(empty_response("attidentity", Type::VARCHAR).map(Response::Query))
+        }
+        CatalogSurface::PgAttributeRegclassName => {
+            Some(empty_response("attname", Type::VARCHAR).map(Response::Query))
+        }
+        CatalogSurface::PgAttributeGeomTypeName => {
+            Some(single_text_row("typname", "geometry").map(Response::Query))
+        }
     }
-    if sql.contains("pg_index") && sql.contains("indkey") {
-        return Some(pg_index_indkey_response(&sql).map(Response::Query));
-    }
-    if sql.contains("pg_get_indexdef") {
-        return Some(pg_get_indexdef_response(&sql).map(Response::Query));
-    }
-    if sql.contains("relkind") && sql.contains("pg_class") && sql.contains("regclass") {
-        return Some(single_text_row("relkind", "r").map(Response::Query));
-    }
-    if sql.contains("pg_attribute") && sql.contains("regclass") && sql.contains("attidentity") {
-        return Some(empty_response("attidentity", Type::VARCHAR).map(Response::Query));
-    }
-    if sql.contains("pg_attribute") && sql.contains("regclass") && sql.contains("attname") {
-        return Some(empty_response("attname", Type::VARCHAR).map(Response::Query));
-    }
-
-    if !(sql.contains("pg_attribute")
-        && sql.contains("pg_type")
-        && sql.contains("t.typname")
-        && sql.contains("a.attname = 'geom'"))
-    {
-        return None;
-    }
-
-    Some(single_text_row("typname", "geometry").map(Response::Query))
 }
 
 async fn postgres_driver_cursor_response(
@@ -490,9 +413,9 @@ async fn postgres_driver_cursor_response(
     session_context: &SessionContext,
 ) -> Option<PgWireResult<Response>> {
     let sql = statement.to_string();
-    if let Some((cursor, table)) = parse_postgres_driver_declare(&sql) {
+    if let Some((cursor, state)) = parse_postgres_driver_declare(&sql) {
         if let Ok(mut cursors) = POSTGRES_DRIVER_CURSORS.lock() {
-            cursors.insert(cursor, PostgresDriverCursor { table, offset: 0 });
+            cursors.insert(cursor, state);
         }
         return Some(Ok(Response::Execution(Tag::new("DECLARE CURSOR"))));
     }
@@ -506,7 +429,7 @@ async fn postgres_driver_cursor_response(
     None
 }
 
-fn parse_postgres_driver_declare(sql: &str) -> Option<(String, String)> {
+fn parse_postgres_driver_declare(sql: &str) -> Option<(String, PostgresDriverCursor)> {
     let upper = sql.to_uppercase();
     if !(upper.starts_with("DECLARE ")
         && upper.contains("OGRPGLAYERREADER")
@@ -515,14 +438,42 @@ fn parse_postgres_driver_declare(sql: &str) -> Option<(String, String)> {
     {
         return None;
     }
-    let cursor = sql.split_whitespace().nth(1)?.to_string();
-    let from_pos = upper.find(" FROM ")? + " FROM ".len();
-    let table = sql[from_pos..]
-        .split_whitespace()
-        .next()?
-        .trim_matches('"')
-        .to_string();
-    Some((cursor, table))
+    let cursor = sql.split_whitespace().nth(1)?.trim_matches('"').to_string();
+    let select_pos = upper.find(" CURSOR FOR ")? + " CURSOR FOR ".len();
+    let select_sql = strip_trailing_semicolon(&sql[select_pos..]).to_string();
+    let columns = cursor_columns_from_select(&select_sql);
+    Some((
+        cursor,
+        PostgresDriverCursor {
+            select_sql,
+            columns,
+            offset: 0,
+        },
+    ))
+}
+
+fn cursor_columns_from_select(select_sql: &str) -> Vec<CursorColumn> {
+    let columns = select_items(select_sql)
+        .into_iter()
+        .filter_map(|expression| {
+            let name = select_item_output_name(&expression)?;
+            (name != "*").then_some(CursorColumn { name })
+        })
+        .collect::<Vec<_>>();
+
+    if columns.is_empty() {
+        return default_cursor_columns();
+    }
+    columns
+}
+
+fn default_cursor_columns() -> Vec<CursorColumn> {
+    ["wkb_geometry", "id", "name"]
+        .into_iter()
+        .map(|name| CursorColumn {
+            name: name.to_string(),
+        })
+        .collect()
 }
 
 fn parse_postgres_driver_fetch(sql: &str) -> Option<(String, usize)> {
@@ -618,7 +569,10 @@ fn geotools_st_asewkb_describe_fields(sql: &str) -> Vec<Field> {
 }
 
 fn is_geotools_binary_geometry_select_item(item_lower: &str, _output_name: &str) -> bool {
-    if item_lower.contains("st_asbinary") || item_lower.contains("st_asewkb") {
+    if item_lower.contains("st_asbinary")
+        || item_lower.contains("st_asewkb")
+        || item_lower.contains("st_asmvt")
+    {
         return true;
     }
     if item_lower.contains("st_astext")
@@ -697,62 +651,6 @@ async fn geotools_st_asewkb_response(
     Ok(Response::Query(QueryResponse::new(fields, row_stream)))
 }
 
-fn select_items(sql: &str) -> Vec<String> {
-    let Some(select_start) = sql.to_lowercase().find("select ").map(|idx| idx + 7) else {
-        return Vec::new();
-    };
-    let lower = sql.to_lowercase();
-    let Some(from_end) = lower[select_start..]
-        .find(" from ")
-        .map(|idx| select_start + idx)
-    else {
-        return Vec::new();
-    };
-    split_top_level_commas(&sql[select_start..from_end])
-}
-
-fn split_top_level_commas(select_list: &str) -> Vec<String> {
-    let mut items = Vec::new();
-    let mut depth = 0_i32;
-    let mut in_quotes = false;
-    let mut start = 0_usize;
-    for (idx, ch) in select_list.char_indices() {
-        match ch {
-            '"' => in_quotes = !in_quotes,
-            '(' if !in_quotes => depth += 1,
-            ')' if !in_quotes => depth -= 1,
-            ',' if !in_quotes && depth == 0 => {
-                items.push(select_list[start..idx].trim().to_string());
-                start = idx + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    if start < select_list.len() {
-        items.push(select_list[start..].trim().to_string());
-    }
-    items
-}
-
-fn select_item_output_name(item: &str) -> Option<String> {
-    let lower = item.to_lowercase();
-    if let Some(as_pos) = lower.rfind(" as ") {
-        return Some(trim_identifier(&item[as_pos + 4..]));
-    }
-    item.rsplit('.')
-        .next()
-        .map(trim_identifier)
-        .filter(|name| !name.is_empty())
-}
-
-fn trim_identifier(identifier: &str) -> String {
-    identifier
-        .trim()
-        .trim_matches('"')
-        .trim_matches('`')
-        .to_string()
-}
-
 async fn pgjdbc_primary_keys_logical_plan(
     session_context: &SessionContext,
     param_count: usize,
@@ -776,11 +674,87 @@ async fn pgjdbc_primary_keys_logical_plan(
         .map_err(|e| PgWireError::ApiError(Box::new(e)))
 }
 
+async fn pgjdbc_typeinfo_sqltype_logical_plan(
+    session_context: &SessionContext,
+    param_count: usize,
+) -> PgWireResult<LogicalPlan> {
+    let oid = integer_param_or_null(1, param_count);
+    let dataframe = session_context
+        .sql(&format!(
+            "SELECT CAST(NULL AS BOOLEAN) AS is_array, \
+                    CAST(NULL AS TEXT) AS typtype, \
+                    CAST(NULL AS TEXT) AS typname, \
+                    {oid} AS oid"
+        ))
+        .await
+        .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+    dataframe
+        .into_optimized_plan()
+        .map_err(|e| PgWireError::ApiError(Box::new(e)))
+}
+
+async fn pgjdbc_typeinfo_name_logical_plan(
+    session_context: &SessionContext,
+    param_count: usize,
+) -> PgWireResult<LogicalPlan> {
+    let is_current_schema = if param_count >= 1 {
+        "CAST($1 AS INTEGER) IS NULL".to_string()
+    } else {
+        "CAST(NULL AS BOOLEAN)".to_string()
+    };
+    let dataframe = session_context
+        .sql(&format!(
+            "SELECT {is_current_schema} AS \"?column?\", \
+                    CAST(NULL AS TEXT) AS nspname, \
+                    CAST(NULL AS TEXT) AS typname"
+        ))
+        .await
+        .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+    dataframe
+        .into_optimized_plan()
+        .map_err(|e| PgWireError::ApiError(Box::new(e)))
+}
+
+async fn pg_type_oid_typname_logical_plan(
+    session_context: &SessionContext,
+    param_count: usize,
+) -> PgWireResult<LogicalPlan> {
+    let oid = integer_param_or_null(1, param_count);
+    let dataframe = session_context
+        .sql(&format!(
+            "SELECT {oid} AS oid, CAST(NULL AS TEXT) AS typname"
+        ))
+        .await
+        .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+    dataframe
+        .into_optimized_plan()
+        .map_err(|e| PgWireError::ApiError(Box::new(e)))
+}
+
+fn integer_param_or_null(idx: usize, param_count: usize) -> String {
+    if idx <= param_count {
+        format!("CAST(${idx} AS INTEGER)")
+    } else {
+        "CAST(NULL AS INTEGER)".to_string()
+    }
+}
+
 async fn ogr_pg_class_oid_lookup_logical_plan(
+    sql: &str,
     session_context: &SessionContext,
 ) -> PgWireResult<LogicalPlan> {
+    let select_list = selected_pg_class_oid_columns(sql)
+        .into_iter()
+        .map(|column| match column {
+            PgClassOidColumn::Oid => "CAST(NULL AS INTEGER) AS oid",
+            PgClassOidColumn::Namespace => "CAST(NULL AS TEXT) AS nspname",
+            PgClassOidColumn::Relname => "CAST(NULL AS TEXT) AS relname",
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let query = format!("SELECT {select_list}");
     let dataframe = session_context
-        .sql("SELECT CAST(NULL AS INTEGER) AS oid, CAST(NULL AS TEXT) AS relname")
+        .sql(&query)
         .await
         .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
     dataframe
@@ -796,48 +770,26 @@ fn text_param_or_null(idx: usize, param_count: usize) -> String {
     }
 }
 
-fn count_positional_placeholders(sql: &str) -> usize {
-    let bytes = sql.as_bytes();
-    let mut max_placeholder = 0_usize;
-    let mut anonymous_placeholders = 0_usize;
-    let mut i = 0_usize;
-    while i < bytes.len() {
-        if bytes[i] == b'$' && bytes.get(i + 1).is_some_and(u8::is_ascii_digit) {
-            i += 1;
-            let start = i;
-            while i < bytes.len() && bytes[i].is_ascii_digit() {
-                i += 1;
-            }
-            if let Ok(idx) = sql[start..i].parse::<usize>() {
-                max_placeholder = max_placeholder.max(idx);
-            }
-        } else if bytes[i] == b'?' {
-            anonymous_placeholders += 1;
-            i += 1;
-        } else {
-            i += 1;
-        }
-    }
-    max_placeholder.max(anonymous_placeholders)
-}
-
 async fn cursor_feature_logical_plan(
     session_context: &SessionContext,
-    table: Option<&str>,
+    state: Option<&PostgresDriverCursor>,
 ) -> PgWireResult<LogicalPlan> {
-    let sql = if let Some(table) = table {
-        format!(
-            "SELECT CAST(NULL AS TEXT) AS \"wkb_geometry\", CAST(\"id\" AS INT) AS \"id\", \
-             CAST(\"name\" AS TEXT) AS \"name\" FROM \"{}\" WHERE FALSE",
-            table.replace('"', "\"\"")
-        )
-    } else {
-        "SELECT X'' AS \"wkb_geometry\", \
-                CAST(NULL AS INT) AS \"id\", \
-                CAST(NULL AS TEXT) AS \"name\" \
-         WHERE FALSE"
-            .to_string()
-    };
+    let columns = state
+        .map(|state| state.columns.clone())
+        .unwrap_or_else(default_cursor_columns);
+    let specs = cursor_field_specs(&columns);
+    let select_list = specs
+        .iter()
+        .map(|spec| {
+            format!(
+                "CAST(NULL AS {}) AS \"{}\"",
+                spec.sql_type(),
+                escape_identifier(&spec.name)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!("SELECT {select_list} WHERE FALSE");
     let dataframe = session_context
         .sql(&sql)
         .await
@@ -854,13 +806,11 @@ async fn cursor_fetch_response(
     limit: usize,
 ) -> PgWireResult<Response> {
     let cursor = cursor.to_string();
-    let fields = Arc::new(cursor_feature_fields());
+    let specs = cursor_field_specs(&state.columns);
+    let fields = Arc::new(cursor_feature_fields(&specs));
     let query = format!(
-        "SELECT \"wkb_geometry\", CAST(\"id\" AS INT) AS \"id\", \
-         CAST(\"name\" AS TEXT) AS \"name\" FROM \"{}\" LIMIT {} OFFSET {}",
-        state.table.replace('"', "\"\""),
-        limit,
-        state.offset
+        "SELECT * FROM ({}) AS \"_quackgis_ogr_cursor\" LIMIT {} OFFSET {}",
+        state.select_sql, limit, state.offset
     );
     let dataframe = session_context
         .sql(&query)
@@ -873,44 +823,13 @@ async fn cursor_fetch_response(
     let mut emitted = 0_usize;
     let mut rows = Vec::new();
     for batch in batches {
-        let wkb = batch.column(0).as_any().downcast_ref::<BinaryArray>();
-        let wkb_view = batch.column(0).as_any().downcast_ref::<BinaryViewArray>();
-        let ids = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .ok_or_else(|| api_error("OGR cursor expected INT id"))?;
-        let names = batch.column(2).as_any().downcast_ref::<StringArray>();
-        let name_views = batch
-            .column(2)
-            .as_any()
-            .downcast_ref::<datafusion::arrow::array::StringViewArray>();
+        if batch.num_columns() != specs.len() {
+            return Err(api_error("OGR cursor returned unexpected column count"));
+        }
         for row_idx in 0..batch.num_rows() {
             let mut encoder = DataRowEncoder::new(Arc::clone(&fields));
-            if batch.column(0).is_null(row_idx) {
-                encoder.encode_field(&None::<&str>)?;
-            } else if let Some(wkb) = wkb {
-                let bytea = format!("\\x{}", hex_encode(wkb.value(row_idx)));
-                encoder.encode_field(&Some(bytea.as_str()))?;
-            } else if let Some(wkb_view) = wkb_view {
-                let bytea = format!("\\x{}", hex_encode(wkb_view.value(row_idx)));
-                encoder.encode_field(&Some(bytea.as_str()))?;
-            } else {
-                return Err(api_error("OGR cursor expected binary geometry"));
-            }
-            if ids.is_null(row_idx) {
-                encoder.encode_field(&None::<i32>)?;
-            } else {
-                encoder.encode_field(&Some(ids.value(row_idx)))?;
-            }
-            if batch.column(2).is_null(row_idx) {
-                encoder.encode_field(&None::<&str>)?;
-            } else if let Some(names) = names {
-                encoder.encode_field(&Some(names.value(row_idx)))?;
-            } else if let Some(name_views) = name_views {
-                encoder.encode_field(&Some(name_views.value(row_idx)))?;
-            } else {
-                return Err(api_error("OGR cursor expected text name"));
+            for (col_idx, spec) in specs.iter().enumerate() {
+                encode_cursor_field(&mut encoder, batch.column(col_idx).as_ref(), row_idx, spec)?;
             }
             emitted += 1;
             rows.push(Ok(encoder.take_row()));
@@ -927,6 +846,158 @@ async fn cursor_fetch_response(
     )))
 }
 
+fn cursor_field_specs(columns: &[CursorColumn]) -> Vec<CursorFieldSpec> {
+    columns
+        .iter()
+        .map(|column| CursorFieldSpec {
+            name: column.name.clone(),
+            kind: cursor_field_kind(&column.name),
+        })
+        .collect()
+}
+
+fn cursor_field_kind(name: &str) -> CursorFieldKind {
+    if crate::geometry_columns::is_geometry_column_name(name) {
+        CursorFieldKind::BinaryHexText
+    } else if name.eq_ignore_ascii_case("id") {
+        CursorFieldKind::Int32
+    } else if name.eq_ignore_ascii_case(SYNTHETIC_ROWID_COLUMN) {
+        CursorFieldKind::Int64
+    } else {
+        CursorFieldKind::Text
+    }
+}
+
+impl CursorFieldSpec {
+    fn pg_type(&self) -> Type {
+        match self.kind {
+            CursorFieldKind::BinaryHexText | CursorFieldKind::Text => Type::VARCHAR,
+            CursorFieldKind::Int32 => Type::INT4,
+            CursorFieldKind::Int64 => Type::INT8,
+        }
+    }
+
+    fn sql_type(&self) -> &'static str {
+        match self.kind {
+            CursorFieldKind::BinaryHexText | CursorFieldKind::Text => "TEXT",
+            CursorFieldKind::Int32 => "INTEGER",
+            CursorFieldKind::Int64 => "BIGINT",
+        }
+    }
+}
+
+fn encode_cursor_field(
+    encoder: &mut DataRowEncoder,
+    array: &dyn Array,
+    row_idx: usize,
+    spec: &CursorFieldSpec,
+) -> PgWireResult<()> {
+    if array.is_null(row_idx) {
+        return encoder.encode_field(&None::<&str>);
+    }
+
+    match spec.kind {
+        CursorFieldKind::BinaryHexText => encode_binary_hex_text(encoder, array, row_idx),
+        CursorFieldKind::Text => encode_textish_field(encoder, array, row_idx),
+        CursorFieldKind::Int32 => encode_i32ish_field(encoder, array, row_idx),
+        CursorFieldKind::Int64 => encode_i64ish_field(encoder, array, row_idx),
+    }
+}
+
+fn encode_binary_hex_text(
+    encoder: &mut DataRowEncoder,
+    array: &dyn Array,
+    row_idx: usize,
+) -> PgWireResult<()> {
+    if let Some(values) = array.as_any().downcast_ref::<BinaryArray>() {
+        let bytea = format!("\\x{}", hex_encode(values.value(row_idx)));
+        return encoder.encode_field(&Some(bytea.as_str()));
+    }
+    if let Some(values) = array.as_any().downcast_ref::<BinaryViewArray>() {
+        let bytea = format!("\\x{}", hex_encode(values.value(row_idx)));
+        return encoder.encode_field(&Some(bytea.as_str()));
+    }
+    if let Some(values) = array.as_any().downcast_ref::<LargeBinaryArray>() {
+        let bytea = format!("\\x{}", hex_encode(values.value(row_idx)));
+        return encoder.encode_field(&Some(bytea.as_str()));
+    }
+    encode_textish_field(encoder, array, row_idx)
+}
+
+fn encode_textish_field(
+    encoder: &mut DataRowEncoder,
+    array: &dyn Array,
+    row_idx: usize,
+) -> PgWireResult<()> {
+    if let Some(values) = array.as_any().downcast_ref::<StringArray>() {
+        return encoder.encode_field(&Some(values.value(row_idx)));
+    }
+    if let Some(values) = array
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::StringViewArray>()
+    {
+        return encoder.encode_field(&Some(values.value(row_idx)));
+    }
+    if let Some(values) = array.as_any().downcast_ref::<LargeStringArray>() {
+        return encoder.encode_field(&Some(values.value(row_idx)));
+    }
+    if let Some(values) = array.as_any().downcast_ref::<BinaryArray>() {
+        let bytea = format!("\\x{}", hex_encode(values.value(row_idx)));
+        return encoder.encode_field(&Some(bytea.as_str()));
+    }
+    if let Some(values) = array.as_any().downcast_ref::<BinaryViewArray>() {
+        let bytea = format!("\\x{}", hex_encode(values.value(row_idx)));
+        return encoder.encode_field(&Some(bytea.as_str()));
+    }
+    if let Some(values) = array.as_any().downcast_ref::<LargeBinaryArray>() {
+        let bytea = format!("\\x{}", hex_encode(values.value(row_idx)));
+        return encoder.encode_field(&Some(bytea.as_str()));
+    }
+
+    let text =
+        array_value_to_string(array, row_idx).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+    encoder.encode_field(&Some(text.as_str()))
+}
+
+fn encode_i32ish_field(
+    encoder: &mut DataRowEncoder,
+    array: &dyn Array,
+    row_idx: usize,
+) -> PgWireResult<()> {
+    if let Some(values) = array.as_any().downcast_ref::<Int32Array>() {
+        return encoder.encode_field(&Some(values.value(row_idx)));
+    }
+    if let Some(values) = array.as_any().downcast_ref::<UInt16Array>() {
+        return encoder.encode_field(&Some(i32::from(values.value(row_idx))));
+    }
+    if let Some(values) = array.as_any().downcast_ref::<Int16Array>() {
+        return encoder.encode_field(&Some(i32::from(values.value(row_idx))));
+    }
+    encode_textish_field(encoder, array, row_idx)
+}
+
+fn encode_i64ish_field(
+    encoder: &mut DataRowEncoder,
+    array: &dyn Array,
+    row_idx: usize,
+) -> PgWireResult<()> {
+    if let Some(values) = array.as_any().downcast_ref::<Int64Array>() {
+        return encoder.encode_field(&Some(values.value(row_idx)));
+    }
+    if let Some(values) = array.as_any().downcast_ref::<UInt32Array>() {
+        return encoder.encode_field(&Some(i64::from(values.value(row_idx))));
+    }
+    if let Some(values) = array.as_any().downcast_ref::<UInt64Array>()
+        && let Ok(value) = i64::try_from(values.value(row_idx))
+    {
+        return encoder.encode_field(&Some(value));
+    }
+    if let Some(values) = array.as_any().downcast_ref::<Int32Array>() {
+        return encoder.encode_field(&Some(i64::from(values.value(row_idx))));
+    }
+    encode_textish_field(encoder, array, row_idx)
+}
+
 fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -941,24 +1012,19 @@ fn api_error(message: &str) -> PgWireError {
     PgWireError::ApiError(Box::new(std::io::Error::other(message.to_string())))
 }
 
-fn cursor_feature_fields() -> Vec<FieldInfo> {
-    vec![
-        FieldInfo::new(
-            "wkb_geometry".to_string(),
-            None,
-            None,
-            Type::VARCHAR,
-            FieldFormat::Text,
-        ),
-        FieldInfo::new("id".to_string(), None, None, Type::INT4, FieldFormat::Text),
-        FieldInfo::new(
-            "name".to_string(),
-            None,
-            None,
-            Type::VARCHAR,
-            FieldFormat::Text,
-        ),
-    ]
+fn cursor_feature_fields(specs: &[CursorFieldSpec]) -> Vec<FieldInfo> {
+    specs
+        .iter()
+        .map(|spec| {
+            FieldInfo::new(
+                spec.name.clone(),
+                None,
+                None,
+                spec.pg_type(),
+                FieldFormat::Text,
+            )
+        })
+        .collect()
 }
 
 fn pg_type_oid_in_response(sql: &str) -> Option<PgWireResult<QueryResponse>> {
@@ -1031,7 +1097,7 @@ fn pg_type_oid_in_response(sql: &str) -> Option<PgWireResult<QueryResponse>> {
     Some(Ok(QueryResponse::new(fields, Box::pin(row_stream))))
 }
 
-fn pg_type_postgis_probe_response() -> PgWireResult<QueryResponse> {
+fn pg_type_oid_typname_probe_response(sql: &str) -> PgWireResult<QueryResponse> {
     let fields = vec![
         FieldInfo::new("oid".to_string(), None, None, Type::OID, FieldFormat::Text),
         FieldInfo::new(
@@ -1042,8 +1108,33 @@ fn pg_type_postgis_probe_response() -> PgWireResult<QueryResponse> {
             FieldFormat::Text,
         ),
     ];
-    let row_stream = futures::stream::empty();
-    Ok(QueryResponse::new(Arc::new(fields), Box::pin(row_stream)))
+    let asks_for_spatial_types = (sql.matches("'bytea'").count() >= 2 && sql.contains("typtype"))
+        || sql.contains("'geometry'")
+        || sql.contains("'geography'");
+    let rows = if asks_for_spatial_types {
+        vec![(GEOMETRY_OID, "geometry"), (GEOGRAPHY_OID, "geography")]
+    } else {
+        [
+            (17_u32, "bytea"),
+            (20_u32, "int8"),
+            (23_u32, "int4"),
+            (25_u32, "text"),
+        ]
+        .into_iter()
+        .filter(|(_oid, typname)| sql.contains(&format!("'{typname}'")))
+        .collect::<Vec<_>>()
+    };
+    let fields = Arc::new(fields);
+    let row_stream = futures::stream::iter(rows.into_iter().map({
+        let fields = Arc::clone(&fields);
+        move |(oid, typname)| {
+            let mut encoder = DataRowEncoder::new(Arc::clone(&fields));
+            encode_u32_field(&mut encoder, oid, FieldFormat::Text)?;
+            encoder.encode_field(&Some(typname))?;
+            Ok(encoder.take_row())
+        }
+    }));
+    Ok(QueryResponse::new(fields, Box::pin(row_stream)))
 }
 
 fn empty_response(name: &str, ty: Type) -> PgWireResult<QueryResponse> {
@@ -1245,43 +1336,91 @@ fn synthetic_table_oid_for_table(table: &str) -> u32 {
     70_000 + (hash % 20_000)
 }
 
-fn is_ogr_pg_class_oid_lookup(sql: &str) -> bool {
-    sql.contains("pg_class")
-        && sql.contains("c.oid")
-        && sql.contains("c.relname")
-        && (sql.contains("relname ~") || sql.contains("relname op"))
-}
-
 fn pg_class_oid_lookup_response(
     sql: &str,
     field_format: FieldFormat,
 ) -> PgWireResult<QueryResponse> {
-    let table = parse_regex_relname(sql).unwrap_or_else(|| "points".to_string());
+    let table = parse_pg_class_relname_filter(sql).unwrap_or_else(|| "points".to_string());
     let oid = synthetic_table_oid_for_table(&table);
     if let Ok(mut tables) = SYNTHETIC_TABLE_OIDS.lock() {
         tables.insert(oid, table.clone());
     }
-    let fields = vec![
-        FieldInfo::new("oid".to_string(), None, None, Type::INT4, field_format),
-        FieldInfo::new(
-            "relname".to_string(),
-            None,
-            None,
-            Type::VARCHAR,
-            field_format,
-        ),
-    ];
+    let selected = selected_pg_class_oid_columns(sql);
+    let fields = selected
+        .iter()
+        .map(|column| match column {
+            PgClassOidColumn::Oid => {
+                FieldInfo::new("oid".to_string(), None, None, Type::INT4, field_format)
+            }
+            PgClassOidColumn::Namespace => FieldInfo::new(
+                "nspname".to_string(),
+                None,
+                None,
+                Type::VARCHAR,
+                field_format,
+            ),
+            PgClassOidColumn::Relname => FieldInfo::new(
+                "relname".to_string(),
+                None,
+                None,
+                Type::VARCHAR,
+                field_format,
+            ),
+        })
+        .collect::<Vec<_>>();
     let fields = Arc::new(fields);
     let row_stream = futures::stream::once({
         let fields = Arc::clone(&fields);
+        let selected = selected.clone();
         async move {
             let mut encoder = DataRowEncoder::new(fields);
-            encode_i32_field(&mut encoder, oid as i32, field_format)?;
-            encoder.encode_field(&Some(table.as_str()))?;
+            for column in selected {
+                match column {
+                    PgClassOidColumn::Oid => {
+                        encode_i32_field(&mut encoder, oid as i32, field_format)?
+                    }
+                    PgClassOidColumn::Namespace => encoder.encode_field(&Some("public"))?,
+                    PgClassOidColumn::Relname => encoder.encode_field(&Some(table.as_str()))?,
+                }
+            }
             Ok(encoder.take_row())
         }
     });
     Ok(QueryResponse::new(fields, Box::pin(row_stream)))
+}
+
+#[derive(Clone, Copy)]
+enum PgClassOidColumn {
+    Oid,
+    Namespace,
+    Relname,
+}
+
+fn selected_pg_class_oid_columns(sql: &str) -> Vec<PgClassOidColumn> {
+    let sql = sql.to_lowercase();
+    let select_end = sql.find(" from ").unwrap_or(sql.len());
+    let select_list = &sql[..select_end];
+    let mut columns = Vec::new();
+    if select_list.contains("c.oid") || select_list.contains(" oid") {
+        columns.push(PgClassOidColumn::Oid);
+    }
+    if select_list.contains("n.nspname") || select_list.contains("nspname") {
+        columns.push(PgClassOidColumn::Namespace);
+    }
+    if select_list.contains("c.relname") || select_list.contains("relname") {
+        columns.push(PgClassOidColumn::Relname);
+    }
+    if columns.is_empty() {
+        columns.push(PgClassOidColumn::Oid);
+        columns.push(PgClassOidColumn::Relname);
+    }
+    columns
+}
+
+fn parse_pg_class_relname_filter(sql: &str) -> Option<String> {
+    parse_regex_relname(sql)
+        .or_else(|| parse_relname_equality(sql))
+        .or_else(|| parse_regclass_table(sql))
 }
 
 fn parse_regex_relname(sql: &str) -> Option<String> {
@@ -1290,6 +1429,18 @@ fn parse_regex_relname(sql: &str) -> Option<String> {
     let end = sql[start..].find(")$")? + start;
     let table = sql[start..end].trim_matches('"');
     (!table.is_empty()).then(|| table.to_string())
+}
+
+fn parse_relname_equality(sql: &str) -> Option<String> {
+    for marker in ["c.relname =", "c.relname=", "relname =", "relname="] {
+        if let Some(start) = sql.find(marker) {
+            let after_equals = sql[start + marker.len()..].trim_start();
+            if let Some(value) = parse_single_quoted_literal(after_equals) {
+                return Some(value.trim_matches('"').to_string());
+            }
+        }
+    }
+    None
 }
 
 fn lookup_synthetic_table_oid(table_oid: u32) -> Option<String> {
@@ -1323,15 +1474,6 @@ fn parse_indexrelid(sql: &str) -> Option<u32> {
 fn parse_pg_get_indexdef_oid(sql: &str) -> Option<u32> {
     let start = sql.find("pg_get_indexdef")? + "pg_get_indexdef".len();
     parse_first_u32(&sql[start..])
-}
-
-fn parse_first_u32(s: &str) -> Option<u32> {
-    let digit_start = s.find(|c: char| c.is_ascii_digit())?;
-    let digits = s[digit_start..]
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect::<String>();
-    digits.parse().ok()
 }
 
 fn pg_class_table_listing_response(
@@ -1472,24 +1614,6 @@ fn pgjdbc_table_listing_response(session_context: &SessionContext) -> PgWireResu
     }));
 
     Ok(QueryResponse::new(fields, Box::pin(row_stream)))
-}
-
-fn is_pgjdbc_primary_keys_query(sql: &str) -> bool {
-    sql.contains("_pg_expandarray")
-        && sql.contains("key_seq")
-        && sql.contains("pk_name")
-        && sql.contains("column_name")
-        && sql.contains("pg_index")
-}
-
-fn is_pgjdbc_columns_query(sql: &str) -> bool {
-    sql.contains("pg_attribute")
-        && sql.contains("pg_type")
-        && sql.contains("atttypid")
-        && sql.contains("attidentity")
-        && sql.contains("attgenerated")
-        && sql.contains("typbasetype")
-        && sql.contains("typtype")
 }
 
 async fn pgjdbc_columns_extended_response(
@@ -2020,7 +2144,8 @@ async fn pg_attribute_column_listing_response(
     sql: &str,
     session_context: &SessionContext,
 ) -> PgWireResult<QueryResponse> {
-    let fields = vec![
+    let include_attgenerated = sql.contains("attgenerated");
+    let mut fields = vec![
         FieldInfo::new(
             "attname".to_string(),
             None,
@@ -2078,6 +2203,15 @@ async fn pg_attribute_column_listing_response(
             FieldFormat::Text,
         ),
     ];
+    if include_attgenerated {
+        fields.push(FieldInfo::new(
+            "attgenerated".to_string(),
+            None,
+            None,
+            Type::VARCHAR,
+            FieldFormat::Text,
+        ));
+    }
     let rows = ogr_attribute_rows(sql, session_context).await;
     let fields = Arc::new(fields);
     let row_stream = futures::stream::iter(rows.into_iter().map({
@@ -2092,6 +2226,9 @@ async fn pg_attribute_column_listing_response(
             encoder.encode_field(&None::<&str>)?;
             encoder.encode_field(&Some(false))?;
             encoder.encode_field(&None::<&str>)?;
+            if include_attgenerated {
+                encoder.encode_field(&Some(""))?;
+            }
             Ok(encoder.take_row())
         }
     }));
@@ -2107,8 +2244,7 @@ struct OgrAttributeRow {
 }
 
 async fn ogr_attribute_rows(sql: &str, session_context: &SessionContext) -> Vec<OgrAttributeRow> {
-    if let Some(table_oid) = parse_attrelid(sql)
-        && let Some(table_name) = lookup_synthetic_table_oid(table_oid)
+    if let Some(table_name) = pg_attribute_table_name(sql, session_context)
         && let Some(rows) = schema_ogr_attribute_rows(session_context, &table_name).await
     {
         return rows;
@@ -2118,6 +2254,22 @@ async fn ogr_attribute_rows(sql: &str, session_context: &SessionContext) -> Vec<
         ogr_attribute_row("wkb_geometry", "bytea", -1, "bytea"),
         ogr_attribute_row("name", "text", -1, "text"),
     ]
+}
+
+fn pg_attribute_table_name(sql: &str, session_context: &SessionContext) -> Option<String> {
+    if let Some(table_name) = parse_regclass_table(sql) {
+        return Some(table_name);
+    }
+    let table_oid = parse_attrelid(sql)?;
+    lookup_synthetic_table_oid(table_oid)
+        .or_else(|| table_name_for_synthetic_oid(session_context, table_oid))
+}
+
+fn table_name_for_synthetic_oid(session_context: &SessionContext, oid: u32) -> Option<String> {
+    visible_tables_as_public_relations(session_context)
+        .into_iter()
+        .map(|(table, _schema)| table)
+        .find(|table| synthetic_table_oid_for_table(table) == oid)
 }
 
 async fn schema_ogr_attribute_rows(

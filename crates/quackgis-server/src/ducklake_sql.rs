@@ -6,8 +6,8 @@
 //! the `quackgis.main.<table>` catalog path.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock};
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -17,13 +17,12 @@ use datafusion::arrow::array::{
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::{DFSchema, DFSchemaRef, ParamValues, ScalarValue};
+use datafusion::common::{DFSchema, DFSchemaRef, ParamValues};
 use datafusion::datasource::MemTable;
 use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
 use datafusion::prelude::SessionContext;
 use datafusion::sql::sqlparser::ast::{
-    AlterTable, AlterTableOperation, AssignmentTarget, ColumnDef, FromTable, ObjectName,
-    SelectItem, TableFactor, TableWithJoins,
+    AlterTable, AlterTableOperation, AssignmentTarget, ColumnDef, ObjectName, SelectItem,
 };
 use datafusion_ducklake::{
     DuckLakeCatalog, DuckLakeTableWriter, MetadataWriter, SqliteMetadataProvider,
@@ -40,6 +39,20 @@ use tokio::sync::Mutex;
 
 use crate::catalog_compat::SYNTHETIC_ROWID_COLUMN;
 use crate::context::{DUCKLAKE_CATALOG, StoragePaths};
+
+mod names;
+mod params;
+mod rewrites;
+
+use names::{
+    delete_target_parts, ducklake_table_ref, insert_source_is_values, insert_target_parts,
+    object_name_last, public_table_ref, quote_ident, table_name_parts, update_target_parts,
+};
+use params::inline_params_if_needed;
+use rewrites::{
+    rewrite_mojibake_string_literals, rewrite_pg_escape_bytea_literals,
+    rewrite_st_geomfromwkb_zero_srid_literals,
+};
 
 static TRANSACTION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -371,173 +384,6 @@ fn returning_query_from_table(
         "SELECT {} FROM {table_ref}{where_clause}",
         returning_select_list(returning)
     )
-}
-
-fn inline_params_if_needed(sql: &str, params: Option<&ParamValues>) -> PgWireResult<String> {
-    let Some(params) = params else {
-        return Ok(sql.to_string());
-    };
-    inline_params(sql, params)
-}
-
-fn inline_params(sql: &str, params: &ParamValues) -> PgWireResult<String> {
-    let bytes = sql.as_bytes();
-    let mut out = String::with_capacity(sql.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\'' => {
-                out.push('\'');
-                i += 1;
-                while i < bytes.len() {
-                    out.push(bytes[i] as char);
-                    if bytes[i] == b'\'' {
-                        if bytes.get(i + 1) == Some(&b'\'') {
-                            i += 1;
-                            out.push('\'');
-                        } else {
-                            i += 1;
-                            break;
-                        }
-                    }
-                    i += 1;
-                }
-            }
-            b'"' => {
-                out.push('"');
-                i += 1;
-                while i < bytes.len() {
-                    out.push(bytes[i] as char);
-                    if bytes[i] == b'"' {
-                        if bytes.get(i + 1) == Some(&b'"') {
-                            i += 1;
-                            out.push('"');
-                        } else {
-                            i += 1;
-                            break;
-                        }
-                    }
-                    i += 1;
-                }
-            }
-            b'$' if bytes.get(i + 1).is_some_and(u8::is_ascii_digit) => {
-                let start = i;
-                i += 2;
-                while i < bytes.len() && bytes[i].is_ascii_digit() {
-                    i += 1;
-                }
-                let placeholder = &sql[start..i];
-                out.push_str(&param_sql_literal(params, placeholder)?);
-            }
-            b => {
-                out.push(b as char);
-                i += 1;
-            }
-        }
-    }
-    Ok(out)
-}
-
-fn param_sql_literal(params: &ParamValues, placeholder: &str) -> PgWireResult<String> {
-    let Ok(value) = params.get_placeholders_with_values(placeholder) else {
-        // datafusion-postgres currently drops UNKNOWN-typed NULL parameters
-        // during deserialization. QGIS sends the synthetic rowid as a NULL
-        // placeholder on INSERT; keep the DML hook fail-closed for storage by
-        // materializing that missing bind as SQL NULL and then ignoring the
-        // synthetic rowid target column below.
-        return Ok("NULL".to_string());
-    };
-    scalar_sql_literal(&value.value)
-}
-
-fn scalar_sql_literal(value: &ScalarValue) -> PgWireResult<String> {
-    let literal = match value {
-        ScalarValue::Null
-        | ScalarValue::Boolean(None)
-        | ScalarValue::Float16(None)
-        | ScalarValue::Float32(None)
-        | ScalarValue::Float64(None)
-        | ScalarValue::Decimal32(None, _, _)
-        | ScalarValue::Decimal64(None, _, _)
-        | ScalarValue::Decimal128(None, _, _)
-        | ScalarValue::Decimal256(None, _, _)
-        | ScalarValue::Int8(None)
-        | ScalarValue::Int16(None)
-        | ScalarValue::Int32(None)
-        | ScalarValue::Int64(None)
-        | ScalarValue::UInt8(None)
-        | ScalarValue::UInt16(None)
-        | ScalarValue::UInt32(None)
-        | ScalarValue::UInt64(None)
-        | ScalarValue::Utf8(None)
-        | ScalarValue::Utf8View(None)
-        | ScalarValue::LargeUtf8(None)
-        | ScalarValue::Binary(None)
-        | ScalarValue::BinaryView(None)
-        | ScalarValue::FixedSizeBinary(_, None)
-        | ScalarValue::LargeBinary(None) => "NULL".to_string(),
-        ScalarValue::Boolean(Some(value)) => value.to_string(),
-        ScalarValue::Float16(Some(value)) => value.to_string(),
-        ScalarValue::Float32(Some(value)) => value.to_string(),
-        ScalarValue::Float64(Some(value)) => value.to_string(),
-        ScalarValue::Decimal32(Some(value), _, scale) => decimal_literal(*value as i128, *scale),
-        ScalarValue::Decimal64(Some(value), _, scale) => decimal_literal(*value as i128, *scale),
-        ScalarValue::Decimal128(Some(value), _, scale) => decimal_literal(*value, *scale),
-        ScalarValue::Decimal256(Some(_), _, _) => {
-            return Err(user_error(anyhow!(
-                "Decimal256 query parameters are not supported by DuckLake DML routing"
-            )));
-        }
-        ScalarValue::Int8(Some(value)) => value.to_string(),
-        ScalarValue::Int16(Some(value)) => value.to_string(),
-        ScalarValue::Int32(Some(value)) => value.to_string(),
-        ScalarValue::Int64(Some(value)) => value.to_string(),
-        ScalarValue::UInt8(Some(value)) => value.to_string(),
-        ScalarValue::UInt16(Some(value)) => value.to_string(),
-        ScalarValue::UInt32(Some(value)) => value.to_string(),
-        ScalarValue::UInt64(Some(value)) => value.to_string(),
-        ScalarValue::Utf8(Some(value))
-        | ScalarValue::Utf8View(Some(value))
-        | ScalarValue::LargeUtf8(Some(value)) => string_or_bytea_literal(value),
-        ScalarValue::Binary(Some(value))
-        | ScalarValue::BinaryView(Some(value))
-        | ScalarValue::FixedSizeBinary(_, Some(value))
-        | ScalarValue::LargeBinary(Some(value)) => binary_literal(value),
-        other => {
-            return Err(user_error(anyhow!(
-                "unsupported query parameter for DuckLake DML routing: {other:?}"
-            )));
-        }
-    };
-    Ok(literal)
-}
-
-fn string_or_bytea_literal(value: &str) -> String {
-    if let Some(bytes) = decode_pg_escape_bytea_body(value) {
-        return binary_literal(&bytes);
-    }
-    let repaired = repair_latin1_decoded_utf8_mojibake(value);
-    let value = repaired.as_deref().unwrap_or(value);
-    format!("'{}'", value.replace('\'', "''"))
-}
-
-fn binary_literal(value: &[u8]) -> String {
-    format!("X'{}'", hex_encode(value))
-}
-
-fn decimal_literal(value: i128, scale: i8) -> String {
-    if scale <= 0 {
-        return value.to_string();
-    }
-    let scale = scale as usize;
-    let sign = if value < 0 { "-" } else { "" };
-    let digits = value.abs().to_string();
-    if digits.len() <= scale {
-        format!("{sign}0.{}{}", "0".repeat(scale - digits.len()), digits)
-    } else {
-        let split = digits.len() - scale;
-        format!("{sign}{}.{}", &digits[..split], &digits[split..])
-    }
 }
 
 fn ducklake_statement_parts(
@@ -1691,44 +1537,6 @@ enum WriteDisposition {
     Append,
 }
 
-fn table_name_parts(
-    name: &datafusion::sql::sqlparser::ast::ObjectName,
-) -> Option<(String, String)> {
-    let parts: Vec<String> = name
-        .0
-        .iter()
-        .map(|p| p.to_string().trim_matches('"').to_string())
-        .collect();
-    match parts.as_slice() {
-        [catalog, schema, table] if catalog == DUCKLAKE_CATALOG && is_ducklake_schema(schema) => {
-            Some(("main".to_string(), table.clone()))
-        }
-        [schema, table] if is_ducklake_schema(schema) => Some(("main".to_string(), table.clone())),
-        [table] => Some(("main".to_string(), table.clone())),
-        _ => None,
-    }
-}
-
-fn is_ducklake_schema(schema: &str) -> bool {
-    schema.eq_ignore_ascii_case("main") || schema.eq_ignore_ascii_case("public")
-}
-
-fn insert_target_parts(
-    table: &datafusion::sql::sqlparser::ast::TableObject,
-) -> Option<(String, String)> {
-    match table {
-        datafusion::sql::sqlparser::ast::TableObject::TableName(name) => table_name_parts(name),
-        _ => None,
-    }
-}
-
-fn insert_source_is_values(query: &datafusion::sql::sqlparser::ast::Query) -> bool {
-    matches!(
-        query.body.as_ref(),
-        datafusion::sql::sqlparser::ast::SetExpr::Values(_)
-    )
-}
-
 fn normalize_batches_for_ducklake(batches: Vec<RecordBatch>) -> Result<Vec<RecordBatch>> {
     batches
         .into_iter()
@@ -1875,50 +1683,6 @@ fn prepend_synthetic_rowid_to_batches(batches: Vec<RecordBatch>) -> Result<Vec<R
         .collect()
 }
 
-fn delete_target_parts(
-    delete: &datafusion::sql::sqlparser::ast::Delete,
-) -> Option<(String, String)> {
-    let from = match &delete.from {
-        FromTable::WithFromKeyword(t) | FromTable::WithoutKeyword(t) => t,
-    };
-    if from.len() != 1 || delete.using.is_some() || !delete.tables.is_empty() {
-        return None;
-    }
-    table_factor_parts(&from[0].relation)
-}
-
-fn update_target_parts(table: &TableWithJoins) -> Option<(String, String)> {
-    if !table.joins.is_empty() {
-        return None;
-    }
-    table_factor_parts(&table.relation)
-}
-
-fn table_factor_parts(f: &TableFactor) -> Option<(String, String)> {
-    match f {
-        TableFactor::Table { name, .. } => table_name_parts(name),
-        _ => None,
-    }
-}
-
-fn object_name_last(name: &ObjectName) -> Option<String> {
-    name.0
-        .last()
-        .map(|p| p.to_string().trim_matches('"').to_string())
-}
-
-fn quote_ident(s: &str) -> String {
-    format!("\"{}\"", s.replace('"', "\"\""))
-}
-
-fn ducklake_table_ref(schema: &str, table: &str) -> String {
-    format!("{DUCKLAKE_CATALOG}.{}.", quote_ident(schema)) + &quote_ident(table)
-}
-
-fn public_table_ref(table: &str) -> String {
-    format!("public.{}", quote_ident(table))
-}
-
 fn sql_type_to_arrow_field(col: &ColumnDef) -> Result<Field> {
     use datafusion::sql::sqlparser::ast::DataType as SqlType;
     let dt = match &col.data_type {
@@ -2001,224 +1765,6 @@ fn empty_batch_for_fields(fields: Vec<Field>) -> Result<RecordBatch> {
         .collect::<Result<Vec<_>>>()?;
     RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)
         .map_err(|e| anyhow!("creating empty RecordBatch: {e}"))
-}
-
-fn rewrite_pg_escape_bytea_literals(sql: &str) -> String {
-    let bytes = sql.as_bytes();
-    let mut out = String::with_capacity(sql.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if (bytes[i] == b'E' || bytes[i] == b'e') && bytes.get(i + 1) == Some(&b'\'') {
-            let body_start = i + 2;
-            if let Some(literal_end) = quoted_literal_end(bytes, body_start) {
-                let literal = &sql[i..=literal_end];
-                let body = &sql[body_start..literal_end];
-                if let Some(decoded) = decode_pg_escape_bytea_body(body) {
-                    out.push_str("X'");
-                    out.push_str(&hex_encode(&decoded));
-                    out.push('\'');
-                } else if let Some(decoded_text) = decode_pg_escape_text_body(body) {
-                    out.push('\'');
-                    out.push_str(&decoded_text.replace('\'', "''"));
-                    out.push('\'');
-                } else {
-                    out.push_str(literal);
-                }
-                i = literal_end + 1;
-                continue;
-            }
-        }
-        let start = i;
-        i += 1;
-        while i < bytes.len()
-            && !((bytes[i] == b'E' || bytes[i] == b'e') && bytes.get(i + 1) == Some(&b'\''))
-        {
-            i += 1;
-        }
-        out.push_str(&sql[start..i]);
-    }
-    out
-}
-
-fn rewrite_st_geomfromwkb_zero_srid_literals(sql: &str) -> String {
-    static ST_GEOMFROMWKB_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
-        regex::Regex::new(
-            r"(?i)\bst_geomfromwkb\s*\(\s*(?P<wkb>X'[0-9a-f]*'|NULL)\s*(?:::bytea)?\s*,\s*0\s*\)",
-        )
-        .expect("valid ST_GeomFromWKB rewrite regex")
-    });
-
-    ST_GEOMFROMWKB_RE.replace_all(sql, "$wkb").into_owned()
-}
-
-fn rewrite_mojibake_string_literals(sql: &str) -> String {
-    let bytes = sql.as_bytes();
-    let mut out = String::with_capacity(sql.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let (literal_start, body_start, prefix_is_hex) = if bytes[i] == b'\'' {
-            (i, i + 1, false)
-        } else if matches!(bytes[i], b'E' | b'e' | b'X' | b'x') && bytes.get(i + 1) == Some(&b'\'')
-        {
-            (i, i + 2, matches!(bytes[i], b'X' | b'x'))
-        } else {
-            let start = i;
-            i += 1;
-            while i < bytes.len()
-                && bytes[i] != b'\''
-                && !(matches!(bytes[i], b'E' | b'e' | b'X' | b'x')
-                    && bytes.get(i + 1) == Some(&b'\''))
-            {
-                i += 1;
-            }
-            out.push_str(&sql[start..i]);
-            continue;
-        };
-
-        if let Some(literal_end) = quoted_literal_end(bytes, body_start) {
-            if prefix_is_hex {
-                out.push_str(&sql[literal_start..=literal_end]);
-            } else {
-                let body = &sql[body_start..literal_end];
-                let unescaped = body.replace("''", "'");
-                if let Some(repaired) = repair_latin1_decoded_utf8_mojibake(&unescaped) {
-                    out.push('\'');
-                    out.push_str(&repaired.replace('\'', "''"));
-                    out.push('\'');
-                } else {
-                    out.push_str(&sql[literal_start..=literal_end]);
-                }
-            }
-            i = literal_end + 1;
-        } else {
-            out.push_str(&sql[literal_start..]);
-            break;
-        }
-    }
-    out
-}
-
-fn quoted_literal_end(bytes: &[u8], body_start: usize) -> Option<usize> {
-    let mut i = body_start;
-    while i < bytes.len() {
-        if bytes[i] == b'\'' {
-            if bytes.get(i + 1) == Some(&b'\'') {
-                i += 2;
-            } else {
-                return Some(i);
-            }
-        } else {
-            i += 1;
-        }
-    }
-    None
-}
-
-fn repair_latin1_decoded_utf8_mojibake(value: &str) -> Option<String> {
-    if !looks_like_latin1_decoded_utf8(value) {
-        return None;
-    }
-    let mut current = value.to_string();
-    for _ in 0..3 {
-        let bytes = latin1_bytes(&current)?;
-        let repaired = String::from_utf8(bytes).ok()?;
-        if repaired == current {
-            break;
-        }
-        current = repaired;
-        if !looks_like_latin1_decoded_utf8(&current) {
-            return Some(current);
-        }
-    }
-    (current != value).then_some(current)
-}
-
-fn looks_like_latin1_decoded_utf8(value: &str) -> bool {
-    value
-        .chars()
-        .any(|ch| matches!(ch, 'Ã' | 'Â') || ('\u{80}'..='\u{9f}').contains(&ch))
-}
-
-fn latin1_bytes(value: &str) -> Option<Vec<u8>> {
-    value
-        .chars()
-        .map(|ch| (u32::from(ch) <= 0xff).then_some(ch as u8))
-        .collect()
-}
-
-fn decode_pg_escape_bytea_body(body: &str) -> Option<Vec<u8>> {
-    let out = decode_pg_escape_octal_body(body)?;
-    looks_like_wkb(&out).then_some(out)
-}
-
-fn decode_pg_escape_text_body(body: &str) -> Option<String> {
-    let out = decode_pg_escape_octal_body(body)?;
-    if looks_like_wkb(&out) {
-        return None;
-    }
-    String::from_utf8(out).ok()
-}
-
-fn decode_pg_escape_octal_body(body: &str) -> Option<Vec<u8>> {
-    let bytes = body.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut has_octal = false;
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'\\' {
-            let octal_start = if bytes.get(i + 1) == Some(&b'\\') {
-                i + 2
-            } else {
-                i + 1
-            };
-            if octal_start + 3 <= bytes.len()
-                && bytes[octal_start..octal_start + 3]
-                    .iter()
-                    .all(|b| (b'0'..=b'7').contains(b))
-            {
-                let value = (bytes[octal_start] - b'0') * 64
-                    + (bytes[octal_start + 1] - b'0') * 8
-                    + (bytes[octal_start + 2] - b'0');
-                out.push(value);
-                has_octal = true;
-                i = octal_start + 3;
-                continue;
-            }
-            return None;
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    has_octal.then_some(out)
-}
-
-fn looks_like_wkb(bytes: &[u8]) -> bool {
-    if bytes.len() < 5 || !matches!(bytes[0], 0 | 1) {
-        return false;
-    }
-    let type_bytes = [bytes[1], bytes[2], bytes[3], bytes[4]];
-    let raw_type = if bytes[0] == 0 {
-        u32::from_be_bytes(type_bytes)
-    } else {
-        u32::from_le_bytes(type_bytes)
-    };
-    let type_id = raw_type & 0x0fff;
-    let base_type = if type_id >= 1000 {
-        type_id % 1000
-    } else {
-        type_id
-    };
-    (1..=7).contains(&base_type)
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
 }
 
 fn is_spatial_type_name(name: &ObjectName) -> bool {

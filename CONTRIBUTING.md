@@ -20,6 +20,10 @@ Fork rules:
 mise install                   # pinned Rust/tool bootstrap
 eval "$(mise activate bash)"   # use pinned tools/env in this shell
 just --list                    # discover common tasks
+just doctor                    # verify the pinned local toolchain
+just smoke                     # smallest server + spatial query smoke
+just demo-kind                 # local Kind demo with stable public.demo_* layers
+just ci                        # same fast gate used by GitHub Actions
 just build                     # server binary
 just test                      # unit + wire integration tests
 just martin-sql                # Martin-generated SQL compatibility
@@ -28,7 +32,10 @@ just check                     # fmt + clippy + tests
 
 The repo uses `mise.toml` for tool/env management and `Justfile` as the stable
 entrypoint for newcomers. Prefer an activated mise shell and reusable Justfile
-recipes over one-off `mise exec ...` snippets.
+recipes over ad hoc commands. For non-interactive/CI contexts, call the same
+recipes through mise, for example `mise exec -- just ci` or
+`mise exec -- just kind-compatibility`. Put new cargo/kubectl/container flows
+behind a Justfile recipe before adding them to docs or workflows.
 
 Compatibility work is trace-driven: capture the SQL a client (QGIS, GeoServer,
 OGR) actually sends, add it as a replay fixture, then fix. See

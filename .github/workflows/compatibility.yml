@@ -1,0 +1,76 @@
+# SPDX-License-Identifier: Apache-2.0
+name: Compatibility probes
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_osm:
+        description: Run the opt-in real OSM PostGIS parity probe after client probes
+        required: false
+        type: boolean
+        default: false
+  schedule:
+    # Nightly UTC compatibility report. Real OSM parity runs on the schedule.
+    - cron: "17 6 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  kind-client-compatibility:
+    name: Kind client compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CONTAINER_ENGINE: docker
+      QUACKGIS_IMAGE: localhost/quackgis:ci
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install mise toolchain
+        uses: jdx/mise-action@v2
+        with:
+          install: true
+          cache: true
+
+      - name: Create Kind cluster
+        shell: bash
+        run: |
+          set -euo pipefail
+          mise exec -- just kind-up
+
+      - name: Build, deploy, and run maintained client probes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mise exec -- just kind-compatibility
+
+      - name: Run real OSM PostGIS parity
+        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_osm) }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mise exec -- just kind-osm-postgis-parity
+
+      - name: Collect compatibility report logs
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mise exec -- just kind-compat-report
+
+      - name: Upload compatibility report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compatibility-report-${{ github.run_id }}
+          path: .tmp/compatibility
+          if-no-files-found: ignore
+
+      - name: Delete Kind cluster
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mise exec -- just kind-down

@@ -1,50 +1,32 @@
+# SPDX-License-Identifier: Apache-2.0
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
-    branches: [main]
+  push:
+    branches:
+      - main
 
-env:
-  CARGO_TERM_COLOR: always
+permissions:
+  contents: read
 
 jobs:
-  test:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 60
+  rust-fast-gate:
+    name: Rust fast gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry + git
-        uses: actions/cache@v4
+      - name: Install mise toolchain
+        uses: jdx/mise-action@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-
+          install: true
+          cache: true
 
-      - name: Cache target dir
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: target-${{ runner.os }}-${{ github.sha }}
-          restore-keys: |
-            target-${{ runner.os }}-
-
-      - name: cargo fmt check
-        run: cargo fmt --all -- --check
-
-      - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: cargo build (release)
-        run: cargo build --workspace --release --all-targets
-
-      - name: cargo test
-        run: cargo test --workspace --all-targets
+      - name: Run fast verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          mise exec -- just ci

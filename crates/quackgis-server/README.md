@@ -14,9 +14,18 @@ quackgis-server
 └── DuckLake              (M1) Parquet + catalog
 ```
 
-## Status (M1)
+## Status (M3/M4)
 
-SedonaDB `SessionContext` is served by datafusion-postgres; DuckLake storage is wired and tested. Dev storage path is SQLite catalog + local Parquet files. Production target is PostgreSQL catalog + AWS S3. Current tests validate SQL CTAS, bare CREATE TABLE, INSERT SELECT, INSERT VALUES with column mapping, UPDATE, DELETE, writer API roundtrip, restart persistence, filter predicates, and WKB geometry persistence. Supported M1 SQL shape targets `quackgis.main.<table>`; advanced multi-table UPDATE/DELETE, RETURNING, and production PostgreSQL/S3 hardening are later milestones.
+SedonaDB `SessionContext` is served by datafusion-postgres; DuckLake storage is
+wired and tested through the pgwire server. Dev storage path is SQLite catalog +
+local Parquet files. Production PostgreSQL-catalog/S3 hardening remains a later
+roadmap item.
+
+Current gates cover DuckLake CTAS/CREATE/INSERT/UPDATE/DELETE, restart
+persistence, WKB geometry persistence, Martin SQL/E2E, QGIS read/edit smoke,
+GDAL/OGR PostgreSQL-driver load/read, and GeoServer PostGIS datastore
+WFS/WMS/WFS-T smoke. See [../../docs/COMPATIBILITY.md](../../docs/COMPATIBILITY.md) for
+current claims and limitations.
 
 ## Run
 
@@ -36,5 +45,5 @@ CLI flags (all optional, env-overridable per `clap`'s `env` feature):
 | `--tls-cert` / `--tls-key` | — | none | optional TLS |
 | `--log` | `RUST_LOG` | `info` | log filter |
 
-No auth at M0 (datafusion-postgres default `SimpleStartupHandler`); RBAC
-arrives at M6.
+Development auth is intentionally minimal: user `postgres`, database
+`quackgis`, no password. Production auth/RBAC/TLS hardening is tracked for M6.

@@ -1,0 +1,71 @@
+# QuackGIS quickstart
+
+This is the shortest path to a local QuackGIS server with real GIS clients
+validated in Kind.
+
+## 1. Install pinned tools
+
+```sh
+mise install
+eval "$(mise activate bash)"
+just doctor
+```
+
+Podman is the default local container runtime. `mise.toml` pins Rust, Just, Kind,
+kubectl, Helm, and cargo-nextest.
+
+## 2. Run the five-minute demo
+
+```sh
+just demo-kind
+```
+
+This creates or reuses the `quackgis` Kind cluster, deploys QuackGIS, seeds stable
+demo layers, and prints client connection hints. Expected tail:
+
+```text
+demo_tables ['public.demo_points', 'public.demo_polygons']
+demo_ok True
+```
+
+Seed only, after an existing deployment is ready:
+
+```sh
+just seed-kind-demo
+```
+
+## 3. Connect clients inside Kind
+
+The in-cluster connection is:
+
+```text
+host: quackgis.quackgis.svc.cluster.local
+port: 5434
+database: quackgis
+user: postgres
+password: <empty>
+tables: public.demo_points, public.demo_polygons
+```
+
+Example OGR command from a container/job using the cluster DNS:
+
+```sh
+ogrinfo 'PG:host=quackgis.quackgis.svc.cluster.local port=5434 user=postgres dbname=quackgis' demo_points -so
+```
+
+## 4. Run the full client gate
+
+```sh
+just kind-compatibility
+just kind-compat-report
+```
+
+The compatibility report is written to `.tmp/compatibility/README.md` and includes
+QGIS read/edit, OGR load/read, and GeoServer WFS/WMS/WFS-T status.
+
+## Troubleshooting
+
+- `just kind-ready` validates Podman, Kind, kubectl, and current cluster state.
+- `just kind-status` shows nodes plus QuackGIS namespace pods/jobs/services.
+- `just kind-logs` prints the QuackGIS server log tail.
+- `just kind-down` deletes the local Kind cluster if you want a clean slate.
