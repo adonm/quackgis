@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: Apache-2.0
+name: Storage smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      recipe:
+        description: Kind storage recipe to run
+        required: true
+        default: kind-lake-smoke
+        type: choice
+        options:
+          - kind-lake-smoke
+          - kind-lake-multipod-smoke
+          - kind-lb-smoke
+          - kind-lake-layoutbench-smoke
+          - kind-read-smoke
+          - kind-write-smoke
+          - kind-olap-smoke
+
+permissions:
+  contents: read
+
+jobs:
+  kind-storage:
+    name: ${{ inputs.recipe }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CONTAINER_ENGINE: docker
+      KIND_EXPERIMENTAL_PROVIDER: docker
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jdx/mise-action@v2
+        with:
+          install: true
+          cache: true
+
+      - name: Run storage smoke
+        run: just "${{ inputs.recipe }}"
+
+      - name: Collect Kind logs
+        if: always()
+        run: just kind-compat-report || true
+
+      - name: Upload Kind logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: storage-kind-logs
+          path: .tmp/compatibility
+          if-no-files-found: ignore

@@ -18,6 +18,10 @@
 Cargo.lock.bak
 .DS_Store
 
+# Python probe bytecode
+__pycache__/
+*.py[cod]
+
 # v0.1 leftovers if they reappear
 pg_geometry/*.so
 core.*

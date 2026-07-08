@@ -1,14 +1,25 @@
 # QuackGIS
 
-A PostGIS-compatible spatial database server in a single Rust binary:
+A PostGIS-compatible, Sedona-powered spatial lakehouse database in a single Rust
+binary: built for platform/application developers who need high-throughput,
+parallel-reader spatial SQL and columnar OLAP analysis over DuckLake/Parquet
+data.
+
+QuackGIS combines:
+
 PostgreSQL wire protocol via
 [datafusion-postgres](https://github.com/datafusion-contrib/datafusion-postgres),
-spatial execution via [Apache SedonaDB](https://github.com/apache/sedona-db),
-storage via [DuckLake](https://ducklake.select)
+spatial execution/performance via
+[Apache SedonaDB](https://github.com/apache/sedona-db), and storage via
+[DuckLake](https://ducklake.select)
 ([datafusion-ducklake](https://github.com/datafusion-contrib/datafusion-ducklake)).
 
-No PostgreSQL. No DuckDB. The goal: spatial clients — **QGIS, GeoServer,
-GDAL/OGR, psycopg** — connect and work without significant changes.
+No PostgreSQL query engine. No DuckDB runtime. The goal is a shared spatial data
+lake that can answer large, complex spatial questions quickly, then run
+DuckDB-style columnar analysis — fanout stats, primitive aggregates/calculations,
+and pushdown filters — over the relevant Parquet records while common PostGIS
+clients — **QGIS, GeoServer, GDAL/OGR, Martin, psql, psycopg** — connect and work
+without significant changes.
 
 ```text
 QGIS / GeoServer (JDBC) / psql / OGR / psycopg
@@ -18,22 +29,32 @@ quackgis server (one Rust binary)
 ├── datafusion-postgres   wire protocol · auth · TLS · pg_catalog
 ├── quackgis compat layer geometry OID/EWKB · geometry_columns ·
 │                         spatial_ref_sys · client shims
-├── SedonaDB              ST_* kernels · CRS · spatial joins (DataFusion)
+├── SedonaDB/DataFusion   ST_* kernels · CRS · spatial joins · columnar OLAP
 └── datafusion-ducklake   DuckLake catalog + Parquet
         ▼
-catalog DB (dev: SQLite, prod: PostgreSQL target) + Parquet (dev: local files, prod: AWS S3 target)
+DuckLake storage = SQL catalog + Parquet objects
+profiles: SQLite + local files, PostgreSQL + S3
 ```
 
 ## Status
 
-**Redesign in progress.** The architecture above was adopted after v0.1
-validated (then retired) a heavier stack: full PostgreSQL + vendored
-pg_ducklake + a C geometry extension + a DuckDB spatial extension. The wire
-adaptor approach replaces all four layers with DataFusion-native components.
+**Developer preview.** The v0.1 PostgreSQL/DuckDB stack is retired; QuackGIS is
+now a single Rust pgwire server over SedonaDB + DuckLake. The preview proves the
+local shape with SQLite catalog + local Parquet data, PostGIS-style spatial SQL,
+DuckLake writes, PostgreSQL text `COPY FROM STDIN`, automatic hidden spatial
+layout columns, and explicit compaction.
 
-Current milestone focus: **M3/M4 client compatibility**. Martin, QGIS read/edit,
-OGR load/read, and GeoServer WFS/WMS smoke probes are green. See
-[ROADMAP.md](./ROADMAP.md) for milestones and the risk register.
+Martin, QGIS read/edit, GDAL/OGR load/read, and GeoServer WFS/WMS/WFS-T smoke
+probes are green for the maintained paths. See
+[docs/DEVELOPER_PREVIEW.md](./docs/DEVELOPER_PREVIEW.md) for the runnable preview
+contract and [ROADMAP.md](./ROADMAP.md) for remaining hardening.
+
+Next named milestone: **Alpha: scaled lakehouse storage** — PostgreSQL catalog +
+S3 object storage, multi-process readers/writers, and high-QPS scaled gates while
+keeping SQLite + local files as a first-class local storage profile. Alpha also
+needs an OLAP fanout gate: scan many geometries, compute grouped spatial/attribute
+statistics, prove pruning/pushdown evidence, and filter relevant records for exact
+SedonaDB recheck.
 
 ## Quick start (dev storage path)
 
@@ -42,14 +63,19 @@ mise install              # Rust, just, kind/kubectl/helm, cargo-nextest
 eval "$(mise activate bash)" # optional: activate pinned tools/env for this shell
 just setup                # also downloads Martin into .tmp/bin
 just ref-init             # optional: clone all reference repos into .tmp/ref
+just preview-smoke        # one-command preview acceptance smoke
 just server               # runs on 127.0.0.1:5434 with .tmp/dev storage
 psql -h 127.0.0.1 -p 5434 -U postgres
 ```
 
 ```sql
 SELECT ST_AsText(ST_GeomFromText('POINT(1 2)'));        -- POINT(1 2)
-CREATE TABLE quackgis.main.parcels AS SELECT 1::INT AS id; -- DuckLake + Parquet
-INSERT INTO quackgis.main.parcels SELECT 2::INT AS id;
+CREATE TABLE public.points (id INT, name TEXT, geom BINARY); -- DuckLake + Parquet
+COPY public.points (id, name, geom) FROM STDIN;              -- GDAL/OGR-style bulk ingest
+1	origin	\\x010100000000000000000000000000000000000000
+2	one	\\x0101000000000000000000f03f000000000000f03f
+\.
+CALL quackgis_compact_table('public.points');                -- rewrite into spatial layout order
 SELECT postgis_version();                                -- 3.4 QUACKGIS
 ```
 
@@ -57,7 +83,11 @@ SELECT postgis_version();                                -- 3.4 QUACKGIS
 
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — layer model, geometry over the wire,
   trust boundaries, what changed from v0.1.
-- [ROADMAP.md](./ROADMAP.md) — milestones M0–M7, success metrics, risks.
+- [docs/PROJECT_DIRECTION.md](./docs/PROJECT_DIRECTION.md) — mission, primary
+  user, non-goals, current preview, and alpha direction.
+- [ROADMAP.md](./ROADMAP.md) — milestones, Alpha direction, success metrics, risks.
+- [docs/DEVELOPER_PREVIEW.md](./docs/DEVELOPER_PREVIEW.md) — exact local preview
+  claim, one-command smoke, manual COPY example, gates, and limitations.
 - [docs/COMPATIBILITY.md](./docs/COMPATIBILITY.md) — client compatibility
   targets and known limitations.
 - [docs/OPERATIONS.md](./docs/OPERATIONS.md) — current local + Kind client-probe
@@ -80,6 +110,7 @@ eval "$(mise activate bash)"
 just --list                    # common entrypoints
 just doctor                    # verify pinned local dev tools are available
 just smoke                     # smallest pgwire + spatial query smoke test
+just preview-smoke             # CREATE + COPY + spatial query + compact smoke
 just demo-local                # host-local demo on 127.0.0.1:5434, Ctrl-C to stop
 just demo-kind                 # 5-minute Kind demo; see docs/QUICKSTART.md
 just ci                        # same fast gate used by GitHub Actions
@@ -88,6 +119,8 @@ just test                      # unit + wire integration tests
 just test-fast                 # non-ignored QuackGIS regression loop only
 just check                     # fmt + clippy + tests
 just check-fast                # fmt + clippy + focused regression loop
+just layoutbench-sf0           # layout/pruning correctness oracle
+just layoutbench-local-smoke   # temp-server layoutbench smoke
 just martin-sql                # Martin-generated SQL compatibility gate
 just martin-e2e                # opt-in real Martin binary E2E
 just kind-refresh              # host-cached build/load/deploy into Kind
@@ -101,6 +134,7 @@ just kind-qgis-edit-probe      # headless PyQGIS insert/update/delete/save gate
 just kind-ogr-probe            # GDAL/OGR PostgreSQL-driver load/read gate
 just kind-geoserver-probe      # GeoServer 3.0.0 datastore + WFS/WMS/WFS-T gate
 just kind-compatibility        # build/deploy + QGIS/OGR/GeoServer compatibility probes
+just kind-lake-smoke           # Kind PostgreSQL catalog + s3s-fs object storage smoke
 just kind-osm-postgis-parity   # opt-in real OSM PostGIS -> QuackGIS parity
 ```
 
@@ -127,6 +161,11 @@ scheduled/manual compatibility workflow builds the Kind image, runs QGIS
 read/edit, OGR, GeoServer, and optionally real OSM PostGIS parity probes, then
 uploads probe logs as a compatibility report artifact.
 
-Upstreams are consumed through fork branches when needed. DuckLake storage is a **priority validated path**, not a placeholder: dev = SQLite catalog + local Parquet files; production target = PostgreSQL catalog + AWS S3 Parquet. Extending datafusion-ducklake to meet QuackGIS storage requirements (SQL DDL routing, UPDATE/DELETE, pruning, PostgreSQL/S3 hardening) is explicitly in scope, while staying forward-compatible with the official DuckLake 1.0+ spec.
+Upstreams are consumed through fork branches when needed. DuckLake storage is a
+**core product path**, not a placeholder: SQL catalog + Parquet object/file data,
+with SQLite + local files and PostgreSQL + S3 both treated as first-class storage
+profiles. Extending datafusion-ducklake to meet QuackGIS storage requirements
+(SQL DDL routing, UPDATE/DELETE, pruning, PostgreSQL/S3 hardening) is explicitly
+in scope, while staying forward-compatible with the official DuckLake 1.0+ spec.
 
 Licensed under the [Apache License 2.0](./LICENSE).

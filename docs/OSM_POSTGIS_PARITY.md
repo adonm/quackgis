@@ -77,7 +77,10 @@ Expected compatibility gaps to flush out:
 - Keep UTF-8 text handling under real-data regression. Phase 0 now verifies
   Monaco names such as `Quai des États-Unis` and `La Pêcherie U Luvassu`; later
   phases should repeat that coverage across all copied OSM layers.
-- Large INSERT batches over pgwire while COPY is still deferred.
+- Large COPY loads over pgwire against pre-created WKB-backed schemas. The
+  maintained OSM parity probe still uses `PG_USE_COPY=NO` for schema-evolving
+  `-addfields` append coverage; COPY is now available for focused bulk-load
+  probes.
 
 ### Phase 2 — side-by-side client access matrix
 
@@ -95,7 +98,10 @@ claiming broad OSM support from a single points table.
 
 ### Phase 3 — documented copy workflows
 
-Document practical recipes people can use immediately:
+Document practical recipes people can use immediately. For schema-evolving
+OGR append flows, keep `PG_USE_COPY=NO` until that probe is intentionally moved;
+for pre-created WKB-backed tables, PostgreSQL text COPY is now a supported bulk
+ingest path.
 
 #### One-shot copy of a source table
 
@@ -151,13 +157,17 @@ Move beyond Monaco only after correctness is boring:
 - Insert throughput tracking with and without COPY support.
 - Martin tile latency and GeoServer WMS render latency.
 - DuckLake file counts, Parquet sizes, and read pruning behavior.
+- OLAP fanout queries over OSM-derived layers: grouped counts/lengths/areas by
+  class/tag, calculated filters for candidate records, and exact spatial recheck
+  after pruning/pushdown.
 
 This phase should decide whether the next highest-value storage feature is:
 
-- PostgreSQL COPY protocol support;
-- a QuackGIS-native bulk load path;
-- DuckLake spatial layout columns and pruning;
-- or production PostgreSQL-catalog/S3 hardening.
+- PostgreSQL/S3 Alpha storage hardening for larger shared OSM copies;
+- a high-QPS parallel-reader probe over copied OSM-derived layers;
+- an OLAP fanout benchmark over OSM-derived columns and geometries;
+- bucket-local compaction for append-heavy OSM refreshes;
+- or a QuackGIS-native bulk load path beyond PostgreSQL text COPY.
 
 ### Phase 6 — production sync guidance
 

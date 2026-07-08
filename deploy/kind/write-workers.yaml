@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: write-workers
+  namespace: quackgis
+spec:
+  completions: 4
+  parallelism: 4
+  completionMode: Indexed
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      volumes:
+        - name: probe-scripts
+          configMap:
+            name: quackgis-probe-scripts
+            defaultMode: 0755
+      containers:
+        - name: write-worker
+          image: docker.io/qgis/qgis:ltr-questing
+          env:
+            - name: QUACKGIS_HOST
+              value: lake.quackgis.svc.cluster.local
+            - name: QUACKGIS_PORT
+              value: "5434"
+            - name: WRITE_MODE
+              value: worker
+            - name: JOB_COMPLETION_INDEX
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
+          volumeMounts:
+            - name: probe-scripts
+              mountPath: /opt/quackgis-probes
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              PYTHONPATH=/opt/quackgis-probes python3 /opt/quackgis-probes/write_probe.py

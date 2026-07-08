@@ -251,7 +251,7 @@ check: fmt-check clippy test
 check-fast: fmt-check clippy test-fast
 
 # Run the same fast gate used by GitHub Actions CI.
-ci: check-fast smoke-local-demo
+ci: check-fast smoke-local-demo preview-smoke
 
 # Run the dev QuackGIS server on QUACKGIS_HOST/QUACKGIS_PORT.
 server:
@@ -282,6 +282,26 @@ smoke-local-demo:
         exit 1; \
     fi; \
     python3 -c 'import pathlib, sys; text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace"); print(text, end=""); sys.exit(0 if "demo_ok True" in text else 1)' "$seed_log"; \
+    kill "$server_pid" 2>/dev/null || true; \
+    wait "$server_pid" 2>/dev/null || true; \
+    trap - EXIT INT TERM
+
+# Developer-preview acceptance smoke: start a temp server and exercise CREATE, COPY, query, compact.
+preview-smoke:
+    @set -eu; \
+    rm -rf .tmp/preview-smoke; \
+    mkdir -p .tmp/preview-smoke/data; \
+    log=.tmp/preview-smoke/quackgis-server.log; \
+    preview_log=.tmp/preview-smoke/preview.log; \
+    QUACKGIS_CATALOG_PATH=.tmp/preview-smoke/quackgis.db QUACKGIS_DATA_PATH=.tmp/preview-smoke/data cargo run -p quackgis-server -- --host {{smoke_host}} --port {{smoke_port}} > "$log" 2>&1 & \
+    server_pid=$!; \
+    trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT INT TERM; \
+    python3 scripts/wait_for_tcp.py {{smoke_host}} {{smoke_port}} "$server_pid" "$log"; \
+    if ! cargo run -p quackgis-server --example developer_preview -- --host {{smoke_host}} --port {{smoke_port}} > "$preview_log" 2>&1; then \
+        python3 -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace"), end="")' "$preview_log"; \
+        exit 1; \
+    fi; \
+    python3 -c 'import pathlib, sys; text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace"); print(text, end=""); sys.exit(0 if "developer_preview_ok True" in text else 1)' "$preview_log"; \
     kill "$server_pid" 2>/dev/null || true; \
     wait "$server_pid" 2>/dev/null || true; \
     trap - EXIT INT TERM
@@ -420,6 +440,117 @@ kind-compatibility:
     just kind-refresh-fast
     just kind-probes
 
+# Deploy the lake profile: PostgreSQL DuckLake catalog + s3s-fs local S3.
+kind-lake-deploy:
+    kubectl create namespace quackgis --dry-run=client -o yaml | kubectl apply -f -
+    kubectl apply -f deploy/kind/lake.yaml
+    kubectl -n quackgis rollout status deployment/pg --timeout=180s
+    kubectl -n quackgis rollout status deployment/s3 --timeout=180s
+    kubectl -n quackgis wait pod -l app=pg --for=condition=ready --timeout=180s
+    kubectl -n quackgis wait pod -l app=s3 --for=condition=ready --timeout=180s
+    kubectl -n quackgis rollout restart deployment/lake
+    kubectl -n quackgis rollout status deployment/lake --timeout=180s
+    kubectl -n quackgis wait deployment/lake --for=condition=Available --timeout=180s
+
+# Build, load, and deploy the lake profile into Kind.
+kind-lake-refresh: kind-build-image-fast kind-load-image kind-lake-deploy
+
+# Run the lake storage smoke in Kind against PostgreSQL catalog + s3s-fs object storage.
+kind-lake-smoke: kind-ready kind-probe-scripts
+    just kind-lake-refresh
+    kubectl -n quackgis delete job lake-probe --ignore-not-found=true
+    kubectl apply -f deploy/kind/lake-probe.yaml
+    kubectl -n quackgis wait job/lake-probe --for=condition=complete --timeout=240s || (kubectl -n quackgis logs deployment/lake --tail=200 || true; kubectl -n quackgis logs job/lake-probe || true; false)
+    kubectl -n quackgis logs job/lake-probe
+
+# Run concurrent storage probes while QuackGIS is scaled to two pods.
+kind-lake-multipod-smoke: kind-ready kind-probe-scripts
+    just kind-lake-refresh
+    kubectl -n quackgis scale deployment/lake --replicas=2
+    kubectl -n quackgis rollout status deployment/lake --timeout=180s
+    kubectl -n quackgis wait deployment/lake --for=condition=Available --timeout=180s
+    kubectl -n quackgis delete job lake-multipod --ignore-not-found=true
+    kubectl apply -f deploy/kind/lake-multipod-probe.yaml
+    kubectl -n quackgis wait job/lake-multipod --for=condition=complete --timeout=300s || (kubectl -n quackgis get pods -l app=lake -o wide || true; kubectl -n quackgis logs deployment/lake --all-containers=true --tail=200 || true; kubectl -n quackgis logs -l job-name=lake-multipod --all-containers=true --prefix=true || true; false)
+    kubectl -n quackgis logs -l job-name=lake-multipod --all-containers=true --prefix=true
+
+# Prove the Kubernetes Service distributes fresh pgwire TCP connections across pods.
+kind-lb-smoke: kind-ready kind-probe-scripts
+    just kind-lake-refresh
+    kubectl -n quackgis scale deployment/lake --replicas=2
+    kubectl -n quackgis rollout status deployment/lake --timeout=180s
+    kubectl -n quackgis wait deployment/lake --for=condition=Available --timeout=180s
+    kubectl -n quackgis delete job lb-probe --ignore-not-found=true
+    kubectl apply -f deploy/kind/lb-probe.yaml
+    kubectl -n quackgis wait job/lb-probe --for=condition=complete --timeout=240s || (kubectl -n quackgis get pods -l app=lake -o wide || true; kubectl -n quackgis logs deployment/lake --all-containers=true --tail=200 || true; kubectl -n quackgis logs job/lb-probe || true; false)
+    kubectl -n quackgis logs job/lb-probe
+
+# Run LayoutBench sf0 through the lake PostgreSQL catalog + S3 storage profile.
+kind-lake-layoutbench-smoke: kind-ready
+    @set -eu; \
+    just kind-lake-refresh; \
+    rm -rf .tmp/layoutbench-lake; \
+    mkdir -p .tmp/layoutbench-lake; \
+    log=.tmp/layoutbench-lake/port-forward.log; \
+    bench_log=.tmp/layoutbench-lake/layoutbench.log; \
+    kubectl -n quackgis port-forward service/lake {{smoke_port}}:5434 > "$log" 2>&1 & \
+    pf_pid=$!; \
+    trap 'kill "$pf_pid" 2>/dev/null || true; wait "$pf_pid" 2>/dev/null || true' EXIT INT TERM; \
+    python3 scripts/wait_for_tcp.py {{smoke_host}} {{smoke_port}} "$pf_pid" "$log"; \
+    if ! cargo run -p quackgis-server --example layoutbench -- --host {{smoke_host}} --port {{smoke_port}} --scale sf0 --query-iters 1 --prefix lake_layoutbench --load-method copy --compact-and-rerun > "$bench_log" 2>&1; then \
+        python3 -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace"), end="")' "$bench_log"; \
+        exit 1; \
+    fi; \
+    python3 -c 'import pathlib, sys; text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace"); print(text, end=""); required = ["layoutbench_seed", "layoutbench_pruning label=aerial", "layoutbench_query label=aerial phase=before_compact", "layoutbench_scan label=aerial phase=after_compact", "layoutbench_compact"]; sys.exit(0 if all(item in text for item in required) else 1)' "$bench_log"; \
+    kill "$pf_pid" 2>/dev/null || true; \
+    wait "$pf_pid" 2>/dev/null || true; \
+    trap - EXIT INT TERM
+
+# Run an in-cluster concurrent read workload against the lake PostgreSQL/S3 profile.
+kind-read-smoke: kind-ready kind-probe-scripts
+    just kind-lake-refresh
+    kubectl -n quackgis scale deployment/lake --replicas=2
+    kubectl -n quackgis rollout status deployment/lake --timeout=180s
+    kubectl -n quackgis wait deployment/lake --for=condition=Available --timeout=180s
+    kubectl -n quackgis delete job read-seed read-probe --ignore-not-found=true
+    kubectl apply -f deploy/kind/read-seed.yaml
+    kubectl -n quackgis wait job/read-seed --for=condition=complete --timeout=600s || (kubectl -n quackgis logs deployment/lake --all-containers=true --tail=200 || true; kubectl -n quackgis logs job/read-seed || true; false)
+    kubectl -n quackgis logs job/read-seed
+    kubectl apply -f deploy/kind/read-probe.yaml
+    kubectl -n quackgis wait job/read-probe --for=condition=complete --timeout=600s || (kubectl -n quackgis get pods -l app=lake -o wide || true; kubectl -n quackgis logs deployment/lake --all-containers=true --tail=200 || true; kubectl -n quackgis logs job/read-probe || true; false)
+    kubectl -n quackgis logs job/read-probe
+
+# Run concurrent write workloads: independent tables plus same-table appends.
+kind-write-smoke: kind-ready kind-probe-scripts
+    just kind-lake-refresh
+    kubectl -n quackgis scale deployment/lake --replicas=2
+    kubectl -n quackgis rollout status deployment/lake --timeout=180s
+    kubectl -n quackgis wait deployment/lake --for=condition=Available --timeout=180s
+    kubectl -n quackgis delete job write-setup write-workers write-verify --ignore-not-found=true
+    kubectl apply -f deploy/kind/write-setup.yaml
+    kubectl -n quackgis wait job/write-setup --for=condition=complete --timeout=240s || (kubectl -n quackgis logs deployment/lake --all-containers=true --tail=200 || true; kubectl -n quackgis logs job/write-setup || true; false)
+    kubectl -n quackgis logs job/write-setup
+    kubectl apply -f deploy/kind/write-workers.yaml
+    kubectl -n quackgis wait job/write-workers --for=condition=complete --timeout=600s || (kubectl -n quackgis get pods -l job-name=write-workers -o wide || true; kubectl -n quackgis logs deployment/lake --all-containers=true --tail=200 || true; kubectl -n quackgis logs -l job-name=write-workers --all-containers=true --prefix=true || true; false)
+    kubectl -n quackgis logs -l job-name=write-workers --all-containers=true --prefix=true
+    kubectl apply -f deploy/kind/write-verify.yaml
+    kubectl -n quackgis wait job/write-verify --for=condition=complete --timeout=300s || (kubectl -n quackgis logs deployment/lake --all-containers=true --tail=200 || true; kubectl -n quackgis logs job/write-verify || true; false)
+    kubectl -n quackgis logs job/write-verify
+
+# Run an OLAP fanout workload: grouped stats, pruning evidence, exact recheck.
+kind-olap-smoke: kind-ready kind-probe-scripts
+    just kind-lake-refresh
+    kubectl -n quackgis scale deployment/lake --replicas=2
+    kubectl -n quackgis rollout status deployment/lake --timeout=180s
+    kubectl -n quackgis wait deployment/lake --for=condition=Available --timeout=180s
+    kubectl -n quackgis delete job olap-seed olap-probe --ignore-not-found=true
+    kubectl apply -f deploy/kind/olap-seed.yaml
+    kubectl -n quackgis wait job/olap-seed --for=condition=complete --timeout=600s || (kubectl -n quackgis logs deployment/lake --all-containers=true --tail=200 || true; kubectl -n quackgis logs job/olap-seed || true; false)
+    kubectl -n quackgis logs job/olap-seed
+    kubectl apply -f deploy/kind/olap-probe.yaml
+    kubectl -n quackgis wait job/olap-probe --for=condition=complete --timeout=600s || (kubectl -n quackgis get pods -l app=lake -o wide || true; kubectl -n quackgis logs deployment/lake --all-containers=true --tail=200 || true; kubectl -n quackgis logs job/olap-probe || true; false)
+    kubectl -n quackgis logs job/olap-probe
+
 # Run all maintained in-cluster client probes in one Kubernetes wait.
 kind-probes: kind-probe-scripts
     kubectl -n quackgis delete job qgis-probe qgis-edit-probe ogr-probe geoserver-probe --ignore-not-found=true
@@ -496,7 +627,7 @@ kind-compat-report:
     mkdir -p .tmp/compatibility
     kubectl -n quackgis get pods,jobs,svc,deploy,statefulset -o wide > .tmp/compatibility/kubernetes.txt 2>&1 || true
     kubectl -n quackgis logs statefulset/quackgis --tail=-1 > .tmp/compatibility/quackgis.log 2>&1 || true
-    @for job in qgis-probe qgis-edit-probe ogr-probe geoserver-probe osm-postgis-parity quackgis-demo; do \
+    @for job in qgis-probe qgis-edit-probe ogr-probe geoserver-probe osm-postgis-parity quackgis-demo lake-probe lake-multipod lb-probe read-seed read-probe write-setup write-workers write-verify olap-seed olap-probe; do \
         kubectl -n quackgis logs "job/${job}" --tail=-1 > ".tmp/compatibility/${job}.log" 2>&1 || true; \
     done
     python3 deploy/kind/render_compat_report.py .tmp/compatibility

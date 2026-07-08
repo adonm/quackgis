@@ -27,8 +27,7 @@ use datafusion::sql::sqlparser::ast::{
     ObjectName, SelectItem, Statement, Value,
 };
 use datafusion_ducklake::{
-    DuckLakeCatalog, DuckLakeTableWriter, MetadataWriter, SqliteMetadataProvider,
-    SqliteMetadataWriter, TableWriteSession, WriteMode,
+    DuckLakeCatalog, DuckLakeTableWriter, MetadataWriter, TableWriteSession, WriteMode,
 };
 use datafusion_postgres::arrow_pg::datatypes::{arrow_schema_to_pg_fields, encode_recordbatch};
 use datafusion_postgres::hooks::{HookClient, QueryHook};
@@ -40,7 +39,6 @@ use datafusion_postgres::pgwire::messages::PgWireBackendMessage;
 use datafusion_postgres::pgwire::messages::copy::{CopyData, CopyDone, CopyFail};
 use datafusion_postgres::pgwire::messages::response::TransactionStatus;
 use futures::{Sink, SinkExt};
-use object_store::local::LocalFileSystem;
 use tokio::sync::Mutex;
 
 use crate::catalog_compat::SYNTHETIC_ROWID_COLUMN;
@@ -212,6 +210,12 @@ impl QueryHook for DuckLakeSqlHook {
         session_context: &SessionContext,
         client: &mut dyn HookClient,
     ) -> Option<PgWireResult<Response>> {
+        if let Err(err) = self
+            .refresh_shared_catalog(statement, session_context)
+            .await
+        {
+            return Some(Err(err));
+        }
         if let Some(rewritten_query) =
             pruning::rewrite_spatial_pruning_query(statement, session_context).await
         {
@@ -300,6 +304,12 @@ impl QueryHook for DuckLakeSqlHook {
         session_context: &SessionContext,
         _client: &(dyn datafusion_postgres::pgwire::api::ClientInfo + Send + Sync),
     ) -> Option<PgWireResult<LogicalPlan>> {
+        if let Err(err) = self
+            .refresh_shared_catalog(statement, session_context)
+            .await
+        {
+            return Some(Err(err));
+        }
         if let Some(plan) = self
             .returning_logical_plan(statement, session_context)
             .await
@@ -347,6 +357,12 @@ impl QueryHook for DuckLakeSqlHook {
         session_context: &SessionContext,
         client: &mut dyn HookClient,
     ) -> Option<PgWireResult<Response>> {
+        if let Err(err) = self
+            .refresh_shared_catalog(statement, session_context)
+            .await
+        {
+            return Some(Err(err));
+        }
         // Route extended-protocol CTAS/INSERT too; clients differ in whether
         // they send DDL via simple or extended flow.
         match statement {
@@ -897,15 +913,8 @@ impl DuckLakeSqlHook {
         table: &str,
         arrow_schema: &Schema,
     ) -> PgWireResult<TableWriteSession> {
-        let writer = Arc::new(
-            SqliteMetadataWriter::new_with_init(&self.paths.catalog_conn)
-                .await
-                .map_err(|e| PgWireError::ApiError(Box::new(e)))?,
-        );
-        writer
-            .set_data_path(&self.paths.data_path)
-            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(LocalFileSystem::new());
+        let writer = self.storage_writer().await?;
+        let object_store = self.storage_object_store()?;
         let table_writer = configured_ducklake_table_writer(writer, object_store)?;
         table_writer
             .begin_write(schema, table, arrow_schema, WriteMode::Replace)
@@ -2035,21 +2044,14 @@ impl DuckLakeSqlHook {
         let batches = layout::project_batches(batches).map_err(user_error)?;
         let batches = layout::sort_batches_by_layout(batches).map_err(user_error)?;
         let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-        let writer = Arc::new(
-            SqliteMetadataWriter::new_with_init(&self.paths.catalog_conn)
-                .await
-                .map_err(|e| PgWireError::ApiError(Box::new(e)))?,
-        );
-        writer
-            .set_data_path(&self.paths.data_path)
-            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+        let writer = self.storage_writer().await?;
         let snapshot = writer
             .create_snapshot()
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         writer
             .get_or_create_schema(schema, None, snapshot)
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(LocalFileSystem::new());
+        let object_store = self.storage_object_store()?;
         let table_writer = configured_ducklake_table_writer(writer, object_store)?;
         match disposition {
             WriteDisposition::Replace => table_writer
@@ -2077,24 +2079,61 @@ impl DuckLakeSqlHook {
     }
 
     async fn refresh_ducklake_catalog(&self, session_context: &SessionContext) -> PgWireResult<()> {
-        let writer = Arc::new(
-            SqliteMetadataWriter::new_with_init(&self.paths.catalog_conn)
-                .await
-                .map_err(|e| PgWireError::ApiError(Box::new(e)))?,
-        );
-        writer
-            .set_data_path(&self.paths.data_path)
-            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-        let provider = SqliteMetadataProvider::new(&self.paths.catalog_conn)
+        let writer = self.storage_writer().await?;
+        let provider = self
+            .paths
+            .metadata_provider()
             .await
-            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-        let ducklake = DuckLakeCatalog::with_writer(Arc::new(provider), writer)
+            .map_err(storage_api_error)?;
+        let ducklake = DuckLakeCatalog::with_writer(provider, writer)
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         session_context.register_catalog(DUCKLAKE_CATALOG, Arc::new(ducklake));
         crate::public_schema::register_public_schema_alias(session_context)
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         Ok(())
     }
+
+    async fn refresh_shared_catalog(
+        &self,
+        statement: &datafusion::sql::sqlparser::ast::Statement,
+        session_context: &SessionContext,
+    ) -> PgWireResult<()> {
+        if self.paths.is_shared_catalog() && needs_shared_catalog_refresh(statement) {
+            self.refresh_ducklake_catalog(session_context).await?;
+        }
+        Ok(())
+    }
+
+    async fn storage_writer(&self) -> PgWireResult<Arc<dyn MetadataWriter>> {
+        self.paths
+            .metadata_writer()
+            .await
+            .map_err(storage_api_error)
+    }
+
+    fn storage_object_store(&self) -> PgWireResult<Arc<dyn object_store::ObjectStore>> {
+        self.paths.object_store().map_err(storage_api_error)
+    }
+}
+
+fn storage_api_error(err: anyhow::Error) -> PgWireError {
+    PgWireError::ApiError(Box::new(std::io::Error::other(err.to_string())))
+}
+
+fn is_read_statement(statement: &datafusion::sql::sqlparser::ast::Statement) -> bool {
+    match statement {
+        datafusion::sql::sqlparser::ast::Statement::Query(_) => true,
+        datafusion::sql::sqlparser::ast::Statement::Explain { statement, .. } => {
+            is_read_statement(statement)
+        }
+        _ => false,
+    }
+}
+
+fn needs_shared_catalog_refresh(statement: &datafusion::sql::sqlparser::ast::Statement) -> bool {
+    is_read_statement(statement)
+        || ducklake_statement_parts(statement).is_some()
+        || matches!(statement, datafusion::sql::sqlparser::ast::Statement::Call(function) if is_compact_call(function))
 }
 
 #[derive(Debug, Clone, Copy)]

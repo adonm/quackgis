@@ -1350,7 +1350,7 @@ checksum = "cb9e7e5d11130c48c8bd4e80c79a9772dd28ce6dc330baca9246205d245b9e2e"
 [[package]]
 name = "datafusion-ducklake"
 version = "0.3.1"
-source = "git+https://github.com/adonm/datafusion-ducklake?branch=main#7a15d31e17800d233aee10dfc38a9595c2bd82b8"
+source = "git+https://github.com/adonm/datafusion-ducklake?branch=main#117c0c5f463205785285f68877b7e472c9235531"
 dependencies = [
  "arrow",
  "async-trait",
@@ -3846,6 +3846,7 @@ dependencies = [
  "sedona-geo",
  "sedona-geometry",
  "sedona-proj",
+ "sqlx",
  "tempfile",
  "tokio",
  "tokio-postgres",
@@ -4999,6 +5000,7 @@ dependencies = [
  "memchr",
  "once_cell",
  "percent-encoding",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -5008,6 +5010,7 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "url",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -5824,6 +5827,24 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "0.26.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
+dependencies = [
+ "webpki-roots 1.0.8",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf85cb06032201fa7c6f829d7db5a7e5aa45bcc0655327713065f6f0576731bf"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]

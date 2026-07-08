@@ -10,8 +10,7 @@ use std::sync::Arc;
 use datafusion::arrow::array::{BinaryArray, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion_ducklake::{DuckLakeTableWriter, MetadataWriter, SqliteMetadataWriter};
-use object_store::local::LocalFileSystem;
+use datafusion_ducklake::DuckLakeTableWriter;
 use quackgis_server::context::StoragePaths;
 use tokio_postgres::NoTls;
 use tokio_postgres::types::Type;
@@ -43,14 +42,7 @@ fn point_wkb(x: f64, y: f64) -> Vec<u8> {
 }
 
 async fn write_keyless_geo(paths: &StoragePaths, table: &str) {
-    let writer = Arc::new(
-        SqliteMetadataWriter::new_with_init(&paths.catalog_conn)
-            .await
-            .expect("writer"),
-    );
-    writer
-        .set_data_path(&paths.data_path)
-        .expect("set data path");
+    let writer = paths.metadata_writer().await.expect("writer");
     let snapshot = writer.create_snapshot().expect("snapshot");
     writer
         .get_or_create_schema("main", None, snapshot)
@@ -69,7 +61,7 @@ async fn write_keyless_geo(paths: &StoragePaths, table: &str) {
         ],
     )
     .expect("batch");
-    let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(LocalFileSystem::new());
+    let object_store = paths.object_store().expect("object store");
     DuckLakeTableWriter::new(writer, object_store)
         .expect("table writer")
         .write_table("main", table, &[batch])

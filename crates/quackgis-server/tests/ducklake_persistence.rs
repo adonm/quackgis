@@ -16,9 +16,8 @@ use std::sync::Arc;
 use datafusion::arrow::array::{BinaryArray, Int32Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion_ducklake::{DuckLakeTableWriter, MetadataWriter, SqliteMetadataWriter};
+use datafusion_ducklake::DuckLakeTableWriter;
 use futures::SinkExt;
-use object_store::local::LocalFileSystem;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_postgres::NoTls;
 
@@ -48,14 +47,7 @@ fn pg_copy_bytea(bytes: &[u8]) -> String {
 }
 
 async fn write_nums(paths: &StoragePaths, table: &str, values: &[i32]) {
-    let writer = Arc::new(
-        SqliteMetadataWriter::new_with_init(&paths.catalog_conn)
-            .await
-            .expect("writer"),
-    );
-    writer
-        .set_data_path(&paths.data_path)
-        .expect("set data path");
+    let writer = paths.metadata_writer().await.expect("writer");
     // Ensure an initial snapshot + main schema exist for a fresh catalog.
     let snapshot = writer.create_snapshot().expect("snapshot");
     writer
@@ -67,7 +59,7 @@ async fn write_nums(paths: &StoragePaths, table: &str, values: &[i32]) {
         vec![Arc::new(Int32Array::from(values.to_vec()))],
     )
     .expect("batch");
-    let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(LocalFileSystem::new());
+    let object_store = paths.object_store().expect("object store");
     DuckLakeTableWriter::new(writer, object_store)
         .expect("table writer")
         .write_table("main", table, &[batch])
@@ -76,14 +68,7 @@ async fn write_nums(paths: &StoragePaths, table: &str, values: &[i32]) {
 }
 
 async fn write_geo(paths: &StoragePaths) {
-    let writer = Arc::new(
-        SqliteMetadataWriter::new_with_init(&paths.catalog_conn)
-            .await
-            .expect("writer"),
-    );
-    writer
-        .set_data_path(&paths.data_path)
-        .expect("set data path");
+    let writer = paths.metadata_writer().await.expect("writer");
     let snapshot = writer.create_snapshot().expect("snapshot");
     writer
         .get_or_create_schema("main", None, snapshot)
@@ -106,7 +91,7 @@ async fn write_geo(paths: &StoragePaths) {
         ],
     )
     .expect("batch");
-    let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(LocalFileSystem::new());
+    let object_store = paths.object_store().expect("object store");
     DuckLakeTableWriter::new(writer, object_store)
         .expect("table writer")
         .write_table("main", "geo", &[batch])

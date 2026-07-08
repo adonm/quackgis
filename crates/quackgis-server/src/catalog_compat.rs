@@ -158,6 +158,9 @@ async fn catalog_query_response(
     session_context: &SessionContext,
 ) -> Option<PgWireResult<Response>> {
     let sql = statement.to_string().to_lowercase();
+    if is_instance_id_query(&sql) {
+        return Some(single_text_row("quackgis_instance_id", &instance_id()).map(Response::Query));
+    }
     if let Some(response) = pg_type::oid_in_response(&sql) {
         return Some(response.map(Response::Query));
     }
@@ -232,6 +235,20 @@ async fn catalog_query_response(
             Some(single_text_row("typname", "geometry").map(Response::Query))
         }
     }
+}
+
+fn is_instance_id_query(sql: &str) -> bool {
+    let compact = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    matches!(
+        compact.as_str(),
+        "select quackgis_instance_id()" | "select quackgis_instance_id() as quackgis_instance_id"
+    )
+}
+
+fn instance_id() -> String {
+    std::env::var("QUACKGIS_INSTANCE_ID")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "unknown".to_string())
 }
 
 fn geography_columns_probe_response() -> PgWireResult<QueryResponse> {

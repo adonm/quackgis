@@ -1,9 +1,14 @@
 # Operations
 
-QuackGIS v0.2 is a single Rust pgwire server. It does **not** run PostgreSQL,
-DuckDB, pg_ducklake, or C extensions in-process. DuckLake metadata is currently
-SQLite-backed in development and table data is local Parquet; production
-PostgreSQL-catalog/S3 hardening remains a roadmap item.
+QuackGIS v0.2 is a single Rust pgwire server for PostGIS-compatible access to
+DuckLake/Parquet spatial data. It does **not** run PostgreSQL as the query engine,
+DuckDB, pg_ducklake, or C extensions in-process.
+
+Current operations are developer-preview/local-first: SQLite DuckLake catalog +
+local Parquet files. The focused Alpha direction is scaled lakehouse storage:
+PostgreSQL catalog + S3/object-store Parquet, many stateless readers, parallel
+ingest writers, OLAP fanout probes over columnar spatial data, and documented
+conflict/backup/compaction behavior.
 
 ## Local development
 
@@ -11,6 +16,7 @@ PostgreSQL-catalog/S3 hardening remains a roadmap item.
 mise install
 eval "$(mise activate bash)"
 just ci
+just preview-smoke
 just build
 just server
 just demo-local
@@ -28,11 +34,26 @@ The default local server listens on `127.0.0.1:5434` and uses:
 | `QUACKGIS_HOST` | `127.0.0.1` | bind host |
 | `QUACKGIS_PORT` | `5434` | pgwire port |
 | `QUACKGIS_CATALOG_PATH` | `.tmp/dev/quackgis.db` | DuckLake SQLite catalog |
+| `QUACKGIS_CATALOG_URL` | unset | PostgreSQL DuckLake catalog URL; switches storage profile when set |
+| `QUACKGIS_DUCKLAKE_CATALOG_NAME` | `quackgis` | DuckLake catalog name inside PostgreSQL metadata |
 | `QUACKGIS_DATA_PATH` | `.tmp/dev/data` | Parquet data directory |
+| `QUACKGIS_S3_ENDPOINT` | unset | S3-compatible endpoint for `s3://` data paths |
+| `QUACKGIS_S3_ACCESS_KEY_ID` / `QUACKGIS_S3_SECRET_ACCESS_KEY` | unset | S3 credentials |
+| `QUACKGIS_S3_REGION` | `us-east-1` | S3 signing region |
+| `QUACKGIS_S3_ALLOW_HTTP` | `false` | allow HTTP S3 endpoints for local development only |
 | `QUACKGIS_LOG` | `info` | Rust log filter |
 
 Dev auth is intentionally minimal: connect as user `postgres` to database
-`quackgis` with no password unless a future auth layer is enabled.
+`quackgis` with no password unless a future auth layer is enabled. Alpha storage
+and multi-process deployment docs must cover production auth/TLS/RBAC plus
+catalog/object-store credentials.
+
+Storage profiles:
+
+| Profile | Status | Intended use |
+|---|---|---|
+| SQLite catalog + local files | current preview gate | local development, correctness parity, simple demos |
+| PostgreSQL catalog + S3/object storage | Alpha Kind smoke | scaled multi-process readers/writers, shared platform deployment |
 
 `just demo-local` uses isolated `.tmp/demo` storage, starts the local server,
 seeds stable `public.demo_points` and `public.demo_polygons` layers, prints
@@ -52,6 +73,7 @@ just kind-ready          # validate Podman/Kind and create or reuse the cluster
 just demo-kind           # deploy, seed stable public.demo_* layers, print hints
 just kind-up
 just kind-compatibility  # build/deploy + QGIS read/edit, OGR, GeoServer probes
+just kind-lake-smoke     # PostgreSQL catalog + s3s-fs object storage smoke
 ```
 
 `mise.toml` pins Rust, Just, Kind, kubectl, Helm, and cargo-nextest; Podman is the
@@ -84,6 +106,11 @@ GeoServer WFS/WMS/WFS-T Jobs together and waits once. Individual `kind-qgis-prob
 `kind-qgis-edit-probe`, `kind-ogr-probe`, and `kind-geoserver-probe` targets
 remain available for focused reruns. `just kind-compatibility` is the stable
 full local/CI recipe: it runs `kind-refresh-fast` and then `kind-probes`.
+
+`just kind-lake-smoke` deploys the short-named lake profile: `lake` QuackGIS pods,
+`pg` for the DuckLake PostgreSQL catalog, and `s3` for local S3-compatible Parquet
+storage. The probe covers CREATE TABLE, text COPY, spatial read-back, compaction,
+and read-back after compaction against that storage profile.
 
 The QGIS probe is a read-path gate. Current expected output includes:
 

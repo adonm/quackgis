@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: write-verify
+  namespace: quackgis
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      volumes:
+        - name: probe-scripts
+          configMap:
+            name: quackgis-probe-scripts
+            defaultMode: 0755
+      containers:
+        - name: write-verify
+          image: docker.io/qgis/qgis:ltr-questing
+          env:
+            - name: QUACKGIS_HOST
+              value: lake.quackgis.svc.cluster.local
+            - name: QUACKGIS_PORT
+              value: "5434"
+            - name: WRITE_MODE
+              value: verify
+          volumeMounts:
+            - name: probe-scripts
+              mountPath: /opt/quackgis-probes
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              PYTHONPATH=/opt/quackgis-probes python3 /opt/quackgis-probes/write_probe.py

@@ -16,7 +16,7 @@ license = "Apache-2.0"
 authors = ["QuackGIS contributors"]
 repository = "https://github.com/adonm/quackgis"
 homepage = "https://github.com/adonm/quackgis"
-description = "PostGIS-compatible spatial database server on datafusion-postgres + SedonaDB + DuckLake"
+description = "PostGIS-compatible Sedona-powered OLAP spatial lakehouse database on DuckLake"
 readme = "README.md"
 keywords = ["gis", "geospatial", "postgis", "datafusion", "sedona"]
 categories = ["database", "science::geo"]
@@ -54,16 +54,17 @@ geo-traits = "0.3"
 # Rust-native path closest to the official DuckLake 1.0 spec; it currently
 # tracks DataFusion 54. Consumed from adonm fork main so we can patch quickly
 # for G5 (UPDATE/DELETE) and G7 (file pruning) when those milestones land.
-# SQLite catalog write path is spec-compliant; PG-catalog writes remain
-# upstream-experimental/non-spec and are deferred.
-datafusion-ducklake = { git = "https://github.com/adonm/datafusion-ducklake", branch = "main", default-features = false, features = ["metadata-sqlite", "write-sqlite"] }
+# SQLite/local remains the default correctness profile; PostgreSQL catalog +
+# S3-compatible object storage is the Alpha scaled-storage profile.
+datafusion-ducklake = { git = "https://github.com/adonm/datafusion-ducklake", branch = "main", default-features = false, features = ["metadata-sqlite", "write-sqlite", "metadata-postgres", "write-postgres", "multicatalog-postgres"] }
 
 # Object-store plumbing — versions aligned with DF 54 / ducklake main.
-object_store = { version = "0.13", default-features = false }
+object_store = { version = "0.13", default-features = false, features = ["aws"] }
 url = "2.5"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "tls-rustls-ring"] }
 
 # Generic runtime / utility crates.
-tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "signal"] }
+tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "signal", "sync"] }
 env_logger = "0.11"
 log = "0.4"
 anyhow = "1"

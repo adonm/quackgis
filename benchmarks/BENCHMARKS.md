@@ -1,11 +1,22 @@
 # Benchmarks
 
-## QuackGIS LayoutBench (planned M5)
+## QuackGIS LayoutBench
 
-LayoutBench is the planned synthetic validation suite for DuckLake
-spatial-temporal layout. It is deterministic by seed and scale factor so CI,
-local dev, nightly, and manual stress runs exercise the same distributions at
-different sizes.
+LayoutBench is the synthetic validation suite for DuckLake spatial-temporal
+layout and the future high-QPS reader gate. It is deterministic by seed and scale
+factor so CI, local dev, nightly, and manual stress runs exercise the same
+distributions at different sizes.
+
+Benchmark priorities follow the project direction:
+
+1. selective large-table spatial query throughput and pruning;
+2. high-QPS parallel pgwire readers over one shared DuckLake catalog/data prefix;
+3. DuckDB-style OLAP fanout queries over columnar spatial data: grouped stats,
+   primitive calculations, projection/filter/aggregate pushdown, and candidate
+   narrowing before exact SedonaDB predicates;
+4. COPY/parallel ingest behavior and DuckLake snapshot conflict semantics;
+5. compaction effectiveness for fragmented append layouts;
+6. compatibility smoke stability for GIS tools.
 
 `sf0` now exists as a Rust integration oracle:
 
@@ -106,6 +117,14 @@ Architecture decisions from this pass:
 - Add bucket/file compaction as the next architectural lever: rewrite many
   autocommit append files into sorted bucket-local files and verify unchanged
   exact results plus fewer matched file ranges.
+- Add an Alpha parallel-reader benchmark/probe over PostgreSQL catalog + S3 (or a
+  local object-store-compatible stand-in first) that reports QPS, latency,
+  bytes-scanned, row-group/file pruning, and per-reader correctness against one
+  shared DuckLake catalog/data prefix.
+- Add an OLAP fanout benchmark/probe that scans many geometries/assets, computes
+  grouped stats (counts, area/length/bbox-derived measures, asset totals, quality
+  flags), filters records from those calculations, and reports pushdown/pruning
+  evidence plus exact SedonaDB recheck correctness.
 
 The first implemented compaction surface is explicit and table-scoped:
 
@@ -171,7 +190,9 @@ Gate queries:
 4. asset discovery by footprint/time/resolution/accuracy;
 5. coordinate-drift residual check;
 6. `sf0` exact-vs-pruned equality oracle;
-7. append-small-files → compact-by-bucket → unchanged results + improved skip
+7. OLAP fanout: grouped spatial/attribute stats + calculated filters + exact
+   recheck;
+8. append-small-files → compact-by-bucket → unchanged results + improved skip
    ratio.
 
 Record: ingest rows/sec, file/row-group sizes, DuckLake metadata rows, max open

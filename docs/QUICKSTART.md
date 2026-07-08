@@ -1,7 +1,11 @@
 # QuackGIS quickstart
 
-This is the shortest path to a local QuackGIS server with real GIS clients
-validated in Kind.
+This is the shortest path to a local QuackGIS developer preview and the Kind
+client probes that validate real GIS workflows.
+
+For the focused project direction — platform/app developers, high-throughput
+spatial lakehouse workloads, and Alpha scaled storage — see
+[PROJECT_DIRECTION.md](./PROJECT_DIRECTION.md).
 
 ## 1. Install pinned tools
 
@@ -14,7 +18,30 @@ just doctor
 Podman is the default local container runtime. `mise.toml` pins Rust, Just, Kind,
 kubectl, Helm, and cargo-nextest.
 
-## 2. Run a local demo without Kubernetes
+## 2. Run the developer-preview acceptance smoke
+
+```sh
+just preview-smoke
+```
+
+This starts a temporary QuackGIS server on `127.0.0.1:15434`, creates a DuckLake
+table, bulk-loads WKB points through PostgreSQL text `COPY FROM STDIN`, queries
+the rows with `ST_AsText(ST_GeomFromWKB(...))`, runs
+`CALL quackgis_compact_table('public.preview_points')`, verifies results are
+unchanged, and then stops the server.
+
+Expected tail:
+
+```text
+preview_table public.preview_points
+preview_copy_rows 3
+developer_preview_ok True
+```
+
+See [DEVELOPER_PREVIEW.md](./DEVELOPER_PREVIEW.md) for the preview contract,
+manual SQL, and verification checklist.
+
+## 3. Run a local demo without Kubernetes
 
 ```sh
 just demo-local
@@ -30,7 +57,7 @@ Seed only, after `just server` or another local deployment is already running:
 just seed-local-demo
 ```
 
-## 3. Run the five-minute Kind demo
+## 4. Run the five-minute Kind demo
 
 ```sh
 just demo-kind
@@ -50,7 +77,7 @@ Seed only, after an existing deployment is ready:
 just seed-kind-demo
 ```
 
-## 4. Connect clients inside Kind
+## 5. Connect clients inside Kind
 
 The in-cluster connection is:
 
@@ -69,7 +96,7 @@ Example OGR command from a container/job using the cluster DNS:
 ogrinfo 'PG:host=quackgis.quackgis.svc.cluster.local port=5434 user=postgres dbname=quackgis' demo_points -so
 ```
 
-## 5. Run the full client gate
+## 6. Run the full client gate
 
 ```sh
 just kind-compatibility

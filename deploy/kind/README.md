@@ -32,6 +32,13 @@ cluster readiness, deployment refresh, and that seed job for the five-minute pat
 Kind deployment with the fast probe build, then runs all maintained client jobs.
 Without an activated shell, use `mise exec -- just kind-compatibility`.
 
+`just kind-lake-smoke` deploys the scaled-storage lake profile. It uses a
+short-named QuackGIS Deployment/Service (`lake`), a PostgreSQL DuckLake catalog
+(`pg`), and local S3-compatible object storage using `s3s-fs` (`s3`). The probe
+creates a table, loads WKB points with PostgreSQL text `COPY FROM STDIN`, queries
+via PostGIS-style functions, compacts the DuckLake table, and verifies unchanged
+results.
+
 `just kind-build-image` builds `quackgis-server` locally first and copies only
 the release binary into a runtime image, so normal Cargo caches are reused. Use
 `just kind-build-image-fast` / `just kind-refresh-fast` for manual probe triage;
@@ -67,3 +74,8 @@ samples from both databases. Use
 The `ducklake` PVC on the StatefulSet is intentionally shared by restarts of the
 single QuackGIS pod. Future multi-server tests should switch the catalog/data
 backend to a shared RWX/object-store setup before scaling replicas.
+
+The lake manifest is intentionally separate from the default compatibility
+StatefulSet: `deploy/kind/lake.yaml` keeps the existing client-probe service
+stable while exercising the shared PostgreSQL/S3 storage profile through
+`lake.quackgis.svc.cluster.local:5434`.

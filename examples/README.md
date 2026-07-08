@@ -23,3 +23,7 @@ See the client-specific examples:
 - [QGIS](./qgis/README.md)
 - [GDAL/OGR](./ogr/README.md)
 - [GeoServer](./geoserver/README.md)
+
+For the single-command developer-preview smoke (CREATE, COPY, spatial query,
+compact), see [../docs/DEVELOPER_PREVIEW.md](../docs/DEVELOPER_PREVIEW.md) or run
+`just preview-smoke` from the repository root.

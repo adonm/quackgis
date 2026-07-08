@@ -2,9 +2,13 @@
 
 ## Goal
 
-QuackGIS should make large geospatial writes fast without asking users to design
-partitions or maintain a secondary index. The target workloads are:
+QuackGIS should make large geospatial reads and writes fast without asking users
+to design partitions or maintain a secondary index. The target workloads are
+platform/application services over shared DuckLake storage:
 
+- high-QPS parallel readers answering complex spatial questions;
+- DuckDB-style OLAP fanout queries that compute grouped stats/calculations over
+  many geometry and attribute columns;
 - many parallel writers;
 - append-heavy tables that grow to billions or trillions of features;
 - large captures such as 10 TB aerial survey batches;
@@ -13,12 +17,17 @@ partitions or maintain a secondary index. The target workloads are:
 
 Correctness never depends on the layout. Every spatial predicate is still
 rechecked by SedonaDB. The layout only decides which DuckLake partitions, files,
-and Parquet row groups can be skipped.
+and Parquet row groups can be skipped by many readers in parallel.
+
+Current preview status: WKB-derived hidden bbox/bucket/sort columns, safe
+single-table bbox rewrites, LayoutBench `sf0`, COPY/INSERT ingest variants, and
+whole-table compaction are implemented. Temporal layout, bucket-local compaction,
+and PostgreSQL/S3 multi-process storage probes are Alpha/hardening work.
 
 ## Decision
 
-Use a **WKB-first, Sedona-bbox layout** for M5. Keep GeoArrow as metadata and a
-future native-array optimization, not the primary storage/execution pivot yet.
+Use a **WKB-first, Sedona-bbox layout**. Keep GeoArrow as metadata and a future
+native-array optimization, not the primary storage/execution pivot yet.
 
 Why:
 
@@ -35,7 +44,9 @@ Why:
 
 Clear direction: **persist WKB + hidden layout columns; optionally tag Arrow
 fields as `geoarrow.wkb` for interoperability; do not wait for native GeoArrow
-geometry arrays before implementing pruning.**
+geometry arrays before implementing pruning.** The strategic scale target is the
+same layout over DuckLake's SQL catalog + object-storage profile, not a separate
+index service.
 
 ## Spatial type model
 
@@ -122,13 +133,14 @@ calling one SQL UDF per output column.
 | `_qg_minx/_qg_miny/_qg_maxx/_qg_maxy` | Sedona `wkb_bounds_xy` over the geometry WKB | exact bbox facts for the row | ordinary Parquet columns with min/max stats |
 | `_qg_space_bucket` | adaptive spatial cell | bounded area partition pruning | DuckLake partition column |
 | `_qg_space_sort` | Hilbert key inside the bucket | row-group locality and stable compaction order | ordinary Parquet column, sort key |
-| `_qg_time_start/_qg_time_end` | detected/configured time column or interval | temporal overlap pruning | ordinary Parquet columns with min/max stats |
-| `_qg_time_bucket` | adaptive time bucket | bounded temporal partition pruning | DuckLake partition column |
+| `_qg_time_start/_qg_time_end` | detected/configured time column or interval | temporal overlap pruning | future ordinary Parquet columns with min/max stats |
+| `_qg_time_bucket` | adaptive time bucket | bounded temporal partition pruning | future DuckLake partition column |
 
-Default physical order: `(_qg_time_bucket, _qg_space_bucket, _qg_space_sort)`.
-The DuckLake partition spec includes only the two coarse bucket columns. Bbox,
-time bounds, and sort keys stay as ordinary data columns so Parquet row-group and
-file statistics can do fine pruning without exploding DuckLake catalog metadata.
+Default target physical order: `(_qg_time_bucket, _qg_space_bucket,
+_qg_space_sort)`. The current preview orders by spatial bucket/sort only. The
+target DuckLake partition spec includes only coarse bucket columns. Bbox, time
+bounds, and sort keys stay as ordinary data columns so Parquet row-group and file
+statistics can do fine pruning without exploding DuckLake catalog metadata.
 
 Null, empty, invalid, or wraparound geometries do not participate in spatial
 bucket pruning: their layout columns are null or assigned to a small overflow
@@ -178,7 +190,10 @@ filter:
 4. Derive candidate `_qg_time_bucket` values for temporal partition pruning.
 5. Let DuckLake/DataFusion prune partitions, files, and row groups with stats
    for the bucket, bbox, and time columns.
-6. Reapply the original SedonaDB predicate exactly.
+6. For OLAP fanout queries, keep projections narrow and push primitive filters,
+   calculations, and aggregates as close to the Parquet scan as DataFusion/
+   DuckLake can support.
+7. Reapply the original SedonaDB predicate exactly.
 
 This gives a PostGIS-like spatial-index experience without a mutable GiST/R-tree
 side structure.
@@ -238,7 +253,11 @@ Core benchmark queries:
    target epoch must stay within the synthetic accuracy threshold.
 6. **Oracle equality:** for `sf0`, every layout-prefiltered query result must
    match the same exact SedonaDB predicate without layout-column pruning.
-7. **Compaction:** append many small writer outputs, compact by bucket, then prove
+7. **OLAP fanout:** scan many aerial/CAD/asset rows, compute grouped spatial and
+   attribute statistics (counts, area/length/bbox-derived metrics, asset totals,
+   quality flags), filter candidate records from those calculations, and verify
+   pushdown/pruning evidence plus exact SedonaDB recheck.
+8. **Compaction:** append many small writer outputs, compact by bucket, then prove
    query results are unchanged while files/row groups scanned decrease.
 
 Record these metrics for every run: ingest rows/sec, generated files, average

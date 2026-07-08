@@ -8,7 +8,7 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "PostGIS-compatible spatial database server: datafusion-postgres + SedonaDB + (M1) DuckLake"
+description = "PostGIS-compatible Sedona-powered OLAP spatial lakehouse database on DuckLake"
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
@@ -37,6 +37,7 @@ geo-traits = { workspace = true }
 datafusion-ducklake = { workspace = true }
 object_store = { workspace = true }
 url = { workspace = true }
+sqlx = { workspace = true }
 
 tokio = { workspace = true }
 env_logger = { workspace = true }

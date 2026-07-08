@@ -19,8 +19,26 @@ async fn main() -> anyhow::Result<()> {
         .write_style(env_logger::WriteStyle::Auto)
         .init();
 
-    let storage_paths =
-        quackgis_server::context::StoragePaths::new(&cli.catalog_path, &cli.data_path)?;
+    let s3 = quackgis_server::context::S3StorageOptions::new(
+        cli.s3_endpoint.clone(),
+        cli.s3_access_key_id.clone(),
+        cli.s3_secret_access_key.clone(),
+        cli.s3_region.clone(),
+        cli.s3_allow_http,
+    )?;
+    let storage_paths = if let Some(catalog_url) = cli.catalog_url.clone() {
+        quackgis_server::context::StoragePaths::postgres(
+            catalog_url,
+            cli.ducklake_catalog_name.clone(),
+            cli.data_path.clone(),
+            s3,
+        )?
+    } else {
+        if s3.is_some() {
+            anyhow::bail!("S3 options require --catalog-url and an s3:// --data-path");
+        }
+        quackgis_server::context::StoragePaths::new(&cli.catalog_path, &cli.data_path)?
+    };
     let ctx: Arc<SessionContext> =
         quackgis_server::context::build_session_context_with_storage(storage_paths.clone()).await?;
 

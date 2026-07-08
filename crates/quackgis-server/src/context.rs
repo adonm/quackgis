@@ -13,10 +13,18 @@ use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_ducklake::{
-    DuckLakeCatalog, MetadataWriter, SqliteMetadataProvider, SqliteMetadataWriter,
+    DuckLakeCatalog, MetadataProvider, MetadataWriter, MulticatalogManager, MulticatalogProvider,
+    PostgresMetadataWriter, SqliteMetadataProvider, SqliteMetadataWriter,
+    initialize_multicatalog_schema,
 };
 use datafusion_postgres::auth::AuthManager;
 use datafusion_postgres::datafusion_pg_catalog::setup_pg_catalog;
+use object_store::ObjectStore;
+use object_store::aws::AmazonS3Builder;
+use object_store::local::LocalFileSystem;
+use sqlx::postgres::{PgPool, PgPoolOptions};
+use tokio::sync::OnceCell;
+use url::Url;
 
 /// Default name of the DuckLake catalog as seen by clients. Persisted tables
 /// live under `quackgis.main.<table>`. The default catalog for unqualified
@@ -24,23 +32,56 @@ use datafusion_postgres::datafusion_pg_catalog::setup_pg_catalog;
 /// `pg_catalog` to it — DuckLake's catalog rejects schema registration.
 pub const DUCKLAKE_CATALOG: &str = "quackgis";
 
-/// Where the DuckLake SQLite catalog file lives and the Parquet data files
-/// live underneath. Both are configurable so callers (CLI, tests) can place
-/// them anywhere — typically a tempdir per test, and a PVC path in prod.
+/// DuckLake storage profile. Local development defaults to SQLite catalog +
+/// filesystem Parquet; Kind Alpha can use a PostgreSQL catalog + S3-compatible
+/// object storage while keeping the same DuckLake table layout.
 #[derive(Debug, Clone)]
 pub struct StoragePaths {
-    /// SQLite connection string of the form `sqlite:<path>?mode=rwc`. The
-    /// `mode=rwc` lets the writer create the file on first run.
-    pub catalog_conn: String,
-    /// Absolute filesystem path under which Parquet data files are stored.
-    /// Created if missing.
-    pub data_path: String,
+    profile: StorageProfile,
+}
+
+#[derive(Debug, Clone)]
+enum StorageProfile {
+    SqliteLocal {
+        /// SQLite connection string of the form `sqlite:<path>?mode=rwc`. The
+        /// `mode=rwc` lets the writer create the file on first run.
+        catalog_conn: String,
+        /// Absolute filesystem path under which Parquet data files are stored.
+        /// Created if missing.
+        data_path: String,
+    },
+    Postgres {
+        catalog_url: String,
+        catalog_name: String,
+        data_path: String,
+        s3: Option<S3StorageOptions>,
+        pool: Arc<OnceCell<PgPool>>,
+        catalog_id: Arc<OnceCell<i64>>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct S3StorageOptions {
+    pub endpoint: Option<String>,
+    pub access_key_id: Option<String>,
+    pub secret_access_key: Option<String>,
+    pub region: String,
+    pub allow_http: bool,
 }
 
 impl StoragePaths {
     /// Production defaults: `quackgis.db` and `./data/` relative to CWD.
     /// Override via `QUACKGIS_CATALOG_PATH` and `QUACKGIS_DATA_PATH`.
     pub fn from_env_or_defaults() -> Result<Self> {
+        if let Ok(catalog_url) = std::env::var("QUACKGIS_CATALOG_URL") {
+            let catalog_name = std::env::var("QUACKGIS_DUCKLAKE_CATALOG_NAME")
+                .unwrap_or_else(|_| "quackgis".to_string());
+            let data_path =
+                std::env::var("QUACKGIS_DATA_PATH").unwrap_or_else(|_| "./data".to_string());
+            let s3 = S3StorageOptions::from_env()?;
+            return Self::postgres(catalog_url, catalog_name, data_path, s3);
+        }
+
         let catalog_path =
             std::env::var("QUACKGIS_CATALOG_PATH").unwrap_or_else(|_| "quackgis.db".to_string());
         let data_path =
@@ -84,17 +125,287 @@ impl StoragePaths {
         let catalog_conn = format!("sqlite:{}?mode=rwc", abs_catalog.display());
         let data_path = abs_data.to_string_lossy().to_string();
         Ok(Self {
-            catalog_conn,
-            data_path,
+            profile: StorageProfile::SqliteLocal {
+                catalog_conn,
+                data_path,
+            },
         })
+    }
+
+    /// Construct a PostgreSQL-backed DuckLake metadata profile. `data_path` may
+    /// be local or object-store backed; for the Kind Alpha path it is an
+    /// S3-compatible URL such as `s3://quackgis/ducklake`.
+    pub fn postgres(
+        catalog_url: String,
+        catalog_name: String,
+        data_path: String,
+        s3: Option<S3StorageOptions>,
+    ) -> Result<Self> {
+        if catalog_url.trim().is_empty() {
+            return Err(anyhow!("PostgreSQL catalog URL cannot be empty"));
+        }
+        if catalog_name.trim().is_empty() {
+            return Err(anyhow!("DuckLake catalog name cannot be empty"));
+        }
+        if data_path.trim().is_empty() {
+            return Err(anyhow!("DuckLake data path cannot be empty"));
+        }
+        if data_path.to_ascii_lowercase().starts_with("s3://") && s3.is_none() {
+            return Err(anyhow!("s3:// data paths require S3 client configuration"));
+        }
+
+        Ok(Self {
+            profile: StorageProfile::Postgres {
+                catalog_url,
+                catalog_name,
+                data_path,
+                s3,
+                pool: Arc::new(OnceCell::new()),
+                catalog_id: Arc::new(OnceCell::new()),
+            },
+        })
+    }
+
+    pub fn data_path(&self) -> &str {
+        match &self.profile {
+            StorageProfile::SqliteLocal { data_path, .. }
+            | StorageProfile::Postgres { data_path, .. } => data_path,
+        }
+    }
+
+    pub fn is_shared_catalog(&self) -> bool {
+        matches!(self.profile, StorageProfile::Postgres { .. })
+    }
+
+    pub async fn metadata_writer(&self) -> Result<Arc<dyn MetadataWriter>> {
+        match &self.profile {
+            StorageProfile::SqliteLocal {
+                catalog_conn,
+                data_path,
+            } => {
+                let writer = SqliteMetadataWriter::new_with_init(catalog_conn)
+                    .await
+                    .map_err(|e| anyhow!("SqliteMetadataWriter init: {e}"))?;
+                writer
+                    .set_data_path(data_path)
+                    .map_err(|e| anyhow!("set_data_path: {e}"))?;
+                Ok(Arc::new(writer))
+            }
+            StorageProfile::Postgres {
+                catalog_url,
+                catalog_name,
+                data_path,
+                pool,
+                catalog_id,
+                ..
+            } => {
+                let pool = postgres_pool(catalog_url, pool).await?;
+                let catalog_id = postgres_catalog_id(&pool, catalog_name, catalog_id).await?;
+                let writer = PostgresMetadataWriter::with_pool(pool, catalog_id)
+                    .await
+                    .map_err(|e| anyhow!("PostgresMetadataWriter init: {e}"))?;
+                writer
+                    .set_data_path(data_path)
+                    .map_err(|e| anyhow!("set_data_path: {e}"))?;
+                Ok(Arc::new(writer))
+            }
+        }
+    }
+
+    pub async fn metadata_provider(&self) -> Result<Arc<dyn MetadataProvider>> {
+        match &self.profile {
+            StorageProfile::SqliteLocal { catalog_conn, .. } => {
+                let provider = SqliteMetadataProvider::new(catalog_conn)
+                    .await
+                    .map_err(|e| anyhow!("SqliteMetadataProvider: {e}"))?;
+                Ok(Arc::new(provider))
+            }
+            StorageProfile::Postgres {
+                catalog_url,
+                catalog_name,
+                pool,
+                catalog_id,
+                ..
+            } => {
+                let pool = postgres_pool(catalog_url, pool).await?;
+                let catalog_id = postgres_catalog_id(&pool, catalog_name, catalog_id).await?;
+                let provider = MulticatalogProvider::with_pool_and_id(pool, catalog_id)
+                    .await
+                    .map_err(|e| anyhow!("MulticatalogProvider: {e}"))?;
+                Ok(Arc::new(provider))
+            }
+        }
+    }
+
+    pub async fn init_ducklake_metadata(
+        &self,
+    ) -> Result<(Arc<dyn MetadataProvider>, Arc<dyn MetadataWriter>)> {
+        let writer = self.metadata_writer().await?;
+        let initial_snapshot = writer
+            .create_snapshot()
+            .map_err(|e| anyhow!("create_snapshot: {e}"))?;
+
+        // Pre-create the `main` schema so SQL like `quackgis.main.<table>` can
+        // resolve at plan time before any CREATE TABLE has run.
+        let _ = writer
+            .get_or_create_schema("main", None, initial_snapshot)
+            .map_err(|e| anyhow!("get_or_create_schema(main): {e}"))?;
+
+        let provider = self.metadata_provider().await?;
+        Ok((provider, writer))
+    }
+
+    pub fn object_store(&self) -> Result<Arc<dyn ObjectStore>> {
+        if self.data_path().to_ascii_lowercase().starts_with("s3://") {
+            let (bucket, s3) = self.s3_bucket_and_options()?;
+            return Ok(Arc::new(s3.build_for_bucket(&bucket)?));
+        }
+        Ok(Arc::new(LocalFileSystem::new()))
+    }
+
+    pub fn register_runtime_object_store(&self, runtime: &RuntimeEnv) -> Result<()> {
+        if self.data_path().to_ascii_lowercase().starts_with("s3://") {
+            let bucket = s3_bucket_name(self.data_path())?;
+            let object_store = self.object_store()?;
+            let url = Url::parse(&format!("s3://{bucket}"))?;
+            runtime.register_object_store(&url, object_store);
+        }
+        Ok(())
+    }
+
+    fn s3_bucket_and_options(&self) -> Result<(String, &S3StorageOptions)> {
+        let bucket = s3_bucket_name(self.data_path())?;
+        let s3 = match &self.profile {
+            StorageProfile::Postgres { s3: Some(s3), .. } => s3,
+            _ => {
+                return Err(anyhow!(
+                    "s3:// data path requires S3 storage options for object-store client"
+                ));
+            }
+        };
+        Ok((bucket, s3))
     }
 }
 
-/// Build the QuarkGIS session context: SedonaDB function catalog + DuckLake
+async fn postgres_pool(catalog_url: &str, cell: &OnceCell<PgPool>) -> Result<PgPool> {
+    cell.get_or_try_init(|| async {
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(catalog_url)
+            .await
+            .with_context(|| "connecting to DuckLake PostgreSQL catalog")?;
+        initialize_multicatalog_schema(&pool)
+            .await
+            .map_err(|e| anyhow!("initialize DuckLake multicatalog schema: {e}"))?;
+        Ok::<PgPool, anyhow::Error>(pool)
+    })
+    .await
+    .cloned()
+}
+
+async fn postgres_catalog_id(
+    pool: &PgPool,
+    catalog_name: &str,
+    cell: &OnceCell<i64>,
+) -> Result<i64> {
+    cell.get_or_try_init(|| async {
+        let manager = MulticatalogManager::new(pool.clone());
+        manager
+            .create_catalog(catalog_name)
+            .await
+            .map_err(|e| anyhow!("create DuckLake catalog {catalog_name:?}: {e}"))
+    })
+    .await
+    .copied()
+}
+
+impl S3StorageOptions {
+    pub fn new(
+        endpoint: Option<String>,
+        access_key_id: Option<String>,
+        secret_access_key: Option<String>,
+        region: String,
+        allow_http: bool,
+    ) -> Result<Option<Self>> {
+        if endpoint.is_none() && access_key_id.is_none() && secret_access_key.is_none() {
+            return Ok(None);
+        }
+        if access_key_id.is_some() != secret_access_key.is_some() {
+            return Err(anyhow!(
+                "S3 access key id and secret access key must be specified together"
+            ));
+        }
+        if let Some(endpoint) = endpoint.as_deref()
+            && endpoint.starts_with("http://")
+            && !allow_http
+        {
+            return Err(anyhow!(
+                "S3 endpoint {endpoint:?} uses HTTP; set --s3-allow-http for local development endpoints"
+            ));
+        }
+
+        Ok(Some(Self {
+            endpoint,
+            access_key_id,
+            secret_access_key,
+            region,
+            allow_http,
+        }))
+    }
+
+    fn from_env() -> Result<Option<Self>> {
+        let endpoint = std::env::var("QUACKGIS_S3_ENDPOINT").ok();
+        let access_key_id = std::env::var("QUACKGIS_S3_ACCESS_KEY_ID").ok();
+        let secret_access_key = std::env::var("QUACKGIS_S3_SECRET_ACCESS_KEY").ok();
+        let region =
+            std::env::var("QUACKGIS_S3_REGION").unwrap_or_else(|_| "us-east-1".to_string());
+        let allow_http = std::env::var("QUACKGIS_S3_ALLOW_HTTP")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+            .unwrap_or(false);
+        Self::new(
+            endpoint,
+            access_key_id,
+            secret_access_key,
+            region,
+            allow_http,
+        )
+    }
+
+    fn build_for_bucket(&self, bucket: &str) -> Result<object_store::aws::AmazonS3> {
+        let mut builder = AmazonS3Builder::new()
+            .with_bucket_name(bucket)
+            .with_region(&self.region)
+            .with_allow_http(self.allow_http)
+            .with_virtual_hosted_style_request(false);
+        if let Some(endpoint) = &self.endpoint {
+            builder = builder.with_endpoint(endpoint);
+        }
+        if let Some(access_key_id) = &self.access_key_id {
+            builder = builder.with_access_key_id(access_key_id);
+        }
+        if let Some(secret_access_key) = &self.secret_access_key {
+            builder = builder.with_secret_access_key(secret_access_key);
+        }
+        builder
+            .build()
+            .with_context(|| format!("building S3 object store client for bucket {bucket:?}"))
+    }
+}
+
+fn s3_bucket_name(data_path: &str) -> Result<String> {
+    let url =
+        Url::parse(data_path).with_context(|| format!("parsing S3 data path {data_path:?}"))?;
+    url.host_str()
+        .map(ToString::to_string)
+        .ok_or_else(|| anyhow!("S3 data path {data_path:?} is missing a bucket name"))
+}
+
+/// Build the QuackGIS session context: SedonaDB function catalog + DuckLake
 /// storage + pg_catalog emulation + information_schema.
 ///
 /// Construction order matters:
-///   1. Build the DuckLake catalog with write support (SQLite backend).
+///   1. Build the DuckLake catalog with write support for the selected storage
+///      profile.
 ///   2. Construct a DataFusion SessionContext with DuckLake as the default
 ///      catalog, then register the narrow SedonaDB function surface that
 ///      QuackGIS needs: base functions, pure-Rust geo kernels, and Rust PROJ.
@@ -116,28 +427,8 @@ pub async fn build_session_context_with_storage(
 
     // 1. DuckLake: writer creates the catalog schema if missing, then a
     //    snapshot is required before any read or write can happen.
-    let writer = SqliteMetadataWriter::new_with_init(&paths.catalog_conn)
-        .await
-        .map_err(|e| anyhow!("SqliteMetadataWriter init: {e}"))?;
-    writer
-        .set_data_path(&paths.data_path)
-        .map_err(|e| anyhow!("set_data_path: {e}"))?;
-    let initial_snapshot = writer
-        .create_snapshot()
-        .map_err(|e| anyhow!("create_snapshot: {e}"))?;
-
-    // Pre-create the `main` schema so SQL like `quackgis.main.<table>` can
-    // resolve at plan time before any CREATE TABLE has run. DuckLakeCatalog
-    // rejects CREATE SCHEMA, but the writer's get_or_create_schema is the
-    // internal API the insert path uses to make this row.
-    let _ = writer
-        .get_or_create_schema("main", None, initial_snapshot)
-        .map_err(|e| anyhow!("get_or_create_schema(main): {e}"))?;
-
-    let provider = SqliteMetadataProvider::new(&paths.catalog_conn)
-        .await
-        .map_err(|e| anyhow!("SqliteMetadataProvider: {e}"))?;
-    let ducklake = DuckLakeCatalog::with_writer(Arc::new(provider), Arc::new(writer))
+    let (provider, writer) = paths.init_ducklake_metadata().await?;
+    let ducklake = DuckLakeCatalog::with_writer(provider, writer)
         .map_err(|e| anyhow!("DuckLakeCatalog::with_writer: {e}"))?;
 
     // 2. SessionContext. Keep "datafusion" as the default catalog (it's the
@@ -147,6 +438,7 @@ pub async fn build_session_context_with_storage(
     //    accessed as `quackgis.main.<table>`. information_schema on.
     let config = SessionConfig::new().with_information_schema(true);
     let runtime = Arc::new(RuntimeEnv::default());
+    paths.register_runtime_object_store(&runtime)?;
     let state = SessionStateBuilder::new()
         .with_default_features()
         .with_config(config)

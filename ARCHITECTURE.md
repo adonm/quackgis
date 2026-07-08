@@ -1,8 +1,12 @@
 # Architecture
 
-QuackGIS is a PostGIS-compatible spatial database server in a single Rust
-binary. It speaks the PostgreSQL wire protocol but does **not** run PostgreSQL.
-Three DataFusion-native components share one `SessionContext`:
+QuackGIS is a PostGIS-compatible, Sedona-powered spatial lakehouse database in a
+single Rust binary. It is built first for platform/application developers who
+need to answer large, complex spatial questions over shared DuckLake/Parquet data
+with high throughput, horizontal read scaling, and columnar OLAP analysis.
+
+QuackGIS speaks the PostgreSQL wire protocol but does **not** run PostgreSQL as a
+query engine. Three DataFusion-native components share one `SessionContext`:
 
 | Component | Upstream | Role |
 |---|---|---|
@@ -34,30 +38,45 @@ built immediately in-fork — see the gap ledger in
 ├──────────────────────────────────────────────────────────────┤
 │ SedonaDB session (DataFusion SessionContext)                 │
 │ ST_* functions · geometry/geography · CRS · spatial joins    │
+│ vectorized columnar projections · aggregates · expressions   │
 ├──────────────────────────────────────────────────────────────┤
 │ datafusion-ducklake                                          │
 │ DuckLake CatalogProvider · Parquet scan/write · snapshots    │
 ├──────────────────────────────────────────────────────────────┤
-│ Storage                                                      │
-│ Dev: SQLite catalog + local Parquet files                   │
-│ Prod target: PostgreSQL catalog + AWS S3 Parquet             │
+│ DuckLake storage profiles                                    │
+│ SQLite catalog + local Parquet files                         │
+│ PostgreSQL catalog + S3 Parquet objects                      │
 └──────────────────────────────────────────────────────────────┘
-PostgreSQL in this design is catalog metadata only; it is not the query engine or user table storage.
+PostgreSQL, when used, is catalog metadata only; it is not the query engine or user table storage.
 ```
 
-One process, one binary. No PostgreSQL server, no DuckDB, no C extensions, no
-extension ABI coupling, and no native GEOS/PROJ/GDAL runtime dependency for the
-QuackGIS binary.
+One QuackGIS process, one binary. No PostgreSQL server in the query/data plane,
+no DuckDB, no C extensions, no extension ABI coupling, and no native
+GEOS/PROJ/GDAL runtime dependency for the QuackGIS binary. A PostgreSQL database
+may be used as DuckLake catalog metadata storage in the scaled profile.
 
 ## Design principles
 
-1. **Wire compatibility, not Postgres.** Running full PostgreSQL to get pgwire
+1. **Scaled spatial questions first.** The primary job is high-performance
+   spatial SQL over big lakehouse datasets: many stateless QuackGIS readers,
+   many parallel ingest jobs, one shared DuckLake catalog/object prefix, and
+   SedonaDB exact spatial execution. Compatibility work exists to keep existing
+   PostGIS clients and tools usable against that lakehouse.
+
+2. **DuckDB-style OLAP ergonomics, without DuckDB.** Users should be able to run
+   fanout analytical SQL over column-oriented DuckLake/Parquet data: scan many
+   geometries, compute grouped spatial/attribute stats, use primitive aggregates
+   and calculations, push filters/projections down where possible, then recheck
+   exact SedonaDB predicates for the narrowed result. DataFusion/Sedona/DuckLake
+   provide this path; DuckDB is not embedded.
+
+3. **Wire compatibility, not Postgres.** Running full PostgreSQL to get pgwire
    was the v0.1 approach; it cost a PG server, a vendored pg_ducklake fork, a C
    extension for the geometry type, and a DuckDB-extension ABI treadmill. The
    target clients (QGIS, GeoServer, Martin, GDAL/OGR/`ogr2ogr`, psycopg) need protocol + catalog +
    PostGIS SQL surface — all servable from Rust.
 
-2. **Pinned upstreams, fork-preferred for gaps.** The best design needs
+4. **Pinned upstreams, fork-preferred for gaps.** The best design needs
    capabilities that do not all exist upstream yet (DuckLake UPDATE/DELETE and
    pruning, SQL cursors, deep pg_catalog, SedonaDB wire encodings — see the
    gap ledger in ROADMAP.md). All upstreams are Apache-2.0, so we track upstream heads through fork branches and fork/vendor the moment a capability is missing, shipping from
@@ -65,22 +84,29 @@ QuackGIS binary.
    milestone boundaries; upstreaming happens opportunistically from the fork,
    never on the critical path.
 
-3. **SedonaDB is the spatial engine.** No reimplemented kernels. QuackGIS
+5. **SedonaDB is the spatial engine.** No reimplemented kernels. QuackGIS
    registers SedonaDB's function catalog and adds only PostGIS-compat aliases
    and signature adapters where names/arities differ.
 
-4. **DuckLake is the only table storage and is priority validated.** Tables live as Parquet + DuckLake catalog metadata. Dev path is SQLite catalog + local files. Production target is PostgreSQL catalog + AWS S3. Extending datafusion-ducklake for QuackGIS requirements is in scope, but changes must remain forward-compatible with the official DuckLake 1.0+ spec and interoperable with reference DuckLake readers where possible.
+6. **DuckLake is the only table storage and is a core product path.** Tables live
+   as Parquet + DuckLake catalog metadata. SQLite + local files and PostgreSQL +
+   S3 are both first-class storage profiles; the PostgreSQL/S3 profile is the
+   scaled multi-writer/high-QPS deployment target. Extending datafusion-ducklake
+   for QuackGIS requirements is in scope, but changes must remain
+   forward-compatible with the official DuckLake 1.0+ spec and interoperable with
+   reference DuckLake readers where possible.
 
-5. **Client-driven compatibility.** The definition of done is scripted QGIS,
+7. **Client-driven compatibility.** The definition of done is scripted QGIS,
    GeoServer, Martin, and OGR/`ogr2ogr` workflows passing against the server, not a
-   function-count.
+   function-count. The compatibility promise is “common PostGIS GIS clients and
+   tools work without significant changes,” not “QuackGIS is PostgreSQL.”
 
 ## Geometry strategy: EWKB everywhere with a real type OID
 
 The goal is the highest performance/fidelity tradeoff SedonaDB can support today.
 EWKB is the current PostGIS wire standard. GeoArrow is useful metadata and a
 future native-array optimization, but it is not the primary physical format for
-M5. We use EWKB/WKB at every durable/client boundary:
+the current layout path. We use EWKB/WKB at every durable/client boundary:
 
 ```text
 ┌────────────┐     WKB Binary     ┌────────────┐    EWKB bytes    ┌────────────┐
@@ -156,20 +182,43 @@ and coordinate-epoch metadata.
 ## DuckLake spatial layout
 
 Spatial tables materialize deterministic hidden layout columns at write time:
-bbox, coarse spatial bucket, spatial sort key, optional temporal bounds, and a
-coarse time bucket. QuackGIS computes geometry-derived layout values in one
-vectorized WKB pass using Sedona bounds helpers. Query planning prunes by time
-bucket → spatial bucket → DuckLake/Parquet bbox statistics → exact SedonaDB
+bbox, coarse spatial bucket, and spatial sort key today; temporal bounds and time
+buckets are the next layout extension. QuackGIS computes geometry-derived layout
+values in one WKB pass. Query planning prunes with safe hidden bbox predicates
+above DuckLake/Parquet statistics, then always rechecks the exact SedonaDB
 predicate.
 
 The design deliberately avoids mutable GiST/R-tree side indexes. Parallel writers
-can write independent files and publish DuckLake snapshots; compaction later
-rewrites only coarse time/space buckets when small files accumulate.
+can write independent files and publish DuckLake snapshots. Current compaction is
+explicit and whole-table; the scaled direction is bucket-local compaction when
+small files accumulate.
 
 See [DuckLake spatial-temporal layout](docs/DUCKLAKE_SPATIAL_LAYOUT.md) for the
 automatic partitioning/indexing direction, including huge aerial captures,
 local-coordinate CAD data, geography/geometry type tiers, coordinate drift
 metadata, and trillion-row table targets (gap ledger G7).
+
+## Columnar OLAP analysis
+
+QuackGIS should feel familiar to users who reach for DuckDB to ask ad hoc
+analytical questions over columnar data, but it keeps the QuackGIS stack:
+DataFusion planning/execution, SedonaDB spatial kernels, and DuckLake/Parquet
+storage.
+
+Target query shape:
+
+1. fan out over a large spatial table or asset index;
+2. use hidden layout columns and ordinary Parquet statistics to prune early;
+3. compute grouped spatial/attribute statistics with vectorized projections,
+   primitive aggregates, conditional expressions, and joins where supported;
+4. use those calculated values as filters for relevant rows/assets;
+5. reapply exact SedonaDB spatial predicates before returning results or serving a
+   PostGIS client.
+
+This complements, rather than replaces, PostGIS compatibility. QGIS/GDAL/GeoServer
+need a familiar pgwire/PostGIS surface; platform services also need large fanout
+analytics such as coverage summaries, asset inventory stats, quality-control
+metrics, and candidate narrowing before expensive exact spatial operations.
 
 ## Transaction semantics over DuckLake snapshots
 
@@ -226,7 +275,11 @@ snapshot commit.
 
 ## Non-goals
 
-- Running PostgreSQL or DuckDB in any form.
+- Running PostgreSQL as the query engine or user table store. PostgreSQL may be
+  used as DuckLake catalog metadata storage.
+- Running DuckDB in-process.
+- A document database.
+- An OLTP application database.
 - PL/pgSQL, triggers, LISTEN/NOTIFY, logical replication.
 - Full PostgreSQL SQL surface — target is what spatial clients actually send.
 - Topology schema, Tiger geocoder, SFCGAL.
