@@ -255,11 +255,24 @@ planner rewrites. The first SQL-level pruning rewrite now injects `_qg_*` bbox
 predicates for simple single-table `ST_Intersects(... ST_MakeEnvelope(...))` and
 `&& ST_TileEnvelope(...)` query shapes while preserving the exact spatial
 predicate. Its oracle counts are pinned by
-`crates/quackgis-server/tests/layoutbench_sf0.rs`:
+`crates/quackgis-server/tests/layoutbench_sf0.rs`; the oracle also checks aliases,
+derived single-table subqueries, wildcard projection safety, tile envelopes,
+comment/string-safe clause scanning, and EXPLAIN visibility of injected layout
+predicates:
 
 ```text
 layoutbench_sf0 aerial=18 cad=12 assets=18 control=7
+layoutbench_sf0_pruning aerial=108/30/18/18 cad=96/24/12/12 assets=24/20/18/18 false_positive=3/3/2/1
 ```
+
+The pruning line is `total/base/candidate/exact`: all table rows, rows after
+non-spatial predicates, rows after hidden bbox predicates, and rows after the
+exact SedonaDB predicate. The local pgwire runner also emits `layoutbench_scan`
+from `EXPLAIN ANALYZE`, including bytes scanned, row-group/file-range pruning,
+Parquet pushdown rows, and whether `_qg_*` bbox predicates reached the physical
+plan. The false-positive case intentionally includes a polygon hole whose bbox
+overlaps the query window but whose exact geometry does not, pinning correctness
+after over-selection.
 
 ## Parallel writes
 
@@ -278,6 +291,60 @@ time/space buckets into larger sorted files.
 For explicit transactions, keep the current single-table snapshot boundary:
 staged writes compute the same hidden columns, then publish one final DuckLake
 snapshot at commit.
+
+## Bulk ingest and sf1 findings
+
+The first pgwire `sf1` iteration uses a moderate local scale (`factor=100`,
+22,800 rows total) to expose levers quickly before moving to nightly-sized data.
+The results are in `benchmarks/BENCHMARKS.md`; the architecture implications are:
+
+1. **COPY is the bulk ingest path.** Batched INSERT VALUES took about 16 s to seed
+   the current sf1; pgwire `COPY ... FROM STDIN` took about 0.9 s with the same
+   rows and correctness checks. QuackGIS therefore implements COPY IN as the path
+   GDAL/OGR should use (`PG_USE_COPY=YES`) for `ogr2ogr`-style loads.
+2. **Layout sorting must run at bulk granularity.** Sorting each tiny autocommit
+   INSERT batch cannot recover locality when client row order is random: shuffled
+   INSERT scanned most row groups. COPY and transaction-staged writes sort the
+   whole table delta and prune back to one matched row group.
+3. **Transaction grouping is a write-layout primitive.** Explicit transactions are
+   not only semantic grouping; they give QuackGIS a staging boundary for sorting a
+   table delta once before publishing it to DuckLake.
+4. **Row groups are the current skip unit.** File/range pruning is not selective
+   in current local sf1 runs; Parquet row-group statistics are. The local default
+   `QUACKGIS_DUCKLAKE_ROW_GROUP_ROWS=512` is intentionally small for this scale
+   and can be disabled with `0`. Larger/nightly scales should migrate this from a
+   row-count cap toward a bytes/row-count policy aligned with DuckLake defaults.
+5. **Compaction is the next architecture lever.** Many small autocommit append
+   files should be rewritten into sorted bucket-local files. Correctness remains
+   the exact SedonaDB predicate; compaction should only reduce files/ranges and
+   row groups read.
+
+The first implementation is an explicit table-scoped command:
+
+```sql
+CALL quackgis_compact_table('public.my_spatial_table');
+```
+
+It is intentionally boring: read the table through DataFusion, normalize/project
+layout columns, sort by the hidden layout key, and rewrite the DuckLake table in
+one replacement snapshot. This already repairs the bad shuffled/autocommit sf1
+case (about 0.52 s to compact all three sf1 tables, cutting aerial from 22/18
+matched row groups to 22/1 and files/ranges from 23/23 to 1/1). The next step is
+to restrict this same primitive to changed coarse time/space buckets instead of
+rewriting the whole table.
+
+Current implemented path:
+
+- CREATE/CTAS/INSERT/COPY writes add hidden `_qg_*` columns for spatial tables;
+- the write path recomputes hidden values from WKB and ignores client-provided
+  layout values;
+- batches are sorted by `(_qg_time_bucket, _qg_space_bucket, _qg_space_sort)`
+  before DuckLake writes;
+- explicit transaction staging sorts the whole staged table at commit;
+- COPY FROM STDIN parses PostgreSQL text COPY, including GDAL-style bytea/WKB
+  octal/hex escapes, and routes through the same layout projection.
+- `CALL quackgis_compact_table(...)` rewrites an existing table through the same
+  projection/sort path to repair small-file or poorly ordered append layouts.
 
 ## Maintenance model
 

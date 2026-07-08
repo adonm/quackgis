@@ -6,15 +6,9 @@
 use std::sync::Arc;
 
 use datafusion::prelude::SessionContext;
-use datafusion_postgres::hooks::QueryHook;
-use datafusion_postgres::hooks::cursor::CursorStatementHook;
-use datafusion_postgres::hooks::set_show::SetShowHook;
-use datafusion_postgres::hooks::transactions::TransactionStatementHook;
-use datafusion_postgres::{ServerOptions, serve_with_hooks};
+use datafusion_postgres::ServerOptions;
 
-use quackgis_server::catalog_compat::CatalogCompatHook;
 use quackgis_server::context::{StoragePaths, build_session_context_with_storage};
-use quackgis_server::ducklake_sql::DuckLakeSqlHook;
 
 pub struct ServerHandle {
     /// Host clients connect to.
@@ -68,16 +62,9 @@ impl ServerHandle {
             .with_host("127.0.0.1".to_string())
             .with_port(addr.port());
 
-        let hooks: Vec<Arc<dyn QueryHook>> = vec![
-            Arc::new(DuckLakeSqlHook::new(paths)),
-            Arc::new(CatalogCompatHook),
-            Arc::new(CursorStatementHook),
-            Arc::new(SetShowHook),
-            Arc::new(TransactionStatementHook),
-        ];
         let serve_task = tokio::spawn(async move {
             // Run forever; the task is aborted when ServerHandle drops.
-            let _ = serve_with_hooks(ctx_for_server, &opts, hooks).await;
+            let _ = quackgis_server::pgwire_server::serve(ctx_for_server, &opts, paths).await;
         });
 
         let handle = Self {

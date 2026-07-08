@@ -108,6 +108,12 @@ async fn layoutbench_sf0_oracle_counts_are_stable() {
     )
     .await;
     assert_public_exact_query_is_rewritten(&client).await;
+    assert_alias_and_tile_query_is_rewritten(&client).await;
+    assert_derived_tile_query_is_rewritten(&client).await;
+    assert_quoted_identifier_query_is_rewritten(&client).await;
+    assert_client_supplied_layout_values_are_ignored(&client).await;
+    assert_public_wildcard_spatial_query_stays_hidden(&client).await;
+    assert_explain_shows_injected_layout_predicate(&client).await;
 
     let aerial_window = Rect {
         minx: 95.0,
@@ -196,6 +202,74 @@ async fn layoutbench_sf0_oracle_counts_are_stable() {
         .get(0);
     assert_eq!(residual_count, residual_expected);
 
+    let pruning_summary = assert_pruning_metrics_are_stable(
+        &client,
+        &[
+            PruningCase {
+                label: "aerial",
+                table: "quackgis.main.layoutbench_aerial_frames",
+                geom_column: "geom",
+                envelope: aerial_window,
+                extra_predicate: "captured_minute BETWEEN 40 AND 170",
+                expected: PruningMetric {
+                    total: seed.aerial_frames.len() as i64,
+                    base: 30,
+                    candidate: aerial_expected,
+                    exact: aerial_expected,
+                },
+            },
+            PruningCase {
+                label: "cad",
+                table: "quackgis.main.layoutbench_cad_objects",
+                geom_column: "geom",
+                envelope: cad_viewport,
+                extra_predicate: "floor = 2",
+                expected: PruningMetric {
+                    total: seed.cad_objects.len() as i64,
+                    base: 24,
+                    candidate: cad_expected,
+                    exact: cad_expected,
+                },
+            },
+            PruningCase {
+                label: "assets",
+                table: "quackgis.main.layoutbench_assets",
+                geom_column: "footprint",
+                envelope: asset_window,
+                extra_predicate: "resolution_cm <= 15.0 AND horizontal_accuracy_cm <= 7.0",
+                expected: PruningMetric {
+                    total: seed.assets.len() as i64,
+                    base: 20,
+                    candidate: asset_expected,
+                    exact: asset_expected,
+                },
+            },
+            PruningCase {
+                label: "false_positive",
+                table: "quackgis.main.layoutbench_false_positives",
+                geom_column: "geom",
+                envelope: Rect {
+                    minx: 45.0,
+                    miny: 45.0,
+                    maxx: 55.0,
+                    maxy: 55.0,
+                },
+                extra_predicate: "id >= 1",
+                expected: PruningMetric {
+                    total: 3,
+                    base: 3,
+                    candidate: 2,
+                    exact: 1,
+                },
+            },
+        ],
+    )
+    .await;
+    assert_eq!(
+        pruning_summary,
+        "layoutbench_sf0_pruning aerial=108/30/18/18 cad=96/24/12/12 assets=24/20/18/18 false_positive=3/3/2/1"
+    );
+
     let summary = format!(
         "layoutbench_sf0 aerial={aerial_expected} cad={cad_expected} \
          assets={asset_expected} control={residual_expected}"
@@ -251,6 +325,109 @@ async fn assert_exact_and_prefilter_count(
         .get(0);
     assert_eq!(exact, expected, "exact count for {table}");
     assert_eq!(prefiltered, exact, "prefiltered count for {table}");
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PruningMetric {
+    /// All rows in the table.
+    total: i64,
+    /// Rows after non-spatial predicates only.
+    base: i64,
+    /// Rows after non-spatial predicates plus hidden bbox predicates, before
+    /// exact spatial predicate evaluation.
+    candidate: i64,
+    /// Rows after exact SedonaDB spatial predicate evaluation.
+    exact: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PruningCase<'a> {
+    label: &'a str,
+    table: &'a str,
+    geom_column: &'a str,
+    envelope: Rect,
+    extra_predicate: &'a str,
+    expected: PruningMetric,
+}
+
+async fn assert_pruning_metrics_are_stable(
+    client: &tokio_postgres::Client,
+    cases: &[PruningCase<'_>],
+) -> String {
+    let mut parts = vec!["layoutbench_sf0_pruning".to_string()];
+    for case in cases {
+        let metric = pruning_metric(client, case).await;
+        assert_eq!(metric, case.expected, "pruning metric for {}", case.label);
+        assert!(
+            metric.exact <= metric.candidate,
+            "exact rows must be a subset of bbox candidates for {}: {metric:?}",
+            case.label
+        );
+        assert!(
+            metric.candidate <= metric.base,
+            "bbox candidates must not exceed base predicate rows for {}: {metric:?}",
+            case.label
+        );
+        assert!(
+            metric.base <= metric.total,
+            "base predicate rows must not exceed table rows for {}: {metric:?}",
+            case.label
+        );
+        assert!(
+            metric.candidate < metric.base,
+            "sf0 pruning should reduce candidates for {}: {metric:?}",
+            case.label
+        );
+        parts.push(format!(
+            "{}={}/{}/{}/{}",
+            case.label, metric.total, metric.base, metric.candidate, metric.exact
+        ));
+    }
+    parts.join(" ")
+}
+
+async fn pruning_metric(client: &tokio_postgres::Client, case: &PruningCase<'_>) -> PruningMetric {
+    let envelope_sql = format!("ST_GeomFromWKB({})", envelope_wkb_sql(case.envelope));
+    let total_sql = format!("SELECT COUNT(*) FROM {}", case.table);
+    let base_sql = format!(
+        "SELECT COUNT(*) FROM {} WHERE {}",
+        case.table, case.extra_predicate
+    );
+    let candidate_sql = format!(
+        "SELECT COUNT(*) FROM {table} \
+         WHERE {extra_predicate} \
+           AND _qg_minx <= {maxx} AND _qg_maxx >= {minx} \
+           AND _qg_miny <= {maxy} AND _qg_maxy >= {miny}",
+        table = case.table,
+        extra_predicate = case.extra_predicate,
+        minx = case.envelope.minx,
+        miny = case.envelope.miny,
+        maxx = case.envelope.maxx,
+        maxy = case.envelope.maxy,
+    );
+    let exact_sql = format!(
+        "SELECT COUNT(*) FROM {table} \
+         WHERE {extra_predicate} \
+           AND ST_Intersects(ST_GeomFromWKB({geom_column}), {envelope_sql})",
+        table = case.table,
+        extra_predicate = case.extra_predicate,
+        geom_column = case.geom_column,
+    );
+
+    PruningMetric {
+        total: query_count(client, &total_sql).await,
+        base: query_count(client, &base_sql).await,
+        candidate: query_count(client, &candidate_sql).await,
+        exact: query_count(client, &exact_sql).await,
+    }
+}
+
+async fn query_count(client: &tokio_postgres::Client, sql: &str) -> i64 {
+    client
+        .query_one(sql, &[])
+        .await
+        .unwrap_or_else(|err| panic!("count query failed: {sql}\n{err}"))
+        .get(0)
 }
 
 async fn assert_public_layout_columns_are_hidden(client: &tokio_postgres::Client, table: &str) {
@@ -339,6 +516,166 @@ async fn assert_public_exact_query_is_rewritten(client: &tokio_postgres::Client)
         .get(0);
     assert_eq!(public_exact, internal_prefiltered);
     assert_eq!(simple_public_exact, internal_prefiltered);
+}
+
+async fn assert_alias_and_tile_query_is_rewritten(client: &tokio_postgres::Client) {
+    let public_sql = "SELECT COUNT(*) AS n FROM layoutbench_aerial_frames AS f \
+        WHERE f.geom && ST_TileEnvelope(0, 0, 0, ST_MakeEnvelope(0, 0, 500, 500, 3857))";
+    let public_count: i64 = client
+        .query_one(public_sql, &[])
+        .await
+        .expect("alias/tile query with internal pruning rewrite")
+        .get(0);
+    let internal_prefiltered: i64 = client
+        .query_one(
+            "SELECT COUNT(*) AS n FROM quackgis.main.layoutbench_aerial_frames AS f \
+             WHERE f._qg_minx <= 500 AND f._qg_maxx >= 0 \
+               AND f._qg_miny <= 500 AND f._qg_maxy >= 0 \
+               AND f.geom && ST_TileEnvelope(0, 0, 0, ST_MakeEnvelope(0, 0, 500, 500, 3857))",
+            &[],
+        )
+        .await
+        .expect("internal alias/tile prefiltered query")
+        .get(0);
+    assert_eq!(public_count, internal_prefiltered);
+}
+
+async fn assert_derived_tile_query_is_rewritten(client: &tokio_postgres::Client) {
+    let public_sql = "SELECT COUNT(*) AS n FROM (\
+            SELECT id, captured_minute FROM layoutbench_aerial_frames AS f \
+            WHERE f.geom && ST_TileEnvelope(0, 0, 0, ST_MakeEnvelope(0, 0, 500, 500, 3857)) \
+            ORDER BY id\
+        ) AS q";
+    let public_count: i64 = client
+        .query_one(public_sql, &[])
+        .await
+        .expect("derived tile query with internal pruning rewrite")
+        .get(0);
+    let internal_prefiltered: i64 = client
+        .query_one(
+            "SELECT COUNT(*) AS n FROM (\
+                 SELECT id, captured_minute FROM quackgis.main.layoutbench_aerial_frames AS f \
+                 WHERE f._qg_minx <= 500 AND f._qg_maxx >= 0 \
+                   AND f._qg_miny <= 500 AND f._qg_maxy >= 0 \
+                   AND f.geom && ST_TileEnvelope(0, 0, 0, ST_MakeEnvelope(0, 0, 500, 500, 3857)) \
+                 ORDER BY id\
+             ) AS q",
+            &[],
+        )
+        .await
+        .expect("internal derived tile prefiltered query")
+        .get(0);
+    assert_eq!(public_count, internal_prefiltered);
+}
+
+async fn assert_quoted_identifier_query_is_rewritten(client: &tokio_postgres::Client) {
+    let public_count: i64 = client
+        .query_one(
+            "SELECT COUNT(*) AS n FROM \"layoutbench quoted\" AS q \
+             WHERE ST_Intersects(\
+               ST_GeomFromWKB(q.\"Geom\"), \
+               ST_GeomFromWKB(ST_MakeEnvelope(8, 8, 12, 12, 3857)))",
+            &[],
+        )
+        .await
+        .expect("quoted identifier query with pruning rewrite")
+        .get(0);
+    let internal_prefiltered: i64 = client
+        .query_one(
+            "SELECT COUNT(*) AS n FROM quackgis.main.\"layoutbench quoted\" AS q \
+             WHERE q._qg_minx <= 12 AND q._qg_maxx >= 8 \
+               AND q._qg_miny <= 12 AND q._qg_maxy >= 8 \
+               AND ST_Intersects(\
+                 ST_GeomFromWKB(q.\"Geom\"), \
+                 ST_GeomFromWKB(ST_MakeEnvelope(8, 8, 12, 12, 3857)))",
+            &[],
+        )
+        .await
+        .expect("quoted identifier internal prefiltered query")
+        .get(0);
+    assert_eq!(public_count, 1);
+    assert_eq!(public_count, internal_prefiltered);
+}
+
+async fn assert_client_supplied_layout_values_are_ignored(client: &tokio_postgres::Client) {
+    client
+        .batch_execute(
+            "INSERT INTO quackgis.main.layoutbench_layout_tamper \
+                (id, _qg_minx, _qg_miny, _qg_maxx, _qg_maxy, geom, label) \
+             VALUES (2, -999, -999, -999, -999, X'010100000000000000000022400000000000002440', 'tampered')",
+        )
+        .await
+        .expect("insert with client-supplied layout columns");
+    let row = client
+        .query_one(
+            "SELECT _qg_minx, _qg_miny, _qg_maxx, _qg_maxy \
+             FROM quackgis.main.layoutbench_layout_tamper WHERE id = 2",
+            &[],
+        )
+        .await
+        .expect("projected tamper layout");
+    let projected: (f64, f64, f64, f64) = (row.get(0), row.get(1), row.get(2), row.get(3));
+    assert_eq!(projected, (9.0, 10.0, 9.0, 10.0));
+}
+
+async fn assert_public_wildcard_spatial_query_stays_hidden(client: &tokio_postgres::Client) {
+    let messages = client
+        .simple_query(
+            "SELECT * FROM layoutbench_aerial_frames \
+             WHERE ST_Intersects(\
+               ST_GeomFromWKB(geom), \
+               ST_GeomFromWKB(ST_MakeEnvelope(95, 95, 290, 185, 3857))) \
+             LIMIT 1",
+        )
+        .await
+        .expect("public wildcard spatial query");
+    let row = messages
+        .iter()
+        .find_map(|message| match message {
+            tokio_postgres::SimpleQueryMessage::Row(row) => Some(row),
+            _ => None,
+        })
+        .expect("public wildcard spatial row");
+    let column_names = row
+        .columns()
+        .iter()
+        .map(|column| column.name().to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        !column_names.iter().any(|name| name.starts_with("_qg_")),
+        "public wildcard spatial query should hide layout columns, got {column_names:?}"
+    );
+}
+
+async fn assert_explain_shows_injected_layout_predicate(client: &tokio_postgres::Client) {
+    let messages = client
+        .simple_query(
+            "EXPLAIN SELECT COUNT(*) AS n FROM layoutbench_aerial_frames \
+             WHERE captured_minute BETWEEN 40 AND 170 \
+               AND ST_Intersects(\
+                 ST_GeomFromWKB(geom), \
+                 ST_GeomFromWKB(ST_MakeEnvelope(95, 95, 290, 185, 3857)))",
+        )
+        .await
+        .expect("EXPLAIN public exact query with internal pruning rewrite");
+    let rendered = messages
+        .iter()
+        .filter_map(|message| match message {
+            tokio_postgres::SimpleQueryMessage::Row(row) => Some(
+                row.columns()
+                    .iter()
+                    .filter_map(|column| row.get(column.name()))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("_qg_minx") && rendered.contains("_qg_maxx"),
+        "EXPLAIN should expose injected layout predicate, got:\n{rendered}"
+    );
 }
 
 async fn assert_projected_bbox_matches_sidecars(
@@ -446,7 +783,13 @@ impl LayoutBenchSf0 {
                   CREATE TABLE layoutbench_control_points (\
                      id INT, point_name TEXT, acquisition_epoch DOUBLE, \
                      source_x DOUBLE, source_y DOUBLE, corrected_x DOUBLE, corrected_y DOUBLE, \
-                     residual_mm DOUBLE, geom BINARY);",
+                     residual_mm DOUBLE, geom BINARY);\
+                  CREATE TABLE \"layoutbench quoted\" (\
+                     id INT, \"Geom\" BINARY, label TEXT);\
+                  CREATE TABLE layoutbench_layout_tamper (\
+                     id INT, geom BINARY, label TEXT);\
+                  CREATE TABLE layoutbench_false_positives (\
+                     id INT, geom BINARY, label TEXT);",
             )
             .await
             .expect("create LayoutBench tables");
@@ -457,6 +800,47 @@ impl LayoutBenchSf0 {
             client,
             "layoutbench_control_points",
             &self.control_point_values(),
+        )
+        .await;
+        insert_rows(
+            client,
+            "\"layoutbench quoted\" (id, \"Geom\", label)",
+            &[
+                format!("(1, {}, 'inside')", point_wkb_sql(10.0, 10.0)),
+                format!("(2, {}, 'outside')", point_wkb_sql(40.0, 40.0)),
+            ],
+        )
+        .await;
+        insert_rows(
+            client,
+            "layoutbench_layout_tamper (id, geom, label)",
+            &[format!("(1, {}, 'baseline')", point_wkb_sql(1.0, 1.0))],
+        )
+        .await;
+        insert_rows(
+            client,
+            "layoutbench_false_positives (id, geom, label)",
+            &[
+                format!("(1, {}, 'donut_bbox_only')", donut_wkb_sql()),
+                format!(
+                    "(2, {}, 'inside_envelope')",
+                    rect_wkb_sql(Rect {
+                        minx: 48.0,
+                        miny: 48.0,
+                        maxx: 52.0,
+                        maxy: 52.0,
+                    })
+                ),
+                format!(
+                    "(3, {}, 'outside_envelope')",
+                    rect_wkb_sql(Rect {
+                        minx: 120.0,
+                        miny: 120.0,
+                        maxx: 130.0,
+                        maxy: 130.0,
+                    })
+                ),
+            ],
         )
         .await;
     }
@@ -700,6 +1084,24 @@ fn point_wkb_sql(x: f64, y: f64) -> String {
     format!("X'{}'", hex_encode(&point_wkb(x, y)))
 }
 
+fn donut_wkb_sql() -> String {
+    let outer = vec![
+        (0.0, 0.0),
+        (100.0, 0.0),
+        (100.0, 100.0),
+        (0.0, 100.0),
+        (0.0, 0.0),
+    ];
+    let hole = vec![
+        (40.0, 40.0),
+        (40.0, 60.0),
+        (60.0, 60.0),
+        (60.0, 40.0),
+        (40.0, 40.0),
+    ];
+    format!("X'{}'", hex_encode(&polygon_wkb(&[outer, hole])))
+}
+
 fn rect_wkb(rect: Rect) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(1 + 4 + 4 + 4 + 5 * 16);
     bytes.push(1);
@@ -715,6 +1117,22 @@ fn rect_wkb(rect: Rect) -> Vec<u8> {
     ] {
         bytes.extend_from_slice(&x.to_le_bytes());
         bytes.extend_from_slice(&y.to_le_bytes());
+    }
+    bytes
+}
+
+fn polygon_wkb(rings: &[Vec<(f64, f64)>]) -> Vec<u8> {
+    let coordinate_count = rings.iter().map(Vec::len).sum::<usize>();
+    let mut bytes = Vec::with_capacity(1 + 4 + 4 + rings.len() * 4 + coordinate_count * 16);
+    bytes.push(1);
+    bytes.extend_from_slice(&3_u32.to_le_bytes());
+    bytes.extend_from_slice(&(rings.len() as u32).to_le_bytes());
+    for ring in rings {
+        bytes.extend_from_slice(&(ring.len() as u32).to_le_bytes());
+        for (x, y) in ring {
+            bytes.extend_from_slice(&x.to_le_bytes());
+            bytes.extend_from_slice(&y.to_le_bytes());
+        }
     }
     bytes
 }

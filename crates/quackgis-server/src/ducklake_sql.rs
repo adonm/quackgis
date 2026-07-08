@@ -13,7 +13,7 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use datafusion::arrow::array::{
     Array, ArrayRef, BinaryArray, BinaryViewArray, BooleanArray, Float64Array, Int32Array,
-    Int64Array, NullArray, StringArray, StringViewArray, new_null_array,
+    Int64Array, NullArray, StringArray, StringViewArray, UInt64Array, new_null_array,
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -22,7 +22,9 @@ use datafusion::datasource::MemTable;
 use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
 use datafusion::prelude::SessionContext;
 use datafusion::sql::sqlparser::ast::{
-    AlterTable, AlterTableOperation, AssignmentTarget, ColumnDef, ObjectName, SelectItem,
+    AlterTable, AlterTableOperation, AssignmentTarget, ColumnDef, CopyLegacyOption, CopyOption,
+    CopySource, CopyTarget, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident,
+    ObjectName, SelectItem, Statement, Value,
 };
 use datafusion_ducklake::{
     DuckLakeCatalog, DuckLakeTableWriter, MetadataWriter, SqliteMetadataProvider,
@@ -31,9 +33,13 @@ use datafusion_ducklake::{
 use datafusion_postgres::arrow_pg::datatypes::{arrow_schema_to_pg_fields, encode_recordbatch};
 use datafusion_postgres::hooks::{HookClient, QueryHook};
 use datafusion_postgres::pgwire::api::portal::Format;
-use datafusion_postgres::pgwire::api::results::{QueryResponse, Response, Tag};
+use datafusion_postgres::pgwire::api::results::{CopyResponse, QueryResponse, Response, Tag};
+use datafusion_postgres::pgwire::api::{ClientInfo, PgWireConnectionState};
 use datafusion_postgres::pgwire::error::{PgWireError, PgWireResult};
+use datafusion_postgres::pgwire::messages::PgWireBackendMessage;
+use datafusion_postgres::pgwire::messages::copy::{CopyData, CopyDone, CopyFail};
 use datafusion_postgres::pgwire::messages::response::TransactionStatus;
+use futures::{Sink, SinkExt};
 use object_store::local::LocalFileSystem;
 use tokio::sync::Mutex;
 
@@ -57,6 +63,8 @@ use rewrites::{
 };
 
 static TRANSACTION_COUNTER: AtomicU64 = AtomicU64::new(1);
+const DEFAULT_DUCKLAKE_ROW_GROUP_ROWS: usize = 512;
+const DUCKLAKE_ROW_GROUP_ROWS_ENV: &str = "QUACKGIS_DUCKLAKE_ROW_GROUP_ROWS";
 
 #[derive(Debug, Clone)]
 pub struct DuckLakeSqlHook {
@@ -66,6 +74,52 @@ pub struct DuckLakeSqlHook {
 #[derive(Debug, Default)]
 struct ClientTransactionState {
     inner: Mutex<TransactionState>,
+}
+
+#[derive(Debug, Default)]
+struct CopyInSessionState {
+    inner: Mutex<Option<CopyInRequest>>,
+}
+
+#[derive(Debug)]
+struct CopyInRequest {
+    schema: String,
+    table: String,
+    columns: Vec<String>,
+    options: CopyTextOptions,
+    data: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct CopyTextOptions {
+    delimiter: u8,
+    null: Vec<u8>,
+    header: bool,
+}
+
+impl Default for CopyTextOptions {
+    fn default() -> Self {
+        Self {
+            delimiter: b'\t',
+            null: b"\\N".to_vec(),
+            header: false,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct DuckLakeCopyHandler {
+    sql: DuckLakeSqlHook,
+    session_context: Arc<SessionContext>,
+}
+
+impl DuckLakeCopyHandler {
+    pub fn new(paths: StoragePaths, session_context: Arc<SessionContext>) -> Self {
+        Self {
+            sql: DuckLakeSqlHook::new(paths),
+            session_context,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -97,6 +151,56 @@ struct StagedTable {
 impl DuckLakeSqlHook {
     pub fn new(paths: StoragePaths) -> Self {
         Self { paths }
+    }
+}
+
+#[async_trait]
+impl datafusion_postgres::pgwire::api::copy::CopyHandler for DuckLakeCopyHandler {
+    async fn on_copy_data<C>(&self, client: &mut C, copy_data: CopyData) -> PgWireResult<()>
+    where
+        C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C::Error: std::fmt::Debug,
+        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+    {
+        self.sql
+            .append_copy_data(client, copy_data.data.as_ref())
+            .await
+    }
+
+    async fn on_copy_done<C>(&self, client: &mut C, _done: CopyDone) -> PgWireResult<()>
+    where
+        C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C::Error: std::fmt::Debug,
+        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+    {
+        let rows = self
+            .sql
+            .finish_copy_in(&self.session_context, client)
+            .await?;
+        client
+            .send(PgWireBackendMessage::CommandComplete(
+                Tag::new("COPY").with_rows(rows).into(),
+            ))
+            .await?;
+        // pgwire 0.40 keeps extended COPY connections in CopyInProgress after
+        // CopyDone and expects a later Sync. Move to AwaitingSync here so that
+        // Sync is consumed and ReadyForQuery is sent; simple COPY is overwritten
+        // back to ReadyForQuery by pgwire's simple-COPY branch.
+        client.set_state(PgWireConnectionState::AwaitingSync);
+        Ok(())
+    }
+
+    async fn on_copy_fail<C>(&self, client: &mut C, fail: CopyFail) -> PgWireError
+    where
+        C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C::Error: std::fmt::Debug,
+        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+    {
+        self.sql.abort_copy_in(client).await;
+        user_error(anyhow!(
+            "COPY FROM STDIN aborted by client: {}",
+            fail.message
+        ))
     }
 }
 
@@ -137,6 +241,22 @@ impl QueryHook for DuckLakeSqlHook {
                 if table_name_parts(&ct.name).is_some() =>
             {
                 Some(self.handle_create_table(ct, session_context, client).await)
+            }
+            datafusion::sql::sqlparser::ast::Statement::Copy { .. }
+                if copy_statement_parts(statement).is_some() =>
+            {
+                Some(
+                    self.handle_copy_from_stdin(statement, session_context, client)
+                        .await,
+                )
+            }
+            datafusion::sql::sqlparser::ast::Statement::Call(function)
+                if is_compact_call(function) =>
+            {
+                Some(
+                    self.handle_compact_call(function, session_context, client)
+                        .await,
+                )
             }
             datafusion::sql::sqlparser::ast::Statement::Insert(insert)
                 if insert.source.is_some() && insert_target_parts(&insert.table).is_some() =>
@@ -195,6 +315,10 @@ impl QueryHook for DuckLakeSqlHook {
         ) {
             return Some(Ok(empty_logical_plan()));
         }
+        if matches!(statement, datafusion::sql::sqlparser::ast::Statement::Call(function) if is_compact_call(function))
+        {
+            return Some(Ok(empty_logical_plan()));
+        }
         if ducklake_statement_parts(statement).is_some() {
             return Some(Ok(empty_logical_plan()));
         }
@@ -242,6 +366,22 @@ impl QueryHook for DuckLakeSqlHook {
                 if table_name_parts(&ct.name).is_some() =>
             {
                 Some(self.handle_create_table(ct, session_context, client).await)
+            }
+            datafusion::sql::sqlparser::ast::Statement::Copy { .. }
+                if copy_statement_parts(statement).is_some() =>
+            {
+                Some(
+                    self.handle_copy_from_stdin(statement, session_context, client)
+                        .await,
+                )
+            }
+            datafusion::sql::sqlparser::ast::Statement::Call(function)
+                if is_compact_call(function) =>
+            {
+                Some(
+                    self.handle_compact_call(function, session_context, client)
+                        .await,
+                )
             }
             datafusion::sql::sqlparser::ast::Statement::Insert(insert)
                 if insert.source.is_some() && insert_target_parts(&insert.table).is_some() =>
@@ -307,16 +447,58 @@ fn empty_logical_plan() -> LogicalPlan {
 
 fn client_transaction_state<C>(client: &C) -> Arc<ClientTransactionState>
 where
-    C: datafusion_postgres::pgwire::api::ClientInfo + Send + Sync + ?Sized,
+    C: ClientInfo + Send + Sync + ?Sized,
 {
     client
         .session_extensions()
         .get_or_insert_with(ClientTransactionState::default)
 }
 
+fn copy_in_session_state<C>(client: &C) -> Arc<CopyInSessionState>
+where
+    C: ClientInfo + Send + Sync + ?Sized,
+{
+    client
+        .session_extensions()
+        .get_or_insert_with(CopyInSessionState::default)
+}
+
+fn configured_ducklake_table_writer(
+    writer: Arc<dyn MetadataWriter>,
+    object_store: Arc<dyn object_store::ObjectStore>,
+) -> PgWireResult<DuckLakeTableWriter> {
+    let mut table_writer = DuckLakeTableWriter::new(writer, object_store)
+        .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+    if let Some(rows) = configured_row_group_rows()? {
+        table_writer = table_writer.with_max_row_group_rows(rows);
+    }
+    Ok(table_writer)
+}
+
+fn configured_row_group_rows() -> PgWireResult<Option<usize>> {
+    match std::env::var(DUCKLAKE_ROW_GROUP_ROWS_ENV) {
+        Ok(value) => {
+            let value = value.trim();
+            if value.is_empty() || value == "0" {
+                return Ok(None);
+            }
+            let rows = value.parse::<usize>().map_err(|err| {
+                user_error(anyhow!(
+                    "{DUCKLAKE_ROW_GROUP_ROWS_ENV} must be a positive integer or 0 to disable: {err}"
+                ))
+            })?;
+            if rows == 0 { Ok(None) } else { Ok(Some(rows)) }
+        }
+        Err(std::env::VarError::NotPresent) => Ok(Some(DEFAULT_DUCKLAKE_ROW_GROUP_ROWS)),
+        Err(err) => Err(user_error(anyhow!(
+            "could not read {DUCKLAKE_ROW_GROUP_ROWS_ENV}: {err}"
+        ))),
+    }
+}
+
 fn next_transaction_id<C>(client: &C) -> String
 where
-    C: datafusion_postgres::pgwire::api::ClientInfo + Send + Sync + ?Sized,
+    C: ClientInfo + Send + Sync + ?Sized,
 {
     let pid = client.pid_and_secret_key().0;
     let counter = TRANSACTION_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -414,9 +596,7 @@ fn returning_query_from_table(
     )
 }
 
-fn ducklake_statement_parts(
-    statement: &datafusion::sql::sqlparser::ast::Statement,
-) -> Option<(String, String)> {
+fn ducklake_statement_parts(statement: &Statement) -> Option<(String, String)> {
     match statement {
         datafusion::sql::sqlparser::ast::Statement::CreateTable(ct) => table_name_parts(&ct.name),
         datafusion::sql::sqlparser::ast::Statement::Insert(insert) if insert.source.is_some() => {
@@ -429,8 +609,97 @@ fn ducklake_statement_parts(
         datafusion::sql::sqlparser::ast::Statement::Update(update) => {
             update_target_parts(&update.table)
         }
+        datafusion::sql::sqlparser::ast::Statement::Copy { .. } => copy_statement_parts(statement),
         _ => None,
     }
+}
+
+fn copy_statement_parts(statement: &Statement) -> Option<(String, String)> {
+    match statement {
+        Statement::Copy {
+            source: CopySource::Table { table_name, .. },
+            to,
+            target,
+            ..
+        } if !*to && matches!(target, CopyTarget::Stdin) => table_name_parts(table_name),
+        _ => None,
+    }
+}
+
+fn is_compact_call(function: &Function) -> bool {
+    object_name_last(&function.name).is_some_and(|name| {
+        name.eq_ignore_ascii_case("quackgis_compact_table")
+            || name.eq_ignore_ascii_case("quackgis_compact")
+    })
+}
+
+fn compact_call_parts(function: &Function) -> PgWireResult<(String, String)> {
+    let FunctionArguments::List(args) = &function.args else {
+        return Err(user_error(anyhow!(
+            "{} requires one table-name argument",
+            function.name
+        )));
+    };
+    if args.args.len() != 1 || !args.clauses.is_empty() || args.duplicate_treatment.is_some() {
+        return Err(user_error(anyhow!(
+            "{} requires exactly one positional table-name argument",
+            function.name
+        )));
+    }
+    let FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) = &args.args[0] else {
+        return Err(user_error(anyhow!(
+            "{} argument must be a table name string or identifier",
+            function.name
+        )));
+    };
+    let table = compact_table_arg_text(expr)?;
+    table_text_parts(&table).ok_or_else(|| user_error(anyhow!("invalid table name: {table}")))
+}
+
+fn compact_table_arg_text(expr: &Expr) -> PgWireResult<String> {
+    match expr {
+        Expr::Value(value) => match &value.value {
+            Value::SingleQuotedString(value)
+            | Value::EscapedStringLiteral(value)
+            | Value::DoubleQuotedString(value) => Ok(value.clone()),
+            other => Err(user_error(anyhow!(
+                "compact table argument must be a string literal or identifier, got {other}"
+            ))),
+        },
+        Expr::Identifier(ident) => Ok(ident.value.clone()),
+        Expr::CompoundIdentifier(idents) => Ok(idents
+            .iter()
+            .map(|ident| ident.value.as_str())
+            .collect::<Vec<_>>()
+            .join(".")),
+        other => Err(user_error(anyhow!(
+            "compact table argument must be a string literal or identifier, got {other}"
+        ))),
+    }
+}
+
+fn table_text_parts(value: &str) -> Option<(String, String)> {
+    let parts = value
+        .split('.')
+        .map(|part| part.trim().trim_matches('"').to_string())
+        .collect::<Vec<_>>();
+    match parts.as_slice() {
+        [catalog, schema, table]
+            if catalog.eq_ignore_ascii_case(DUCKLAKE_CATALOG)
+                && is_ducklake_user_schema(schema) =>
+        {
+            Some(("main".to_string(), table.clone()))
+        }
+        [schema, table] if is_ducklake_user_schema(schema) => {
+            Some(("main".to_string(), table.clone()))
+        }
+        [table] if !table.is_empty() => Some(("main".to_string(), table.clone())),
+        _ => None,
+    }
+}
+
+fn is_ducklake_user_schema(schema: &str) -> bool {
+    schema.eq_ignore_ascii_case("main") || schema.eq_ignore_ascii_case("public")
 }
 
 impl DuckLakeSqlHook {
@@ -503,7 +772,10 @@ impl DuckLakeSqlHook {
         Ok(Response::TransactionEnd(Tag::new("ROLLBACK")))
     }
 
-    async fn client_in_transaction(&self, client: &dyn HookClient) -> bool {
+    async fn client_in_transaction<C>(&self, client: &C) -> bool
+    where
+        C: ClientInfo + Send + Sync + ?Sized,
+    {
         let tx_state = client_transaction_state(client);
         let state = tx_state.inner.lock().await;
         matches!(*state, TransactionState::Active(_))
@@ -520,7 +792,9 @@ impl DuckLakeSqlHook {
                 .writer_session
                 .take()
                 .ok_or_else(|| user_error(anyhow!("transaction table writer already consumed")))?;
-            for batch in &staged.batches {
+            let batches =
+                layout::sort_batches_by_layout(staged.batches.clone()).map_err(user_error)?;
+            for batch in &batches {
                 if let Err(err) = writer.write_batch(batch) {
                     self.cleanup_temp_tables(session_context, &temp_tables)?;
                     return Err(PgWireError::ApiError(Box::new(err)));
@@ -632,8 +906,7 @@ impl DuckLakeSqlHook {
             .set_data_path(&self.paths.data_path)
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(LocalFileSystem::new());
-        let table_writer = DuckLakeTableWriter::new(writer, object_store)
-            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+        let table_writer = configured_ducklake_table_writer(writer, object_store)?;
         table_writer
             .begin_write(schema, table, arrow_schema, WriteMode::Replace)
             .map_err(|e| PgWireError::ApiError(Box::new(e)))
@@ -1040,6 +1313,259 @@ impl DuckLakeSqlHook {
             self.refresh_ducklake_catalog(session_context).await?;
         }
         Ok(Response::Execution(Tag::new("CREATE TABLE")))
+    }
+
+    async fn handle_compact_call(
+        &self,
+        function: &Function,
+        session_context: &SessionContext,
+        client: &dyn HookClient,
+    ) -> PgWireResult<Response> {
+        if self.client_in_transaction(client).await {
+            return Err(user_error(anyhow!(
+                "quackgis_compact_table inside explicit transactions is not supported"
+            )));
+        }
+        let (schema, table) = compact_call_parts(function)?;
+        let rows = self.compact_table(session_context, &schema, &table).await?;
+        Ok(Response::Execution(Tag::new(&format!("COMPACT {rows}"))))
+    }
+
+    async fn compact_table(
+        &self,
+        session_context: &SessionContext,
+        schema: &str,
+        table: &str,
+    ) -> PgWireResult<usize> {
+        let table_ref = ducklake_table_ref(schema, table);
+        let (batches, rows) = collect_normalized_query_batches(
+            session_context,
+            &format!("SELECT * FROM {table_ref}"),
+        )
+        .await?;
+        self.write_batches(schema, table, &batches, WriteDisposition::Replace)
+            .await?;
+        self.refresh_ducklake_catalog(session_context).await?;
+        Ok(rows)
+    }
+
+    async fn handle_copy_from_stdin(
+        &self,
+        statement: &Statement,
+        session_context: &SessionContext,
+        client: &dyn HookClient,
+    ) -> PgWireResult<Response> {
+        let (table_name, columns, options, legacy_options, values) = match statement {
+            Statement::Copy {
+                source:
+                    CopySource::Table {
+                        table_name,
+                        columns,
+                    },
+                to,
+                target,
+                options,
+                legacy_options,
+                values,
+            } if !*to && matches!(target, CopyTarget::Stdin) => {
+                (table_name, columns, options, legacy_options, values)
+            }
+            _ => {
+                return Err(user_error(anyhow!(
+                    "only COPY <table> [(columns)] FROM STDIN is supported"
+                )));
+            }
+        };
+        if !values.is_empty() {
+            return Err(user_error(anyhow!(
+                "COPY FROM inline VALUES is not supported; use COPY FROM STDIN"
+            )));
+        }
+        let (schema, table) = table_name_parts(table_name).expect("guarded by caller");
+        let options = parse_copy_text_options(options, legacy_options)?;
+        let target_schema = self
+            .copy_target_schema(session_context, client, &schema, &table)
+            .await?;
+        let copy_columns = copy_columns_for_request(target_schema.as_ref(), columns)?;
+        let column_count = copy_columns.len();
+
+        let state = copy_in_session_state(client);
+        let mut copy = state.inner.lock().await;
+        if copy.is_some() {
+            return Err(user_error(anyhow!(
+                "another COPY FROM STDIN operation is already active on this connection"
+            )));
+        }
+        *copy = Some(CopyInRequest {
+            schema,
+            table,
+            columns: copy_columns,
+            options,
+            data: Vec::new(),
+        });
+
+        Ok(Response::CopyIn(CopyResponse::new(
+            0,
+            column_count,
+            futures::stream::empty(),
+        )))
+    }
+
+    async fn append_copy_data<C>(&self, client: &C, data: &[u8]) -> PgWireResult<()>
+    where
+        C: ClientInfo + Send + Sync + ?Sized,
+    {
+        let state = copy_in_session_state(client);
+        let mut copy = state.inner.lock().await;
+        let copy = copy
+            .as_mut()
+            .ok_or_else(|| user_error(anyhow!("COPY data received without active COPY")))?;
+        copy.data.extend_from_slice(data);
+        Ok(())
+    }
+
+    async fn finish_copy_in<C>(
+        &self,
+        session_context: &SessionContext,
+        client: &C,
+    ) -> PgWireResult<usize>
+    where
+        C: ClientInfo + Send + Sync + ?Sized,
+    {
+        let state = copy_in_session_state(client);
+        let request = {
+            let mut copy = state.inner.lock().await;
+            copy.take()
+                .ok_or_else(|| user_error(anyhow!("COPY done received without active COPY")))?
+        };
+
+        if self.client_in_transaction(client).await {
+            self.finish_copy_in_transaction(session_context, client, request)
+                .await
+        } else {
+            self.finish_copy_in_autocommit(session_context, request)
+                .await
+        }
+    }
+
+    async fn abort_copy_in<C>(&self, client: &C)
+    where
+        C: ClientInfo + Send + Sync + ?Sized,
+    {
+        if let Some(state) = client.session_extensions().get::<CopyInSessionState>() {
+            let mut copy = state.inner.lock().await;
+            *copy = None;
+        }
+    }
+
+    async fn copy_target_schema<C>(
+        &self,
+        session_context: &SessionContext,
+        client: &C,
+        schema: &str,
+        table: &str,
+    ) -> PgWireResult<SchemaRef>
+    where
+        C: ClientInfo + Send + Sync + ?Sized,
+    {
+        let key = TableKey {
+            schema: schema.to_string(),
+            table: table.to_string(),
+        };
+        let tx_state = client_transaction_state(client);
+        {
+            let state = tx_state.inner.lock().await;
+            if let TransactionState::Active(active) = &*state
+                && let Some(staged) = active.staged_tables.get(&key)
+                && let Some(batch) = staged.batches.first()
+            {
+                return Ok(batch.schema());
+            }
+        }
+        let table_ref = ducklake_table_ref(schema, table);
+        self.table_schema(session_context, &table_ref).await
+    }
+
+    async fn finish_copy_in_autocommit(
+        &self,
+        session_context: &SessionContext,
+        request: CopyInRequest,
+    ) -> PgWireResult<usize> {
+        let schema = request.schema.clone();
+        let table = request.table.clone();
+        let table_ref = ducklake_table_ref(&schema, &table);
+        let target_schema = self.table_schema(session_context, &table_ref).await?;
+        let next_rowid = if schema_has_synthetic_rowid(target_schema.as_ref()) {
+            self.next_synthetic_rowid_from_table(session_context, &table_ref)
+                .await?
+        } else {
+            1
+        };
+        let (batches, rows) = copy_request_to_batches(request, target_schema, next_rowid)?;
+        if rows == 0 {
+            return Ok(0);
+        }
+        self.write_batches(&schema, &table, &batches, WriteDisposition::Append)
+            .await?;
+        self.refresh_ducklake_catalog(session_context).await?;
+        Ok(rows)
+    }
+
+    async fn finish_copy_in_transaction<C>(
+        &self,
+        session_context: &SessionContext,
+        client: &C,
+        request: CopyInRequest,
+    ) -> PgWireResult<usize>
+    where
+        C: ClientInfo + Send + Sync + ?Sized,
+    {
+        let schema = request.schema.clone();
+        let table = request.table.clone();
+        let tx_state = client_transaction_state(client);
+        let mut state = tx_state.inner.lock().await;
+        let TransactionState::Active(active) = &mut *state else {
+            return Err(user_error(anyhow!("transaction state is not active")));
+        };
+        let staged = self
+            .ensure_staged_table(active, session_context, &schema, &table)
+            .await?;
+        let target_schema = staged
+            .batches
+            .first()
+            .map(|batch| batch.schema())
+            .ok_or_else(|| user_error(anyhow!("staged table must have a schema")))?;
+        let next_rowid = if schema_has_synthetic_rowid(target_schema.as_ref()) {
+            next_synthetic_rowid_from_batches(&staged.batches)?
+        } else {
+            1
+        };
+        let (new_batches, rows) = copy_request_to_batches(request, target_schema, next_rowid)?;
+        if rows == 0 {
+            return Ok(0);
+        }
+        let combined =
+            Self::append_staged_batches(&staged.batches, new_batches).map_err(user_error)?;
+        self.replace_staged_batches(session_context, staged, combined)?;
+        Ok(rows)
+    }
+
+    async fn next_synthetic_rowid_from_table(
+        &self,
+        session_context: &SessionContext,
+        table_ref: &str,
+    ) -> PgWireResult<i64> {
+        let rowid = quote_ident(SYNTHETIC_ROWID_COLUMN);
+        let query = format!("SELECT COALESCE(MAX({rowid}), 0) AS max_rowid FROM {table_ref}");
+        let batches = collect_query_batches(session_context, &query).await?;
+        let Some(batch) = batches.first() else {
+            return Ok(1);
+        };
+        if batch.num_rows() == 0 || batch.num_columns() == 0 || batch.column(0).is_null(0) {
+            return Ok(1);
+        }
+        let max_rowid = scalar_i64_at(batch.column(0).as_ref(), 0).map_err(user_error)?;
+        Ok(max_rowid + 1)
     }
 
     async fn handle_insert(
@@ -1507,6 +2033,7 @@ impl DuckLakeSqlHook {
             batches.to_vec()
         };
         let batches = layout::project_batches(batches).map_err(user_error)?;
+        let batches = layout::sort_batches_by_layout(batches).map_err(user_error)?;
         let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         let writer = Arc::new(
             SqliteMetadataWriter::new_with_init(&self.paths.catalog_conn)
@@ -1523,8 +2050,7 @@ impl DuckLakeSqlHook {
             .get_or_create_schema(schema, None, snapshot)
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(LocalFileSystem::new());
-        let table_writer = DuckLakeTableWriter::new(writer, object_store)
-            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+        let table_writer = configured_ducklake_table_writer(writer, object_store)?;
         match disposition {
             WriteDisposition::Replace => table_writer
                 .write_table(schema, table, &batches)
@@ -1575,6 +2101,509 @@ impl DuckLakeSqlHook {
 enum WriteDisposition {
     Replace,
     Append,
+}
+
+fn parse_copy_text_options(
+    options: &[CopyOption],
+    legacy_options: &[CopyLegacyOption],
+) -> PgWireResult<CopyTextOptions> {
+    let mut parsed = CopyTextOptions::default();
+    for option in options {
+        match option {
+            CopyOption::Format(format) if format.value.eq_ignore_ascii_case("text") => {}
+            CopyOption::Format(format) => {
+                return Err(user_error(anyhow!(
+                    "unsupported COPY format {}; only text COPY FROM STDIN is supported",
+                    format.value
+                )));
+            }
+            CopyOption::Delimiter(delimiter) => {
+                parsed.delimiter = copy_delimiter_to_byte(*delimiter)?;
+            }
+            CopyOption::Null(null) => {
+                parsed.null = null.as_bytes().to_vec();
+            }
+            CopyOption::Header(header) => {
+                parsed.header = *header;
+            }
+            CopyOption::Encoding(encoding) if encoding.eq_ignore_ascii_case("utf8") => {}
+            CopyOption::Encoding(encoding) if encoding.eq_ignore_ascii_case("utf-8") => {}
+            other => {
+                return Err(user_error(anyhow!(
+                    "unsupported COPY option for text COPY FROM STDIN: {other}"
+                )));
+            }
+        }
+    }
+    for option in legacy_options {
+        match option {
+            CopyLegacyOption::Delimiter(delimiter) => {
+                parsed.delimiter = copy_delimiter_to_byte(*delimiter)?;
+            }
+            CopyLegacyOption::Null(null) => {
+                parsed.null = null.as_bytes().to_vec();
+            }
+            CopyLegacyOption::Header => {
+                parsed.header = true;
+            }
+            CopyLegacyOption::Csv(_) | CopyLegacyOption::Binary => {
+                return Err(user_error(anyhow!(
+                    "unsupported COPY option {option}; only text COPY FROM STDIN is supported"
+                )));
+            }
+            other => {
+                return Err(user_error(anyhow!(
+                    "unsupported COPY option for text COPY FROM STDIN: {other}"
+                )));
+            }
+        }
+    }
+    Ok(parsed)
+}
+
+fn copy_delimiter_to_byte(delimiter: char) -> PgWireResult<u8> {
+    if delimiter.len_utf8() != 1 {
+        return Err(user_error(anyhow!(
+            "COPY text delimiter must be a single-byte character"
+        )));
+    }
+    Ok(delimiter as u8)
+}
+
+fn copy_columns_for_request(schema: &Schema, columns: &[Ident]) -> PgWireResult<Vec<String>> {
+    if columns.is_empty() {
+        return Ok(schema
+            .fields()
+            .iter()
+            .filter(|field| !is_internal_copy_column(field.name()))
+            .map(|field| field.name().clone())
+            .collect());
+    }
+
+    let mut out: Vec<String> = Vec::with_capacity(columns.len());
+    for ident in columns {
+        let requested = ident.value.clone();
+        if is_internal_copy_column(&requested) {
+            return Err(user_error(anyhow!(
+                "COPY cannot write internal QuackGIS column {requested}"
+            )));
+        }
+        let field = schema
+            .fields()
+            .iter()
+            .find(|field| field.name().eq_ignore_ascii_case(&requested))
+            .ok_or_else(|| user_error(anyhow!("COPY column does not exist: {requested}")))?;
+        if is_internal_copy_column(field.name()) {
+            return Err(user_error(anyhow!(
+                "COPY cannot write internal QuackGIS column {}",
+                field.name()
+            )));
+        }
+        if out
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(field.name()))
+        {
+            return Err(user_error(anyhow!(
+                "COPY column specified more than once: {}",
+                field.name()
+            )));
+        }
+        out.push(field.name().clone());
+    }
+    Ok(out)
+}
+
+fn is_internal_copy_column(name: &str) -> bool {
+    name.eq_ignore_ascii_case(SYNTHETIC_ROWID_COLUMN) || layout::is_layout_column(name)
+}
+
+fn schema_has_synthetic_rowid(schema: &Schema) -> bool {
+    schema
+        .fields()
+        .iter()
+        .any(|field| field.name().eq_ignore_ascii_case(SYNTHETIC_ROWID_COLUMN))
+}
+
+fn next_synthetic_rowid_from_batches(batches: &[RecordBatch]) -> PgWireResult<i64> {
+    let mut max_rowid = 0_i64;
+    for batch in batches {
+        let Some(index) = batch
+            .schema()
+            .fields()
+            .iter()
+            .position(|field| field.name().eq_ignore_ascii_case(SYNTHETIC_ROWID_COLUMN))
+        else {
+            continue;
+        };
+        let column = batch.column(index).as_ref();
+        for row in 0..batch.num_rows() {
+            if !column.is_null(row) {
+                max_rowid = max_rowid.max(scalar_i64_at(column, row).map_err(user_error)?);
+            }
+        }
+    }
+    Ok(max_rowid + 1)
+}
+
+fn copy_request_to_batches(
+    request: CopyInRequest,
+    target_schema: SchemaRef,
+    next_rowid: i64,
+) -> PgWireResult<(Vec<RecordBatch>, usize)> {
+    let rows =
+        parse_copy_text_rows(&request.data, request.options.delimiter).map_err(user_error)?;
+    let rows = materialize_copy_rows(rows, request.options.header);
+    for (idx, row) in rows.iter().enumerate() {
+        if row.len() != request.columns.len() {
+            return Err(user_error(anyhow!(
+                "COPY row {} has {} fields but {} columns were expected",
+                idx + 1,
+                row.len(),
+                request.columns.len()
+            )));
+        }
+    }
+    let row_count = rows.len();
+    if row_count == 0 {
+        return Ok((Vec::new(), 0));
+    }
+
+    let mut source_by_target = vec![None; target_schema.fields().len()];
+    for (source_idx, column) in request.columns.iter().enumerate() {
+        let target_idx = target_schema
+            .fields()
+            .iter()
+            .position(|field| field.name().eq_ignore_ascii_case(column))
+            .ok_or_else(|| user_error(anyhow!("COPY column does not exist: {column}")))?;
+        source_by_target[target_idx] = Some(source_idx);
+    }
+
+    let mut arrays = Vec::with_capacity(target_schema.fields().len());
+    for (target_idx, field) in target_schema.fields().iter().enumerate() {
+        let array = if field.name().eq_ignore_ascii_case(SYNTHETIC_ROWID_COLUMN)
+            && source_by_target[target_idx].is_none()
+        {
+            Arc::new(Int64Array::from(
+                (0..row_count)
+                    .map(|row| Some(next_rowid + row as i64))
+                    .collect::<Vec<_>>(),
+            )) as ArrayRef
+        } else if let Some(source_idx) = source_by_target[target_idx] {
+            copy_source_array(field.as_ref(), &rows, source_idx, &request.options)?
+        } else {
+            new_null_array(field.data_type(), row_count)
+        };
+        arrays.push(array);
+    }
+
+    let batch = RecordBatch::try_new(target_schema, arrays)
+        .map_err(|e| user_error(anyhow!("building COPY RecordBatch: {e}")))?;
+    Ok((vec![batch], row_count))
+}
+
+fn materialize_copy_rows(rows: Vec<Vec<Vec<u8>>>, header: bool) -> Vec<Vec<Vec<u8>>> {
+    let mut out = Vec::with_capacity(rows.len());
+    for (idx, row) in rows.into_iter().enumerate() {
+        if header && idx == 0 {
+            continue;
+        }
+        if row.len() == 1 && row[0] == b"\\." {
+            break;
+        }
+        out.push(row);
+    }
+    out
+}
+
+fn parse_copy_text_rows(data: &[u8], delimiter: u8) -> Result<Vec<Vec<Vec<u8>>>> {
+    let mut rows = Vec::new();
+    let mut row: Vec<Vec<u8>> = Vec::new();
+    let mut field: Vec<u8> = Vec::new();
+    let mut i = 0;
+    while i < data.len() {
+        match data[i] {
+            b if b == delimiter => {
+                row.push(std::mem::take(&mut field));
+            }
+            b'\n' => {
+                row.push(std::mem::take(&mut field));
+                rows.push(std::mem::take(&mut row));
+            }
+            b'\r' => {
+                row.push(std::mem::take(&mut field));
+                rows.push(std::mem::take(&mut row));
+                if data.get(i + 1) == Some(&b'\n') {
+                    i += 1;
+                }
+            }
+            b'\\' => {
+                field.push(b'\\');
+                if let Some(next) = data.get(i + 1) {
+                    i += 1;
+                    field.push(*next);
+                }
+            }
+            b => field.push(b),
+        }
+        i += 1;
+    }
+    if !field.is_empty() || !row.is_empty() {
+        row.push(field);
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+fn copy_source_array(
+    field: &Field,
+    rows: &[Vec<Vec<u8>>],
+    source_idx: usize,
+    options: &CopyTextOptions,
+) -> PgWireResult<ArrayRef> {
+    match field.data_type() {
+        DataType::Int32 => rows
+            .iter()
+            .map(|row| parse_copy_i32(&row[source_idx], options))
+            .collect::<PgWireResult<Vec<_>>>()
+            .map(|values| Arc::new(Int32Array::from(values)) as ArrayRef),
+        DataType::Int64 => rows
+            .iter()
+            .map(|row| parse_copy_i64(&row[source_idx], options))
+            .collect::<PgWireResult<Vec<_>>>()
+            .map(|values| Arc::new(Int64Array::from(values)) as ArrayRef),
+        DataType::Float64 => rows
+            .iter()
+            .map(|row| parse_copy_f64(&row[source_idx], options))
+            .collect::<PgWireResult<Vec<_>>>()
+            .map(|values| Arc::new(Float64Array::from(values)) as ArrayRef),
+        DataType::Boolean => rows
+            .iter()
+            .map(|row| parse_copy_bool(&row[source_idx], options))
+            .collect::<PgWireResult<Vec<_>>>()
+            .map(|values| Arc::new(BooleanArray::from(values)) as ArrayRef),
+        DataType::Utf8 => {
+            let values = rows
+                .iter()
+                .map(|row| parse_copy_string(&row[source_idx], options))
+                .collect::<PgWireResult<Vec<_>>>()?;
+            let refs = values
+                .iter()
+                .map(|value| value.as_deref())
+                .collect::<Vec<_>>();
+            Ok(Arc::new(StringArray::from(refs)) as ArrayRef)
+        }
+        DataType::Binary => {
+            let values = rows
+                .iter()
+                .map(|row| parse_copy_bytea(&row[source_idx], options))
+                .collect::<PgWireResult<Vec<_>>>()?;
+            let refs = values
+                .iter()
+                .map(|value| value.as_deref())
+                .collect::<Vec<_>>();
+            Ok(Arc::new(BinaryArray::from(refs)) as ArrayRef)
+        }
+        other => Err(user_error(anyhow!(
+            "unsupported COPY target column type for {}: {other}",
+            field.name()
+        ))),
+    }
+}
+
+fn parse_copy_i32(raw: &[u8], options: &CopyTextOptions) -> PgWireResult<Option<i32>> {
+    parse_copy_string(raw, options)?
+        .map(|value| {
+            value
+                .parse::<i32>()
+                .map_err(|e| user_error(anyhow!("invalid COPY int4 value {value:?}: {e}")))
+        })
+        .transpose()
+}
+
+fn parse_copy_i64(raw: &[u8], options: &CopyTextOptions) -> PgWireResult<Option<i64>> {
+    parse_copy_string(raw, options)?
+        .map(|value| {
+            value
+                .parse::<i64>()
+                .map_err(|e| user_error(anyhow!("invalid COPY int8 value {value:?}: {e}")))
+        })
+        .transpose()
+}
+
+fn parse_copy_f64(raw: &[u8], options: &CopyTextOptions) -> PgWireResult<Option<f64>> {
+    parse_copy_string(raw, options)?
+        .map(|value| {
+            value
+                .parse::<f64>()
+                .map_err(|e| user_error(anyhow!("invalid COPY float8 value {value:?}: {e}")))
+        })
+        .transpose()
+}
+
+fn parse_copy_bool(raw: &[u8], options: &CopyTextOptions) -> PgWireResult<Option<bool>> {
+    parse_copy_string(raw, options)?
+        .map(|value| match value.to_ascii_lowercase().as_str() {
+            "t" | "true" | "1" | "y" | "yes" | "on" => Ok(true),
+            "f" | "false" | "0" | "n" | "no" | "off" => Ok(false),
+            _ => Err(user_error(anyhow!("invalid COPY boolean value {value:?}"))),
+        })
+        .transpose()
+}
+
+fn parse_copy_string(raw: &[u8], options: &CopyTextOptions) -> PgWireResult<Option<String>> {
+    if raw == options.null.as_slice() {
+        return Ok(None);
+    }
+    let bytes = copy_text_unescape(raw).map_err(user_error)?;
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|e| user_error(anyhow!("invalid UTF-8 in COPY text field: {e}")))
+}
+
+fn parse_copy_bytea(raw: &[u8], options: &CopyTextOptions) -> PgWireResult<Option<Vec<u8>>> {
+    if raw == options.null.as_slice() {
+        return Ok(None);
+    }
+    let text = copy_text_unescape(raw).map_err(user_error)?;
+    parse_bytea_input(&text).map(Some).map_err(user_error)
+}
+
+fn copy_text_unescape(raw: &[u8]) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] != b'\\' {
+            out.push(raw[i]);
+            i += 1;
+            continue;
+        }
+        i += 1;
+        let Some(&escaped) = raw.get(i) else {
+            out.push(b'\\');
+            break;
+        };
+        match escaped {
+            b'b' => out.push(0x08),
+            b'f' => out.push(0x0c),
+            b'n' => out.push(b'\n'),
+            b'r' => out.push(b'\r'),
+            b't' => out.push(b'\t'),
+            b'v' => out.push(0x0b),
+            b'0'..=b'7' => {
+                let mut value = (escaped - b'0') as u32;
+                let mut digits = 1;
+                while digits < 3 {
+                    let Some(&next) = raw.get(i + 1) else {
+                        break;
+                    };
+                    if !(b'0'..=b'7').contains(&next) {
+                        break;
+                    }
+                    i += 1;
+                    digits += 1;
+                    value = value * 8 + (next - b'0') as u32;
+                }
+                if value > u8::MAX as u32 {
+                    return Err(anyhow!("COPY octal escape is out of byte range"));
+                }
+                out.push(value as u8);
+            }
+            b'x' => {
+                let Some(&hi) = raw.get(i + 1) else {
+                    out.push(b'x');
+                    i += 1;
+                    continue;
+                };
+                let Some(&lo) = raw.get(i + 2) else {
+                    out.push(b'x');
+                    i += 1;
+                    continue;
+                };
+                if let (Some(hi), Some(lo)) = (hex_value(hi), hex_value(lo)) {
+                    out.push((hi << 4) | lo);
+                    i += 2;
+                } else {
+                    out.push(b'x');
+                }
+            }
+            other => out.push(other),
+        }
+        i += 1;
+    }
+    Ok(out)
+}
+
+fn parse_bytea_input(text: &[u8]) -> Result<Vec<u8>> {
+    if text.starts_with(b"\\x") {
+        let hex = &text[2..];
+        if !hex.len().is_multiple_of(2) {
+            return Err(anyhow!("invalid bytea hex input length"));
+        }
+        let mut out = Vec::with_capacity(hex.len() / 2);
+        for pair in hex.chunks_exact(2) {
+            let hi = hex_value(pair[0]).ok_or_else(|| anyhow!("invalid bytea hex digit"))?;
+            let lo = hex_value(pair[1]).ok_or_else(|| anyhow!("invalid bytea hex digit"))?;
+            out.push((hi << 4) | lo);
+        }
+        return Ok(out);
+    }
+
+    let mut out = Vec::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        if text[i] != b'\\' {
+            out.push(text[i]);
+            i += 1;
+            continue;
+        }
+        if text.get(i + 1) == Some(&b'\\') {
+            out.push(b'\\');
+            i += 2;
+            continue;
+        }
+        if i + 3 < text.len()
+            && (b'0'..=b'7').contains(&text[i + 1])
+            && (b'0'..=b'7').contains(&text[i + 2])
+            && (b'0'..=b'7').contains(&text[i + 3])
+        {
+            let value = ((text[i + 1] - b'0') as u32) * 64
+                + ((text[i + 2] - b'0') as u32) * 8
+                + (text[i + 3] - b'0') as u32;
+            if value > u8::MAX as u32 {
+                return Err(anyhow!("bytea octal escape is out of byte range"));
+            }
+            out.push(value as u8);
+            i += 4;
+            continue;
+        }
+        return Err(anyhow!("invalid bytea escape sequence"));
+    }
+    Ok(out)
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn scalar_i64_at(array: &dyn Array, row: usize) -> Result<i64> {
+    if let Some(values) = array.as_any().downcast_ref::<Int64Array>() {
+        return Ok(values.value(row));
+    }
+    if let Some(values) = array.as_any().downcast_ref::<Int32Array>() {
+        return Ok(values.value(row) as i64);
+    }
+    if let Some(values) = array.as_any().downcast_ref::<UInt64Array>() {
+        return i64::try_from(values.value(row)).map_err(|e| anyhow!("row id is too large: {e}"));
+    }
+    Err(anyhow!(
+        "expected integer row id column, got {}",
+        array.data_type()
+    ))
 }
 
 fn normalize_batches_for_ducklake(batches: Vec<RecordBatch>) -> Result<Vec<RecordBatch>> {

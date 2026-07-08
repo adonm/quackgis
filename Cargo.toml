@@ -36,6 +36,8 @@ datafusion-postgres = { git = "https://github.com/adonm/datafusion-postgres", br
 datafusion = "54"
 datafusion-expr-common = "54"
 datafusion-functions-aggregate-common = "54"
+arrow-ord = "58"
+arrow-select = "58"
 
 # Spatial engine — use SedonaDB subcrates directly instead of the umbrella
 # `sedona` crate so QuackGIS does not compile unused GEOS/GDAL/raster/catalog

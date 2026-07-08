@@ -13,15 +13,134 @@ different sizes.
 just layoutbench-sf0
 ```
 
+For local, pgwire-level smoke/benchmark runs against an already-running server:
+
+```sh
+just server
+just layoutbench-local sf0 3 generated insert
+just layoutbench-local sf1 5 generated copy
+just layoutbench-local sf1 3 shuffled insert true   # before/after compaction
+just layoutbench-local-smoke
+```
+
+The local runner can vary ingest order (`generated`, `shuffled`, `layout`), load
+method (`insert`, `copy`), transaction grouping, and query variants. It seeds
+`public.layoutbench_local_*` tables, prints row counts,
+`total/base/candidate/exact` pruning metrics, repeated-query timings, and
+`EXPLAIN ANALYZE` scan metrics (`bytes_scanned`, row-group/file-range pruning,
+Parquet pushdown rows, and whether the hidden `_qg_*` predicate reached the
+physical plan). The smoke recipe starts a temporary server and runs the sf0
+runner once.
+
+### Current `sf1` iteration notes (2026-07-08)
+
+Current local `sf1` is deliberately moderate (`factor=100`: 10,800 aerial rows,
+9,600 CAD rows, 2,400 asset rows) so developer laptops can iterate quickly. It
+is not the future million-row nightly scale; it is a fast lever-finding loop.
+
+Run shape:
+
+```sh
+# Fresh temp catalog per case; default row-group cap is 512 rows.
+cargo run -p quackgis-server --example layoutbench -- \
+  --scale sf1 --query-iters 3 --load-method copy \
+  --ingest-order generated --compare-variants
+```
+
+Key measurements from `.tmp/layoutbench-sf1/current`:
+
+| Case | Seed time | Aerial avg | CAD avg | Assets avg | Row-group pruning |
+|---|---:|---:|---:|---:|---|
+| `insert`, generated, autocommit | 16.05 s | 62.0 ms | 60.4 ms | 37.7 ms | good: 22/1, 20/1, 5/1 |
+| `insert`, shuffled, autocommit | 16.02 s | 89.9 ms | 88.0 ms | 43.7 ms | poor: 22/18, 20/19, 5/5 |
+| `insert`, generated, transaction | 13.99 s | 37.8 ms | 33.9 ms | 31.7 ms | good, one file/range per table |
+| `insert`, shuffled, transaction | 14.10 s | 38.7 ms | 33.8 ms | 30.6 ms | good, shuffled order neutralized |
+| `copy`, generated, autocommit | 0.90 s | 35.4 ms | 33.1 ms | 31.5 ms | good: 22/1, 19/1, 5/1 |
+| `copy`, shuffled, autocommit | 0.91 s | 38.5 ms | 35.3 ms | 32.1 ms | good, shuffled order neutralized |
+| `copy`, generated, transaction | 0.88 s | 35.6 ms | 34.4 ms | 30.4 ms | good, one file/range per table |
+| `insert`, shuffled, compacted | +0.52 s compact | 33.4 ms | 32.8 ms | 29.5 ms | repaired: 22/1, 19/1, 5/1; one file/range |
+
+Interpretation:
+
+1. **Load protocol dominates ingest.** COPY is about 18× faster than batched
+   INSERT VALUES at this scale (≈0.9 s vs ≈16 s). OGR/GDAL `PG_USE_COPY=YES` is
+   therefore a core architecture path, not an optional optimization.
+2. **Write grouping dominates scan stability.** Autocommit INSERT writes many
+   small append snapshots/files; transaction grouping or COPY produces one or two
+   files/ranges per table and faster query times.
+3. **Sort granularity matters.** Sorting each small INSERT batch helps only when
+   client order is already layout-local. Shuffled autocommit INSERT destroys
+   row-group locality because each append is sorted in isolation. Bulk COPY or
+   transaction-staged writes sort the whole table/table delta and make client row
+   order mostly irrelevant.
+4. **Current pruning is row-group driven.** File/range pruning is not selective in
+   these runs (`files_ranges` usually all matched). DuckLake/DataFusion row-group
+   stats are the effective skip surface today; future compaction/file-level layout
+   work should target file/range pruning.
+5. **Exact predicates remain cheap enough after bbox pruning.** The `bbox_only`
+   variants are slightly faster, but `bbox_exact` preserves correctness with
+   modest overhead. Hidden bbox predicates are essential for CAD/assets: CAD
+   `internal_exact` scanned every row group (`19/19`) and ~996 bytes vs bbox+exact
+   scanning one row group and ~74 bytes.
+
+Row-group sweep using COPY/generated:
+
+| `QUACKGIS_DUCKLAKE_ROW_GROUP_ROWS` | Aerial avg / groups | CAD avg / groups | Assets avg / groups | Notes |
+|---:|---|---|---|---|
+| 128 | 47.7 ms / 85→1 | 45.6 ms / 75→1 | 32.7 ms / 19→1 | too many row groups; metadata overhead dominates |
+| 256 | 41.3 ms / 43→1 | 42.2 ms / 38→1 | 34.9 ms / 10→1 | better, still more overhead than 512 |
+| 512 (default) | 35.8 ms / 22→1 | 37.5 ms / 19→1 | 31.9 ms / 5→1 | best current local balance |
+| 1024 | 36.4 ms / 11→1 | 35.7 ms / 10→1 | 34.2 ms / 3→1 | close to 512; scans more bytes |
+| 2048 | 33.3 ms / 6→1 | 35.4 ms / 5→1 | 34.7 ms / 2→1 | fewer groups, weaker fine pruning |
+| disabled (`0`) | 42.7 ms / 1→1 | 53.0 ms / 1→1 | 35.1 ms / 1→1 | no row-group pruning; poor CAD shape |
+
+Architecture decisions from this pass:
+
+- Keep the default local row-group cap at 512 rows until larger/nightly data says
+  otherwise. It gives stable pruning without excessive row-group overhead.
+- Prefer COPY for bulk ingest and document INSERT VALUES as a compatibility path.
+- Keep sorting by hidden layout keys in the DuckLake write path, but treat it as a
+  bulk-write/compaction primitive: it must run over whole COPY batches,
+  transaction-staged table deltas, or compaction units, not just isolated small
+  appends.
+- Add bucket/file compaction as the next architectural lever: rewrite many
+  autocommit append files into sorted bucket-local files and verify unchanged
+  exact results plus fewer matched file ranges.
+
+The first implemented compaction surface is explicit and table-scoped:
+
+```sql
+CALL quackgis_compact_table('public.layoutbench_local_aerial_frames');
+```
+
+It reads the DuckLake table, recomputes/projects hidden layout columns, sorts by
+the layout key, and rewrites one replacement snapshot. On the shuffled INSERT sf1
+case it took about 0.52 s for all three benchmark tables and repaired the bad
+layout:
+
+| Label | Before compact | After compact |
+|---|---|---|
+| aerial | 88.3 ms, row groups 22/18/4, files 23/23/0 | 33.4 ms, row groups 22/1/21, files 1/1/0 |
+| CAD | 84.2 ms, row groups 20/19/1, files 21/21/0 | 32.8 ms, row groups 19/1/18, files 1/1/0 |
+| assets | 45.0 ms, row groups 5/5/0, files 6/6/0 | 29.5 ms, row groups 5/1/4, files 1/1/0 |
+
+This validates the compaction lever. The current implementation rewrites the
+whole table; the production direction is bucket-local compaction using the same
+projection/sort/write primitive.
+
 Current pinned `sf0` counts:
 
 ```text
 layoutbench_sf0 aerial=18 cad=12 assets=18 control=7
+layoutbench_sf0_pruning aerial=108/30/18/18 cad=96/24/12/12 assets=24/20/18/18 false_positive=3/3/2/1
 ```
 
 The test creates the planned table families, verifies `_qg_*` layout projection,
-and checks bbox-prefiltered query shapes return the same counts as exact SedonaDB
-predicates. Larger scales remain planned generator/benchmark work.
+checks bbox-prefiltered query shapes return the same counts as exact SedonaDB
+predicates, and pins the `total/base/candidate/exact` row counts for the current
+sf0 pruning windows. The false-positive case proves bbox pruning can over-select
+while exact SedonaDB evaluation still returns the correct result. Larger scales
+remain planned generator/benchmark work.
 
 | Scale | Purpose |
 |---|---|

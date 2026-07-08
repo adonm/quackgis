@@ -38,31 +38,45 @@ pub(super) async fn rewrite_spatial_pruning_query(
     statement: &Statement,
     session_context: &SessionContext,
 ) -> Option<String> {
-    if !matches!(statement, Statement::Query(_)) {
+    if !is_rewritable_statement(statement) {
         return None;
     }
 
     let sql = statement.to_string();
     let sql_lower = sql.to_ascii_lowercase();
-    if sql_lower.contains("_qg_")
-        || sql_lower.contains(" join ")
-        || sql_lower.contains(" union ")
-        || !sql_lower.contains(" where ")
+    if sql_lower.contains("_qg_") || sql_lower.contains(" union ") || !sql_lower.contains(" where ")
     {
         return None;
     }
 
     let envelope = extract_envelope(&sql)?;
-    let target = rewrite_target(&sql)?;
-    let table_schema = ducklake_table_schema(session_context, &target.table).await?;
-    if !has_layout_columns(table_schema.as_ref())
-        || !mentions_spatial_predicate(&sql, table_schema.as_ref())
-    {
-        return None;
-    }
+    for target in rewrite_targets(&sql) {
+        if projection_has_wildcard_for_target(&sql, &target)
+            || target_has_same_level_join(&sql, &target)
+        {
+            continue;
+        }
+        let table_schema = ducklake_table_schema(session_context, &target.table).await?;
+        if !has_layout_columns(table_schema.as_ref())
+            || !mentions_spatial_predicate(&sql, table_schema.as_ref())
+        {
+            continue;
+        }
 
-    let bbox_predicate = bbox_predicate(envelope, target.qualifier.as_deref());
-    inject_bbox_predicate(&sql, &target, &bbox_predicate)
+        let bbox_predicate = bbox_predicate(envelope, target.qualifier.as_deref());
+        if let Some(rewritten) = inject_bbox_predicate(&sql, &target, &bbox_predicate) {
+            return Some(rewritten);
+        }
+    }
+    None
+}
+
+fn is_rewritable_statement(statement: &Statement) -> bool {
+    match statement {
+        Statement::Query(_) => true,
+        Statement::Explain { statement, .. } => matches!(statement.as_ref(), Statement::Query(_)),
+        _ => false,
+    }
 }
 
 async fn ducklake_table_schema(
@@ -112,7 +126,7 @@ fn mentions_column(sql_lower: &str, column: &str) -> bool {
         .is_match(sql_lower)
 }
 
-fn rewrite_target(sql: &str) -> Option<RewriteTarget> {
+fn rewrite_targets(sql: &str) -> Vec<RewriteTarget> {
     static FROM_RE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(
             r#"(?is)\bfrom\s+(?P<table>(?:"[^"]+"|[a-z_][\w$]*)(?:\s*\.\s*(?:"[^"]+"|[a-z_][\w$]*)){0,2})"#,
@@ -120,16 +134,24 @@ fn rewrite_target(sql: &str) -> Option<RewriteTarget> {
         .expect("valid FROM regex")
     });
 
-    let captures = FROM_RE.captures(sql)?;
-    let table_match = captures.name("table")?;
-    let table_parts = object_parts(table_match.as_str());
-    let table = ducklake_table_name(&table_parts)?;
-    let qualifier = alias_after_table(&sql[table_match.end()..]).map(quote_ident_or_passthrough);
-    Some(RewriteTarget {
-        table,
-        table_span: table_match.start()..table_match.end(),
-        qualifier,
-    })
+    FROM_RE
+        .captures_iter(sql)
+        .filter_map(|captures| {
+            let table_match = captures.name("table")?;
+            if !is_code_at(sql, table_match.start()) {
+                return None;
+            }
+            let table_parts = object_parts(table_match.as_str());
+            let table = ducklake_table_name(&table_parts)?;
+            let qualifier =
+                alias_after_table(&sql[table_match.end()..]).map(quote_ident_or_passthrough);
+            Some(RewriteTarget {
+                table,
+                table_span: table_match.start()..table_match.end(),
+                qualifier,
+            })
+        })
+        .collect()
 }
 
 fn object_parts(table_ref: &str) -> Vec<String> {
@@ -191,6 +213,225 @@ fn quote_ident_or_passthrough(alias: &str) -> String {
     } else {
         quote_ident(alias)
     }
+}
+
+fn projection_has_wildcard_for_target(sql: &str, target: &RewriteTarget) -> bool {
+    let depth = depth_at(sql, target.table_span.start);
+    let Some(select_start) =
+        last_keyword_at_depth_before(sql, "select", target.table_span.start, depth)
+    else {
+        return false;
+    };
+    let Some(from_start) = find_keyword_at_depth(sql, "from", select_start + "select".len(), depth)
+    else {
+        return false;
+    };
+    span_has_wildcard_at_depth(sql, select_start + "select".len(), from_start, depth)
+}
+
+#[cfg(test)]
+fn projection_has_top_level_wildcard(sql: &str) -> bool {
+    let Some(select_start) = find_keyword_at_depth(sql, "select", 0, 0) else {
+        return false;
+    };
+    let Some(from_start) = find_keyword_at_depth(sql, "from", select_start + "select".len(), 0)
+    else {
+        return false;
+    };
+    span_has_wildcard_at_depth(sql, select_start + "select".len(), from_start, 0)
+}
+
+fn span_has_wildcard_at_depth(sql: &str, start: usize, end: usize, target_depth: i32) -> bool {
+    let bytes = sql.as_bytes();
+    let mut state = ScanState::default();
+    let mut i = 0;
+    while i < end.min(bytes.len()) {
+        if i >= start && state.is_code() && state.depth == target_depth && bytes[i] == b'*' {
+            return true;
+        }
+        i = state.advance(bytes, i);
+    }
+    false
+}
+
+fn target_has_same_level_join(sql: &str, target: &RewriteTarget) -> bool {
+    let depth = depth_at(sql, target.table_span.start);
+    let start = target.table_span.end;
+    let end = where_start_after_target(sql, target, depth)
+        .or_else(|| statement_segment_end(sql, start, depth))
+        .unwrap_or(sql.len());
+    ["join", "left", "right", "inner", "outer", "cross", "full"]
+        .into_iter()
+        .any(|keyword| {
+            find_keyword_at_depth(sql, keyword, start, depth).is_some_and(|idx| idx < end)
+        })
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct ScanState {
+    depth: i32,
+    in_single_quote: bool,
+    in_double_quote: bool,
+    in_line_comment: bool,
+    in_block_comment: bool,
+}
+
+impl ScanState {
+    fn is_code(self) -> bool {
+        !self.in_single_quote
+            && !self.in_double_quote
+            && !self.in_line_comment
+            && !self.in_block_comment
+    }
+
+    fn advance(&mut self, bytes: &[u8], i: usize) -> usize {
+        if i >= bytes.len() {
+            return i + 1;
+        }
+        if self.in_line_comment {
+            if bytes[i] == b'\n' {
+                self.in_line_comment = false;
+            }
+            return i + 1;
+        }
+        if self.in_block_comment {
+            if bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/') {
+                self.in_block_comment = false;
+                return i + 2;
+            }
+            return i + 1;
+        }
+        if self.in_single_quote {
+            if bytes[i] == b'\'' {
+                if bytes.get(i + 1) == Some(&b'\'') {
+                    return i + 2;
+                }
+                self.in_single_quote = false;
+            }
+            return i + 1;
+        }
+        if self.in_double_quote {
+            if bytes[i] == b'"' {
+                if bytes.get(i + 1) == Some(&b'"') {
+                    return i + 2;
+                }
+                self.in_double_quote = false;
+            }
+            return i + 1;
+        }
+
+        match bytes[i] {
+            b'-' if bytes.get(i + 1) == Some(&b'-') => {
+                self.in_line_comment = true;
+                i + 2
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                self.in_block_comment = true;
+                i + 2
+            }
+            b'\'' => {
+                self.in_single_quote = true;
+                i + 1
+            }
+            b'"' => {
+                self.in_double_quote = true;
+                i + 1
+            }
+            b'(' => {
+                self.depth += 1;
+                i + 1
+            }
+            b')' => {
+                self.depth = (self.depth - 1).max(0);
+                i + 1
+            }
+            _ => i + 1,
+        }
+    }
+}
+
+fn depth_at(sql: &str, idx: usize) -> i32 {
+    let bytes = sql.as_bytes();
+    let mut state = ScanState::default();
+    let mut i = 0;
+    while i < idx.min(bytes.len()) {
+        i = state.advance(bytes, i);
+    }
+    state.depth
+}
+
+fn is_code_at(sql: &str, idx: usize) -> bool {
+    let bytes = sql.as_bytes();
+    let mut state = ScanState::default();
+    let mut i = 0;
+    while i < idx.min(bytes.len()) {
+        i = state.advance(bytes, i);
+    }
+    state.is_code()
+}
+
+fn find_keyword_at_depth(
+    sql: &str,
+    keyword: &str,
+    start: usize,
+    target_depth: i32,
+) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let keyword = keyword.as_bytes();
+    let mut state = ScanState::default();
+    let mut i = 0;
+    while i + keyword.len() <= bytes.len() {
+        if i >= start
+            && state.is_code()
+            && state.depth == target_depth
+            && bytes[i..].starts_with(keyword)
+            && is_keyword_boundary(bytes.get(i.wrapping_sub(1)).copied())
+            && is_keyword_boundary(bytes.get(i + keyword.len()).copied())
+        {
+            return Some(i);
+        }
+        i = state.advance(bytes, i);
+    }
+    None
+}
+
+fn last_keyword_at_depth_before(
+    sql: &str,
+    keyword: &str,
+    before: usize,
+    target_depth: i32,
+) -> Option<usize> {
+    let mut last = None;
+    let mut start = 0;
+    while let Some(idx) = find_keyword_at_depth(sql, keyword, start, target_depth) {
+        if idx >= before {
+            break;
+        }
+        last = Some(idx);
+        start = idx + keyword.len();
+    }
+    last
+}
+
+fn is_keyword_boundary(ch: Option<u8>) -> bool {
+    ch.is_none_or(|ch| !ch.is_ascii_alphanumeric() && ch != b'_')
+}
+
+fn statement_segment_end(sql: &str, start: usize, target_depth: i32) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut state = ScanState::default();
+    let mut i = 0;
+    while i < bytes.len() {
+        if i >= start && state.is_code() && state.depth < target_depth {
+            return Some(i);
+        }
+        if i >= start && state.is_code() && state.depth == target_depth && bytes[i] == b')' {
+            return Some(i);
+        }
+        i = state.advance(bytes, i);
+    }
+    None
 }
 
 fn extract_envelope(sql: &str) -> Option<Envelope> {
@@ -298,19 +539,10 @@ fn inject_bbox_predicate(
     target: &RewriteTarget,
     bbox_predicate: &str,
 ) -> Option<String> {
-    static WHERE_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r#"(?is)\bwhere\b"#).expect("valid WHERE regex"));
-    static CLAUSE_END_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r#"(?is)\b(group\s+by|order\s+by|having|limit|offset|fetch)\b"#)
-            .expect("valid clause-end regex")
-    });
-
-    let where_match = WHERE_RE.find(sql)?;
-    let after_where = where_match.end();
-    let suffix_start = CLAUSE_END_RE
-        .find(&sql[after_where..])
-        .map(|m| after_where + m.start())
-        .unwrap_or(sql.len());
+    let depth = depth_at(sql, target.table_span.start);
+    let where_start = where_start_after_target(sql, target, depth)?;
+    let after_where = where_start + "where".len();
+    let suffix_start = predicate_end(sql, after_where, depth);
     let existing_predicate = sql[after_where..suffix_start].trim();
     if existing_predicate.is_empty() {
         return None;
@@ -342,6 +574,22 @@ fn inject_bbox_predicate(
     Some(rewritten)
 }
 
+fn where_start_after_target(sql: &str, target: &RewriteTarget, depth: i32) -> Option<usize> {
+    let segment_end = statement_segment_end(sql, target.table_span.end, depth).unwrap_or(sql.len());
+    find_keyword_at_depth(sql, "where", target.table_span.end, depth)
+        .filter(|idx| *idx < segment_end)
+}
+
+fn predicate_end(sql: &str, predicate_start: usize, depth: i32) -> usize {
+    let clause_keywords = ["group", "order", "having", "limit", "offset", "fetch"];
+    clause_keywords
+        .into_iter()
+        .filter_map(|keyword| find_keyword_at_depth(sql, keyword, predicate_start, depth))
+        .chain(statement_segment_end(sql, predicate_start, depth))
+        .min()
+        .unwrap_or(sql.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,7 +599,7 @@ mod tests {
         let sql = "SELECT COUNT(*) FROM public.frames WHERE mission = 'a' AND \
                    ST_Intersects(ST_GeomFromWKB(geom), \
                    ST_GeomFromWKB(ST_MakeEnvelope(1, 2, 3, 4, 3857)))";
-        let target = rewrite_target(sql).expect("target");
+        let target = rewrite_targets(sql).pop().expect("target");
         let envelope = extract_envelope(sql).expect("envelope");
         let rewritten =
             inject_bbox_predicate(sql, &target, &bbox_predicate(envelope, None)).expect("rewrite");
@@ -369,5 +617,51 @@ mod tests {
         assert_eq!(envelope.maxx, WEB_MERCATOR_WORLD);
         assert_eq!(envelope.miny, -WEB_MERCATOR_WORLD);
         assert_eq!(envelope.maxy, WEB_MERCATOR_WORLD);
+    }
+
+    #[test]
+    fn wildcard_projection_is_not_rewritten() {
+        assert!(projection_has_top_level_wildcard(
+            "SELECT f.* FROM frames AS f WHERE ST_Intersects(geom, ST_MakeEnvelope(1,2,3,4,3857))"
+        ));
+        assert!(!projection_has_top_level_wildcard(
+            "SELECT COUNT(*) FROM frames WHERE ST_Intersects(geom, ST_MakeEnvelope(1,2,3,4,3857))"
+        ));
+    }
+
+    #[test]
+    fn injects_inside_derived_query_at_matching_depth() {
+        let sql = "SELECT COUNT(*) FROM (SELECT id FROM public.frames AS f \
+                   WHERE f.geom && ST_TileEnvelope(0, 0, 0) ORDER BY id) AS q";
+        let target = rewrite_targets(sql).pop().expect("target");
+        let envelope = extract_envelope(sql).expect("envelope");
+        let rewritten = inject_bbox_predicate(
+            sql,
+            &target,
+            &bbox_predicate(envelope, target.qualifier.as_deref()),
+        )
+        .expect("rewrite");
+        assert!(rewritten.contains("FROM quackgis.\"main\".\"frames\" AS f"));
+        assert!(rewritten.contains("\"f\".\"_qg_minx\""));
+        assert!(rewritten.contains(" ORDER BY id"));
+    }
+
+    #[test]
+    fn scanner_ignores_comments_and_string_literals() {
+        let sql = "SELECT COUNT('* from nope') FROM public.frames -- FROM ignored\n\
+                   WHERE geom && ST_TileEnvelope(0, 0, 0) /* WHERE ignored */";
+        let targets = rewrite_targets(sql);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].table, "frames");
+        assert!(!projection_has_top_level_wildcard(sql));
+    }
+
+    #[test]
+    fn join_detection_stops_before_where_predicate() {
+        let sql = "SELECT COUNT(*) FROM public.frames \
+                   WHERE left(label, 1) = 'a' \
+                   AND geom && ST_TileEnvelope(0, 0, 0)";
+        let target = rewrite_targets(sql).pop().expect("target");
+        assert!(!target_has_same_level_join(sql, &target));
     }
 }

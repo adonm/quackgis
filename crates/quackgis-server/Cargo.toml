@@ -27,6 +27,8 @@ datafusion-postgres = { workspace = true }
 datafusion = { workspace = true }
 datafusion-expr-common = { workspace = true }
 datafusion-functions-aggregate-common = { workspace = true }
+arrow-ord = { workspace = true }
+arrow-select = { workspace = true }
 sedona-functions = { workspace = true }
 sedona-geo = { workspace = true }
 sedona-proj = { workspace = true }

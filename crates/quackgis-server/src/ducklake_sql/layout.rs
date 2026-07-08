@@ -7,6 +7,9 @@
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
+use arrow_ord::sort::{SortColumn, SortOptions, lexsort_to_indices};
+use arrow_select::concat::concat_batches;
+use arrow_select::take::take_record_batch;
 use datafusion::arrow::array::{
     Array, ArrayRef, BinaryArray, BinaryViewArray, Float64Array, Int32Array, Int64Array,
     new_null_array,
@@ -111,6 +114,64 @@ pub(super) fn ensure_columns_for_spatial_batches(
 
 pub(super) fn project_batches(batches: Vec<RecordBatch>) -> Result<Vec<RecordBatch>> {
     batches.into_iter().map(project_batch).collect()
+}
+
+pub(super) fn sort_batches_by_layout(batches: Vec<RecordBatch>) -> Result<Vec<RecordBatch>> {
+    let Some(schema) = batches.first().map(|batch| batch.schema()) else {
+        return Ok(batches);
+    };
+    let total_rows = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+    if total_rows <= 1 {
+        return Ok(batches);
+    }
+    let Some(sort_indices) = layout_sort_indices(schema.as_ref()) else {
+        return Ok(batches);
+    };
+
+    let batch_sizes = batches
+        .iter()
+        .filter_map(|batch| (batch.num_rows() > 0).then_some(batch.num_rows()))
+        .collect::<Vec<_>>();
+    if batch_sizes.is_empty() {
+        return Ok(batches);
+    }
+
+    let combined = concat_batches(&schema, batches.iter())
+        .map_err(|e| anyhow!("concatenating batches for layout sort: {e}"))?;
+    let sort_columns = sort_indices
+        .into_iter()
+        .map(|index| SortColumn {
+            values: Arc::clone(combined.column(index)),
+            options: Some(SortOptions {
+                descending: false,
+                nulls_first: false,
+            }),
+        })
+        .collect::<Vec<_>>();
+    let indices = lexsort_to_indices(&sort_columns, None)
+        .map_err(|e| anyhow!("building layout sort indices: {e}"))?;
+    let sorted = take_record_batch(&combined, &indices)
+        .map_err(|e| anyhow!("reordering rows by DuckLake layout columns: {e}"))?;
+
+    let mut offset = 0;
+    let mut out = Vec::with_capacity(batch_sizes.len());
+    for len in batch_sizes {
+        out.push(sorted.slice(offset, len));
+        offset += len;
+    }
+    Ok(out)
+}
+
+fn layout_sort_indices(schema: &Schema) -> Option<Vec<usize>> {
+    let mut indices = Vec::new();
+    for name in [TIME_BUCKET, SPACE_BUCKET, SPACE_SORT] {
+        let index = schema
+            .fields()
+            .iter()
+            .position(|field| field.name().eq_ignore_ascii_case(name))?;
+        indices.push(index);
+    }
+    Some(indices)
 }
 
 fn missing_layout_fields(schema: &Schema) -> Vec<Field> {

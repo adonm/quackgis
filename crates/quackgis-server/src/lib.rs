@@ -9,6 +9,7 @@ pub mod context;
 pub mod catalog_compat;
 pub mod ducklake_sql;
 pub mod geometry_columns;
+pub mod pgwire_server;
 pub mod postgis_compat;
 pub mod public_schema;
 

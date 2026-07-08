@@ -214,6 +214,32 @@ test-fast:
 layoutbench-sf0:
     cargo test -p quackgis-server --test layoutbench_sf0 -- --nocapture
 
+# Seed and run LayoutBench against an already-running local server.
+layoutbench-local scale="sf0" query_iters="3" ingest_order="generated" load_method="insert" compact="false":
+    @extra=""; \
+    if [ "{{compact}}" = "true" ]; then extra="--compact-and-rerun"; fi; \
+    cargo run -p quackgis-server --example layoutbench -- --host {{host}} --port {{port}} --scale {{scale}} --query-iters {{query_iters}} --ingest-order {{ingest_order}} --load-method {{load_method}} $extra
+
+# CI/local smoke for the LayoutBench runner: start a temporary server, run sf0, and exit.
+layoutbench-local-smoke:
+    @set -eu; \
+    rm -rf .tmp/layoutbench-smoke; \
+    mkdir -p .tmp/layoutbench-smoke/data; \
+    log=.tmp/layoutbench-smoke/quackgis-server.log; \
+    bench_log=.tmp/layoutbench-smoke/layoutbench.log; \
+    QUACKGIS_CATALOG_PATH=.tmp/layoutbench-smoke/quackgis.db QUACKGIS_DATA_PATH=.tmp/layoutbench-smoke/data cargo run -p quackgis-server -- --host {{smoke_host}} --port {{smoke_port}} > "$log" 2>&1 & \
+    server_pid=$!; \
+    trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT INT TERM; \
+    python3 scripts/wait_for_tcp.py {{smoke_host}} {{smoke_port}} "$server_pid" "$log"; \
+    if ! cargo run -p quackgis-server --example layoutbench -- --host {{smoke_host}} --port {{smoke_port}} --scale sf0 --query-iters 1 > "$bench_log" 2>&1; then \
+        python3 -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace"), end="")' "$bench_log"; \
+        exit 1; \
+    fi; \
+    python3 -c 'import pathlib, sys; text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace"); print(text, end=""); sys.exit(0 if "layoutbench_query label=aerial" in text and "layoutbench_pruning label=aerial" in text and "layoutbench_scan label=aerial" in text else 1)' "$bench_log"; \
+    kill "$server_pid" 2>/dev/null || true; \
+    wait "$server_pid" 2>/dev/null || true; \
+    trap - EXIT INT TERM
+
 # Run nextest when installed by mise.
 nextest:
     cargo nextest run --workspace
