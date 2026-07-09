@@ -8,8 +8,9 @@ platform/application developers building high-throughput spatial services over a
 shared DuckLake/Parquet data lake, including DuckDB-style columnar OLAP analysis
 over filtered spatial records without embedding DuckDB. See
 [PROJECT_DIRECTION.md](./PROJECT_DIRECTION.md). The preview proves the local
-shape before the Alpha hardening track (PostgreSQL catalog + S3, parallel
-readers/writers, high-QPS gates, OLAP fanout probes, and operations evidence).
+shape before the Alpha promotion ladder (Kind+Linkerd, PostgreSQL catalog + S3,
+parallel readers/writers, high-QPS gates, OLAP fanout probes, and operations
+evidence).
 
 ## Preview goal
 

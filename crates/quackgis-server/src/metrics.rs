@@ -45,6 +45,9 @@ pub fn render_prometheus() -> String {
             "# HELP quackgis_native_compact_mutations_total Native bucket-compaction mutations committed.\n",
             "# TYPE quackgis_native_compact_mutations_total counter\n",
             "quackgis_native_compact_mutations_total {}\n",
+            "# HELP quackgis_native_mutation_aborts_total Native DuckLake mutation attempts aborted before catalog commit.\n",
+            "# TYPE quackgis_native_mutation_aborts_total counter\n",
+            "quackgis_native_mutation_aborts_total {}\n",
             "# HELP quackgis_compactions_total Successful QuackGIS compaction calls.\n",
             "# TYPE quackgis_compactions_total counter\n",
             "quackgis_compactions_total {}\n",
@@ -58,6 +61,7 @@ pub fn render_prometheus() -> String {
         metrics.native_delete_mutations_total,
         metrics.native_update_mutations_total,
         metrics.native_compact_mutations_total,
+        metrics.native_mutation_aborts_total,
         metrics.compactions_total,
     )
 }
@@ -115,6 +119,7 @@ mod tests {
         assert!(body.contains("quackgis_write_denied_total"));
         assert!(body.contains("quackgis_catalog_refresh_total"));
         assert!(body.contains("quackgis_native_delete_mutations_total"));
+        assert!(body.contains("quackgis_native_mutation_aborts_total"));
         assert!(body.contains("quackgis_compactions_total"));
         assert!(!body.contains("QUACKGIS_S3_SECRET_ACCESS_KEY"));
     }

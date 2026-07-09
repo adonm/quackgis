@@ -1,36 +1,67 @@
 # Snapshot, rollback, and time-travel plan
 
 DuckLake snapshots are the natural boundary for backup, rollback, staged imports,
-and future SQL time travel. QuackGIS already exposes safe metadata inspection
-through `ducklake_snapshots()`, `ducklake_table_info()`, and
-`ducklake_list_files()`. SQL `AS OF`, protected snapshots, and CDC row functions
-remain future work.
+and SQL time travel. QuackGIS exposes safe metadata inspection through
+`ducklake_snapshots()`, `ducklake_table_info()`, and `ducklake_list_files()`. The
+first pgwire-safe snapshot read path is implemented for simple single-table reads
+using either `public.table(snapshot => <snapshot_id>)` or
+`public.table(snapshot_id => <snapshot_id>)`. Parser-level SQL `AS OF`, protected
+snapshots, timestamp resolution, positional table-function selectors, rollback
+integration, and CDC row functions remain future work.
 
 ## Current supported surface
 
 | Surface | Status | Evidence |
 |---|---|---|
 | Snapshot metadata inspection | ✅ available through pgwire | `ducklake_metadata_table_functions_roundtrip_through_wire` |
+| Simple snapshot-pinned table read | ✅ available through pgwire with `snapshot`/`snapshot_id` named selectors and count/extent parity | `ducklake_snapshot_selector_reads_pinned_table` |
 | Matched local backup/restore | ✅ local oracle | `ducklake_local_backup_restore_copy_roundtrip` |
 | External backup/restore drill | ⏳ runbook, execution required | `docs/ALPHA_EXTERNAL_SERVICES.md` |
-| SQL `AS OF` time travel | ❌ not implemented | future parser/query tests |
+| SQL `AS OF` time travel | ⏳ pgwire PostgreSQL dialect rejects table-version syntax before hooks | current selector syntax plus future parser/query tests |
 | Protected snapshots / retention | ❌ not implemented | future DuckLake API alignment |
 | CDC row UDTFs | ❌ disabled | pgwire/Arrow projection must be fixed first |
 
-## SQL `AS OF` target shape
+## Current snapshot selector syntax
+
+The current safe SQL path is intentionally narrow and parser-compatible with the
+PostgreSQL wire parser. Snapshot ids must come from `ducklake_snapshots()`:
+
+```sql
+SELECT * FROM public.assets(snapshot => 12345) WHERE id = 7;
+SELECT * FROM public.assets(snapshot_id => 12345) WHERE id = 7;
+```
+
+Current limits:
+
+1. exactly one snapshot-qualified DuckLake table;
+2. simple `SELECT` only;
+3. no joins, DML, `COPY`, compaction, or writes;
+4. snapshot id must be a literal numeric id from `ducklake_snapshots()`;
+5. the table must exist at that snapshot or the query fails closed; and
+6. the snapshot read uses a temporary snapshot-pinned DuckLake catalog for that
+   query only.
+
+This is a prototype time-travel read path, not protected retention. Operators
+must still preserve the referenced catalog/object state through backups or future
+protected snapshot APIs.
+
+## Parser-level SQL `AS OF` target shape
 
 QuackGIS should prefer a small PostGIS-like read syntax that is explicit and easy
-to reject when unsupported:
+to reject when unsupported. The upstream SQL parser has table-version AST forms,
+but the PostgreSQL dialect used by the pgwire path currently rejects those forms
+before QuackGIS hooks can route them:
 
 ```sql
 SELECT * FROM public.assets AS OF SNAPSHOT 12345 WHERE id = 7;
 SELECT * FROM public.assets AS OF TIMESTAMP '2026-07-09T12:00:00Z';
 ```
 
-Implementation requirements:
+Future implementation requirements:
 
 1. Parse only unambiguous single-table snapshot qualifiers first.
-2. Resolve snapshot ids through DuckLake metadata and fail closed if missing.
+2. Resolve snapshot ids/timestamps through DuckLake metadata and fail closed if
+   missing or ambiguous.
 3. Register a snapshot-pinned DuckLake catalog for the query scope only.
 4. Preserve exact SedonaDB spatial recheck and deny unsafe pruning rewrites that
    cannot be proven against the pinned snapshot.

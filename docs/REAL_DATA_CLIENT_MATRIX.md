@@ -11,7 +11,7 @@ This document defines the evidence contract before widening the expensive probes
 
 | Dataset | Layers | Clients exercised today | Evidence |
 |---|---|---|---|
-| Geofabrik Monaco OSM | `points`, `lines`, `multipolygons` sampled through OGR's standard OSM layers | OGR copy/read, QuackGIS SQL sample comparison, QGIS open/filter/render on copied layers | `just kind-osm-postgis-parity`, `docs/OSM_POSTGIS_PARITY.md` |
+| Geofabrik Monaco OSM | `points`, `lines`, `multipolygons` sampled through OGR's standard OSM layers | OGR copy/read, QuackGIS SQL sample comparison, non-empty MVT SQL bytes, QGIS open/filter/render on copied layers | `just kind-osm-postgis-parity`, `docs/OSM_POSTGIS_PARITY.md` |
 
 Current status is **opt-in real-data evidence**, not broad OSM or real-data
 support. The default scheduled compatibility workflow runs the Monaco path because
@@ -42,8 +42,10 @@ Every promoted real-data matrix row should name:
 | SQL/OLAP | representative grouped counts/lengths/areas and candidate-narrowing queries emit row counts, file groups, bytes scanned, and p95/p99 where applicable |
 
 Python/API/BI-style clients follow the broader probe ladder in
-[API_CLIENT_PROBES.md](./API_CLIENT_PROBES.md) before they become maintained
-real-data matrix rows.
+[API_CLIENT_PROBES.md](./API_CLIENT_PROBES.md). The current API-client Kind probe
+covers synthetic pgwire/catalog/WKB/bbox/BI/MVT profile surfaces and is reported
+in the compatibility artifact; it is not yet a real-data matrix row until named
+clients run over copied real-data layers.
 
 ## Dataset ladder
 
@@ -80,10 +82,10 @@ combination where practical. Preferred metric keys:
 }
 ```
 
-`scripts/trend_metrics.py` already extracts common QPS, latency, scan, native DML,
-and OSM feature-count fields. Add new columns only when a dashboard consumer needs
-the value across runs; otherwise keep dataset-specific detail in the rendered
-compatibility report.
+`scripts/trend_metrics.py` already extracts common QPS, latency, scan, native
+DML/compaction/abort, and OSM feature-count fields. Add new columns only when a
+dashboard consumer needs the value across runs; otherwise keep dataset-specific
+detail in the rendered compatibility report.
 
 ## Copy workflow guardrails
 

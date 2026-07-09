@@ -3,10 +3,16 @@
 QuackGIS is a PostGIS-compatible front door to a Sedona-powered spatial lakehouse
 in a single Rust binary. It is built first for platform/application developers
 who need to answer large, complex spatial questions over shared DuckLake/Parquet
-data with high throughput, horizontal read scaling, and columnar OLAP analysis.
-The long-term architecture also treats raster, point-cloud, CAD/BIM, 3D tile, and
-reality-capture datasets as queryable asset indexes plus sidecars rather than as
-heavy decoders in the SQL hot path.
+data with high throughput, horizontal read scaling, parallel ingest/edit paths,
+and columnar OLAP analysis. The long-term architecture also treats raster,
+point-cloud, CAD/BIM, 3D tile, and reality-capture datasets as queryable asset
+indexes plus sidecars rather than as heavy decoders in the SQL hot path.
+
+The architecture target is an operational spatial data plane: stateless QuackGIS
+pods serve pgwire clients and analytical/API traffic; DuckLake's SQL catalog is
+the transactional control point; Parquet/object storage is the data plane;
+metrics, metadata UDTFs, compatibility reports, and release evidence are the
+operator control surface.
 
 QuackGIS speaks the PostgreSQL wire protocol but does **not** run PostgreSQL as a
 query engine. Three DataFusion-native components share one `SessionContext`:
@@ -17,11 +23,11 @@ query engine. Three DataFusion-native components share one `SessionContext`:
 | [Apache SedonaDB](https://github.com/apache/sedona-db) | Apache Sedona | Spatial execution: ST_* kernels via Rust-native features in the QuackGIS build (`geo`, `tg`, `proj-rust`), geometry/geography types, CRS propagation, spatial joins, GeoParquet |
 | [datafusion-ducklake](https://github.com/datafusion-contrib/datafusion-ducklake) | datafusion-contrib | Rust-native DuckLake lakehouse targeting the official DuckLake 1.0+ spec: catalog metadata in SQL DB, data in Parquet on file/object storage |
 
-QuackGIS itself is the thin integration layer: PostGIS SQL surface, client
-compatibility shims, and spatial table layout. Upstreams are consumed as
-**tracked fork branches** so missing capabilities are
-built immediately in-fork — see the gap ledger in
-[ROADMAP.md](./ROADMAP.md).
+QuackGIS itself is the thin-but-opinionated integration layer: PostGIS SQL
+surface, client compatibility shims, spatial/temporal table layout, native
+DuckLake maintenance entrypoints, and evidence/ops surfaces. Upstreams are
+consumed as **tracked fork branches** so missing capabilities are built
+immediately in-fork — see the gap ledger in [ROADMAP.md](./ROADMAP.md).
 
 ## Layer model
 
@@ -38,6 +44,7 @@ built immediately in-fork — see the gap ledger in
 │ geometry_columns · spatial_ref_sys · postgis_version()       │
 │ pg_catalog additions · session no-ops (SET, client GUCs)     │
 │ pg_catalog/cursor shims for PostGIS-style clients            │
+│ metrics · DuckLake metadata UDTFs · maintenance commands      │
 ├──────────────────────────────────────────────────────────────┤
 │ SedonaDB session (DataFusion SessionContext)                 │
 │ ST_* functions · geometry/geography · CRS · spatial joins    │
@@ -112,15 +119,26 @@ may be used as DuckLake catalog metadata storage in the scaled profile.
 
 8. **Operations and metadata are product features.** DuckLake metadata UDTFs,
    `pg_roles`, privilege helpers, compatibility reports, trendable metrics,
-   backup/restore oracles, and catalog refresh behavior are part of the public
-   platform contract. A lakehouse that cannot be inspected or restored is not
-   credible no matter how fast a single query is.
+   backup/restore oracles, catalog refresh behavior, and release evidence are part
+   of the public platform contract. A lakehouse that cannot be inspected,
+   budgeted, restored, or upgraded is not credible no matter how fast a single
+   query is.
 
 9. **Heavy spatial formats enter through index rows and sidecars first.** Raster,
-   point-cloud, CAD/BIM, 3D tiles, and reality-capture content should expose
-   footprints, CRS/epoch metadata, quality/resolution fields, lineage, and object
-   URIs in SQL while preserving high-fidelity artifacts outside the vectorized
-   query path until a specific reader/kernel is justified.
+    point-cloud, CAD/BIM, 3D tiles, and reality-capture content should expose
+    footprints, CRS/epoch metadata, quality/resolution fields, lineage, and object
+    URIs in SQL while preserving high-fidelity artifacts outside the vectorized
+    query path until a specific reader/kernel is justified.
+
+10. **Proof moves in promotion rings.** Local/SQLite gates prove deterministic
+    semantics; Kind+Linkerd proves multi-pod service shape, mTLS/TCP visibility,
+    and cheap lake-profile scale; managed PostgreSQL/S3 proves production storage
+    behavior. A claim must name the ring it has reached.
+
+11. **Maintenance is an engine surface, not an operator afterthought.** Native DML,
+    compaction, snapshot retention, failed-writer cleanup, stats refresh, and
+    reference-reader interop need SQL/ops entrypoints and metrics because they are
+    how a columnar lake remains fast and trustworthy under edit workloads.
 
 ## Lessons from the preview/Alpha gates
 
@@ -155,8 +173,20 @@ may be used as DuckLake catalog metadata storage in the scaled profile.
    partially visible mutations are correctness bugs. Upstream multi-deletion-vector
    Puffin support should be adopted only with reference-reader interop and the same
    single-snapshot visibility guarantee.
+8. **Local mesh evidence is useful but bounded.** Kind+Linkerd made service shape,
+   multi-pod reads/writes, and mTLS/TCP observability cheap enough to run often.
+   It does not prove managed PostgreSQL failover, provider object-store semantics,
+   credential rotation, or backup/restore until those drills run externally.
+9. **Catalog refresh is a correctness and performance knob.** Shared DuckLake
+   catalogs need explicit refresh behavior for multi-pod readers. Low refresh
+   latency helps edit visibility; relaxed refresh improves stable read benchmarks.
+   Both modes need metrics and budgeted probes.
+10. **Expose safe metadata before row-level internals.** Snapshot/file/table
+    metadata UDTFs are valuable operational surfaces. CDC row UDTFs stay disabled
+    until pgwire/Arrow projection is safe, because an introspection feature must
+    never panic or misproject rows.
 
-## Geometry strategy: EWKB everywhere with a real type OID
+## Geometry strategy: EWKB everywhere with a PostGIS-like type OID
 
 The goal is the highest performance/fidelity tradeoff SedonaDB can support today.
 EWKB is the current PostGIS wire standard. GeoArrow is useful metadata and a
@@ -192,9 +222,9 @@ Arrow `Binary` internally. QuackGIS marks geometry columns with
   GEOMETRY columns);
 - the DuckLake 1.0+ spec is respected (GEOMETRY is a spec-defined type string).
 
-### Implementation path (G1 + G13)
+### Current path (G1 + G13)
 
-1. **G1 (arrow-pg fork):** register a `geometry` type OID in `pg_type` with
+1. **G1 (arrow-pg fork):** register `geometry`/`geography` type OIDs in `pg_type` with
    text encoding = hex-EWKB, binary encoding = raw EWKB. Encode SedonaDB
    Binary/WKB result columns as EWKB (prepend SRID flag from column metadata).
    Decode inbound parameters from EWKB/WKB/WKT.
@@ -288,9 +318,11 @@ metrics, and candidate narrowing before expensive exact spatial operations.
 
 ## Transaction semantics over DuckLake snapshots
 
-Autocommit QuackGIS DML remains correct-but-coarse: each
-`INSERT`/`UPDATE`/`DELETE` is written through the DuckLake writer API and
-published as its own snapshot.
+Autocommit QuackGIS DML publishes one DuckLake snapshot per statement. `INSERT`
+uses the DuckLake writer path. Supported `DELETE`/`UPDATE` shapes prefer the
+native positional-delete/replacement-row path so common edit workloads avoid full
+table rewrites; unsupported shapes fall back to the staged full-table rewrite
+path or fail closed when correctness cannot be preserved.
 
 Explicit transaction blocks now provide a DuckLake-native, transactionish path
 for edit-client DML on one table:
@@ -312,10 +344,11 @@ for edit-client DML on one table:
 This is intentionally narrower than PostgreSQL transaction emulation: DDL inside
 explicit transactions and multi-table write transactions fail closed, and
 ordinary `SELECT` statements inside a transaction still read the committed
-DuckLake catalog rather than the private staged table. Native delete files,
-partial-file rewrites, and multi-table single-snapshot commits remain future
-performance/semantic hardening; the current semantic boundary is a single-table
-snapshot commit.
+DuckLake catalog rather than the private staged table. Native delete files and
+bucket-scoped partial compaction exist for supported autocommit/maintenance paths;
+explicit-transaction native batching, read-your-writes overlays, and multi-table
+single-snapshot commits remain future semantic hardening. The current transaction
+boundary is one table and one visible snapshot.
 
 ## Trust boundaries
 

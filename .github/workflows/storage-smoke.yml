@@ -87,10 +87,26 @@ jobs:
           path: .tmp/compatibility/metrics.json
           if-no-files-found: ignore
 
-      - name: Fail on reported storage failures
+      - name: Fail on reported storage failures or budget overruns
         if: always()
         run: |
-          if [ -f .tmp/compatibility/README.md ] && grep -q '❌ fail' .tmp/compatibility/README.md; then
+          if [ -f .tmp/compatibility/metrics.json ]; then
+            args=(--allow-not-run)
+            case "$STORAGE_RECIPE" in
+              kind-alpha-smoke)
+                args+=(--require-check lake_probe --require-check lake_multipod --require-check write_verify --require-check qps_probe --require-check olap_probe)
+                ;;
+              kind-external-alpha-smoke) args+=(--require-check external_lake_probe) ;;
+              kind-lake-smoke) args+=(--require-check lake_probe) ;;
+              kind-lake-multipod-smoke) args+=(--require-check lake_multipod) ;;
+              kind-lb-smoke) args+=(--require-check lb_probe) ;;
+              kind-read-smoke) args+=(--require-check read_probe) ;;
+              kind-qps-smoke) args+=(--require-check qps_probe) ;;
+              kind-write-smoke) args+=(--require-check write_verify) ;;
+              kind-olap-smoke) args+=(--require-check olap_probe) ;;
+            esac
+            python3 scripts/metrics_budget_check.py "${args[@]}" .tmp/compatibility
+          elif [ -f .tmp/compatibility/README.md ] && grep -q '❌ fail' .tmp/compatibility/README.md; then
             grep '^Summary:' .tmp/compatibility/README.md || true
             exit 1
           fi

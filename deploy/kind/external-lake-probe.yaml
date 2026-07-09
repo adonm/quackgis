@@ -47,6 +47,7 @@ spec:
               PYTHONPATH=/opt/quackgis-probes python3 /opt/quackgis-probes/native_delete_probe.py
               python3 - <<'PY'
               import os
+              import re
               import urllib.request
 
               host = os.environ["QUACKGIS_HOST"]
@@ -57,9 +58,14 @@ spec:
                   "# TYPE quackgis_queries_started_total counter",
                   "quackgis_queries_started_total",
                   "quackgis_write_denied_total",
+                  "quackgis_native_mutation_aborts_total",
               ]
               missing = [needle for needle in required if needle not in body]
               if missing:
                   raise SystemExit(f"missing metrics output: {missing!r}")
+              aborts = re.search(r"^quackgis_native_mutation_aborts_total\s+(\d+)", body, re.MULTILINE)
+              if not aborts:
+                  raise SystemExit("missing native mutation abort metric value")
+              print(f"metrics_native_mutation_aborts_total {aborts.group(1)}")
               print("metrics_ok True")
               PY

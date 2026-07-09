@@ -15,8 +15,9 @@ CHECKS = [
     ("QGIS read/render/filter/identify", "qgis-probe.log", ["valid True", "filter_names ['one']", "identify_names ['one']", "render_ok True"]),
     ("QGIS edit/save", "qgis-edit-probe.log", ["edit_ok True"]),
     ("GDAL/OGR load/read", "ogr-probe.log", ["feature_count 2", "loaded_rows", "load_feature_count 2", "ogr_keyless_compact_ok True"]),
+    ("API client profile surfaces", "api-client-probe.log", ["api_client_psycopg_surface", "api_client_sqlalchemy_surface", "api_client_geopandas_surface", "api_client_pgfeatureserv_surface", "api_client_bi_surface", "api_client_mvt_surface", "api_client_probe_ok True"]),
     ("GeoServer WFS/WMS/WFS-T", "geoserver-probe.log", ["wfs_point_count", "wms_png_header 89504e470d0a1a0a", "wfst_transaction_ok True", "geoserver_keyless_update_ok True", "geoserver_probe_ok True"]),
-    ("OSM PostGIS/QGIS parity", "osm-postgis-parity.log", ["osm_postgis_to_quackgis_copy_ok True", "osm_qgis_open_ok True", "osm_qgis_render_ok True"]),
+    ("OSM PostGIS/QGIS/MVT parity", "osm-postgis-parity.log", ["osm_postgis_to_quackgis_copy_ok True", "osm_mvt_ok True", "osm_qgis_open_ok True", "osm_qgis_render_ok True"]),
     ("Kind demo seed", "quackgis-demo.log", ["demo_ok True"]),
     ("Lake PostgreSQL/S3 storage", "lake-probe.log", ["storage_ok True"]),
     ("External profile storage", "external-lake-probe.log", ["storage_ok True", "native_delete_ok True", "native_update_ok True", "native_compact_ok True", "delete_files=2", "delete_snapshots=1", "appended_files=1", "retired_files=0", "metrics_ok True"]),
@@ -173,14 +174,21 @@ def metric_values(path: Path) -> dict[str, object]:
         )
 
     if name == "osm-postgis-parity.log":
-        return compact(
+        values = {
+            f"qgis_{label}_feature_count": last_int_after_prefix(
+                text, f"qgis_osm_{label}_feature_count "
+            )
+            for label in ("points", "lines", "multipolygons")
+        }
+        values.update(
             {
-                f"qgis_{label}_feature_count": last_int_after_prefix(
-                    text, f"qgis_osm_{label}_feature_count "
+                f"mvt_{label}_tile_bytes": last_int_after_prefix(
+                    text, f"osm_mvt_{label}_tile_bytes "
                 )
                 for label in ("points", "lines", "multipolygons")
             }
         )
+        return compact(values)
 
     if name == "read-probe.log":
         result = line_kv(last_line(text, "read_result ") or "")
@@ -191,6 +199,18 @@ def metric_values(path: Path) -> dict[str, object]:
                 "p95_ms": maybe_float(result.get("p95_ms")),
                 "p99_ms": maybe_float(result.get("p99_ms")),
                 "bytes_scanned": maybe_int(scan.get("bytes_scanned")),
+            }
+        )
+
+    if name == "api-client-probe.log":
+        summary = line_kv(last_line(text, "api_client_summary ") or "")
+        return compact(
+            {
+                "feature_count": maybe_int(summary.get("feature_count")),
+                "reflected_columns": maybe_int(summary.get("reflected_columns")),
+                "bbox_count": maybe_int(summary.get("bbox_count")),
+                "groups": maybe_int(summary.get("groups")),
+                "tile_bytes": maybe_int(summary.get("tile_bytes")),
             }
         )
 
@@ -218,6 +238,9 @@ def metric_values(path: Path) -> dict[str, object]:
                 ),
                 "native_compact_retired_files": maybe_int(
                     native_compact.get("retired_files")
+                ),
+                "native_mutation_aborts": last_int_after_prefix(
+                    text, "metrics_native_mutation_aborts_total "
                 ),
             }
         )
@@ -298,6 +321,10 @@ def metric_summary(path: Path) -> str:
             label: last_int_after_prefix(text, f"qgis_osm_{label}_feature_count ")
             for label in ("points", "lines", "multipolygons")
         }
+        mvt_bytes = {
+            label: last_int_after_prefix(text, f"osm_mvt_{label}_tile_bytes ")
+            for label in ("points", "lines", "multipolygons")
+        }
         return "; ".join(
             item
             for item in [
@@ -305,6 +332,15 @@ def metric_summary(path: Path) -> str:
                 f"qgis_lines={counts['lines']}" if counts["lines"] is not None else "",
                 f"qgis_multipolygons={counts['multipolygons']}"
                 if counts["multipolygons"] is not None
+                else "",
+                f"mvt_points_bytes={mvt_bytes['points']}"
+                if mvt_bytes["points"] is not None
+                else "",
+                f"mvt_lines_bytes={mvt_bytes['lines']}"
+                if mvt_bytes["lines"] is not None
+                else "",
+                f"mvt_multipolygons_bytes={mvt_bytes['multipolygons']}"
+                if mvt_bytes["multipolygons"] is not None
                 else "",
             ]
             if item
@@ -324,10 +360,25 @@ def metric_summary(path: Path) -> str:
             if item
         )
 
+    if name == "api-client-probe.log":
+        summary = line_kv(last_line(text, "api_client_summary ") or "")
+        return "; ".join(
+            item
+            for item in [
+                f"feature_count={summary.get('feature_count')}" if summary.get("feature_count") else "",
+                f"reflected_columns={summary.get('reflected_columns')}" if summary.get("reflected_columns") else "",
+                f"bbox_count={summary.get('bbox_count')}" if summary.get("bbox_count") else "",
+                f"groups={summary.get('groups')}" if summary.get("groups") else "",
+                f"tile_bytes={summary.get('tile_bytes')}" if summary.get("tile_bytes") else "",
+            ]
+            if item
+        )
+
     if name == "external-lake-probe.log":
         native_delete = line_kv(last_line(text, "native_delete ") or "")
         native_update = line_kv(last_line(text, "native_update ") or "")
         native_compact = line_kv(last_line(text, "native_compact ") or "")
+        aborts = last_int_after_prefix(text, "metrics_native_mutation_aborts_total ")
         return "; ".join(
             item
             for item in [
@@ -343,6 +394,7 @@ def metric_summary(path: Path) -> str:
                 f"compact_retired={native_compact.get('retired_files')}"
                 if native_compact.get("retired_files")
                 else "",
+                f"native_mutation_aborts={aborts}" if aborts is not None else "",
             ]
             if item
         )

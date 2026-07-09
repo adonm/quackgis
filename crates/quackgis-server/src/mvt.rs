@@ -572,6 +572,23 @@ pub struct MvtFeature {
 
 /// Build the final MVT tile bytes from a layer name, extent, and features.
 pub fn build_mvt_tile(layer_name: &str, extent: u32, features: &[MvtFeature]) -> Vec<u8> {
+    build_mvt_tile_with_dictionary(layer_name, extent, &[], &[], features)
+}
+
+/// Build the final MVT tile bytes with an explicit layer key/value dictionary.
+///
+/// Feature tags use MVT's packed `[key_index, value_index, ...]` encoding and
+/// refer to the `keys` and `values` slices supplied here. The SQL aggregate still
+/// feeds geometry-only features today; this lower-level dictionary path is kept
+/// explicit so Martin/real-data attribute propagation can be wired and tested
+/// without changing the geometry encoder again.
+pub fn build_mvt_tile_with_dictionary(
+    layer_name: &str,
+    extent: u32,
+    keys: &[String],
+    values: &[String],
+    features: &[MvtFeature],
+) -> Vec<u8> {
     // Build Feature messages
     let mut feature_msgs: Vec<Vec<u8>> = Vec::new();
     for feat in features {
@@ -612,8 +629,14 @@ pub fn build_mvt_tile(layer_name: &str, extent: u32, features: &[MvtFeature]) ->
     for feat in &feature_msgs {
         encode_bytes_field(2, feat, &mut layer);
     }
-    // field 3: keys (repeated string) — empty for now (no property keys)
-    // field 4: values (repeated bytes) — empty for now
+    // field 3: keys (repeated string)
+    for key in keys {
+        encode_string_field(3, key, &mut layer);
+    }
+    // field 4: values (repeated Value messages)
+    for value in values {
+        encode_bytes_field(4, &encode_mvt_value(value), &mut layer);
+    }
 
     // Build Tile message
     let mut tile = Vec::new();
@@ -642,4 +665,46 @@ pub fn mvt_geom_transform(
     let sx = extent / bw;
     let sy = extent / bh;
     geom.map_coords(|x, y| ((x - bx1) * sx, (y - by1) * sy))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn point_wkb(x: f64, y: f64) -> Vec<u8> {
+        let mut wkb = Vec::with_capacity(21);
+        wkb.push(1);
+        wkb.extend_from_slice(&1_u32.to_le_bytes());
+        wkb.extend_from_slice(&x.to_le_bytes());
+        wkb.extend_from_slice(&y.to_le_bytes());
+        wkb
+    }
+
+    fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+    }
+
+    #[test]
+    fn mvt_dictionary_encodes_feature_tags_keys_and_values() {
+        let parsed = parse_wkb(&point_wkb(0.0, 0.0)).expect("parse point WKB");
+        let (geom_type, commands) = encode_mvt_geometry(&parsed).expect("encode point MVT");
+        let feature = MvtFeature {
+            geom_type,
+            commands,
+            tags: vec![0, 0, 1, 1],
+            id: Some(7),
+        };
+        let keys = vec!["name".to_string(), "kind".to_string()];
+        let values = vec!["origin".to_string(), "poi".to_string()];
+
+        let tile = build_mvt_tile_with_dictionary("points", 4096, &keys, &values, &[feature]);
+
+        assert!(contains_bytes(&tile, b"points"));
+        assert!(contains_bytes(&tile, b"name"));
+        assert!(contains_bytes(&tile, b"kind"));
+        assert!(contains_bytes(&tile, b"origin"));
+        assert!(contains_bytes(&tile, b"poi"));
+    }
 }

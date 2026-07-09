@@ -279,7 +279,7 @@ check: fmt-check clippy test
 check-fast: fmt-check clippy test-fast
 
 # Run the same fast gate used by GitHub Actions CI.
-ci: check-fast smoke-local-demo preview-smoke probe-static-check runtime-static-check
+ci: check-fast smoke-local-demo preview-smoke api-client-local-smoke probe-static-check runtime-static-check
 
 # Run the dev QuackGIS server on QUACKGIS_HOST/QUACKGIS_PORT.
 server:
@@ -330,6 +330,26 @@ preview-smoke:
         exit 1; \
     fi; \
     python3 -c 'import pathlib, sys; text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace"); print(text, end=""); sys.exit(0 if "developer_preview_ok True" in text else 1)' "$preview_log"; \
+    kill "$server_pid" 2>/dev/null || true; \
+    wait "$server_pid" 2>/dev/null || true; \
+    trap - EXIT INT TERM
+
+# Local API/client surface smoke for psycopg/SQLAlchemy/GeoPandas/pg_featureserv/BI/MVT probe work.
+api-client-local-smoke:
+    @set -eu; \
+    rm -rf .tmp/api-client-smoke; \
+    mkdir -p .tmp/api-client-smoke/data; \
+    log=.tmp/api-client-smoke/quackgis-server.log; \
+    probe_log=.tmp/api-client-smoke/api-client.log; \
+    QUACKGIS_CATALOG_PATH=.tmp/api-client-smoke/quackgis.db QUACKGIS_DATA_PATH=.tmp/api-client-smoke/data cargo run -p quackgis-server -- --host {{smoke_host}} --port {{smoke_port}} > "$log" 2>&1 & \
+    server_pid=$!; \
+    trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT INT TERM; \
+    python3 scripts/wait_for_tcp.py {{smoke_host}} {{smoke_port}} "$server_pid" "$log"; \
+    if ! cargo run -p quackgis-server --example api_client_probe -- --host {{smoke_host}} --port {{smoke_port}} > "$probe_log" 2>&1; then \
+        python3 -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace"), end="")' "$probe_log"; \
+        exit 1; \
+    fi; \
+    python3 -c 'import pathlib, sys; text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace"); print(text, end=""); sys.exit(0 if "api_client_probe_ok True" in text else 1)' "$probe_log"; \
     kill "$server_pid" 2>/dev/null || true; \
     wait "$server_pid" 2>/dev/null || true; \
     trap - EXIT INT TERM
@@ -460,7 +480,7 @@ kind-probe-scripts:
 # Static pre-Kind validation for probe scripts and Kubernetes manifests.
 probe-static-check:
     mkdir -p .tmp/pycache
-    PYTHONPYCACHEPREFIX=.tmp/pycache python3 -m py_compile scripts/probe_static_check.py scripts/runtime_static_check.py scripts/trend_metrics.py deploy/kind/render_compat_report.py deploy/kind/check_linkerd_injected.py deploy/kind/probes/*.py
+    PYTHONPYCACHEPREFIX=.tmp/pycache python3 -m py_compile scripts/probe_static_check.py scripts/runtime_static_check.py scripts/trend_metrics.py scripts/metrics_budget_check.py deploy/kind/render_compat_report.py deploy/kind/check_linkerd_injected.py deploy/kind/probes/*.py
     bash -n deploy/kind/probes/*.sh
     python3 scripts/probe_static_check.py deploy/kind
     python3 scripts/probe_static_check.py deploy/kubernetes
@@ -488,6 +508,21 @@ metrics-dashboard path=".tmp/compatibility" out=".tmp/metrics-dashboard.md":
     mkdir -p "$(dirname "${out_arg}")"; \
     python3 scripts/trend_metrics.py --format dashboard "${path_arg}" > "${out_arg}"; \
     printf "wrote %s\n" "${out_arg}"
+
+# Fail closed when metrics artifacts report failed checks or exceed explicit budgets.
+metrics-budget-check path=".tmp/compatibility" require_budgeted="false" allow_not_run="false":
+    @set -eu; \
+    path_arg='{{path}}'; \
+    require_arg='{{require_budgeted}}'; \
+    allow_arg='{{allow_not_run}}'; \
+    path_arg="${path_arg#path=}"; \
+    if [ "${require_arg#allow_not_run=}" != "$require_arg" ]; then allow_arg="$require_arg"; require_arg="false"; fi; \
+    require_arg="${require_arg#require_budgeted=}"; \
+    allow_arg="${allow_arg#allow_not_run=}"; \
+    flags=""; \
+    if [ "$require_arg" = "true" ]; then flags="$flags --require-budgeted"; fi; \
+    if [ "$allow_arg" = "true" ]; then flags="$flags --allow-not-run"; fi; \
+    python3 scripts/metrics_budget_check.py $flags "$path_arg"
 
 # Build, load, and deploy QuackGIS into Kind.
 kind-refresh: kind-build-image kind-load-image kind-deploy
@@ -734,12 +769,13 @@ kind-alpha-smoke: kind-lake-smoke kind-lake-multipod-smoke kind-write-smoke kind
 
 # Run all maintained in-cluster client probes in one Kubernetes wait.
 kind-probes: kind-probe-scripts
-    kubectl -n quackgis delete job qgis-probe qgis-edit-probe ogr-probe geoserver-probe --ignore-not-found=true
-    kubectl apply -f deploy/kind/qgis-probe.yaml -f deploy/kind/qgis-edit-probe.yaml -f deploy/kind/ogr-probe.yaml -f deploy/kind/geoserver-probe.yaml
-    kubectl -n quackgis wait job/qgis-probe job/qgis-edit-probe job/ogr-probe job/geoserver-probe --for=condition=complete --timeout=600s || (kubectl -n quackgis logs job/qgis-probe || true; kubectl -n quackgis logs job/qgis-edit-probe || true; kubectl -n quackgis logs job/ogr-probe || true; kubectl -n quackgis logs job/geoserver-probe || true; false)
+    kubectl -n quackgis delete job qgis-probe qgis-edit-probe ogr-probe api-client-probe geoserver-probe --ignore-not-found=true
+    kubectl apply -f deploy/kind/qgis-probe.yaml -f deploy/kind/qgis-edit-probe.yaml -f deploy/kind/ogr-probe.yaml -f deploy/kind/api-client-probe.yaml -f deploy/kind/geoserver-probe.yaml
+    kubectl -n quackgis wait job/qgis-probe job/qgis-edit-probe job/ogr-probe job/api-client-probe job/geoserver-probe --for=condition=complete --timeout=600s || (kubectl -n quackgis logs job/qgis-probe || true; kubectl -n quackgis logs job/qgis-edit-probe || true; kubectl -n quackgis logs job/ogr-probe || true; kubectl -n quackgis logs job/api-client-probe || true; kubectl -n quackgis logs job/geoserver-probe || true; false)
     kubectl -n quackgis logs job/qgis-probe
     kubectl -n quackgis logs job/qgis-edit-probe
     kubectl -n quackgis logs job/ogr-probe
+    kubectl -n quackgis logs job/api-client-probe
     kubectl -n quackgis logs job/geoserver-probe
 
 # Run the headless QGIS client probe as an in-cluster Job.
@@ -762,6 +798,13 @@ kind-ogr-probe: kind-probe-scripts
     kubectl apply -f deploy/kind/ogr-probe.yaml
     kubectl -n quackgis wait job/ogr-probe --for=condition=complete --timeout=180s || (kubectl -n quackgis logs job/ogr-probe; false)
     kubectl -n quackgis logs job/ogr-probe
+
+# Run the Python/API/BI-style pgwire surface probe as an in-cluster Job.
+kind-api-client-probe: kind-probe-scripts
+    kubectl -n quackgis delete job api-client-probe --ignore-not-found=true
+    kubectl apply -f deploy/kind/api-client-probe.yaml
+    kubectl -n quackgis wait job/api-client-probe --for=condition=complete --timeout=180s || (kubectl -n quackgis logs job/api-client-probe; false)
+    kubectl -n quackgis logs job/api-client-probe
 
 # Run the GeoServer PostGIS datastore/WFS/WMS/WFS-T probe as an in-cluster Job.
 kind-geoserver-probe: kind-probe-scripts
@@ -808,7 +851,7 @@ kind-compat-report:
     mkdir -p .tmp/compatibility
     kubectl -n quackgis get pods,jobs,svc,deploy,statefulset -o wide > .tmp/compatibility/kubernetes.txt 2>&1 || true
     kubectl -n quackgis logs statefulset/quackgis --tail=-1 > .tmp/compatibility/quackgis.log 2>&1 || true
-    @for job in qgis-probe qgis-edit-probe ogr-probe geoserver-probe osm-postgis-parity quackgis-demo lake-probe external-lake-probe lake-multipod lb-probe read-seed read-probe qps-seed qps-probe write-setup write-workers write-verify olap-seed olap-probe; do \
+    @for job in qgis-probe qgis-edit-probe ogr-probe api-client-probe geoserver-probe osm-postgis-parity quackgis-demo lake-probe external-lake-probe lake-multipod lb-probe read-seed read-probe qps-seed qps-probe write-setup write-workers write-verify olap-seed olap-probe; do \
         kubectl -n quackgis logs "job/${job}" --tail=-1 > ".tmp/compatibility/${job}.log" 2>&1 || true; \
     done
     kubectl -n quackgis logs deployment/external-lake --all-containers=true --tail=-1 > .tmp/compatibility/external-lake.log 2>&1 || true

@@ -5,6 +5,12 @@ Rust pgwire server for platform and application teams that need to keep very
 large spatial data in open DuckLake/Parquet storage while serving familiar
 PostGIS clients and high-throughput analytical SQL.
 
+The full ambition is a regional-to-national spatial data plane, not a narrower
+PostgreSQL clone: stateless QuackGIS readers/writers over DuckLake snapshots,
+managed catalog/object storage, releaseable datasets, budgeted query evidence,
+and eventually multi-modal asset indexes for raster, point-cloud, CAD/BIM, 3D
+tiles, imagery, and reality-capture data.
+
 The durable storage model is DuckLake: SQL catalog metadata plus Parquet data on
 file/object storage. SQLite + local files and PostgreSQL + S3 are both first-class
 storage profiles. The same SQL, pgwire, spatial layout, and compatibility surface
@@ -78,7 +84,7 @@ frames, and provenance sidecars. The SQL hot path should query footprints,
 quality/resolution fields, CRS/epoch metadata, lineage, and storage URIs while
 leaving heavyweight source artifacts in object storage.
 
-## Current preview, Alpha evidence, and broader direction
+## Current preview, Alpha evidence, and promotion ladder
 
 The current developer preview/Alpha base proves the core shape:
 
@@ -97,24 +103,22 @@ The current developer preview/Alpha base proves the core shape:
 The Alpha evidence loop now exists in Kind: PostgreSQL DuckLake catalog,
 S3-compatible object storage, multiple QuackGIS pods, writer conflict/retry,
 native DML/compaction metadata probes, QPS reader probes, OLAP fanout probes,
-metrics scraping, and uploaded compatibility/storage reports. The next step is
-**Alpha hardening**:
-make that evidence credible enough for external platform developers instead of
-treating in-cluster stand-ins as production claims.
+Linkerd mTLS/TCP observability, metrics scraping, and uploaded compatibility/
+storage/benchmark reports. The next step is not another docs pass; it is the
+promotion ladder:
 
-- release-attached trend dashboards from scheduled/manual `metrics.json` artifacts;
-- larger/manual QPS and OLAP gates over LayoutBench, real OSM, and
-  Overture-derived layers;
-- external PostgreSQL and S3-compatible services, not only in-cluster stand-ins;
-- operational probes/docs for catalog/object-store credentials, compaction,
-  backup/restore, failed-writer cleanup, catalog refresh, and failure modes;
-- production auth/RBAC/TLS hardening, richer metrics, and Kubernetes deployment
-  profiles beyond the current reviewed Alpha example.
+1. make local Kind+Linkerd evidence boring and budgeted;
+2. promote the same claims to managed PostgreSQL/S3-compatible services;
+3. widen copied real-data client/API matrices and edit traces;
+4. harden native maintenance, snapshots, RBAC, backup/restore, and upgrade paths;
+5. publish a 1.0 release packet that a platform team can run without source-tree
+   archaeology;
+6. extend the same SQL/control plane to multi-modal spatial asset inventories.
 
-Beyond Alpha, the project should aim at real-data client matrices, native write
-maintenance, temporal layout, SQL time travel, broader PostGIS conformance,
-multi-modal asset sidecar schemas, and a 1.0 release that platform teams can
-operate without reading the source tree.
+Forward roadmap items should therefore be evidence-oriented: dashboards with
+budgets, failure drills, copied datasets, external-service runs, compatibility
+matrices, and release artifacts. A design document or runbook is a contract for
+future evidence, not evidence by itself.
 
 ## Scope boundaries
 
@@ -141,10 +145,12 @@ PostgreSQL illusion conflict, correctness and explicit limits win.
 Docs should distinguish:
 
 - **current preview claims**: only features covered by tests/smokes/benchmarks;
-- **alpha evidence**: PostgreSQL + S3, multi-process readers/writers, high-QPS
-  scaled gates, OLAP gates, and trendable metrics;
-- **alpha hardening**: real external services, larger scheduled datasets, and ops
-  docs before production claims;
-- **later roadmap**: broader real-data compatibility, native write maintenance,
-  temporal layout/time travel, production security, advanced analytics, and
-  multi-modal spatial asset indexing.
+- **local Alpha evidence**: Kind+Linkerd PostgreSQL/S3-like profile, multi-process
+  readers/writers, high-QPS/OLAP gates, mTLS/TCP visibility, and trendable metrics;
+- **external Alpha evidence**: managed PostgreSQL/S3-compatible services,
+  provider behavior, backup/restore, credential rotation, and failure drills;
+- **Beta/1.0 evidence**: copied regional datasets, full client/API matrices,
+  native maintenance, snapshot/time-travel operations, RBAC, DR, upgrades, and
+  release packets;
+- **2.x direction**: multi-modal spatial asset indexing, maintained summaries,
+  branches/releases, and digital-twin-scale SQL/control-plane workflows.

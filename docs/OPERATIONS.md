@@ -161,18 +161,19 @@ runtime stage.
 
 Client probe scripts are versioned under `deploy/kind/probes/` and published into
 the cluster by `just kind-probe-scripts` as a `quackgis-probe-scripts` ConfigMap.
-The QGIS, OGR, GeoServer, and demo Jobs all use this shared probe core instead of
-embedding large scripts directly in YAML.
+The QGIS, OGR, API-client, GeoServer, and demo Jobs all use this shared probe core
+instead of embedding large scripts directly in YAML.
 
 `just seed-kind-demo` refreshes stable `public.demo_points` and
 `public.demo_polygons` layers in an existing deployment. `just demo-kind` wraps
 cluster readiness, deployment refresh, and that seed job for quick onboarding.
 
-`just kind-probes` starts the maintained QGIS read/render/identify/filter, QGIS edit, OGR, and
-GeoServer WFS/WMS/WFS-T Jobs together and waits once. Individual `kind-qgis-probe`,
-`kind-qgis-edit-probe`, `kind-ogr-probe`, and `kind-geoserver-probe` targets
-remain available for focused reruns. `just kind-compatibility` is the stable
-full local/CI recipe: it runs `kind-refresh-fast` and then `kind-probes`.
+`just kind-probes` starts the maintained QGIS read/render/identify/filter, QGIS
+edit, OGR, API-client profile, and GeoServer WFS/WMS/WFS-T Jobs together and waits
+once. Individual `kind-qgis-probe`, `kind-qgis-edit-probe`, `kind-ogr-probe`,
+`kind-api-client-probe`, and `kind-geoserver-probe` targets remain available for
+focused reruns. `just kind-compatibility` is the stable full local/CI recipe: it
+runs `kind-refresh-fast` and then `kind-probes`.
 
 `just kind-lake-smoke` deploys the short-named lake profile: `lake` QuackGIS pods,
 `pg` for the DuckLake PostgreSQL catalog, and `s3` for local S3-compatible Parquet
@@ -232,6 +233,11 @@ metric deltas. Increase `QPS_DEEP_FACTOR`, `QPS_DEEP_WORKERS`, and
 `lake`, `pg`, `s3`, and `mesh-client` pods, runs storage plus TCP load-balancing
 probes from the injected client, and asserts Linkerd proxy metrics report TLS
 traffic. The default `LINKERD_IPTABLES_MODE=nft` matches Podman-backed Kind.
+
+The roadmap's near-term execution focus is to maximize this local Kind+Linkerd
+envelope before external-service promotion. See
+[LOCAL_KIND_LINKERD_FOCUS.md](./LOCAL_KIND_LINKERD_FOCUS.md) for the recommended
+full local ladder, scale knobs, and claim boundaries.
 
 The QGIS probe is a read-path gate. Current expected output includes:
 
@@ -489,9 +495,11 @@ rerun the workflow before investigating deeper catalog bugs.
 GitHub Actions uses `mise.toml` as the CI toolchain source of truth and calls the
 same Justfile recipes as local development through `mise exec -- just ...`.
 
-- `CI` runs `just ci` (`check-fast`) on pushes to `main` and pull requests.
-- `Compatibility probes` runs the Kind QGIS read/edit, OGR, and GeoServer probes
-  with `just kind-compatibility` on a nightly schedule and by manual dispatch. It
+- `CI` runs `just ci` (`check-fast`, local demo/preview smokes,
+  `api-client-local-smoke`, static probe validation, and runtime image guard) on
+  pushes to `main` and pull requests.
+- `Compatibility probes` runs the Kind QGIS read/edit, OGR, API-client profile,
+  and GeoServer probes with `just kind-compatibility` on a nightly schedule and by manual dispatch. It
   appends `.tmp/compatibility/README.md` to the GitHub job summary, uploads logs
   collected by `just kind-compat-report` as a compatibility report artifact, and
   fails explicitly if the rendered report contains a failed probe row.
@@ -509,7 +517,10 @@ same Justfile recipes as local development through `mise exec -- just ...`.
   remain smoke evidence, not production durability evidence.
 - Native DML and compaction crash/retry/orphan drills should follow
   [MUTATION_FAILURE_DRILLS.md](./MUTATION_FAILURE_DRILLS.md); successful ordinary
-  DML tests alone are not production failure-mode evidence.
+  DML tests alone are not production failure-mode evidence. The local native
+  `DELETE`/`UPDATE`/bucket-compaction before-commit failpoint tests are the first
+  automated crash-boundary oracles; service-level kill/retry drills remain
+  promotion work.
 - Snapshot rollback, future SQL `AS OF`, protected snapshot, and CDC exposure
   policy is documented in [SNAPSHOT_OPERATIONS.md](./SNAPSHOT_OPERATIONS.md).
 
@@ -531,7 +542,9 @@ Use `just metrics-trend path/to/artifact-dir` to flatten one or more downloaded
 `metrics.json` files into CSV for trend dashboards. The helper also supports
 `format=json`, `format=markdown`, and `format=dashboard` for release notes or
 manual inspection. `just metrics-dashboard path=path/to/artifact-dir` writes a
-release-ready Markdown dashboard; see
+release-ready Markdown dashboard. `just metrics-budget-check path=path/to/artifact-dir`
+fails closed on failed checks and explicit budget overruns; add
+`require_budgeted=true` for release candidates. See
 [Metrics trend dashboard](./METRICS_TRENDS.md) for the signal contract.
 
 ## Logs and observability
@@ -553,9 +566,10 @@ denials emit a separate counter line:
 quackgis_write_denied user=quackgis_readonly statement_kind=create_table denied_total=1
 ```
 
-M8 observability now includes process-local catalog refresh and native
-DML/compaction mutation counters without requiring log scraping. Object-store IO
-and writer-conflict counters remain future work.
+M8 observability now includes process-local catalog refresh counters, native
+DML/compaction mutation counters, and native mutation abort counters without
+requiring log scraping. Object-store IO and writer-conflict counters remain future
+work.
 
 For process-local scrape evidence, set `QUACKGIS_METRICS_PORT` (and optionally
 `QUACKGIS_METRICS_HOST`, default `127.0.0.1`) to expose a small Prometheus text
@@ -569,9 +583,9 @@ curl http://127.0.0.1:9187/metrics
 The endpoint is disabled by default and currently exports only safe process
 counters: pgwire hook statements started, transaction staging ids allocated,
 read-only write denials, DuckLake catalog refreshes, shared-catalog read/strong
-refreshes, native delete/update/bucket-compaction mutations, and successful
-compaction calls. It intentionally does not expose SQL text, object-store paths,
-usernames, or secrets.
+refreshes, native delete/update/bucket-compaction mutations, native mutation
+aborts before catalog commit, and successful compaction calls. It intentionally
+does not expose SQL text, object-store paths, usernames, or secrets.
 
 ## Persistence model
 

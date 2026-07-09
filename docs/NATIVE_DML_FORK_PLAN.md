@@ -119,9 +119,15 @@ catalog-layout rules.
   snapshot publishes them, and failed staging setup creates no schema/table rows.
 - Run the native DELETE/UPDATE/COMPACT oracle on PostgreSQL/S3 Kind storage before
   claiming production-scale DML performance.
-- Add crash/retry probes around mutation commit boundaries; no committed snapshot
-  may expose partial deletes, duplicate update rows, or lost bucket-compaction
-  rows. The drill ladder and evidence packet are documented in
+- Local QuackGIS tests `ducklake_native_delete_failpoint_before_commit_leaves_catalog_unchanged`,
+  `ducklake_native_update_failpoint_before_commit_leaves_catalog_unchanged`, and
+  `ducklake_native_compact_failpoint_before_commit_leaves_catalog_unchanged`
+  inject aborts after native object prewrites and before `commit_table_mutation`,
+  proving no catalog data-file/delete-file rows become visible for those
+  boundaries. Extend the same crash/retry probes to process-kill/retry, Kind, and
+  external profiles; no committed snapshot may expose partial deletes, duplicate
+  update rows, or lost bucket-compaction rows. The drill ladder and evidence packet
+  are documented in
   `docs/MUTATION_FAILURE_DRILLS.md`.
 - Prove `RETURNING`, QGIS keyless `_quackgis_rowid`, GeoServer WFS-T, and OGR
   edit traces still match the current rewrite semantics.

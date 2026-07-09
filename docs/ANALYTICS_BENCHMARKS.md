@@ -3,7 +3,7 @@
 QuackGIS' product claim is not just that GIS clients connect: it must answer
 large spatial/lakehouse questions with measurable pruning, columnar OLAP, and
 stable client results. This document defines the benchmark evidence contract for
-Alpha hardening, M9 analytics, and 1.0 release reports.
+local Alpha, external Alpha promotion, M9 analytics, and 1.0 release reports.
 
 ## Current benchmark base
 
@@ -14,6 +14,7 @@ Alpha hardening, M9 analytics, and 1.0 release reports.
 | Kind QPS selective readers | ✅ Alpha evidence | `just kind-qps-smoke` |
 | Kind grouped OLAP fanout | ✅ Alpha evidence | `just kind-olap-smoke` |
 | Local fragmented compaction read improvement | ✅ local evidence | `ducklake_full_compaction_reports_scan_metric_improvement` |
+| Metrics budget gate | ✅ cheap artifact gate | `just metrics-budget-check path=.tmp/compatibility` |
 | Real-data OSM copy/read | ⚠️ opt-in | `just kind-osm-postgis-parity` |
 | External PostgreSQL/S3 scale ladder | ⏳ runbook, execution required | `docs/ALPHA_EXTERNAL_SERVICES.md` |
 
@@ -52,7 +53,9 @@ The manual `Benchmark ladder` GitHub workflow runs the maintained benchmark
 recipes (`layoutbench-local-smoke`, `kind-qps-smoke`, `kind-olap-smoke`,
 `kind-qps-deep-smoke`, and `kind-lake-layoutbench-smoke`) and uploads
 `benchmark-report-*` plus `benchmark-metrics-*` artifacts. Treat those artifacts
-as manual evidence unless/until a recipe is promoted to a scheduled gate.
+as manual evidence unless/until a recipe is promoted to a scheduled gate. The
+preferred near-term scale target is the local Kind+Linkerd envelope documented in
+[LOCAL_KIND_LINKERD_FOCUS.md](./LOCAL_KIND_LINKERD_FOCUS.md).
 
 ## Query families
 
@@ -74,6 +77,11 @@ as manual evidence unless/until a recipe is promoted to a scheduled gate.
 - Regressions must distinguish correctness failure, planner regression, object-
   store latency, and intentional scale increase.
 - Trend dashboards augment the gate; they do not replace it.
+- `just metrics-budget-check path=<metrics.json-or-dir>` is the cheap release gate
+  for existing artifacts: it fails on failed checks and on any emitted
+  `*_budget` value exceeded by the matching metric. Use `require_budgeted=true`
+  for release candidates so dashboards cannot pass without at least one explicit
+  budget assertion.
 
 ## Report template
 

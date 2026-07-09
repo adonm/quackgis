@@ -33,11 +33,14 @@ SHA:
 1. `just check-fast` via CI or a local transcript;
 2. compatibility probe artifact from the maintained workflow;
 3. storage smoke artifact, at least `kind-alpha-smoke`;
-4. PostGIS regress subset artifact;
-5. PostGIS fixture summary from `just postgis-conformance-summary` when the
+4. budget check transcript, for example
+   `just metrics-budget-check path=<artifact-dir> require_budgeted=true` on the
+   selected compatibility/storage/benchmark metrics;
+5. PostGIS regress subset artifact;
+6. PostGIS fixture summary from `just postgis-conformance-summary` when the
    conformance ledger changed;
-6. release binary checksum and image digest/tags;
-7. known limitations copied from `docs/COMPATIBILITY.md`,
+7. release binary checksum and image digest/tags;
+8. known limitations copied from `docs/COMPATIBILITY.md`,
    `docs/POSTGIS_CONFORMANCE.md`, and roadmap open items.
 
 If any scheduled artifact is missing for the release SHA, label the release as a
@@ -46,11 +49,17 @@ preview/manual build and include the exact replacement command transcript.
 ## Evidence review checklist
 
 - Source SHA in all artifacts matches the release manifest.
-- Compatibility/storage reports do not contain `❌ fail` rows.
+- Compatibility/storage/benchmark workflows ran `metrics-budget-check` on their
+  uploaded `metrics.json`, including required-check assertions for expected
+  recipe outputs; reports do not contain `❌ fail` rows, and the gate did not run
+  against an empty artifact directory.
 - `metrics-dashboard.md` is present beside `metrics.json` when workflows produced
   metrics.
+- `just metrics-budget-check require_budgeted=true` passes for release-selected
+  metrics artifacts.
 - QPS/OLAP scan budgets did not regress unexpectedly.
-- Native DML/compaction counters and row-count checks match the roadmap claim.
+- Native DML/compaction/abort counters and row-count checks match the roadmap
+  claim.
 - PostGIS regress pass-rate is recorded and unsupported surfaces are documented in
   `docs/POSTGIS_CONFORMANCE.md`.
 - External PostgreSQL/S3 claims are not made unless the evidence packet includes

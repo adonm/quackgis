@@ -8,7 +8,7 @@ only when it appears in one of the maintained gates below.
 
 | Tier | Scope | Evidence |
 |---|---|---|
-| Pgwire claimed subset | Functions and metadata exercised through the QuackGIS server protocol boundary | `just postgis-regress`; `crates/quackgis-server/tests/postgis_regress.rs` currently has 14 cases and prints `postgis_regress_subset passed=<n> total=<n> pass_rate=<x>` |
+| Pgwire claimed subset | Functions and metadata exercised through the QuackGIS server protocol boundary | `just postgis-regress`; `crates/quackgis-server/tests/postgis_regress.rs` currently has 39 cases and prints `postgis_regress_subset passed=<n> total=<n> pass_rate=<x>` |
 | SQL portability fixtures | SedonaDB/PostGIS function-kernel parity and documented mechanical rewrites | `tests/run_sql.sh` includes the SQL fixtures summarized by `just postgis-conformance-summary` |
 | Client traces | Real client SQL/catalog/wire behavior | Kind probes for QGIS, GDAL/OGR, GeoServer, and Martin; see `docs/COMPATIBILITY_MATRIX.md` |
 
@@ -27,10 +27,10 @@ release notes or conformance reviews.
 | Constructors and text/WKB IO | ✅ pgwire starter + SQL fixtures | `ST_GeomFromText`, `ST_GeomFromEWKT`, `ST_Point`, `ST_MakeEnvelope`, WKB/EWKB client payloads |
 | SRID helpers | ✅ pgwire starter | EWKB SRID tags are preserved/read by `ST_SetSRID`, `ST_SRID`, `ST_GeomFromEWKT`, `ST_MakeEnvelope(..., srid)`, and `ST_Transform(..., srid)` |
 | Predicates and DE-9IM | ✅ SQL fixtures; starter pgwire subset for `ST_Intersects` | Includes intersects, contains/within boundary semantics, disjoint, touches, crosses, overlaps, equals, covers, DWithin, ordering-equals, and 40 curated `ST_Relate` matrices |
-| Measures/accessors | ✅ SQL fixtures; starter pgwire subset for area/distance/length | Area, length, perimeter, distance, bbox accessors, dimension, collection/validity helpers |
+| Measures/accessors | ✅ SQL fixtures; starter pgwire subset for area/distance/length, `ST_X`/`ST_Y`, `ST_XMin`/`ST_YMin`/`ST_XMax`/`ST_YMax`, `GeometryType`/`ST_GeometryType`, `ST_NDims`/`ST_CoordDim`/`ST_Dimension`, `ST_NPoints`/`ST_NumPoints`, `ST_StartPoint`/`ST_EndPoint`/`ST_PointN`, `ST_NumGeometries`, `ST_IsEmpty`, `ST_IsValid`, and helper metadata | Area, length, perimeter, distance, bbox accessors, dimension/`ST_Zmflag`, collection/validity helpers |
 | Overlay/processing | ✅ SQL fixtures | Intersection, union, difference, symdifference, make-valid, hull/envelope, shortest/longest/closest line, max distance |
 | Dump/set-returning functions | ✅ SQL fixtures | `ST_Dump`, `ST_DumpPoints`, `ST_DumpRings`, `ST_DumpSegments`; SQL syntax follows DataFusion table-function shape (`FROM st_dump(...)`) |
-| Editing/affine/simplify | ✅ SQL fixtures with documented deltas | Reverse, normalize, set/remove/add point, flip coordinates, force polygon CW, translate/scale/rotate/affine/snap-to-grid, simplify |
+| Editing/affine/simplify | ✅ SQL fixtures with documented deltas; pgwire renderer helpers | Reverse, normalize, set/remove/add point, flip coordinates, force polygon CW, translate/scale/rotate/affine/snap-to-grid, simplify; `ST_Force2D`, `ST_CurveToLine`, and `ST_HasArc` are covered through pgwire because maintained clients use them in render/tile SQL |
 | Operators/client rewrites | ✅ maintained where clients require them | `&&` and `<->` are mapped in QuackGIS/client paths; SQL portability fixtures also document mechanical DuckDB/Sedona rewrites |
 
 ## Known deltas and skips

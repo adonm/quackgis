@@ -86,7 +86,7 @@ An external Alpha evidence packet is credible when it includes:
 - known deviations from the Kind profile.
 
 If any drill is skipped, label the resulting evidence as an **external wiring
-smoke**, not as external-service Alpha hardening.
+smoke**, not as external-service Alpha promotion evidence.
 
 ## Rollback and cleanup
 

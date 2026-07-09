@@ -10,12 +10,12 @@ This document defines the support bar for Python/API/BI-style clients.
 
 | Client/profile | Target workflow | Support status |
 |---|---|---|
-| psycopg 3 | connect, parameterized WKB/EWKB, binary/text reads, COPY where applicable | covered indirectly by pgwire/tokio-postgres tests; dedicated probe pending |
-| SQLAlchemy Core | reflection enough for read queries and inserts into declared schemas | not claimed |
-| GeoPandas `read_postgis` | read WKB-backed geometry into a GeoDataFrame, preserve CRS metadata when available | not claimed |
-| pg_featureserv-like reader | table discovery, bbox filters, JSON/GeoJSON-shaped API reads over pgwire | not claimed |
-| BI/SQL tools | simple/extended protocol SELECTs, projection/filter/grouped aggregates | not claimed as a named client |
-| MVT consumers through Martin | table discovery, non-empty tile, attribute tags | Martin SQL/E2E base exists; attribute matrix pending |
+| psycopg 3 | connect, parameterized WKB/EWKB, binary/text reads, COPY where applicable | profile surface covered by `just api-client-local-smoke` and `just kind-api-client-probe`; named psycopg dependency probe pending |
+| SQLAlchemy Core | reflection enough for read queries and inserts into declared schemas | profile information_schema surface covered locally and in Kind; named SQLAlchemy dependency probe pending |
+| GeoPandas `read_postgis` | read WKB-backed geometry into a GeoDataFrame, preserve CRS metadata when available | profile WKB row-query surface covered locally and in Kind; named GeoPandas dependency probe pending |
+| pg_featureserv-like reader | table discovery, bbox filters, JSON/GeoJSON-shaped API reads over pgwire | profile bbox/filter surface covered locally and in Kind; real server pending |
+| BI/SQL tools | simple/extended protocol SELECTs, projection/filter/grouped aggregates | profile grouped aggregate surface covered locally and in Kind; named BI client pending |
+| MVT consumers through Martin | table discovery, non-empty tile, attribute tags | Martin SQL/E2E base exists; profile non-empty MVT query covered locally and in Kind; encoder-level key/value tags covered; SQL/client attribute propagation pending |
 
 ## Probe design rules
 
@@ -67,10 +67,55 @@ Use the smallest deterministic fixture first:
 - Client-specific compatibility hacks without a named PostgreSQL catalog/protocol
   surface.
 
+## Implemented local surface probe
+
+`just api-client-local-smoke` starts a temporary QuackGIS server and runs
+`crates/quackgis-server/examples/api_client_probe.rs`. It is deliberately lighter
+than named client containers and asserts the protocol/catalog surfaces first:
+
+- psycopg-style text and typed binary WKB parameters plus `ST_AsEWKB` readback;
+- SQLAlchemy-style `information_schema` table/column reflection without hidden
+  layout columns;
+- GeoPandas-style WKB row reads with documented SRID-0 behavior;
+- pg_featureserv-style bbox/filter query over a WKB layer;
+- BI-style grouped aggregate query; and
+- non-empty MVT bytes from `ST_AsMVTGeom` + `ST_AsMVT`.
+
+The MVT encoder itself now has a focused unit test for key/value dictionaries and
+feature tags. The public SQL/client probes still assert non-empty tiles only until
+Martin-style attribute propagation is wired through `ST_AsMVT` query shapes.
+
+This is a local/wire gate, not a named-client support claim. Promotion still
+requires the containerized client or real server named in the matrix. The local
+gate is now part of `just ci`, so API/client catalog drift is caught before the
+heavier Kind/client promotion path.
+
+## Implemented Kind profile probe
+
+`just kind-api-client-probe` runs the same API/profile contract inside the
+maintained Kind network using the shared probe ConfigMap. It emits one
+`api_client_summary` line for compatibility metrics:
+
+- `feature_count` for GeoPandas-style WKB reads;
+- `reflected_columns` for SQLAlchemy-style table/column reflection;
+- `bbox_count` for pg_featureserv-style spatial filters;
+- `groups` for BI-style grouped aggregates; and
+- `tile_bytes` for non-empty MVT output.
+
+`just kind-probes`, `just kind-compatibility`, and `just kind-compat-report` now
+include this API-client profile row. This promotes the profile to a maintained
+scheduled/report artifact, but it still does **not** claim broad named-client
+support until the actual psycopg, SQLAlchemy, GeoPandas, pg_featureserv, BI, or
+Martin workflows run with their own dependencies/traces.
+
 ## Next concrete probes
 
-1. psycopg 3 local probe for binary WKB/EWKB params and read-only write denial.
-2. SQLAlchemy inspector probe over `public.demo_points` and a DuckLake table.
-3. GeoPandas `read_postgis` probe over a WKB-backed demo layer.
-4. Martin MVT attribute-tag assertion over copied OSM or demo layers.
-5. pg_featureserv-style bbox/filter query harness before adding the real server.
+1. Promote the profile psycopg surface into a real psycopg 3 container probe,
+   including read-only write denial and COPY where dependencies are available.
+2. Promote the SQLAlchemy/GeoPandas surfaces into named Python dependency probes.
+3. Add a pg_featureserv-style server harness once the bbox/filter SQL surface is
+   boring.
+4. Wire Martin MVT attribute tags through SQL/client probes over copied OSM or
+   demo layers.
+5. Run the named client probes over copied real-data layers before claiming
+   real-data workflow support.

@@ -6,8 +6,8 @@
 //! the `quackgis.main.<table>` catalog path.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
@@ -25,7 +25,8 @@ use datafusion::prelude::SessionContext;
 use datafusion::sql::sqlparser::ast::{
     AlterTable, AlterTableOperation, AssignmentTarget, ColumnDef, CopyLegacyOption, CopyOption,
     CopySource, CopyTarget, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident,
-    ObjectName, SelectItem, Statement, UnaryOperator, Value,
+    ObjectName, ObjectNamePart, Query, SelectItem, SetExpr, Statement, TableFactor,
+    TableFunctionArgs, TableVersion, UnaryOperator, Value,
 };
 use datafusion_ducklake::{
     DeleteFileMutation, DuckLakeCatalog, DuckLakeTable, DuckLakeTableFile, DuckLakeTableWriter,
@@ -72,13 +73,183 @@ static SHARED_CATALOG_STRONG_REFRESH_COUNTER: AtomicU64 = AtomicU64::new(0);
 static NATIVE_DELETE_MUTATION_COUNTER: AtomicU64 = AtomicU64::new(0);
 static NATIVE_UPDATE_MUTATION_COUNTER: AtomicU64 = AtomicU64::new(0);
 static NATIVE_COMPACT_MUTATION_COUNTER: AtomicU64 = AtomicU64::new(0);
+static NATIVE_MUTATION_ABORT_COUNTER: AtomicU64 = AtomicU64::new(0);
 static COMPACTION_COUNTER: AtomicU64 = AtomicU64::new(0);
+static NATIVE_MUTATION_FAILPOINT: OnceLock<StdMutex<Option<NativeMutationFailpoint>>> =
+    OnceLock::new();
 const DEFAULT_DUCKLAKE_ROW_GROUP_ROWS: usize = 512;
 const DUCKLAKE_ROW_GROUP_ROWS_ENV: &str = "QUACKGIS_DUCKLAKE_ROW_GROUP_ROWS";
 const DEFAULT_SHARED_CATALOG_REFRESH_MS: u64 = 1_000;
 const SHARED_CATALOG_REFRESH_MS_ENV: &str = "QUACKGIS_SHARED_CATALOG_REFRESH_MS";
 const DEFAULT_SELECTIVE_READ_TARGET_PARTITIONS: usize = 1;
 const SELECTIVE_READ_TARGET_PARTITIONS_ENV: &str = "QUACKGIS_SELECTIVE_READ_TARGET_PARTITIONS";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeMutationKind {
+    Delete,
+    Update,
+    Compact,
+}
+
+impl NativeMutationKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Delete => "delete",
+            Self::Update => "update",
+            Self::Compact => "compact",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            value if value.eq_ignore_ascii_case("delete") => Ok(Self::Delete),
+            value if value.eq_ignore_ascii_case("update") => Ok(Self::Update),
+            value if value.eq_ignore_ascii_case("compact") => Ok(Self::Compact),
+            _ => Err(anyhow!(
+                "unsupported native mutation failpoint operation {value:?}; expected delete, update, or compact"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeMutationStage {
+    BeforeCommit,
+}
+
+impl NativeMutationStage {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::BeforeCommit => "before_commit",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            value if value.eq_ignore_ascii_case("before_commit") => Ok(Self::BeforeCommit),
+            _ => Err(anyhow!(
+                "unsupported native mutation failpoint stage {value:?}; expected before_commit"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct NativeMutationFailpoint {
+    kind: NativeMutationKind,
+    stage: NativeMutationStage,
+    schema: Option<String>,
+    table: Option<String>,
+}
+
+impl NativeMutationFailpoint {
+    fn parse(spec: &str) -> Result<Self> {
+        let parts = spec.split(':').collect::<Vec<_>>();
+        if !(2..=3).contains(&parts.len()) {
+            return Err(anyhow!(
+                "native mutation failpoint must be operation:stage[:schema.table], got {spec:?}"
+            ));
+        }
+        let kind = NativeMutationKind::parse(parts[0].trim())?;
+        let stage = NativeMutationStage::parse(parts[1].trim())?;
+        let (schema, table) = if let Some(target) = parts.get(2) {
+            parse_failpoint_target(target.trim())?
+        } else {
+            (None, None)
+        };
+        Ok(Self {
+            kind,
+            stage,
+            schema,
+            table,
+        })
+    }
+
+    fn matches(
+        &self,
+        kind: NativeMutationKind,
+        stage: NativeMutationStage,
+        schema: &str,
+        table: &str,
+    ) -> bool {
+        self.kind == kind
+            && self.stage == stage
+            && self
+                .schema
+                .as_deref()
+                .is_none_or(|expected| expected.eq_ignore_ascii_case(schema))
+            && self
+                .table
+                .as_deref()
+                .is_none_or(|expected| expected.eq_ignore_ascii_case(table))
+    }
+}
+
+/// Install a one-shot native mutation failpoint for tests and local failure drills.
+///
+/// The syntax is `operation:stage[:schema.table]`, for example
+/// `delete:before_commit:main.points`. The failpoint is process-local, triggers
+/// only once, and is not exposed through pgwire.
+#[doc(hidden)]
+pub fn set_native_mutation_failpoint_for_tests(spec: Option<&str>) -> Result<()> {
+    let failpoint = spec.map(NativeMutationFailpoint::parse).transpose()?;
+    let mut guard = native_mutation_failpoint()
+        .lock()
+        .map_err(|_| anyhow!("native mutation failpoint lock poisoned"))?;
+    *guard = failpoint;
+    Ok(())
+}
+
+fn native_mutation_failpoint() -> &'static StdMutex<Option<NativeMutationFailpoint>> {
+    NATIVE_MUTATION_FAILPOINT.get_or_init(|| StdMutex::new(None))
+}
+
+fn parse_failpoint_target(target: &str) -> Result<(Option<String>, Option<String>)> {
+    if target.is_empty() || target == "*" {
+        return Ok((None, None));
+    }
+    let parts = target.split('.').collect::<Vec<_>>();
+    match parts.as_slice() {
+        [table] if !table.is_empty() => Ok((None, Some((*table).to_string()))),
+        [schema, table] if !schema.is_empty() && !table.is_empty() => {
+            Ok((Some((*schema).to_string()), Some((*table).to_string())))
+        }
+        _ => Err(anyhow!(
+            "native mutation failpoint target must be table or schema.table, got {target:?}"
+        )),
+    }
+}
+
+fn maybe_fail_native_mutation(
+    kind: NativeMutationKind,
+    stage: NativeMutationStage,
+    schema: &str,
+    table: &str,
+) -> PgWireResult<()> {
+    let failpoint = {
+        let mut guard = native_mutation_failpoint()
+            .lock()
+            .map_err(|_| user_error(anyhow!("native mutation failpoint lock poisoned")))?;
+        if guard
+            .as_ref()
+            .is_some_and(|fp| fp.matches(kind, stage, schema, table))
+        {
+            NATIVE_MUTATION_ABORT_COUNTER.fetch_add(1, Ordering::Relaxed);
+            guard.take()
+        } else {
+            None
+        }
+    };
+
+    if let Some(failpoint) = failpoint {
+        return Err(user_error(anyhow!(
+            "debug native mutation failpoint triggered: operation={} stage={} target={schema}.{table}",
+            failpoint.kind.as_str(),
+            failpoint.stage.as_str()
+        )));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone)]
 pub struct DuckLakeSqlHook {
@@ -208,6 +379,13 @@ struct NativeRowPlan {
     catalog_name: String,
 }
 
+struct SnapshotQueryRewrite {
+    sql: String,
+    snapshot_id: i64,
+    schema: String,
+    table: String,
+}
+
 impl DuckLakeSqlHook {
     pub fn new(paths: StoragePaths) -> Self {
         Self::new_with_auth(paths, AuthConfig::trust())
@@ -240,6 +418,51 @@ impl DuckLakeSqlHook {
             }
         }
     }
+
+    async fn snapshot_query_context(
+        &self,
+        statement: &Statement,
+        session_context: &SessionContext,
+    ) -> PgWireResult<Option<(SessionContext, String)>> {
+        let catalog_name = format!(
+            "__quackgis_snapshot_{}",
+            QUERY_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let Some(rewrite) = snapshot_query_rewrite(statement, &catalog_name)? else {
+            return Ok(None);
+        };
+        let provider = self
+            .paths
+            .metadata_provider()
+            .await
+            .map_err(storage_api_error)?;
+        let schema_meta = provider
+            .get_schema_by_name(&rewrite.schema, rewrite.snapshot_id)
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?
+            .ok_or_else(|| {
+                user_error(anyhow!(
+                    "schema {} was not visible at DuckLake snapshot {}",
+                    rewrite.schema,
+                    rewrite.snapshot_id
+                ))
+            })?;
+        provider
+            .get_table_by_name(schema_meta.schema_id, &rewrite.table, rewrite.snapshot_id)
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?
+            .ok_or_else(|| {
+                user_error(anyhow!(
+                    "table {}.{} was not visible at DuckLake snapshot {}",
+                    rewrite.schema,
+                    rewrite.table,
+                    rewrite.snapshot_id
+                ))
+            })?;
+        let ducklake = DuckLakeCatalog::with_snapshot(provider, rewrite.snapshot_id)
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+        let snapshot_context = SessionContext::new_with_state(session_context.state());
+        snapshot_context.register_catalog(&catalog_name, Arc::new(ducklake));
+        Ok(Some((snapshot_context, rewrite.sql)))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,6 +476,7 @@ pub struct DuckLakeSqlMetrics {
     pub native_delete_mutations_total: u64,
     pub native_update_mutations_total: u64,
     pub native_compact_mutations_total: u64,
+    pub native_mutation_aborts_total: u64,
     pub compactions_total: u64,
 }
 
@@ -271,6 +495,7 @@ pub fn metrics_snapshot() -> DuckLakeSqlMetrics {
         native_delete_mutations_total: NATIVE_DELETE_MUTATION_COUNTER.load(Ordering::Relaxed),
         native_update_mutations_total: NATIVE_UPDATE_MUTATION_COUNTER.load(Ordering::Relaxed),
         native_compact_mutations_total: NATIVE_COMPACT_MUTATION_COUNTER.load(Ordering::Relaxed),
+        native_mutation_aborts_total: NATIVE_MUTATION_ABORT_COUNTER.load(Ordering::Relaxed),
         compactions_total: COMPACTION_COUNTER.load(Ordering::Relaxed),
     }
 }
@@ -357,6 +582,23 @@ impl QueryHook for DuckLakeSqlHook {
             && let Err(err) = self.ensure_write_allowed(client, statement)
         {
             return Some(Err(err));
+        }
+        match self
+            .snapshot_query_context(statement, session_context)
+            .await
+        {
+            Ok(Some((snapshot_context, rewritten_query))) => {
+                return Some(
+                    collect_query_batches(&snapshot_context, &rewritten_query)
+                        .await
+                        .and_then(|batches| {
+                            query_response_from_batches_with_format(batches, Format::UnifiedText)
+                        })
+                        .map(Response::Query),
+                );
+            }
+            Ok(None) => {}
+            Err(err) => return Some(Err(err)),
         }
         if let Some(rewritten_query) =
             pruning::rewrite_spatial_pruning_query(statement, session_context).await
@@ -457,6 +699,25 @@ impl QueryHook for DuckLakeSqlHook {
         {
             return Some(Err(err));
         }
+        match self
+            .snapshot_query_context(statement, session_context)
+            .await
+        {
+            Ok(Some((snapshot_context, rewritten_query))) => {
+                return Some(
+                    snapshot_context
+                        .sql(&rewritten_query)
+                        .await
+                        .map_err(|e| PgWireError::ApiError(Box::new(e)))
+                        .and_then(|df| {
+                            df.into_optimized_plan()
+                                .map_err(|e| PgWireError::ApiError(Box::new(e)))
+                        }),
+                );
+            }
+            Ok(None) => {}
+            Err(err) => return Some(Err(err)),
+        }
         if let Some(plan) = self
             .returning_logical_plan(statement, session_context)
             .await
@@ -515,6 +776,23 @@ impl QueryHook for DuckLakeSqlHook {
             && let Err(err) = self.ensure_write_allowed(client, statement)
         {
             return Some(Err(err));
+        }
+        match self
+            .snapshot_query_context(statement, session_context)
+            .await
+        {
+            Ok(Some((snapshot_context, rewritten_query))) => {
+                return Some(
+                    collect_query_batches(&snapshot_context, &rewritten_query)
+                        .await
+                        .and_then(|batches| {
+                            query_response_from_batches_with_format(batches, Format::UnifiedBinary)
+                        })
+                        .map(Response::Query),
+                );
+            }
+            Ok(None) => {}
+            Err(err) => return Some(Err(err)),
         }
         if param_values_empty(_params)
             && let Some(rewritten_query) =
@@ -625,6 +903,352 @@ fn empty_logical_plan() -> LogicalPlan {
         produce_one_row: false,
         schema: DFSchemaRef::new(DFSchema::empty()),
     })
+}
+
+fn snapshot_query_rewrite(
+    statement: &Statement,
+    catalog_name: &str,
+) -> PgWireResult<Option<SnapshotQueryRewrite>> {
+    let Statement::Query(query) = statement else {
+        return Ok(None);
+    };
+    let selector_count = query_snapshot_selector_count(query);
+    if selector_count == 0 {
+        return Ok(None);
+    }
+    if selector_count > 1 {
+        return Err(user_error(anyhow!(
+            "DuckLake snapshot reads support exactly one snapshot-qualified table in the first safe path"
+        )));
+    }
+
+    let mut statement = statement.clone();
+    let Statement::Query(query) = &mut statement else {
+        unreachable!("checked above")
+    };
+    let (schema, table, snapshot_id) = rewrite_single_table_snapshot_query(query, catalog_name)?;
+    Ok(Some(SnapshotQueryRewrite {
+        sql: statement.to_string(),
+        snapshot_id,
+        schema,
+        table,
+    }))
+}
+
+fn rewrite_single_table_snapshot_query(
+    query: &mut Query,
+    catalog_name: &str,
+) -> PgWireResult<(String, String, i64)> {
+    let SetExpr::Select(select) = query.body.as_mut() else {
+        return Err(user_error(anyhow!(
+            "DuckLake snapshot reads currently support only simple SELECT statements"
+        )));
+    };
+    if select.from.len() != 1 {
+        return Err(user_error(anyhow!(
+            "DuckLake snapshot reads currently support exactly one FROM table"
+        )));
+    }
+    let table = &mut select.from[0];
+    if !table.joins.is_empty() {
+        return Err(user_error(anyhow!(
+            "DuckLake snapshot reads currently support only single-table reads without joins"
+        )));
+    }
+    match &mut table.relation {
+        TableFactor::Table {
+            name,
+            args,
+            version,
+            ..
+        } => {
+            if let Some((schema, table_name, function_args)) = snapshot_table_function_parts(name) {
+                if args.is_some() || version.is_some() {
+                    return Err(user_error(anyhow!(
+                        "DuckLake snapshot reads accept only one snapshot selector per table"
+                    )));
+                }
+                let snapshot_id = snapshot_id_from_function_args(function_args, false)?;
+                *name = snapshot_catalog_table_name(catalog_name, &schema, &table_name);
+                return Ok((schema, table_name, snapshot_id));
+            }
+            let (schema, table_name) = snapshot_table_name_parts(name)
+                .or_else(|| {
+                    args.as_ref()
+                        .filter(|args| snapshot_table_args_have_named_selector(args))
+                        .and_then(|_| snapshot_bare_table_name_parts(name))
+                })
+                .ok_or_else(|| {
+                    user_error(anyhow!(
+                        "DuckLake snapshot reads require a QuackGIS DuckLake table with snapshot => <id>"
+                    ))
+                })?;
+            let snapshot_id = if let Some(table_version) = version.take() {
+                snapshot_id_from_table_version(&table_version)?
+            } else if let Some(table_args) = args.take() {
+                snapshot_id_from_table_args(&table_args)?
+            } else {
+                return Err(user_error(anyhow!(
+                    "internal error: snapshot rewrite missing table snapshot selector"
+                )));
+            };
+            *name = snapshot_catalog_table_name(catalog_name, &schema, &table_name);
+            Ok((schema, table_name, snapshot_id))
+        }
+        TableFactor::Function {
+            lateral,
+            name,
+            args,
+            with_ordinality,
+            alias,
+        } => {
+            if *lateral || *with_ordinality {
+                return Err(user_error(anyhow!(
+                    "DuckLake snapshot table reads do not support LATERAL or WITH ORDINALITY"
+                )));
+            }
+            let (schema, table_name) = snapshot_table_name_parts(name).ok_or_else(|| {
+                user_error(anyhow!(
+                    "DuckLake snapshot reads require a schema-qualified QuackGIS DuckLake table"
+                ))
+            })?;
+            let snapshot_id = snapshot_id_from_function_args(args, false)?;
+            let alias = alias.take();
+            table.relation = TableFactor::Table {
+                name: snapshot_catalog_table_name(catalog_name, &schema, &table_name),
+                alias,
+                args: None,
+                with_hints: vec![],
+                version: None,
+                with_ordinality: false,
+                partitions: vec![],
+                json_path: None,
+                sample: None,
+                index_hints: vec![],
+            };
+            Ok((schema, table_name, snapshot_id))
+        }
+        _ => Err(user_error(anyhow!(
+            "DuckLake snapshot reads currently support only named DuckLake tables"
+        ))),
+    }
+}
+
+fn snapshot_catalog_table_name(catalog_name: &str, schema: &str, table: &str) -> ObjectName {
+    ObjectName::from(vec![
+        Ident::new(catalog_name),
+        Ident::new(schema),
+        Ident::new(table),
+    ])
+}
+
+fn snapshot_table_name_parts(name: &ObjectName) -> Option<(String, String)> {
+    let parts: Vec<String> = name
+        .0
+        .iter()
+        .map(|p| p.to_string().trim_matches('"').to_string())
+        .collect();
+    match parts.as_slice() {
+        [catalog, schema, table] if catalog == DUCKLAKE_CATALOG && is_snapshot_schema(schema) => {
+            Some(("main".to_string(), table.clone()))
+        }
+        [schema, table] if is_snapshot_schema(schema) => Some(("main".to_string(), table.clone())),
+        _ => None,
+    }
+}
+
+fn snapshot_bare_table_name_parts(name: &ObjectName) -> Option<(String, String)> {
+    match name.0.as_slice() {
+        [ObjectNamePart::Identifier(table)] => Some(("main".to_string(), table.value.clone())),
+        _ => None,
+    }
+}
+
+fn snapshot_table_function_parts(name: &ObjectName) -> Option<(String, String, &[FunctionArg])> {
+    match name.0.as_slice() {
+        [
+            ObjectNamePart::Identifier(catalog),
+            ObjectNamePart::Identifier(schema),
+            ObjectNamePart::Function(function),
+        ] if catalog.value.eq_ignore_ascii_case(DUCKLAKE_CATALOG)
+            && is_snapshot_schema(&schema.value) =>
+        {
+            Some((
+                "main".to_string(),
+                function.name.value.clone(),
+                function.args.as_slice(),
+            ))
+        }
+        [
+            ObjectNamePart::Identifier(schema),
+            ObjectNamePart::Function(function),
+        ] if is_snapshot_schema(&schema.value) => Some((
+            "main".to_string(),
+            function.name.value.clone(),
+            function.args.as_slice(),
+        )),
+        _ => None,
+    }
+}
+
+fn is_snapshot_schema(schema: &str) -> bool {
+    schema.eq_ignore_ascii_case("main") || schema.eq_ignore_ascii_case("public")
+}
+
+fn snapshot_id_from_table_version(version: &TableVersion) -> PgWireResult<i64> {
+    match version {
+        TableVersion::VersionAsOf(expr) => snapshot_id_from_expr(expr),
+        _ => Err(user_error(anyhow!(
+            "DuckLake time travel currently supports literal snapshot ids only"
+        ))),
+    }
+}
+
+fn snapshot_id_from_table_args(args: &TableFunctionArgs) -> PgWireResult<i64> {
+    snapshot_id_from_function_args(&args.args, args.settings.is_some())
+}
+
+fn snapshot_table_args_have_named_selector(args: &TableFunctionArgs) -> bool {
+    args.settings.is_none()
+        && args.args.len() == 1
+        && function_arg_is_snapshot_selector(&args.args[0])
+}
+
+fn function_arg_is_snapshot_selector(arg: &FunctionArg) -> bool {
+    match arg {
+        FunctionArg::Named { name, .. } => {
+            name.value.eq_ignore_ascii_case("snapshot")
+                || name.value.eq_ignore_ascii_case("snapshot_id")
+        }
+        FunctionArg::ExprNamed { name, .. } => match name {
+            Expr::Identifier(ident) => {
+                ident.value.eq_ignore_ascii_case("snapshot")
+                    || ident.value.eq_ignore_ascii_case("snapshot_id")
+            }
+            _ => false,
+        },
+        FunctionArg::Unnamed(_) => false,
+    }
+}
+
+fn snapshot_id_from_function_args(args: &[FunctionArg], has_settings: bool) -> PgWireResult<i64> {
+    if has_settings || args.len() != 1 {
+        return Err(user_error(anyhow!(
+            "DuckLake snapshot table reads use exactly one snapshot id argument: public.table(<snapshot_id>)"
+        )));
+    }
+    match &args[0] {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => snapshot_id_from_expr(expr),
+        FunctionArg::Named { name, arg, .. }
+            if name.value.eq_ignore_ascii_case("snapshot")
+                || name.value.eq_ignore_ascii_case("snapshot_id") =>
+        {
+            match arg {
+                FunctionArgExpr::Expr(expr) => snapshot_id_from_expr(expr),
+                _ => Err(user_error(anyhow!(
+                    "DuckLake snapshot id must be an expression"
+                ))),
+            }
+        }
+        FunctionArg::ExprNamed {
+            name: Expr::Identifier(ident),
+            arg,
+            ..
+        } if ident.value.eq_ignore_ascii_case("snapshot")
+            || ident.value.eq_ignore_ascii_case("snapshot_id") =>
+        {
+            match arg {
+                FunctionArgExpr::Expr(expr) => snapshot_id_from_expr(expr),
+                _ => Err(user_error(anyhow!(
+                    "DuckLake snapshot id must be an expression"
+                ))),
+            }
+        }
+        _ => Err(user_error(anyhow!(
+            "DuckLake snapshot table reads use public.table(<snapshot_id>) or public.table(snapshot => <snapshot_id>)"
+        ))),
+    }
+}
+
+fn snapshot_id_from_expr(expr: &Expr) -> PgWireResult<i64> {
+    match expr {
+        Expr::Value(value) => match &value.value {
+            Value::Number(raw, _) => raw
+                .parse::<i64>()
+                .map_err(|e| user_error(anyhow!("invalid DuckLake snapshot id {raw:?}: {e}"))),
+            _ => Err(user_error(anyhow!(
+                "DuckLake snapshot reads require a numeric snapshot id"
+            ))),
+        },
+        Expr::UnaryOp {
+            op: UnaryOperator::Plus,
+            expr,
+        } => snapshot_id_from_expr(expr),
+        _ => Err(user_error(anyhow!(
+            "DuckLake snapshot reads require a literal snapshot id"
+        ))),
+    }
+}
+
+fn query_snapshot_selector_count(query: &Query) -> usize {
+    set_expr_snapshot_selector_count(query.body.as_ref())
+}
+
+fn set_expr_snapshot_selector_count(expr: &SetExpr) -> usize {
+    match expr {
+        SetExpr::Select(select) => select
+            .from
+            .iter()
+            .map(|table| {
+                table_factor_snapshot_selector_count(&table.relation)
+                    + table
+                        .joins
+                        .iter()
+                        .map(|join| table_factor_snapshot_selector_count(&join.relation))
+                        .sum::<usize>()
+            })
+            .sum(),
+        SetExpr::Query(query) => query_snapshot_selector_count(query),
+        SetExpr::SetOperation { left, right, .. } => {
+            set_expr_snapshot_selector_count(left) + set_expr_snapshot_selector_count(right)
+        }
+        _ => 0,
+    }
+}
+
+fn table_factor_snapshot_selector_count(factor: &TableFactor) -> usize {
+    match factor {
+        TableFactor::Table {
+            name,
+            args,
+            version,
+            ..
+        } => {
+            usize::from(version.is_some())
+                + usize::from(args.is_some() && snapshot_table_name_parts(name).is_some())
+                + usize::from(
+                    args.as_ref()
+                        .is_some_and(snapshot_table_args_have_named_selector)
+                        && snapshot_bare_table_name_parts(name).is_some(),
+                )
+                + usize::from(snapshot_table_function_parts(name).is_some())
+        }
+        TableFactor::Function { name, args, .. } => {
+            usize::from(!args.is_empty() && snapshot_table_name_parts(name).is_some())
+        }
+        TableFactor::Derived { subquery, .. } => query_snapshot_selector_count(subquery),
+        TableFactor::NestedJoin {
+            table_with_joins, ..
+        } => {
+            table_factor_snapshot_selector_count(&table_with_joins.relation)
+                + table_with_joins
+                    .joins
+                    .iter()
+                    .map(|join| table_factor_snapshot_selector_count(&join.relation))
+                    .sum::<usize>()
+        }
+        _ => 0,
+    }
 }
 
 fn log_query_start<C>(client: &C, protocol: &str, statement: &Statement) -> u64
@@ -1851,6 +2475,12 @@ impl DuckLakeSqlHook {
         let mutation = self
             .add_native_delete_files_to_mutation(&mut plan, schema, table, &table_writer, mutation)
             .await?;
+        maybe_fail_native_mutation(
+            NativeMutationKind::Compact,
+            NativeMutationStage::BeforeCommit,
+            schema,
+            table,
+        )?;
         writer
             .commit_table_mutation(plan.table_id, schema, table, plan.snapshot_id, &mutation)
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
@@ -1889,6 +2519,7 @@ impl DuckLakeSqlHook {
         session_context: &SessionContext,
         client: &dyn HookClient,
     ) -> PgWireResult<Response> {
+        self.ensure_write_allowed(client, statement)?;
         let (table_name, columns, options, legacy_options, values) = match statement {
             Statement::Copy {
                 source:
@@ -2487,6 +3118,12 @@ impl DuckLakeSqlHook {
         if mutation.is_empty() {
             return Ok(Some(0));
         }
+        maybe_fail_native_mutation(
+            NativeMutationKind::Delete,
+            NativeMutationStage::BeforeCommit,
+            schema,
+            table,
+        )?;
         writer
             .commit_table_mutation(plan.table_id, schema, table, plan.snapshot_id, &mutation)
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
@@ -2561,6 +3198,12 @@ impl DuckLakeSqlHook {
         let mutation = self
             .add_native_delete_files_to_mutation(&mut plan, schema, table, &table_writer, mutation)
             .await?;
+        maybe_fail_native_mutation(
+            NativeMutationKind::Update,
+            NativeMutationStage::BeforeCommit,
+            schema,
+            table,
+        )?;
         writer
             .commit_table_mutation(plan.table_id, schema, table, plan.snapshot_id, &mutation)
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;

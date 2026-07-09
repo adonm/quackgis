@@ -42,6 +42,10 @@ pub fn register_spatial_udfs(ctx: &SessionContext) -> DFResult<()> {
     register_st_estimatedextent(ctx)?;
     register_st_astext(ctx)?;
     register_st_asbinary(ctx)?;
+    register_st_point_accessors(ctx)?;
+    register_st_bbox_accessors(ctx)?;
+    register_st_geometry_accessors(ctx)?;
+    register_st_line_accessors(ctx)?;
     register_st_transform_real(ctx)?;
     register_bbox_overlap(ctx)?;
     register_st_geomfromewkt(ctx)?;
@@ -480,6 +484,625 @@ impl ScalarUDFImpl for STAsText {
             .collect::<DFResult<Vec<_>>>()?;
         Ok(ColumnarValue::Array(Arc::new(StringArray::from_iter(out))))
     }
+}
+
+// ─── ST_X/ST_Y(point) — point coordinate accessors ─────────────────────────
+fn register_st_point_accessors(ctx: &SessionContext) -> DFResult<()> {
+    ctx.register_udf(ScalarUDF::new_from_impl(STPointCoord::new("st_x", Axis::X)));
+    ctx.register_udf(ScalarUDF::new_from_impl(STPointCoord::new("st_y", Axis::Y)));
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Axis {
+    X,
+    Y,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct STPointCoord {
+    name: &'static str,
+    axis: Axis,
+    signature: Signature,
+}
+
+impl STPointCoord {
+    fn new(name: &'static str, axis: Axis) -> Self {
+        Self {
+            name,
+            axis,
+            signature: Signature::one_of(
+                vec![
+                    TypeSignature::Exact(vec![DataType::Binary]),
+                    TypeSignature::Exact(vec![DataType::BinaryView]),
+                ],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
+
+impl ScalarUDFImpl for STPointCoord {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Float64)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let arrays = columnar_values_to_arrays(&args.args)?;
+        let geom = arrays.first().ok_or_else(|| {
+            DataFusionError::Internal(format!("{} expected one argument", self.name))
+        })?;
+        let out = (0..geom.len())
+            .map(|i| match binary_value_at(geom, i, self.name)? {
+                Some(wkb) => point_coord(wkb, self.axis, self.name).map(Some),
+                None => Ok(None),
+            })
+            .collect::<DFResult<Vec<_>>>()?;
+        Ok(ColumnarValue::Array(Arc::new(Float64Array::from_iter(out))))
+    }
+}
+
+fn point_coord(wkb: &[u8], axis: Axis, function: &str) -> DFResult<f64> {
+    let parsed = crate::mvt::parse_wkb(wkb).ok_or_else(|| {
+        DataFusionError::Execution(format!("{function} expected valid 2D WKB/EWKB"))
+    })?;
+    if parsed.geom_type != crate::mvt::GeomType::Point {
+        return Err(DataFusionError::Execution(format!(
+            "{function} expected POINT geometry"
+        )));
+    }
+    let (x, y) = parsed
+        .rings
+        .first()
+        .and_then(|ring| ring.first())
+        .copied()
+        .ok_or_else(|| {
+            DataFusionError::Execution(format!("{function} expected non-empty POINT"))
+        })?;
+    Ok(match axis {
+        Axis::X => x,
+        Axis::Y => y,
+    })
+}
+
+// ─── ST_XMin/ST_YMin/ST_XMax/ST_YMax(geom|box2d) — bbox accessors ──────────
+fn register_st_bbox_accessors(ctx: &SessionContext) -> DFResult<()> {
+    ctx.register_udf(ScalarUDF::new_from_impl(STBboxCoord::new(
+        "st_xmin",
+        BboxAxis::XMin,
+    )));
+    ctx.register_udf(ScalarUDF::new_from_impl(STBboxCoord::new(
+        "st_ymin",
+        BboxAxis::YMin,
+    )));
+    ctx.register_udf(ScalarUDF::new_from_impl(STBboxCoord::new(
+        "st_xmax",
+        BboxAxis::XMax,
+    )));
+    ctx.register_udf(ScalarUDF::new_from_impl(STBboxCoord::new(
+        "st_ymax",
+        BboxAxis::YMax,
+    )));
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum BboxAxis {
+    XMin,
+    YMin,
+    XMax,
+    YMax,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct STBboxCoord {
+    name: &'static str,
+    axis: BboxAxis,
+    signature: Signature,
+}
+
+impl STBboxCoord {
+    fn new(name: &'static str, axis: BboxAxis) -> Self {
+        Self {
+            name,
+            axis,
+            signature: Signature::one_of(
+                vec![
+                    TypeSignature::Exact(vec![DataType::Binary]),
+                    TypeSignature::Exact(vec![DataType::BinaryView]),
+                    TypeSignature::Exact(vec![DataType::Utf8]),
+                ],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
+
+impl ScalarUDFImpl for STBboxCoord {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Float64)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let arrays = columnar_values_to_arrays(&args.args)?;
+        let input = arrays.first().ok_or_else(|| {
+            DataFusionError::Internal(format!("{} expected one argument", self.name))
+        })?;
+        let out = (0..input.len())
+            .map(|i| bbox_coord_at(input, i, self.axis, self.name))
+            .collect::<DFResult<Vec<_>>>()?;
+        Ok(ColumnarValue::Array(Arc::new(Float64Array::from_iter(out))))
+    }
+}
+
+fn bbox_coord_at(
+    input: &ArrayRef,
+    row: usize,
+    axis: BboxAxis,
+    function: &str,
+) -> DFResult<Option<f64>> {
+    let rect = if matches!(input.data_type(), DataType::Utf8) {
+        let text = input
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| DataFusionError::Internal(format!("{function} expected Utf8")))?;
+        if text.is_null(row) {
+            return Ok(None);
+        }
+        parse_box2d(text.value(row))?
+    } else {
+        let Some(wkb) = binary_value_at(input, row, function)? else {
+            return Ok(None);
+        };
+        rect_from_wkb(wkb)?
+    };
+    Ok(rect.map(|rect| match axis {
+        BboxAxis::XMin => rect.min_x,
+        BboxAxis::YMin => rect.min_y,
+        BboxAxis::XMax => rect.max_x,
+        BboxAxis::YMax => rect.max_y,
+    }))
+}
+
+// ─── ST_GeometryType/ST_NPoints/ST_NumGeometries metadata accessors ────────
+fn register_st_geometry_accessors(ctx: &SessionContext) -> DFResult<()> {
+    ctx.register_udf(ScalarUDF::new_from_impl(STGeometryType::new()));
+    ctx.register_udf(ScalarUDF::new_from_impl(STGeometryCount::new(
+        "st_npoints",
+        GeometryCountKind::Points,
+    )));
+    ctx.register_udf(ScalarUDF::new_from_impl(STGeometryCount::new(
+        "st_numpoints",
+        GeometryCountKind::Points,
+    )));
+    ctx.register_udf(ScalarUDF::new_from_impl(STGeometryCount::new(
+        "st_numgeometries",
+        GeometryCountKind::Geometries,
+    )));
+    ctx.register_udf(ScalarUDF::new_from_impl(STGeometryCount::new(
+        "st_ndims",
+        GeometryCountKind::CoordinateDimensions,
+    )));
+    ctx.register_udf(ScalarUDF::new_from_impl(STGeometryCount::new(
+        "st_coorddim",
+        GeometryCountKind::CoordinateDimensions,
+    )));
+    ctx.register_udf(ScalarUDF::new_from_impl(STGeometryCount::new(
+        "st_dimension",
+        GeometryCountKind::TopologicalDimension,
+    )));
+    ctx.register_udf(ScalarUDF::new_from_impl(STGeometryBool::new(
+        "st_isempty",
+        GeometryBoolKind::IsEmpty,
+    )));
+    ctx.register_udf(ScalarUDF::new_from_impl(STGeometryBool::new(
+        "st_isvalid",
+        GeometryBoolKind::IsValid,
+    )));
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct STGeometryType {
+    signature: Signature,
+}
+
+impl STGeometryType {
+    fn new() -> Self {
+        Self {
+            signature: Signature::one_of(
+                vec![
+                    TypeSignature::Exact(vec![DataType::Binary]),
+                    TypeSignature::Exact(vec![DataType::BinaryView]),
+                ],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
+
+impl ScalarUDFImpl for STGeometryType {
+    fn name(&self) -> &str {
+        "st_geometrytype"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Utf8)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let arrays = columnar_values_to_arrays(&args.args)?;
+        let input = arrays.first().ok_or_else(|| {
+            DataFusionError::Internal("st_geometrytype expected one argument".into())
+        })?;
+        let out = (0..input.len())
+            .map(|i| match binary_value_at(input, i, "st_geometrytype")? {
+                Some(wkb) => Ok(wkb_geometry_type_name(wkb).map(postgis_geometry_type_name)),
+                None => Ok(None),
+            })
+            .collect::<DFResult<Vec<_>>>()?;
+        Ok(ColumnarValue::Array(Arc::new(StringArray::from_iter(out))))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum GeometryCountKind {
+    Points,
+    Geometries,
+    CoordinateDimensions,
+    TopologicalDimension,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct STGeometryCount {
+    name: &'static str,
+    kind: GeometryCountKind,
+    signature: Signature,
+}
+
+impl STGeometryCount {
+    fn new(name: &'static str, kind: GeometryCountKind) -> Self {
+        Self {
+            name,
+            kind,
+            signature: Signature::one_of(
+                vec![
+                    TypeSignature::Exact(vec![DataType::Binary]),
+                    TypeSignature::Exact(vec![DataType::BinaryView]),
+                ],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
+
+impl ScalarUDFImpl for STGeometryCount {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Int32)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let arrays = columnar_values_to_arrays(&args.args)?;
+        let input = arrays.first().ok_or_else(|| {
+            DataFusionError::Internal(format!("{} expected one argument", self.name))
+        })?;
+        let out = (0..input.len())
+            .map(|i| match binary_value_at(input, i, self.name)? {
+                Some(wkb) => geometry_count(wkb, self.kind, self.name).map(Some),
+                None => Ok(None),
+            })
+            .collect::<DFResult<Vec<_>>>()?;
+        Ok(ColumnarValue::Array(Arc::new(Int32Array::from_iter(out))))
+    }
+}
+
+fn postgis_geometry_type_name(name: &str) -> String {
+    match name {
+        "POINT" => "ST_Point".to_string(),
+        "LINESTRING" => "ST_LineString".to_string(),
+        "POLYGON" => "ST_Polygon".to_string(),
+        "MULTIPOINT" => "ST_MultiPoint".to_string(),
+        "MULTILINESTRING" => "ST_MultiLineString".to_string(),
+        "MULTIPOLYGON" => "ST_MultiPolygon".to_string(),
+        "GEOMETRYCOLLECTION" => "ST_GeometryCollection".to_string(),
+        _ => "ST_Geometry".to_string(),
+    }
+}
+
+fn geometry_count(wkb: &[u8], kind: GeometryCountKind, function: &str) -> DFResult<i32> {
+    let parsed = crate::mvt::parse_wkb(wkb).ok_or_else(|| {
+        DataFusionError::Execution(format!("{function} expected valid 2D WKB/EWKB"))
+    })?;
+    let count = match kind {
+        GeometryCountKind::Points => parsed.all_coords().count(),
+        GeometryCountKind::Geometries => match parsed.geom_type {
+            crate::mvt::GeomType::MultiPoint => parsed.rings.first().map_or(0, Vec::len),
+            crate::mvt::GeomType::MultiLineString => parsed.rings.len(),
+            crate::mvt::GeomType::MultiPolygon => {
+                parsed.sub_geom_ring_counts.as_ref().map_or(0, Vec::len)
+            }
+            crate::mvt::GeomType::GeometryCollection => 0,
+            crate::mvt::GeomType::Unknown(_) => 0,
+            _ => usize::from(parsed.all_coords().next().is_some()),
+        },
+        GeometryCountKind::CoordinateDimensions => 2,
+        GeometryCountKind::TopologicalDimension => match parsed.geom_type {
+            crate::mvt::GeomType::Point | crate::mvt::GeomType::MultiPoint => 0,
+            crate::mvt::GeomType::LineString | crate::mvt::GeomType::MultiLineString => 1,
+            crate::mvt::GeomType::Polygon | crate::mvt::GeomType::MultiPolygon => 2,
+            crate::mvt::GeomType::GeometryCollection | crate::mvt::GeomType::Unknown(_) => 0,
+        },
+    };
+    i32::try_from(count).map_err(|_| {
+        DataFusionError::Execution(format!("{function} result exceeds INT32 range: {count}"))
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum GeometryBoolKind {
+    IsEmpty,
+    IsValid,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct STGeometryBool {
+    name: &'static str,
+    kind: GeometryBoolKind,
+    signature: Signature,
+}
+
+impl STGeometryBool {
+    fn new(name: &'static str, kind: GeometryBoolKind) -> Self {
+        Self {
+            name,
+            kind,
+            signature: Signature::one_of(
+                vec![
+                    TypeSignature::Exact(vec![DataType::Binary]),
+                    TypeSignature::Exact(vec![DataType::BinaryView]),
+                ],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
+
+impl ScalarUDFImpl for STGeometryBool {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Boolean)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let arrays = columnar_values_to_arrays(&args.args)?;
+        let input = arrays.first().ok_or_else(|| {
+            DataFusionError::Internal(format!("{} expected one argument", self.name))
+        })?;
+        let out = (0..input.len())
+            .map(|i| match binary_value_at(input, i, self.name)? {
+                Some(wkb) => geometry_bool(wkb, self.kind),
+                None => Ok(None),
+            })
+            .collect::<DFResult<Vec<_>>>()?;
+        Ok(ColumnarValue::Array(Arc::new(BooleanArray::from_iter(out))))
+    }
+}
+
+fn geometry_bool(wkb: &[u8], kind: GeometryBoolKind) -> DFResult<Option<bool>> {
+    let parsed = crate::mvt::parse_wkb(wkb);
+    match kind {
+        GeometryBoolKind::IsValid => Ok(Some(parsed.is_some())),
+        GeometryBoolKind::IsEmpty => parsed
+            .map(|geom| Some(geom.all_coords().next().is_none()))
+            .ok_or_else(|| {
+                DataFusionError::Execution("st_isempty expected valid 2D WKB/EWKB".into())
+            }),
+    }
+}
+
+// ─── ST_StartPoint/ST_EndPoint/ST_PointN line accessors ────────────────────
+fn register_st_line_accessors(ctx: &SessionContext) -> DFResult<()> {
+    ctx.register_udf(ScalarUDF::new_from_impl(STLineEndpoint::new(
+        "st_startpoint",
+        LineEndpoint::Start,
+    )));
+    ctx.register_udf(ScalarUDF::new_from_impl(STLineEndpoint::new(
+        "st_endpoint",
+        LineEndpoint::End,
+    )));
+    ctx.register_udf(ScalarUDF::new_from_impl(STPointN::new()));
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum LineEndpoint {
+    Start,
+    End,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct STLineEndpoint {
+    name: &'static str,
+    endpoint: LineEndpoint,
+    signature: Signature,
+}
+
+impl STLineEndpoint {
+    fn new(name: &'static str, endpoint: LineEndpoint) -> Self {
+        Self {
+            name,
+            endpoint,
+            signature: Signature::one_of(
+                vec![
+                    TypeSignature::Exact(vec![DataType::Binary]),
+                    TypeSignature::Exact(vec![DataType::BinaryView]),
+                ],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
+
+impl ScalarUDFImpl for STLineEndpoint {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Binary)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let arrays = columnar_values_to_arrays(&args.args)?;
+        let input = arrays.first().ok_or_else(|| {
+            DataFusionError::Internal(format!("{} expected one argument", self.name))
+        })?;
+        let out = (0..input.len())
+            .map(|i| match binary_value_at(input, i, self.name)? {
+                Some(wkb) => line_endpoint_wkb(wkb, self.endpoint),
+                None => Ok(None),
+            })
+            .collect::<DFResult<Vec<_>>>()?;
+        Ok(ColumnarValue::Array(Arc::new(BinaryArray::from_iter(
+            out.iter().map(|v| v.as_deref()),
+        ))))
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct STPointN {
+    signature: Signature,
+}
+
+impl STPointN {
+    fn new() -> Self {
+        Self {
+            signature: Signature::one_of(
+                vec![
+                    TypeSignature::Exact(vec![DataType::Binary, DataType::Int64]),
+                    TypeSignature::Exact(vec![DataType::BinaryView, DataType::Int64]),
+                ],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
+
+impl ScalarUDFImpl for STPointN {
+    fn name(&self) -> &str {
+        "st_pointn"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Binary)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let arrays = columnar_values_to_arrays(&args.args)?;
+        let geom = arrays
+            .first()
+            .ok_or_else(|| DataFusionError::Internal("st_pointn expected geometry".into()))?;
+        let n = arrays
+            .get(1)
+            .ok_or_else(|| DataFusionError::Internal("st_pointn expected point index".into()))?;
+        let n = as_i64_array_ref(n)?;
+        let out = (0..geom.len())
+            .map(|i| {
+                if n.is_null(i) {
+                    return Ok(None);
+                }
+                match binary_value_at(geom, i, "st_pointn")? {
+                    Some(wkb) => line_point_n_wkb(wkb, n.value(i)),
+                    None => Ok(None),
+                }
+            })
+            .collect::<DFResult<Vec<_>>>()?;
+        Ok(ColumnarValue::Array(Arc::new(BinaryArray::from_iter(
+            out.iter().map(|v| v.as_deref()),
+        ))))
+    }
+}
+
+fn line_endpoint_wkb(wkb: &[u8], endpoint: LineEndpoint) -> DFResult<Option<Vec<u8>>> {
+    let parsed = crate::mvt::parse_wkb(wkb).ok_or_else(|| {
+        DataFusionError::Execution("line endpoint accessor expected valid 2D WKB/EWKB".into())
+    })?;
+    if parsed.geom_type != crate::mvt::GeomType::LineString {
+        return Ok(None);
+    }
+    let point = match endpoint {
+        LineEndpoint::Start => parsed.rings.first().and_then(|ring| ring.first()).copied(),
+        LineEndpoint::End => parsed.rings.first().and_then(|ring| ring.last()).copied(),
+    };
+    point.map(point_to_wkb).transpose()
+}
+
+fn line_point_n_wkb(wkb: &[u8], n: i64) -> DFResult<Option<Vec<u8>>> {
+    let parsed = crate::mvt::parse_wkb(wkb)
+        .ok_or_else(|| DataFusionError::Execution("st_pointn expected valid 2D WKB/EWKB".into()))?;
+    if parsed.geom_type != crate::mvt::GeomType::LineString || n == 0 {
+        return Ok(None);
+    }
+    let Some(ring) = parsed.rings.first() else {
+        return Ok(None);
+    };
+    let index = if n > 0 {
+        usize::try_from(n - 1).ok()
+    } else {
+        let from_end = usize::try_from(-n).ok();
+        from_end.and_then(|offset| ring.len().checked_sub(offset))
+    };
+    index
+        .and_then(|idx| ring.get(idx).copied())
+        .map(point_to_wkb)
+        .transpose()
+}
+
+fn point_to_wkb(point: (f64, f64)) -> DFResult<Vec<u8>> {
+    wkb_point(point).map_err(|e| DataFusionError::Execution(e.to_string()))
 }
 
 // ─── WKB construction helpers ──────────────────────────────────────────────

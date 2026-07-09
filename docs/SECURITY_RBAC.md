@@ -13,10 +13,10 @@ This document defines what must be true before widening the security claim.
 |---|---|---|
 | Trust-mode local development | ✅ default preview | local smokes |
 | SCRAM-SHA-256 password auth | ✅ implemented | `password_auth_and_readonly_role_fail_closed` |
-| Read/write vs read-only roles | ✅ coarse role model | read-only writes fail closed in wire tests |
+| Read/write vs read-only roles | ✅ coarse role model | read-only writes fail closed; recognized DDL/DML/maintenance denials increment `quackgis_write_denied_total` in wire tests |
 | `pg_roles` and privilege helper metadata | ✅ compatibility surface | `wire_spatial` privilege/catalog tests |
 | pgwire TLS cert/key | ✅ configurable | ops docs and Kubernetes example |
-| Metrics endpoint | ✅ opt-in, no SQL/secrets | metrics tests and external profile scrape |
+| Metrics endpoint | ✅ opt-in, no SQL/secrets | metrics tests, read-only denial counter test, and external profile scrape |
 | Object/schema/table-level RBAC | ❌ not implemented | future trace-driven work |
 
 ## Trust boundaries
@@ -38,7 +38,7 @@ This document defines what must be true before widening the security claim.
 | Missing read/write password in password mode | server fails closed at startup |
 | Missing TLS cert or key half | server fails closed at startup |
 | Wrong password | connection denied; no fallback to trust mode |
-| Read-only CREATE/COPY/DML/compaction | denied before DuckLake mutation; `quackgis_write_denied_total` increments |
+| Read-only CREATE/COPY/DML/compaction | denied before DuckLake mutation; recognized DDL/DML/maintenance denials increment `quackgis_write_denied_total` |
 | Secret rotation | rolling pods pick up new catalog/object/pgwire secrets; old credentials no longer work |
 | TLS/mTLS enforcement | plaintext path is blocked by deployment/network policy when production profile requires TLS |
 | Catalog/object credential revoke | in-flight operations fail explicitly; no partial data claim without mutation drill evidence |

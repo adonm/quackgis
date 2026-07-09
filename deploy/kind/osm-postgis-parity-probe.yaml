@@ -314,6 +314,41 @@ spec:
                   conn.close()
                   return rows
 
+              def assert_quackgis_mvt_tiles(layers):
+                  conn = psycopg2.connect(
+                      host=os.environ["QUACKGIS_HOST"],
+                      port=int(os.environ["QUACKGIS_PORT"]),
+                      user="postgres",
+                      dbname="quackgis",
+                  )
+                  cur = conn.cursor()
+                  try:
+                      for layer in layers:
+                          label = layer["label"]
+                          table = layer["quackgis_table"]
+                          cur.execute(
+                              f"""
+                              SELECT ST_AsMVT(
+                                  ST_AsMVTGeom(
+                                      wkb_geometry,
+                                      ST_MakeEnvelope(-180.0, -90.0, 180.0, 90.0, 4326),
+                                      4096,
+                                      64,
+                                      true
+                                  )
+                              )
+                              FROM public."{table}"
+                              WHERE wkb_geometry IS NOT NULL
+                              """
+                          )
+                          tile = cur.fetchone()[0]
+                          tile_bytes = len(bytes(tile))
+                          print(f"osm_mvt_{label}_tile_bytes", tile_bytes)
+                          assert tile_bytes > 0, f"empty OSM MVT tile for {label}"
+                  finally:
+                      cur.close()
+                      conn.close()
+
               qgis_expected_counts = {}
               for layer in layers:
                   label = layer["label"]
@@ -358,6 +393,9 @@ spec:
                   qgis_expected_counts[label] = len(quackgis_rows)
 
               print("osm_postgis_to_quackgis_copy_ok True")
+
+              assert_quackgis_mvt_tiles(layers)
+              print("osm_mvt_ok True")
 
               QgsApplication.setPrefixPath("/usr", True)
               app = QgsApplication([], False)

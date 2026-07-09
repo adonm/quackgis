@@ -328,7 +328,8 @@ async fn password_auth_and_readonly_role_fail_closed() {
         .get(0);
     assert_eq!(count, 1);
 
-    for (label, sql) in [
+    let denied_before = quackgis_server::ducklake_sql::metrics_snapshot().writes_denied_total;
+    let denied_writes = [
         (
             "create table",
             "CREATE TABLE public.auth_ro_denied (id INT)",
@@ -348,7 +349,8 @@ async fn password_auth_and_readonly_role_fail_closed() {
             "compact",
             "CALL quackgis_compact_table('public.auth_rw_points')",
         ),
-    ] {
+    ];
+    for (label, sql) in denied_writes {
         let denied = readonly.simple_query(sql).await;
         assert!(
             denied.is_err(),
@@ -357,11 +359,17 @@ async fn password_auth_and_readonly_role_fail_closed() {
     }
 
     let copy_denied = readonly
-        .copy_in::<_, std::io::Cursor<Vec<u8>>>("COPY public.auth_rw_points FROM STDIN")
+        .simple_query("COPY public.auth_rw_points FROM STDIN")
         .await;
     assert!(
         copy_denied.is_err(),
         "readonly role unexpectedly entered COPY FROM STDIN"
+    );
+    let denied_after = quackgis_server::ducklake_sql::metrics_snapshot().writes_denied_total;
+    assert!(
+        denied_after >= denied_before + denied_writes.len() as u64,
+        "read-only denied writes should increment metrics: before={denied_before} after={denied_after} denied_sql={}",
+        denied_writes.len()
     );
 
     let count_after_denials: i64 = writer

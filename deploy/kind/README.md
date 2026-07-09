@@ -102,10 +102,10 @@ thin-LTO/single-codegen-unit) to cut rebuild latency. Use
 Run these recipes from an activated mise shell so Kind, kubectl, podman, Cargo,
 and Just all come from the repo-pinned environment.
 
-`just kind-probes` starts the maintained QGIS read, QGIS edit, OGR, and
-GeoServer WFS/WMS/WFS-T Jobs together and waits once, which is the fastest full
-client-probe loop after a refresh. Individual probe targets remain available for
-focused triage.
+`just kind-probes` starts the maintained QGIS read, QGIS edit, OGR, API-client
+profile, and GeoServer WFS/WMS/WFS-T Jobs together and waits once, which is the
+fastest full client-probe loop after a refresh. Individual probe targets remain
+available for focused triage.
 
 `kind-qgis-probe` is the QGIS add-layer/read-feature gate.
 `kind-qgis-edit-probe` opens a keyless spatial layer through the QGIS postgres
@@ -114,6 +114,10 @@ provider and exercises insert/update/delete/commit with `_quackgis_rowid`.
 `PG_USE_POSTGIS=NO` to read a WKB-backed table, append a GeoJSON layer with
 `PG_USE_COPY=NO` + `-addfields`, and assert both SQL and GeoJSON read-back,
 including dynamically appended fields.
+`kind-api-client-probe` runs the maintained Python/API/BI profile surfaces:
+psycopg-style text/binary WKB params, SQLAlchemy-style reflection,
+GeoPandas-style WKB reads, pg_featureserv-style bbox filters, BI grouped
+aggregates, and non-empty MVT output.
 `kind-geoserver-probe` uses official GeoServer 3.0.0 plus pgjdbc to register a
 PostGIS datastore, publish a WKB-backed layer, verify WFS GeoJSON feature count,
 verify WMS returns a PNG, and exercise real WFS-T insert/update/delete.

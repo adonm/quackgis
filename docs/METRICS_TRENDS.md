@@ -8,6 +8,7 @@ external dashboards or a release-ready Markdown dashboard:
 just metrics-trend path=.tmp/compatibility format=csv
 just metrics-trend path=.tmp/compatibility format=json
 just metrics-dashboard path=.tmp/compatibility out=.tmp/metrics-dashboard.md
+just metrics-budget-check path=.tmp/compatibility require_budgeted=true
 ```
 
 The Markdown dashboard covers the Alpha/M6 signals that should be trended before
@@ -17,7 +18,7 @@ production claims:
 - scan-byte and file-group budgets;
 - OLAP candidate-group/candidate-row narrowing;
 - writer conflict/retry counts;
-- native DML and compaction counters;
+- native DML, compaction, and abort counters;
 - real-data client feature counts when OSM parity artifacts are present;
 - curated PostGIS regress pass-rate when `postgis-regress.log` is bundled with
   the artifact.
@@ -25,10 +26,19 @@ production claims:
 See [ANALYTICS_BENCHMARKS.md](./ANALYTICS_BENCHMARKS.md) for the benchmark
 metrics, scale ladder, and budget policy that feed these dashboards.
 
-The scheduled/manual compatibility, storage, and PostGIS regress workflows render
-`metrics-dashboard.md` into their uploaded artifacts and append it to the GitHub
-job summary whenever a `metrics.json` artifact is present. Release managers can
-attach that generated dashboard to release evidence or copy it into a release
-branch. The source artifact remains the machine-readable `metrics.json`; the
-dashboard is only a compact human review surface. See
+The scheduled/manual compatibility, storage, and benchmark workflows render
+`metrics-dashboard.md` into their uploaded artifacts, append it to the GitHub job
+summary whenever a `metrics.json` artifact is present, and run
+`metrics-budget-check allow_not_run=true` so failed rows or explicit budget
+overruns fail the workflow even when the report includes unrelated not-run rows.
+Compatibility and selected storage/benchmark recipes also pass `--require-check`
+for the probes that recipe is expected to produce, so a missing log cannot be
+silently treated as an allowed not-run row.
+Release managers can attach that generated dashboard to release evidence or copy
+it into a release branch. The source artifact remains the machine-readable
+`metrics.json`; the dashboard is only a compact human review surface.
+`metrics-budget-check` is the matching fail-closed gate for explicit `*_budget`
+metrics and failed report rows. It also fails when the requested file/directory
+contains no `metrics.json`, so empty downloads or mistyped artifact paths cannot
+pass release checks. See
 [RELEASE_EVIDENCE.md](./RELEASE_EVIDENCE.md) for the release attachment policy.

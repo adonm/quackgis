@@ -47,14 +47,15 @@ layout columns, and explicit compaction.
 Martin, QGIS read/edit, GDAL/OGR load/read, and GeoServer WFS/WMS/WFS-T smoke
 probes are green for the maintained paths. See
 [docs/DEVELOPER_PREVIEW.md](./docs/DEVELOPER_PREVIEW.md) for the runnable preview
-contract and [ROADMAP.md](./ROADMAP.md) for remaining hardening.
+contract and [ROADMAP.md](./ROADMAP.md) for the forward promotion roadmap.
 
 Alpha scaled-storage evidence now exists in Kind: PostgreSQL catalog +
-S3-compatible object storage, multi-process readers/writers, high-QPS scaled
-gates, writer conflict/retry, and OLAP fanout with pruning/pushdown evidence. The
-roadmap focus is Alpha hardening and then production ambition: external services,
-larger real-data workloads, trend reports, native write maintenance, security, and
-operations docs before production claims.
+S3-compatible object storage, multi-process readers/writers, Linkerd mTLS/TCP
+visibility, high-QPS scaled gates, writer conflict/retry, and OLAP fanout with
+pruning/pushdown evidence. The roadmap now promotes that local envelope toward the
+full project goal: managed external services, regional real-data/client matrices,
+budgeted trend reports, native maintenance, snapshots, security/DR, and eventually
+multi-modal spatial asset inventories before broad production claims.
 
 ## Quick start (dev storage path)
 
@@ -85,11 +86,13 @@ SELECT postgis_version();                                -- 3.4 QUACKGIS
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — layer model, geometry over the wire,
   trust boundaries, what changed from v0.1.
 - [docs/PROJECT_DIRECTION.md](./docs/PROJECT_DIRECTION.md) — mission, primary
-  user, non-goals, current preview, Alpha evidence, and broader direction.
-- [ROADMAP.md](./ROADMAP.md) — current evidence, ambitious forward milestones,
-  success metrics, and risks.
-- [docs/ROADMAP_STATUS.md](./docs/ROADMAP_STATUS.md) — locally closed roadmap
-  contracts vs execution-heavy remaining work.
+  user, non-goals, current preview, Alpha evidence, and promotion ladder.
+- [ROADMAP.md](./ROADMAP.md) — consolidated evidence snapshot, ambitious promotion
+  ladder, forward milestones, execution queue, and risks.
+- [docs/ROADMAP_STATUS.md](./docs/ROADMAP_STATUS.md) — implemented contracts vs
+  active roadmap frontiers.
+- [docs/LOCAL_KIND_LINKERD_FOCUS.md](./docs/LOCAL_KIND_LINKERD_FOCUS.md) — local
+  Kind+Linkerd maximum capability ladder, scale knobs, and claim boundaries.
 - [docs/DEVELOPER_PREVIEW.md](./docs/DEVELOPER_PREVIEW.md) — exact local preview
   claim, one-command smoke, manual COPY example, gates, and limitations.
 - [docs/COMPATIBILITY.md](./docs/COMPATIBILITY.md) — client compatibility
@@ -102,7 +105,7 @@ SELECT postgis_version();                                -- 3.4 QUACKGIS
 - [docs/OPERATIONS.md](./docs/OPERATIONS.md) — current local + Kind client-probe
   workflow for the single Rust pgwire binary.
 - [docs/ALPHA_EXTERNAL_SERVICES.md](./docs/ALPHA_EXTERNAL_SERVICES.md) — real
-  PostgreSQL/S3 Alpha hardening runbook and failure-drill evidence ladder.
+  PostgreSQL/S3 Alpha promotion runbook and failure-drill evidence ladder.
 - [docs/SECURITY_RBAC.md](./docs/SECURITY_RBAC.md) — security trust boundaries,
   RBAC target, and auth/TLS/secret-rotation failure-mode checklist.
 - [deploy/kubernetes/](./deploy/kubernetes/) — production-style Alpha
@@ -149,6 +152,7 @@ just --list                    # common entrypoints
 just doctor                    # verify pinned local dev tools are available
 just smoke                     # smallest pgwire + spatial query smoke test
 just preview-smoke             # CREATE + COPY + spatial query + compact smoke
+just api-client-local-smoke    # local API/client surface probe (params/catalog/WKB/MVT/BI)
 just demo-local                # host-local demo on 127.0.0.1:5434, Ctrl-C to stop
 just demo-kind                 # 5-minute Kind demo; see docs/QUICKSTART.md
 just ci                        # same fast gate used by GitHub Actions
@@ -162,6 +166,7 @@ just layoutbench-local-smoke   # temp-server layoutbench smoke
 just postgis-regress           # starter curated PostGIS function regress subset
 just postgis-conformance-summary # static fixture coverage summary
 just runtime-static-check      # guard single-binary native-free runtime image
+just metrics-budget-check path=.tmp/compatibility # fail closed on budgeted metrics artifacts
 just martin-sql                # Martin-generated SQL compatibility gate
 just martin-e2e                # opt-in real Martin binary E2E
 just kind-refresh              # host-cached build/load/deploy into Kind
@@ -169,12 +174,13 @@ just kind-refresh-fast         # faster no-LTO probe build/load/deploy loop
 just kind-ready                # validate podman + create/reuse local Kind cluster
 just seed-local-demo           # seed stable public.demo_* layers in a running local server
 just seed-kind-demo            # seed stable public.demo_* layers in an existing cluster
-just kind-probes               # QGIS read/edit + OGR + GeoServer WFS/WMS/WFS-T jobs
+just kind-probes               # QGIS read/edit + OGR + API profile + GeoServer jobs
 just kind-qgis-probe           # headless PyQGIS add-layer/read-feature gate
 just kind-qgis-edit-probe      # headless PyQGIS insert/update/delete/save gate
 just kind-ogr-probe            # GDAL/OGR PostgreSQL-driver load/read gate
+just kind-api-client-probe     # Python/API/BI-style profile surface gate
 just kind-geoserver-probe      # GeoServer 3.0.0 datastore + WFS/WMS/WFS-T gate
-just kind-compatibility        # build/deploy + QGIS/OGR/GeoServer compatibility probes
+just kind-compatibility        # build/deploy + maintained client compatibility probes
 just kind-lake-smoke           # Kind PostgreSQL catalog + s3s-fs object storage smoke
 just kind-external-alpha-smoke # env-driven external PostgreSQL/S3 storage profile
 just kind-lake-multipod-smoke  # shared-catalog smoke through multiple QuackGIS pods

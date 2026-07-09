@@ -98,12 +98,21 @@ jobs:
           path: .tmp/compatibility/metrics.json
           if-no-files-found: ignore
 
-      - name: Fail on reported compatibility failures
+      - name: Fail on reported compatibility failures or budget overruns
         if: always()
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f .tmp/compatibility/README.md ] && grep -q '❌ fail' .tmp/compatibility/README.md; then
+          if [ -f .tmp/compatibility/metrics.json ]; then
+            mise exec -- python3 scripts/metrics_budget_check.py \
+              --allow-not-run \
+              --require-check qgis_probe \
+              --require-check qgis_edit_probe \
+              --require-check ogr_probe \
+              --require-check api_client_probe \
+              --require-check geoserver_probe \
+              .tmp/compatibility
+          elif [ -f .tmp/compatibility/README.md ] && grep -q '❌ fail' .tmp/compatibility/README.md; then
             grep '^Summary:' .tmp/compatibility/README.md || true
             exit 1
           fi

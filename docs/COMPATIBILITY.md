@@ -16,14 +16,15 @@ missing upstream that we build in tracked fork branches.
 | Client | Target | Milestone | Notes |
 |---|---|---|---|
 | `psql` | ✅ | M0 | simple + extended protocol via datafusion-postgres |
-| psycopg (v3) | ✅ | M2 | text + binary geometry round-trip |
+| psycopg (v3) | ✅ profile surface | M2/M6 | text + binary geometry round-trip through pgwire/tokio-postgres and Kind Python profile probe; named psycopg dependency probe pending |
 | QGIS (postgres provider) | ✅ read/render/identify/filter + edit smoke | M3/M4 | Kind PyQGIS probe validates layer open, feature read, attribute filter, feature-id identify, and headless render; edit probe opens a keyless spatial layer and commits insert/update/delete/save through `_quackgis_rowid` |
 | GDAL/OGR `ogr2ogr` (PostgreSQL driver) | ✅ load/read | M3/M4 | Kind OGR probe seeds a WKB-backed layer, reads it with `ogrinfo`/GeoJSON export, then appends GeoJSON with `PG_USE_COPY=NO` + `-addfields` and verifies SQL + GeoJSON read-back including appended fields |
 | GDAL/OGR bulk load path | ✅ COPY path | M5 | PostgreSQL text `COPY FROM STDIN` is implemented for simple and extended pgwire, including chunked `CopyData`, GDAL-style bytea/WKB hex and octal escapes, autocommit writes, and explicit single-table transactions. Maintained Kind OGR gate still covers INSERT append mode; COPY has focused Rust and preview-smoke coverage. |
 | QGIS (editing) | ✅ smoke | M4 | `INSERT`/`UPDATE`/`DELETE ... RETURNING`, parameterized WKB edits, synthetic rowid metadata, and single-table explicit transaction rollback/commit pass wire regressions; Kind PyQGIS edit/save gate passes |
 | GeoServer (PostGIS datastore) | ✅ WFS/WMS/WFS-T smoke | M4 | Official GeoServer 3.0.0 Kind probe registers a PostGIS datastore, publishes a WKB-backed layer, verifies WFS GeoJSON feature count, receives a WMS PNG, and performs real WFS-T insert/update/delete transactions; Rust wire tests keep trace-shaped DML coverage |
 | Martin (MapLibre tile server) | ✅ | M2+ | auto-discover geometry tables; MVT tile serving via ST_AsMVT |
-| pg_featureserv | stretch | M7 | trace-driven |
+| SQLAlchemy/GeoPandas/API readers | ✅ maintained profile surface | M6 | `just api-client-local-smoke` and `just kind-api-client-probe` cover information_schema reflection, WKB row reads, bbox filters, grouped aggregates, and non-empty MVT bytes before named client containers |
+| pg_featureserv | local bbox surface | M7 | real server remains trace-driven |
 | `pg_dump` / logical replication | ❌ | — | back up the DuckLake catalog + Parquet instead |
 
 ## Wire protocol surface (datafusion-postgres)
@@ -75,7 +76,7 @@ missing upstream that we build in tracked fork branches.
 | Columnar OLAP fanout | ✅ Alpha smoke for grouped spatial/attribute stats, primitive calculations, pruning/aggregate evidence, and candidate filtering before exact SedonaDB recheck; larger benchmark variants remain future hardening |
 | Compaction | ✅ `CALL quackgis_compact_table('schema.table')` and alias `CALL quackgis_compact(...)` rewrite a table into layout order; optional `(time_bucket, space_bucket)` uses native bucket-scoped delete+pending-append metadata when row-lineage planning succeeds, falling back to an atomic full-table replacement for unsupported shapes. Local tests report visible-file, scan-byte, and row-group deltas for fragmented appends |
 | DuckLake metadata table functions | ✅ `ducklake_snapshots()`, `ducklake_table_info()`, and `ducklake_list_files()` are exposed through pgwire for catalog inspection; CDC row table functions stay disabled until pgwire projection is safe |
-| Snapshot time travel (SQL `AS OF`) | ❌ programmatic only (G8); target syntax and restore/CDC policy documented in `docs/SNAPSHOT_OPERATIONS.md` |
+| Snapshot time travel | ✅ simple `public.table(snapshot => <id>)` or `public.table(snapshot_id => <id>)` selector for one-table reads; parser-level SQL `AS OF`, positional table-function selectors, protected retention, rollback integration, and CDC remain future (G8); see `docs/SNAPSHOT_OPERATIONS.md` |
 | Generic filter pushdown/pruning path | ✅ datafusion-ducklake declares inexact filter pushdown; QuackGIS adds spatial-layout rewrites above it |
 | DuckDB-inlined data reads | ❌ — avoid inlining when writing from DuckDB |
 | Object stores | ✅ local FS validated; S3-compatible storage exercised in Kind with `s3s-fs`; production object-store soak remains future hardening |

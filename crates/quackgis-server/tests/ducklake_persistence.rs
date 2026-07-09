@@ -26,6 +26,10 @@ use tokio_postgres::NoTls;
 
 use common::ServerHandle;
 use quackgis_server::context::{StoragePaths, build_session_context_with_storage};
+use quackgis_server::ducklake_sql;
+
+static NATIVE_MUTATION_FAILPOINT_TEST_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
 
 fn point_wkb(x: f64, y: f64) -> Vec<u8> {
     // OGC WKB, little endian, Point type=1, x, y.
@@ -574,6 +578,145 @@ async fn ducklake_compact_table_accepts_layout_bucket_scope() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn ducklake_native_compact_failpoint_before_commit_leaves_catalog_unchanged() {
+    let _serial = NATIVE_MUTATION_FAILPOINT_TEST_LOCK.lock().await;
+    let _failpoint = NativeMutationFailpointGuard::set(
+        "compact:before_commit:main.native_compact_failpoint_points",
+    );
+    let aborts_before = ducklake_sql::metrics_snapshot().native_mutation_aborts_total;
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let catalog_path = tmp.path().join("quackgis.db");
+    let server = ServerHandle::start_with_tempdir(tmp).await;
+    let (client, conn) = tokio_postgres::connect(&server.conn_str(), NoTls)
+        .await
+        .expect("connect");
+    let _conn = tokio::spawn(conn);
+
+    client
+        .batch_execute(
+            "CREATE TABLE public.native_compact_failpoint_points (
+                 id INT,
+                 captured_minute INT,
+                 geom BINARY,
+                 name TEXT
+             );
+             INSERT INTO public.native_compact_failpoint_points (id, captured_minute, geom, name) VALUES
+                (1, 10, X'010100000000000000000000000000000000000000', 'a');
+             INSERT INTO public.native_compact_failpoint_points (id, captured_minute, geom, name) VALUES
+                (2, 10, X'010100000000000000000000000000000000000000', 'b');
+             INSERT INTO public.native_compact_failpoint_points (id, captured_minute, geom, name) VALUES
+                (3, 80, X'010100000000000000000010400000000000001040', 'c');",
+        )
+        .await
+        .expect("seed native compact failpoint target");
+
+    let bucket = client
+        .query_one(
+            "SELECT _qg_time_bucket, _qg_space_bucket
+             FROM quackgis.main.native_compact_failpoint_points
+             WHERE id = 1",
+            &[],
+        )
+        .await
+        .expect("read layout bucket");
+    let time_bucket: i64 = bucket.get(0);
+    let space_bucket: i64 = bucket.get(1);
+
+    let before_rows: Vec<(i32, i32, String)> = client
+        .query(
+            "SELECT id, captured_minute, name
+             FROM public.native_compact_failpoint_points
+             ORDER BY id",
+            &[],
+        )
+        .await
+        .expect("select before failed compact")
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2)))
+        .collect();
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", catalog_path.display()))
+        .await
+        .expect("catalog pool");
+    let before_counts = catalog_mutation_counts(&pool, "native_compact_failpoint_points").await;
+
+    let failed = client
+        .batch_execute(&format!(
+            "CALL quackgis_compact_table('public.native_compact_failpoint_points', {time_bucket}, {space_bucket})"
+        ))
+        .await;
+    assert!(
+        failed.is_err(),
+        "failpoint should abort before commit_table_mutation"
+    );
+    assert_eq!(
+        ducklake_sql::metrics_snapshot().native_mutation_aborts_total,
+        aborts_before + 1,
+        "native mutation abort counter should increment for the failed compaction"
+    );
+
+    let after_rows: Vec<(i32, i32, String)> = client
+        .query(
+            "SELECT id, captured_minute, name
+             FROM public.native_compact_failpoint_points
+             ORDER BY id",
+            &[],
+        )
+        .await
+        .expect("select after failed compact")
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2)))
+        .collect();
+    assert_eq!(
+        after_rows, before_rows,
+        "failed native compaction must leave visible rows unchanged"
+    );
+    let after_counts = catalog_mutation_counts(&pool, "native_compact_failpoint_points").await;
+    assert_eq!(
+        after_counts, before_counts,
+        "pending compacted data/delete objects must not become catalog-visible after failed compaction"
+    );
+    let info = table_info(&client, "native_compact_failpoint_points").await;
+    assert_eq!(info.delete_file_count, 0);
+
+    client
+        .batch_execute(&format!(
+            "CALL quackgis_compact_table('public.native_compact_failpoint_points', {time_bucket}, {space_bucket})"
+        ))
+        .await
+        .expect("retry native compaction after one-shot failpoint");
+    let retry_rows: Vec<(i32, i32, String)> = client
+        .query(
+            "SELECT id, captured_minute, name
+             FROM public.native_compact_failpoint_points
+             ORDER BY id",
+            &[],
+        )
+        .await
+        .expect("select after retried compact")
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2)))
+        .collect();
+    assert_eq!(
+        retry_rows, before_rows,
+        "retried native compaction must preserve visible rows"
+    );
+    let retry_counts = catalog_mutation_counts(&pool, "native_compact_failpoint_points").await;
+    assert!(
+        retry_counts.delete_files > before_counts.delete_files,
+        "retried compaction should publish delete-file metadata: before={before_counts:?} retry={retry_counts:?}"
+    );
+    assert!(
+        retry_counts.data_files > before_counts.data_files,
+        "retried compaction should publish replacement data-file metadata: before={before_counts:?} retry={retry_counts:?}"
+    );
+    assert_eq!(
+        ducklake_sql::metrics_snapshot().native_mutation_aborts_total,
+        aborts_before + 1,
+        "retry after one-shot compact failpoint must not increment abort counter again"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn ducklake_metadata_table_functions_roundtrip_through_wire() {
     let server = ServerHandle::start().await;
     let (client, conn) = tokio_postgres::connect(&server.conn_str(), NoTls)
@@ -638,6 +781,103 @@ async fn ducklake_metadata_table_functions_roundtrip_through_wire() {
     assert!(
         cdc_unregistered.is_err(),
         "CDC row table functions stay disabled until pgwire projection is safe"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ducklake_snapshot_selector_reads_pinned_table() {
+    let server = ServerHandle::start().await;
+    let (client, conn) = tokio_postgres::connect(&server.conn_str(), NoTls)
+        .await
+        .expect("connect");
+    let _conn = tokio::spawn(conn);
+
+    client
+        .batch_execute(
+            "CREATE TABLE public.snapshot_points (id INT, geom BINARY, name TEXT);
+             INSERT INTO public.snapshot_points (id, geom, name) VALUES
+                (1, X'010100000000000000000000000000000000000000', 'first');",
+        )
+        .await
+        .expect("seed first snapshot row");
+    let snapshot_id: i64 = client
+        .query_one("SELECT MAX(snapshot_id) FROM ducklake_snapshots()", &[])
+        .await
+        .expect("snapshot after first insert")
+        .get(0);
+
+    client
+        .batch_execute(
+            "INSERT INTO public.snapshot_points (id, geom, name) VALUES
+                (2, X'0101000000000000000000F03F000000000000F03F', 'second');",
+        )
+        .await
+        .expect("seed second snapshot row");
+
+    let current_ids: Vec<i32> = client
+        .query("SELECT id FROM public.snapshot_points ORDER BY id", &[])
+        .await
+        .expect("current snapshot query")
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert_eq!(current_ids, vec![1, 2]);
+
+    let asof_ids: Vec<i32> = client
+        .query(
+            &format!(
+                "SELECT id FROM public.snapshot_points(snapshot => {snapshot_id}) ORDER BY id"
+            ),
+            &[],
+        )
+        .await
+        .expect("snapshot-pinned table query")
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert_eq!(asof_ids, vec![1]);
+
+    let snapshot_id_alias_ids: Vec<i32> = client
+        .query(
+            &format!(
+                "SELECT id FROM public.snapshot_points(snapshot_id => {snapshot_id}) ORDER BY id"
+            ),
+            &[],
+        )
+        .await
+        .expect("snapshot-pinned snapshot_id alias table query")
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert_eq!(snapshot_id_alias_ids, vec![1]);
+
+    let snapshot_count_extent = client
+        .query_one(
+            &format!(
+                "SELECT COUNT(*), ST_Extent(geom) FROM public.snapshot_points(snapshot => {snapshot_id})"
+            ),
+            &[],
+        )
+        .await
+        .expect("snapshot-pinned count and extent query");
+    assert_eq!(snapshot_count_extent.get::<_, i64>(0), 1);
+    assert_eq!(snapshot_count_extent.get::<_, String>(1), "BOX(0 0,0 0)");
+
+    let current_after_snapshot_ids: Vec<i32> = client
+        .query("SELECT id FROM public.snapshot_points ORDER BY id", &[])
+        .await
+        .expect("current table remains current after snapshot read")
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert_eq!(current_after_snapshot_ids, vec![1, 2]);
+
+    let missing = client
+        .simple_query("SELECT id FROM public.snapshot_points(snapshot => 1)")
+        .await;
+    assert!(
+        missing.is_err(),
+        "snapshot read must fail closed when the table is absent at the snapshot"
     );
 }
 
@@ -857,12 +1097,34 @@ struct DuckLakeTableInfo {
     delete_file_count: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CatalogMutationCounts {
+    data_files: i64,
+    delete_files: i64,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct ScanMetric {
     bytes_scanned: Option<u64>,
     file_groups: Option<u64>,
     row_groups_total: Option<u64>,
     row_groups_matched: Option<u64>,
+}
+
+struct NativeMutationFailpointGuard;
+
+impl NativeMutationFailpointGuard {
+    fn set(spec: &str) -> Self {
+        quackgis_server::ducklake_sql::set_native_mutation_failpoint_for_tests(Some(spec))
+            .expect("install native mutation failpoint");
+        Self
+    }
+}
+
+impl Drop for NativeMutationFailpointGuard {
+    fn drop(&mut self) {
+        let _ = quackgis_server::ducklake_sql::set_native_mutation_failpoint_for_tests(None);
+    }
 }
 
 impl ScanMetric {
@@ -888,6 +1150,35 @@ async fn table_info(client: &tokio_postgres::Client, table_name: &str) -> DuckLa
         file_count: row.get(0),
         file_size_bytes: row.get(1),
         delete_file_count: row.get(2),
+    }
+}
+
+async fn catalog_mutation_counts(
+    pool: &sqlx::SqlitePool,
+    table_name: &str,
+) -> CatalogMutationCounts {
+    let row = sqlx::query(
+        "WITH target_table AS (
+             SELECT t.table_id
+             FROM ducklake_table t
+             JOIN ducklake_schema s ON s.schema_id = t.schema_id
+             WHERE s.schema_name = 'main'
+               AND t.table_name = ?
+               AND t.end_snapshot IS NULL
+         )
+         SELECT
+             (SELECT COUNT(*) FROM ducklake_data_file data
+              JOIN target_table tt ON tt.table_id = data.table_id) AS data_files,
+             (SELECT COUNT(*) FROM ducklake_delete_file df
+              JOIN target_table tt ON tt.table_id = df.table_id) AS delete_files",
+    )
+    .bind(table_name)
+    .fetch_one(pool)
+    .await
+    .expect("catalog mutation counts");
+    CatalogMutationCounts {
+        data_files: row.try_get("data_files").unwrap(),
+        delete_files: row.try_get("delete_files").unwrap(),
     }
 }
 
@@ -1241,6 +1532,251 @@ async fn ducklake_delete_uses_atomic_native_delete_files_across_data_files() {
     assert_eq!(
         delete_snapshots, 1,
         "both delete files must be committed under one snapshot"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ducklake_native_delete_failpoint_before_commit_leaves_catalog_unchanged() {
+    let _serial = NATIVE_MUTATION_FAILPOINT_TEST_LOCK.lock().await;
+    let _failpoint = NativeMutationFailpointGuard::set(
+        "delete:before_commit:main.native_delete_failpoint_points",
+    );
+    let aborts_before = ducklake_sql::metrics_snapshot().native_mutation_aborts_total;
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let catalog_path = tmp.path().join("quackgis.db");
+    let server = ServerHandle::start_with_tempdir(tmp).await;
+    let (client, conn) = tokio_postgres::connect(&server.conn_str(), NoTls)
+        .await
+        .expect("connect");
+    let _conn = tokio::spawn(conn);
+
+    client
+        .batch_execute(
+            "CREATE TABLE public.native_delete_failpoint_points (id INT, geom BINARY, name TEXT);
+             INSERT INTO public.native_delete_failpoint_points (id, geom, name) VALUES
+                (1, X'010100000000000000000000000000000000000000', 'a'),
+                (2, X'0101000000000000000000F03F000000000000F03F', 'b');
+             INSERT INTO public.native_delete_failpoint_points (id, geom, name) VALUES
+                (3, X'010100000000000000000000400000000000000040', 'c'),
+                (4, X'010100000000000000000008400000000000000840', 'd');",
+        )
+        .await
+        .expect("seed native delete failpoint target");
+
+    let failed = client
+        .execute(
+            "DELETE FROM public.native_delete_failpoint_points WHERE id = 2 OR id = 4",
+            &[],
+        )
+        .await;
+    assert!(
+        failed.is_err(),
+        "failpoint should abort before commit_table_mutation"
+    );
+    assert_eq!(
+        ducklake_sql::metrics_snapshot().native_mutation_aborts_total,
+        aborts_before + 1,
+        "native mutation abort counter should increment for the failed delete"
+    );
+
+    let rows: Vec<(i32, String)> = client
+        .query(
+            "SELECT id, name FROM public.native_delete_failpoint_points ORDER BY id",
+            &[],
+        )
+        .await
+        .expect("select rows after failed native delete")
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            (1, "a".to_string()),
+            (2, "b".to_string()),
+            (3, "c".to_string()),
+            (4, "d".to_string()),
+        ],
+        "failed native delete must leave the visible table unchanged"
+    );
+
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", catalog_path.display()))
+        .await
+        .expect("catalog pool");
+    let delete_files: i64 = sqlx::query(
+        "SELECT COUNT(*) AS delete_files
+         FROM ducklake_delete_file df
+         JOIN ducklake_table t ON t.table_id = df.table_id
+         JOIN ducklake_schema s ON s.schema_id = t.schema_id
+         WHERE s.schema_name = 'main'
+           AND t.table_name = 'native_delete_failpoint_points'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("delete metadata after failed native delete")
+    .try_get("delete_files")
+    .unwrap();
+    assert_eq!(
+        delete_files, 0,
+        "prewritten delete objects must not become visible catalog delete-file rows"
+    );
+
+    let info = table_info(&client, "native_delete_failpoint_points").await;
+    assert_eq!(info.delete_file_count, 0);
+
+    let deleted = client
+        .execute(
+            "DELETE FROM public.native_delete_failpoint_points WHERE id = 2 OR id = 4",
+            &[],
+        )
+        .await
+        .expect("retry native DELETE after one-shot failpoint");
+    assert_eq!(deleted, 2);
+    let retry_rows: Vec<(i32, String)> = client
+        .query(
+            "SELECT id, name FROM public.native_delete_failpoint_points ORDER BY id",
+            &[],
+        )
+        .await
+        .expect("select rows after retried native delete")
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    assert_eq!(
+        retry_rows,
+        vec![(1, "a".to_string()), (3, "c".to_string())],
+        "retried native delete should publish exactly the intended mutation"
+    );
+    let retry_info = table_info(&client, "native_delete_failpoint_points").await;
+    assert!(
+        retry_info.delete_file_count > 0,
+        "retried native delete should publish delete-file metadata: {retry_info:?}"
+    );
+    assert_eq!(
+        ducklake_sql::metrics_snapshot().native_mutation_aborts_total,
+        aborts_before + 1,
+        "retry after one-shot delete failpoint must not increment abort counter again"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ducklake_native_update_failpoint_before_commit_leaves_catalog_unchanged() {
+    let _serial = NATIVE_MUTATION_FAILPOINT_TEST_LOCK.lock().await;
+    let _failpoint = NativeMutationFailpointGuard::set(
+        "update:before_commit:main.native_update_failpoint_points",
+    );
+    let aborts_before = ducklake_sql::metrics_snapshot().native_mutation_aborts_total;
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let catalog_path = tmp.path().join("quackgis.db");
+    let server = ServerHandle::start_with_tempdir(tmp).await;
+    let (client, conn) = tokio_postgres::connect(&server.conn_str(), NoTls)
+        .await
+        .expect("connect");
+    let _conn = tokio::spawn(conn);
+
+    client
+        .batch_execute(
+            "CREATE TABLE public.native_update_failpoint_points (id INT, geom BINARY, name TEXT);
+             INSERT INTO public.native_update_failpoint_points (id, geom, name) VALUES
+                (1, X'010100000000000000000000000000000000000000', 'a'),
+                (2, X'0101000000000000000000F03F000000000000F03F', 'b');
+             INSERT INTO public.native_update_failpoint_points (id, geom, name) VALUES
+                (3, X'010100000000000000000000400000000000000040', 'c'),
+                (4, X'010100000000000000000008400000000000000840', 'd');",
+        )
+        .await
+        .expect("seed native update failpoint target");
+
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", catalog_path.display()))
+        .await
+        .expect("catalog pool");
+    let before_counts = catalog_mutation_counts(&pool, "native_update_failpoint_points").await;
+
+    let failed = client
+        .execute(
+            "UPDATE public.native_update_failpoint_points SET name = 'updated' WHERE id = 2 OR id = 4",
+            &[],
+        )
+        .await;
+    assert!(
+        failed.is_err(),
+        "failpoint should abort before commit_table_mutation"
+    );
+    assert_eq!(
+        ducklake_sql::metrics_snapshot().native_mutation_aborts_total,
+        aborts_before + 1,
+        "native mutation abort counter should increment for the failed update"
+    );
+
+    let rows: Vec<(i32, String)> = client
+        .query(
+            "SELECT id, name FROM public.native_update_failpoint_points ORDER BY id",
+            &[],
+        )
+        .await
+        .expect("select rows after failed native update")
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            (1, "a".to_string()),
+            (2, "b".to_string()),
+            (3, "c".to_string()),
+            (4, "d".to_string()),
+        ],
+        "failed native update must leave the visible table unchanged"
+    );
+    let after_counts = catalog_mutation_counts(&pool, "native_update_failpoint_points").await;
+    assert_eq!(
+        after_counts, before_counts,
+        "pending replacement/delete objects must not become catalog-visible after failed update"
+    );
+    let info = table_info(&client, "native_update_failpoint_points").await;
+    assert_eq!(info.delete_file_count, 0);
+
+    let updated = client
+        .execute(
+            "UPDATE public.native_update_failpoint_points SET name = 'updated' WHERE id = 2 OR id = 4",
+            &[],
+        )
+        .await
+        .expect("retry native UPDATE after one-shot failpoint");
+    assert_eq!(updated, 2);
+    let retry_rows: Vec<(i32, String)> = client
+        .query(
+            "SELECT id, name FROM public.native_update_failpoint_points ORDER BY id",
+            &[],
+        )
+        .await
+        .expect("select rows after retried native update")
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    assert_eq!(
+        retry_rows,
+        vec![
+            (1, "a".to_string()),
+            (2, "updated".to_string()),
+            (3, "c".to_string()),
+            (4, "updated".to_string()),
+        ],
+        "retried native update should publish exactly the intended mutation"
+    );
+    let retry_counts = catalog_mutation_counts(&pool, "native_update_failpoint_points").await;
+    assert!(
+        retry_counts.delete_files > before_counts.delete_files,
+        "retried update should publish delete-file metadata: before={before_counts:?} retry={retry_counts:?}"
+    );
+    assert!(
+        retry_counts.data_files > before_counts.data_files,
+        "retried update should publish replacement data-file metadata: before={before_counts:?} retry={retry_counts:?}"
+    );
+    assert_eq!(
+        ducklake_sql::metrics_snapshot().native_mutation_aborts_total,
+        aborts_before + 1,
+        "retry after one-shot update failpoint must not increment abort counter again"
     );
 }
 
