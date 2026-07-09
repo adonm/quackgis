@@ -1,4 +1,9 @@
-# G2 introspection probe — pg_catalog readiness
+# Historical introspection probe — pg_catalog readiness
+
+This is a dated pre-implementation probe report. Its `G#`/`M#` labels refer to the
+retired gap/milestone ledger and are retained only to explain the original
+observations; current status lives in `docs/ROADMAP_STATUS.md` and
+`docs/COMPATIBILITY.md`.
 
 Date: 2026-07-05. Method: ran a battery of typical QGIS/GeoServer-style
 introspection queries against a freshly-started `quackgis-server` (M0 build

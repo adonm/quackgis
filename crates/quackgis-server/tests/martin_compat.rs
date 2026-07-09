@@ -53,6 +53,12 @@ fn assert_bbox_approx(actual: (f64, f64, f64, f64), expected: (f64, f64, f64, f6
     assert!((actual.3 - expected.3).abs() < eps, "max_y {actual:?}");
 }
 
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
 async fn setup_martin_test_table(client: &tokio_postgres::Client) {
     client
         .simple_query("CREATE TABLE quackgis.main.points (id INT, geom BINARY, name TEXT)")
@@ -212,4 +218,36 @@ async fn martin_record_form_st_asmvt_query_executes() {
         .get(0);
 
     assert!(!tile.is_empty(), "MVT tile should not be empty");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn quackgis_st_asmvt_encodes_attribute_tags() {
+    let (_server, client) = connect_with_table().await;
+
+    let tile: Vec<u8> = client
+        .query_one(
+            "SELECT ST_AsMVT(
+                ST_AsMVTGeom(
+                    ST_Transform(ST_CurveToLine(geom::geometry), 3857),
+                    ST_TileEnvelope(0, 0, 0),
+                    4096, 64, true
+                ),
+                'points',
+                4096,
+                name
+             )
+             FROM quackgis.main.points
+             WHERE geom && ST_TileEnvelope(0, 0, 0)",
+            &[],
+        )
+        .await
+        .expect("QuackGIS MVT attribute query")
+        .get(0);
+
+    for expected in ["points", "name", "origin"] {
+        assert!(
+            contains_bytes(&tile, expected.as_bytes()),
+            "MVT tile should contain {expected:?} in layer/key/value dictionaries"
+        );
+    }
 }

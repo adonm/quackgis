@@ -337,7 +337,6 @@ dependencies = [
 [[package]]
 name = "arrow-pg"
 version = "0.14.0"
-source = "git+https://github.com/adonm/datafusion-postgres?branch=quackgis%2Ffixes#2c2e5d9bee77287147f3bc94e4d718d481bb9763"
 dependencies = [
  "arrow-schema",
  "bytes",
@@ -1593,7 +1592,6 @@ dependencies = [
 [[package]]
 name = "datafusion-pg-catalog"
 version = "0.17.0"
-source = "git+https://github.com/adonm/datafusion-postgres?branch=quackgis%2Ffixes#2c2e5d9bee77287147f3bc94e4d718d481bb9763"
 dependencies = [
  "arrow-pg",
  "async-trait",
@@ -1713,7 +1711,6 @@ dependencies = [
 [[package]]
 name = "datafusion-postgres"
 version = "0.17.0"
-source = "git+https://github.com/adonm/datafusion-postgres?branch=quackgis%2Ffixes#2c2e5d9bee77287147f3bc94e4d718d481bb9763"
 dependencies = [
  "arrow-pg",
  "async-trait",

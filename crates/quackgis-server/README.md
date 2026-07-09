@@ -10,17 +10,18 @@ psql / JDBC / QGIS / GeoServer / OGR
         ▼
 quackgis-server
 ├── datafusion-postgres   wire protocol · pg_catalog emulation
-├── quackgis compat       (M2+) geometry OID/encoding · geometry_columns
+├── quackgis compat       geometry OID/encoding · geometry_columns
 ├── SedonaDB              ST_* kernels · CRS · spatial joins
-└── DuckLake              (M1) Parquet + catalog
+└── DuckLake              Parquet + catalog
 ```
 
 ## Status (developer preview)
 
 SedonaDB `SessionContext` is served by datafusion-postgres; DuckLake storage is
-wired and tested through the pgwire server. Current preview storage is SQLite
-catalog + local Parquet files. Alpha storage hardening targets PostgreSQL catalog
-+ S3/object-store Parquet with multi-process readers/writers.
+wired and tested through the pgwire server. The deterministic preview uses SQLite
+catalog + local Parquet files. Kind Alpha gates exercise the library-specific
+PostgreSQL multicatalog + S3/object-store profile with multiple readers/writers;
+managed-service and standard-reader/export evidence remain forward work.
 
 Primary direction: platform/application developers running many parallel readers
 and ingest jobs against a shared DuckLake catalog/object-store dataset. Common
@@ -73,5 +74,7 @@ CLI flags (all optional, env-overridable per `clap`'s `env` feature):
 | `--tls-cert` / `--tls-key` | — | none | optional TLS |
 | `--log` | `RUST_LOG` | `info` | log filter |
 
-Development auth is intentionally minimal: user `postgres`, database
-`quackgis`, no password. Non-local auth/RBAC/TLS hardening is tracked for Alpha.
+Trust-mode development defaults to user `postgres`, database `quackgis`, with no
+password. Password mode supports SCRAM, optional TLS is wired, and coarse
+read-only/read-write authorization is implemented; object-level RBAC and external
+rotation/failure evidence remain production hardening.

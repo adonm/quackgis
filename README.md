@@ -83,12 +83,14 @@ SELECT postgis_version();                                -- 3.4 QUACKGIS
 
 ## Documentation
 
-- [ARCHITECTURE.md](./ARCHITECTURE.md) — layer model, geometry over the wire,
-  trust boundaries, what changed from v0.1.
-- [docs/PROJECT_DIRECTION.md](./docs/PROJECT_DIRECTION.md) — mission, primary
-  user, non-goals, current preview, Alpha evidence, and promotion ladder.
-- [ROADMAP.md](./ROADMAP.md) — consolidated evidence snapshot, ambitious promotion
-  ladder, forward milestones, execution queue, and risks.
+- [ARCHITECTURE.md](./ARCHITECTURE.md) — authoritative layer model, current
+  implementation boundaries, invariants, and lessons learned.
+- [docs/PROJECT_DIRECTION.md](./docs/PROJECT_DIRECTION.md) — stable mission,
+  primary user/job, product horizons, and scope discipline.
+- [docs/HISTORY.md](./docs/HISTORY.md) — architecture eras, useful commit anchors,
+  retained lessons, and a newcomer code-reading guide.
+- [ROADMAP.md](./ROADMAP.md) — ambitious forward outcomes, measurable exit gates,
+  execution queue, and risks; implemented status stays out of this file.
 - [docs/ROADMAP_STATUS.md](./docs/ROADMAP_STATUS.md) — implemented contracts vs
   active roadmap frontiers.
 - [docs/LOCAL_KIND_LINKERD_FOCUS.md](./docs/LOCAL_KIND_LINKERD_FOCUS.md) — local
@@ -120,8 +122,8 @@ SELECT postgis_version();                                -- 3.4 QUACKGIS
   native DuckLake delete-file/partial-rewrite fork path.
 - [docs/MUTATION_FAILURE_DRILLS.md](./docs/MUTATION_FAILURE_DRILLS.md) — native
   DML/compaction crash, retry, and orphan-cleanup evidence ladder.
-- [docs/SNAPSHOT_OPERATIONS.md](./docs/SNAPSHOT_OPERATIONS.md) — snapshot
-  rollback, future SQL `AS OF`, protected snapshot, and CDC exposure plan.
+- [docs/SNAPSHOT_OPERATIONS.md](./docs/SNAPSHOT_OPERATIONS.md) — snapshot-id SQL
+  `AS OF`, rollback, protected snapshot, and CDC exposure plan.
 - [docs/MULTIMODAL_ASSETS.md](./docs/MULTIMODAL_ASSETS.md) — raster,
   point-cloud, 3D tile, CAD/BIM, aerial, and reality-capture footprint/sidecar
   schema patterns.
@@ -217,11 +219,13 @@ scheduled/manual compatibility workflow builds the Kind image, runs QGIS
 read/edit, OGR, GeoServer, and optionally real OSM PostGIS parity probes, then
 uploads probe logs as a compatibility report artifact.
 
-Upstreams are consumed through fork branches when needed. DuckLake storage is a
-**core product path**, not a placeholder: SQL catalog + Parquet object/file data,
-with SQLite + local files and PostgreSQL + S3 both treated as first-class storage
-profiles. Extending datafusion-ducklake to meet QuackGIS storage requirements
-(SQL DDL routing, UPDATE/DELETE, pruning, PostgreSQL/S3 hardening) is explicitly
-in scope, while staying forward-compatible with the official DuckLake 1.0+ spec.
+Upstreams are consumed through pinned forks or in-tree vendors when needed.
+DuckLake storage is a **core product path**, not a placeholder: SQL catalog plus
+Parquet object/file data. SQLite/local is deterministic and spec-oriented but not
+yet a drop-in DuckDB-writable catalog; the current PostgreSQL/S3 multicatalog
+backend is a library-specific Alpha profile
+until reference-reader or tested export/migration evidence proves a stronger
+claim. Extending datafusion-ducklake is in scope, with every divergence and
+migration trigger recorded in `DIVERGENCE.md` and `docs/DUCKLAKE_ALIGNMENT.md`.
 
 Licensed under the [Apache License 2.0](./LICENSE).

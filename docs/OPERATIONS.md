@@ -100,7 +100,7 @@ Safe Alpha defaults before any external exposure:
 - keep `QUACKGIS_LOG=info` unless debugging in a trusted workspace, because query
   text and object paths may be sensitive.
 
-Target M8 production profiles still need full object-level RBAC, documented
+Target M9 production profiles still need full object-level RBAC, documented
 default TLS manifests, and broader failure-mode probes. A production-style
 Kubernetes starting point lives under `deploy/kubernetes/`; it keeps secrets out
 of Git and enables pgwire TLS, password auth, metrics, probes, and resource
@@ -521,8 +521,8 @@ same Justfile recipes as local development through `mise exec -- just ...`.
   `DELETE`/`UPDATE`/bucket-compaction before-commit failpoint tests are the first
   automated crash-boundary oracles; service-level kill/retry drills remain
   promotion work.
-- Snapshot rollback, future SQL `AS OF`, protected snapshot, and CDC exposure
-  policy is documented in [SNAPSHOT_OPERATIONS.md](./SNAPSHOT_OPERATIONS.md).
+- Snapshot-id SQL `AS OF`, rollback, protected snapshot, and CDC exposure policy
+  is documented in [SNAPSHOT_OPERATIONS.md](./SNAPSHOT_OPERATIONS.md).
 
 Every `kind-compat-report` artifact includes `metrics.json` with both probe
 metrics and GitHub run metadata (`github_sha`, workflow, run id, run URL, and
@@ -566,10 +566,10 @@ denials emit a separate counter line:
 quackgis_write_denied user=quackgis_readonly statement_kind=create_table denied_total=1
 ```
 
-M8 observability now includes process-local catalog refresh counters, native
-DML/compaction mutation counters, and native mutation abort counters without
-requiring log scraping. Object-store IO and writer-conflict counters remain future
-work.
+Current observability includes process-local catalog refresh counters,
+snapshot-pinned read success/error counters, native DML/compaction mutation
+counters, and native mutation abort counters without requiring log scraping.
+Object-store IO and writer-conflict counters remain future work.
 
 For process-local scrape evidence, set `QUACKGIS_METRICS_PORT` (and optionally
 `QUACKGIS_METRICS_HOST`, default `127.0.0.1`) to expose a small Prometheus text
@@ -583,9 +583,10 @@ curl http://127.0.0.1:9187/metrics
 The endpoint is disabled by default and currently exports only safe process
 counters: pgwire hook statements started, transaction staging ids allocated,
 read-only write denials, DuckLake catalog refreshes, shared-catalog read/strong
-refreshes, native delete/update/bucket-compaction mutations, native mutation
-aborts before catalog commit, and successful compaction calls. It intentionally
-does not expose SQL text, object-store paths, usernames, or secrets.
+refreshes, snapshot-pinned read successes/errors, native delete/update/
+bucket-compaction mutations, native mutation aborts before catalog commit, and
+successful compaction calls. It intentionally does not expose SQL text,
+object-store paths, usernames, or secrets.
 
 ## Persistence model
 

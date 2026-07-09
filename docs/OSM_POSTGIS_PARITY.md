@@ -29,72 +29,44 @@ goal here is to make this workflow boring:
 - OSM data is licensed under ODbL. Any published derived data or screenshots
   need appropriate OpenStreetMap attribution and ODbL compliance review.
 
-## Long roadmap
+## Implemented Monaco baseline
 
-### Phase 0 — opt-in real-data plumbing
-
-Status: the opt-in gate covers Monaco `points`, `lines`, and `multipolygons`.
-It asserts deterministic count, stable IDs, `osm_id`, UTF-8 names, geometry type
-distribution, and bbox through GeoJSON exports, repeats the `id`/`osm_id`/`name`
-comparison through SQL, emits non-empty MVT bytes for each copied QuackGIS layer,
-then opens each copied layer through QGIS, iterates real features/geometries,
-applies a feature filter, and renders a small map image.
-
-- Add a Kind PostGIS reference deployment in the `quackgis` namespace.
-- Add an opt-in `just kind-osm-postgis-parity` target, separate from the default
-  fast `just kind-probes` loop.
-- Download Monaco `.osm.pbf` at runtime.
-- Load real OSM points, lines, and multipolygons into PostGIS with GDAL/OGR.
-- Create small deterministic samples from the real PostGIS tables.
-- Pre-create equivalent WKB-backed QuackGIS tables.
-- Copy PostGIS → QuackGIS with `ogr2ogr` using `PG_USE_COPY=NO` and
-  `-addfields` so real OSM attributes such as `osm_id` are added by the same OGR
-  path users will run.
-- Compare counts, IDs, geometry types, and bbox through GeoJSON exports from
-  both databases, then compare `id`/`osm_id`/UTF-8 `name` rows through SQL.
-- Emit non-empty MVT tile bytes for each copied QuackGIS OSM layer using the same
-  WKB-backed SQL surface Martin consumes.
-- Open each copied QuackGIS OSM layer through QGIS's PostgreSQL provider and
-  assert provider validity, feature counts, filtered feature access, non-empty
-  geometries, and render success.
-
-### Phase 1 — multi-layer OSM copy parity
-
-Status: implemented for OGR's standard OSM `points`, `lines`, and
-`multipolygons` layers.
-
-The current probe copies these standard OGR OSM layers:
+The opt-in `just kind-osm-postgis-parity` gate deploys a PostGIS reference,
+downloads Monaco at runtime, loads OGR's standard OSM layers, creates deterministic
+samples, copies them into pre-created WKB-backed QuackGIS tables with `ogr2ogr`,
+and compares the two systems. It covers:
 
 - `points` → `osm_points` / `wkb_geometry` Point.
 - `lines` → `osm_lines` LineString/MultiLineString-compatible WKB.
 - `multipolygons` → `osm_multipolygons` Polygon/MultiPolygon-compatible WKB.
-- Samples are deterministic: stable `ORDER BY`, explicit limits, explicit table
+- deterministic samples: stable `ORDER BY`, explicit limits, explicit table
   names, and printed counts.
-- The gate compares:
-  - feature count;
-  - selected attributes (`osm_id`, `name`, class tags where available);
-  - geometry type distribution;
-  - bbox.
+- count, stable id/`osm_id`, selected attributes, UTF-8 names, geometry type
+  distribution, and bbox through SQL/GeoJSON;
+- non-empty MVT SQL bytes for each copied layer; and
+- QGIS provider validity, feature iteration/filtering, non-empty geometries, and
+  a rendered image over the QuackGIS copies.
 
-Expected compatibility gaps to flush out next:
+## Remaining OSM promotion work
 
-- GDAL layer creation defaults that assume real PostgreSQL DDL/type support.
-- Geometry type promotion (`POLYGON` vs `MULTIPOLYGON`, line variants).
-- QGIS PostGIS-source side-by-side over real OSM layers; current gate opens,
+- QGIS PostGIS-source side-by-side over real OSM layers; the current gate opens,
   filters, iterates, and renders the copied QuackGIS layers.
-- Attribute type mapping and long `other_tags` strings.
-- Schema-derived OGR metadata for arbitrary appended columns. The maintained OGR
-  probe now fails if an appended field is missing from GeoJSON export; repeat
-  this coverage as QGIS/GeoServer OSM-layer probes are added.
-- Keep UTF-8 text handling under real-data regression. Phase 0 now verifies
+- Run GeoServer WFS/WMS/WFS-T on the copied OSM layers; generic GeoServer fixtures
+  do not close this real-data row.
+- Run the real Martin binary and verify configured OSM attributes, not only SQL
+  MVT bytes/encoder dictionaries.
+- Keep geometry promotion, long `other_tags`, arbitrary appended columns, and
+  UTF-8 text under real-data regression. The baseline verifies
   Monaco names such as `Quai des États-Unis` and `La Pêcherie U Luvassu`; later
-  phases should repeat that coverage across all copied OSM layers.
-- Large COPY loads over pgwire against pre-created WKB-backed schemas. The
+  datasets should repeat that coverage.
+- Add large COPY loads over pgwire against pre-created WKB-backed schemas. The
   maintained OSM parity probe still uses `PG_USE_COPY=NO` for schema-evolving
   `-addfields` append coverage; COPY is now available for focused bulk-load
   probes.
+- Promote to wider extracts and the versioned city client matrix in
+  [REAL_DATA_CLIENT_MATRIX.md](./REAL_DATA_CLIENT_MATRIX.md).
 
-### Phase 2 — side-by-side client access matrix
+### Side-by-side client access matrix
 
 For each copied OSM layer, open both the PostGIS source and QuackGIS copy with:
 
@@ -102,14 +74,14 @@ For each copied OSM layer, open both the PostGIS source and QuackGIS copy with:
 |---|---:|---:|---|
 | OGR | ✅ | ✅ | `ogrinfo`, GeoJSON export, count/bbox/type parity |
 | QGIS | stretch | ✅ | provider validity, feature iteration/filtering, and render smoke for QuackGIS copy; PostGIS side-by-side remains next |
-| GeoServer | ✅ | ✅ | datastore publish, WFS count, WMS PNG |
-| Martin/MVT SQL | stretch | ✅ | non-empty MVT bytes for copied QuackGIS layers; encoder-level tags are covered, while real Martin binary and SQL attribute propagation remain next |
+| GeoServer | ⏳ | ⏳ | generic datastore/WFS/WMS/WFS-T gates pass; copied OSM side-by-side is not yet part of this track |
+| Martin/MVT | ⏳ | SQL bytes only | non-empty MVT bytes for copied QuackGIS layers; real Martin binary attribute propagation remains next |
 
 This phase should produce an explicit compatibility report per layer following
 the real-data matrix contract rather than claiming broad OSM support from a
 single points table.
 
-### Phase 3 — documented copy workflows
+### Documented copy workflows
 
 Document practical recipes people can use immediately. For schema-evolving
 OGR append flows, keep `PG_USE_COPY=NO` until that probe is intentionally moved;
@@ -152,7 +124,7 @@ For raw OSM, true minutely replication belongs in the PostGIS/osm2pgsql side
 first; QuackGIS should initially consume curated changed tables from PostGIS,
 not implement OSM replication itself.
 
-### Phase 4 — write/edit workflows against OSM-derived layers
+### Write/edit workflows against OSM-derived layers
 
 - GeoServer WFS-T insert/update/delete against a QuackGIS OSM-derived layer.
 - QGIS edits against copied OSM layers with real-world attribute widths and NULLs.
@@ -161,7 +133,7 @@ not implement OSM replication itself.
 This is where general pgjdbc fetch-size portal suspension, geometry write
 parameters, and privilege metadata should be implemented if traces require them.
 
-### Phase 5 — performance and larger extracts
+### Performance and larger extracts
 
 Move beyond Monaco only after correctness is boring:
 
@@ -176,13 +148,14 @@ Move beyond Monaco only after correctness is boring:
 
 This phase should decide whether the next highest-value storage feature is:
 
-- PostgreSQL/S3 Alpha storage hardening for larger shared OSM copies;
-- a high-QPS parallel-reader probe over copied OSM-derived layers;
-- an OLAP fanout benchmark over OSM-derived columns and geometries;
-- bucket-local compaction for append-heavy OSM refreshes;
-- or a QuackGIS-native bulk load path beyond PostgreSQL text COPY.
+- managed-service PostgreSQL/S3 evidence for larger shared OSM copies;
+- high-QPS and OLAP gates over copied OSM-derived layers rather than only
+  synthetic tables;
+- real edit-history and bucket-compaction evidence for append-heavy refreshes;
+- or a QuackGIS-native bulk load path beyond PostgreSQL text COPY if COPY becomes
+  the measured bottleneck.
 
-### Phase 6 — production sync guidance
+### Production sync guidance
 
 Document recommended architectures:
 
@@ -195,7 +168,7 @@ Document recommended architectures:
 4. **No unsupported claims.** Logical replication, triggers, and full PostgreSQL
    extension semantics remain non-goals unless explicitly implemented later.
 
-## First implemented gate
+## Baseline gate command
 
 The first gate is intentionally small but real:
 
@@ -218,5 +191,6 @@ osm_postgis_to_quackgis_copy_ok True
 
 This proves real OSM → PostGIS → QuackGIS copy/read parity for deterministic
 Point, LineString, and MultiPolygon-compatible samples across stable IDs, OSM
-IDs, UTF-8 names, geometry type distribution, and bbox. Later phases widen
-client coverage beyond OGR.
+IDs, UTF-8 names, geometry type distribution, and bbox. Remaining promotion widens
+the existing OGR/QGIS/SQL-MVT baseline to PostGIS-side QGIS, copied-layer
+GeoServer, real Martin attributes, larger extracts, and managed storage.

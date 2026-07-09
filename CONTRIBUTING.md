@@ -1,9 +1,9 @@
 # Contributing
 
-QuackGIS is a thin integration layer over three upstream DataFusion projects
-(datafusion-postgres, SedonaDB, datafusion-ducklake), consumed as **tracked fork
-branches**. Several capabilities the design needs don't exist upstream yet — see
-the gap ledger in [ROADMAP.md](./ROADMAP.md). Policy: **fork/vendor
+QuackGIS is an integration layer over three upstream DataFusion projects
+(datafusion-postgres, SedonaDB, datafusion-ducklake), consumed as pinned forks or
+in-tree vendors. Several capabilities the design needs don't exist upstream yet —
+see [DIVERGENCE.md](./DIVERGENCE.md). Policy: **fork/vendor
 preferred** — when a needed capability is missing, build it in our fork and
 ship; upstream the patch opportunistically, never on the critical path. This
 repo owns the PostGIS compatibility surface (geometry over the wire,
@@ -11,7 +11,8 @@ geometry_columns/spatial_ref_sys, client shims) and the glue.
 
 Fork rules:
 
-- Track upstream heads through named `quackgis/*` fork branches; no silent floating dependency changes outside commits.
+- Track upstream heads through named `quackgis/*` branches or a documented
+  vendored base; no silent floating dependency changes outside commits.
 - Minimal diffs; every patch listed in the fork's `DIVERGENCE.md` with its
   upstream PR link if one exists.
 - Rebase forks onto upstream tags at milestone boundaries.
@@ -40,11 +41,13 @@ behind a Justfile recipe before adding them to docs or workflows.
 
 Compatibility work is trace-driven: capture the SQL a client (QGIS, GeoServer,
 OGR) actually sends, add it as a replay fixture, then fix. See
-[ROADMAP.md](./ROADMAP.md) for the current milestone and gates.
+[ROADMAP.md](./ROADMAP.md) for forward outcomes and
+[docs/ROADMAP_STATUS.md](./docs/ROADMAP_STATUS.md) for current frontiers.
 
-Note: legacy v0.1 assets (DuckDB extension in `src/`, `container/init.d/`,
-`vendor/`) are being retired at M0 — don't extend them; see ROADMAP.md
-"Retired v0.1 assets".
+Legacy PostgreSQL/DuckDB/C-extension assets are retired. Do not recreate or extend
+that architecture. Read [docs/HISTORY.md](./docs/HISTORY.md) before mining old
+commits; it identifies useful anchors, retained lessons, and current owners for
+those ideas.
 
 ## Rules
 

@@ -3,7 +3,7 @@
 ## QuackGIS LayoutBench
 
 LayoutBench is the synthetic validation suite for DuckLake spatial-temporal
-layout and the future high-QPS reader gate. It is deterministic by seed and scale
+layout and the maintained high-QPS reader gates. It is deterministic by seed and scale
 factor so CI, local dev, nightly, and manual stress runs exercise the same
 distributions at different sizes.
 
@@ -132,17 +132,10 @@ Architecture decisions from this pass:
   bulk-write/compaction primitive: it must run over whole COPY batches,
   transaction-staged table deltas, or compaction units, not just isolated small
   appends.
-- Add bucket/file compaction as the next architectural lever: rewrite many
-  autocommit append files into sorted bucket-local files and verify unchanged
-  exact results plus fewer matched file ranges.
-- Add an Alpha parallel-reader benchmark/probe over PostgreSQL catalog + S3 (or a
-  local object-store-compatible stand-in first) that reports QPS, latency,
-  bytes-scanned, row-group/file pruning, and per-reader correctness against one
-  shared DuckLake catalog/data prefix.
-- Add an OLAP fanout benchmark/probe that scans many geometries/assets, computes
-  grouped stats (counts, area/length/bbox-derived measures, asset totals, quality
-  flags), filters records from those calculations, and reports pushdown/pruning
-  evidence plus exact SedonaDB recheck correctness.
+- Subsequent gates implemented bucket-local compaction, Kind parallel-reader QPS,
+  and grouped OLAP fanout. Those are now the baseline, not pending benchmark work.
+- Promote the same metrics to `sf10m`/`sf100m`, copied real data, and managed
+  services; add catalog-roundtrip, metadata-scan, conflict, and cost budgets.
 
 The first implemented compaction surface is explicit and table-scoped:
 
@@ -151,7 +144,8 @@ CALL quackgis_compact_table('public.layoutbench_local_aerial_frames');
 ```
 
 It reads the DuckLake table, recomputes/projects hidden layout columns, sorts by
-the layout key, and rewrites one replacement snapshot. On the shuffled INSERT sf1
+the layout key, and rewrites one replacement snapshot. On the shuffled INSERT
+`sf1-local`
 case it took about 0.52 s for all three benchmark tables and repaired the bad
 layout:
 
@@ -183,9 +177,11 @@ remain planned generator/benchmark work.
 | Scale | Purpose |
 |---|---|
 | `sf0` | CI oracle: implemented; small enough to compare prefiltered results against exact SedonaDB predicates |
-| `sf1` | local benchmark: 1M-5M mixed rows for ingest/query iteration |
-| `sf10` | nightly benchmark: 10M-50M rows for pruning/compaction regressions |
-| `sf100+` | manual stress: generated-streaming proxy for 10 TB aerial/CAD ingest |
+| `sf1-local` (runner argument `sf1`) | current fast local trend run: 22,800 mixed rows |
+| `sf10m` | city-scale client/pruning/compaction gate: 10M+ rows |
+| `sf100m` | routine regional benchmark: 100M+ rows |
+| `sf1b` | scheduled regional/national stress: 1B+ rows |
+| `sf10tb` | manual object/catalog stress: 10TB+ generated or copied inventory |
 
 Synthetic tables:
 
@@ -222,7 +218,11 @@ coordinate residual error.
 See `docs/DUCKLAKE_SPATIAL_LAYOUT.md` for the type/fidelity model and layout
 details.
 
-## SpatialBench benchmarks (legacy local DuckLake)
+## Historical SpatialBench archive (retired v0.1 architecture)
+
+The remainder of this file records the retired DuckDB-extension benchmark path.
+It is historical comparison data, not a current QuackGIS release gate. Current
+benchmark contracts live above and in `docs/ANALYTICS_BENCHMARKS.md`.
 
 Runs the [Apache SpatialBench](https://github.com/apache/sedona-spatialbench)
 queries against the **sedonadb** extension over a **local DuckLake** (DuckDB file

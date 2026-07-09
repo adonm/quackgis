@@ -132,13 +132,20 @@ def assert_mvt_surface(conn, table: str) -> int:
     with conn.cursor() as cur:
         cur.execute(
             "SELECT ST_AsMVT("
-            "ST_AsMVTGeom(geom, ST_MakeEnvelope(-1.0, -1.0, 2.0, 2.0, 3857), 4096, 64, true)"
+            "ST_AsMVTGeom(geom, ST_MakeEnvelope(-1.0, -1.0, 2.0, 2.0, 3857), 4096, 64, true), "
+            f"'{table}', 4096, name, category"
             f") FROM public.{quote_ident(table)} WHERE id <= 2"
         )
         tile = cur.fetchone()[0]
-    tile_bytes = len(bytes(tile))
+    raw_tile = bytes(tile)
+    tile_bytes = len(raw_tile)
     require(tile_bytes > 0, "MVT tile was empty")
-    print(f"api_client_mvt_surface tile_bytes={tile_bytes}")
+    for expected in (table, "name", "origin", "category", "alpha"):
+        require(
+            expected.encode("utf-8") in raw_tile,
+            f"MVT tile missing expected attribute/layer token {expected!r}",
+        )
+    print(f"api_client_mvt_surface tile_bytes={tile_bytes} attributes=True")
     return tile_bytes
 
 

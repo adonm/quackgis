@@ -1,156 +1,76 @@
 # Project direction
 
-QuackGIS is a **PostGIS-compatible front door to a spatial lakehouse**: a single
-Rust pgwire server for platform and application teams that need to keep very
-large spatial data in open DuckLake/Parquet storage while serving familiar
-PostGIS clients and high-throughput analytical SQL.
+This is the stable product charter. It intentionally does not repeat current
+status or milestone detail:
 
-The full ambition is a regional-to-national spatial data plane, not a narrower
-PostgreSQL clone: stateless QuackGIS readers/writers over DuckLake snapshots,
-managed catalog/object storage, releaseable datasets, budgeted query evidence,
-and eventually multi-modal asset indexes for raster, point-cloud, CAD/BIM, 3D
-tiles, imagery, and reality-capture data.
+- [ROADMAP.md](../ROADMAP.md) owns future outcomes and exit gates;
+- [ARCHITECTURE.md](../ARCHITECTURE.md) owns design and invariants; and
+- [ROADMAP_STATUS.md](./ROADMAP_STATUS.md) owns the implemented evidence floor.
 
-The durable storage model is DuckLake: SQL catalog metadata plus Parquet data on
-file/object storage. SQLite + local files and PostgreSQL + S3 are both first-class
-storage profiles. The same SQL, pgwire, spatial layout, and compatibility surface
-should work on both. SQLite/local must preserve the same semantics for local and
-test deployments; scaled multi-writer/high-QPS gates target the PostgreSQL catalog
-+ S3 object-storage profile.
+## Product thesis
 
-QuackGIS should stay deliberately aligned with DuckLake upstream. Fork-backed
-storage semantics are acceptable to unblock spatial workflows, but stable
-DuckLake features should replace QuackGIS-only workarounds: deletion-vector/Puffin
-improvements for DML, protected snapshots and future branch/merge for operations,
-materialized views for maintained spatial summaries, VARIANT/UDT/fixed-size-array
-support for asset metadata, and PostgreSQL catalog roundtrip/metadata-scan
-optimizations for scale.
+QuackGIS is the **PostGIS-compatible SQL and control plane for an open spatial
+lakehouse**. It lets platform and application teams keep large shared spatial data
+in DuckLake/Parquet, execute through DataFusion + SedonaDB, and preserve the GIS,
+driver, API, and BI ecosystem that already understands PostgreSQL/PostGIS.
 
-## Primary user
+The durable advantage is the combination, not any one subsystem:
 
-The first-class user is a **platform or application developer** building spatial
-services over a shared data lake:
+1. familiar pgwire/PostGIS workflows at the edge;
+2. exact vectorized spatial and columnar analysis in the engine;
+3. snapshot-based open lake storage for scale and recoverability;
+4. trace-driven compatibility rather than speculative PostgreSQL emulation; and
+5. dataset release, maintenance, metadata, and evidence surfaces that make the
+   lake operable.
 
-- many stateless QuackGIS readers serving analytical/API traffic;
-- many parallel ingest jobs, including GDAL/OGR/`ogr2ogr`-style tools;
-- one shared DuckLake catalog and object-store data prefix;
-- complex spatial SQL and OLAP-style aggregates over large tables without copying
-  data into PostgreSQL or DuckDB.
+## Primary user and job
 
-Desktop/server GIS clients matter because they are the ecosystem interface. QGIS,
-GDAL/OGR, GeoServer, Martin, `psql`, psycopg, SQLAlchemy/GeoPandas,
-pg_featureserv-style services, and BI tools should connect with minimal or no
-client changes, but QuackGIS is not primarily a desktop GIS product.
+The first-class user is a platform team running shared spatial services:
 
-## Primary job
+- stateless readers serving GIS, APIs, tiles, and analytical traffic;
+- parallel GDAL/OGR and application ingest/edit jobs;
+- managed catalog/object storage;
+- real spatial SQL and grouped/window/join analysis where supported; and
+- release, restore, retention, and upgrade workflows over large datasets.
 
 The core job is:
 
-> Answer large, complex spatial questions over a big shared dataset with high
-> performance and horizontal read scaling, then analyze the filtered columnar
-> records with OLAP-style aggregations/calculations, while remaining compatible
-> with common PostGIS client workflows.
+> Answer large, complex spatial questions over a shared lake with horizontal read
+> scale and columnar analytics while preserving common PostGIS client workflows
+> and exact spatial results.
 
-This drives the architecture:
+## Product horizons
 
-1. pgwire + PostGIS-compatible catalog/SQL surface for tools;
-2. SedonaDB for spatial execution and exact predicate correctness;
-3. DataFusion-style vectorized SQL for columnar projections, aggregates, joins,
-   expressions, and filter pushdown;
-4. DuckLake/Parquet for lakehouse storage, snapshots, parallel readers, and object
-   storage scale;
-5. hidden spatial/temporal layout columns, pruning, COPY ingest, native DML, and
-   compaction for large-table performance;
-6. operational metadata, trendable metrics, and backup/restore evidence as first-
-   class product surfaces.
+- **1.0:** an operational regional vector lakehouse with managed-service,
+  real-data client, security, recovery, upgrade, and budgeted scale evidence.
+- **1.x:** releaseable datasets, protected history, staged promotion/rollback, and
+  maintained tile/coverage summaries.
+- **2.x:** a multi-modal SQL/control plane for raster, point-cloud, 3D, CAD/BIM,
+  imagery, and reality-capture inventories, with national/trillion-class stress
+  evidence and measured sharding limits.
 
-“DuckDB-style OLAP” is a target user experience: fast ad hoc analytical SQL over
-column-oriented data, with primitive aggregations/calculations pushed close to the
-Parquet scan where possible. It does **not** mean embedding DuckDB.
+## Scope discipline
 
-Example target workload:
+QuackGIS is not a smaller PostgreSQL, OLTP database, desktop GIS, map server, or
+universal spatial-format decoder. PostgreSQL is an interface and optional catalog
+store; DuckDB is not embedded; heavy assets remain in object storage behind
+queryable footprint/provenance indexes.
 
-1. fan out across many geometry rows/assets;
-2. compute spatial stats such as bbox/area/length/intersection counts or grouped
-   coverage metrics;
-3. combine those with primitive columnar aggregates such as `count`, `sum`,
-   `avg`, percentiles/histograms where available, and conditional expressions;
-4. use the aggregate/calculated result to filter relevant records for follow-up
-   exact SedonaDB spatial predicates or downstream clients.
+Compatibility breadth is earned from maintained workflows. Storage-specific
+features are adopted from DuckLake when they preserve QuackGIS correctness and
+interoperability gates. When PostgreSQL illusion, optimization, and correctness
+conflict, explicit limits and correctness win.
 
-Longer term, QuackGIS should also index high-fidelity spatial assets: raster
-mosaics, point-cloud tiles, 3D tiles, CAD/BIM objects, aerial/reality-capture
-frames, and provenance sidecars. The SQL hot path should query footprints,
-quality/resolution fields, CRS/epoch metadata, lineage, and storage URIs while
-leaving heavyweight source artifacts in object storage.
+## Claim discipline
 
-## Current preview, Alpha evidence, and promotion ladder
+Every claim names its evidence ring:
 
-The current developer preview/Alpha base proves the core shape:
+- local deterministic semantics;
+- Kind/multi-pod integration;
+- managed-service provider behavior;
+- copied real-data client/product behavior; or
+- release-grade upgrade, recovery, and soak evidence.
 
-1. PostGIS-compatible pgwire server in one Rust binary;
-2. DuckLake writes on SQLite/local and Alpha PostgreSQL/S3 profiles;
-3. PostgreSQL text `COPY FROM STDIN`, CTAS/INSERT/UPDATE/DELETE, native
-   autocommit delete/update, and bucket-local compaction paths;
-4. QGIS/GDAL/OGR/GeoServer/Martin compatibility smoke paths;
-5. WKB-first hidden spatial layout, safe bbox pruning, temporal `BETWEEN` bucket
-   prefilters, and exact SedonaDB recheck;
-6. SCRAM password mode, coarse read/write vs read-only roles, explicit-user
-   privilege metadata, DuckLake metadata UDTFs, local backup/restore oracle,
-   trendable `metrics.json` artifacts plus Markdown dashboards, and an opt-in
-   Prometheus metrics endpoint.
-
-The Alpha evidence loop now exists in Kind: PostgreSQL DuckLake catalog,
-S3-compatible object storage, multiple QuackGIS pods, writer conflict/retry,
-native DML/compaction metadata probes, QPS reader probes, OLAP fanout probes,
-Linkerd mTLS/TCP observability, metrics scraping, and uploaded compatibility/
-storage/benchmark reports. The next step is not another docs pass; it is the
-promotion ladder:
-
-1. make local Kind+Linkerd evidence boring and budgeted;
-2. promote the same claims to managed PostgreSQL/S3-compatible services;
-3. widen copied real-data client/API matrices and edit traces;
-4. harden native maintenance, snapshots, RBAC, backup/restore, and upgrade paths;
-5. publish a 1.0 release packet that a platform team can run without source-tree
-   archaeology;
-6. extend the same SQL/control plane to multi-modal spatial asset inventories.
-
-Forward roadmap items should therefore be evidence-oriented: dashboards with
-budgets, failure drills, copied datasets, external-service runs, compatibility
-matrices, and release artifacts. A design document or runbook is a contract for
-future evidence, not evidence by itself.
-
-## Scope boundaries
-
-QuackGIS is not:
-
-- a document database;
-- an OLTP application database;
-- a full PostgreSQL replacement;
-- a general-purpose lakehouse engine unrelated to spatial workloads;
-- a desktop GIS or map server;
-- a heavyweight raster/CAD/point-cloud decoder in the SQL hot path.
-
-QuackGIS does include columnar OLAP analysis because spatial lakehouse workloads
-need it: fanout scans, grouped stats, primitive calculations, and pushdown filters
-over Parquet columns are part of the target direction when they support spatial
-analysis.
-
-QuackGIS should still emulate enough transactional, catalog, and protocol behavior
-to avoid client changes for common PostGIS/GIS workflows. When correctness and
-PostgreSQL illusion conflict, correctness and explicit limits win.
-
-## Claim style
-
-Docs should distinguish:
-
-- **current preview claims**: only features covered by tests/smokes/benchmarks;
-- **local Alpha evidence**: Kind+Linkerd PostgreSQL/S3-like profile, multi-process
-  readers/writers, high-QPS/OLAP gates, mTLS/TCP visibility, and trendable metrics;
-- **external Alpha evidence**: managed PostgreSQL/S3-compatible services,
-  provider behavior, backup/restore, credential rotation, and failure drills;
-- **Beta/1.0 evidence**: copied regional datasets, full client/API matrices,
-  native maintenance, snapshot/time-travel operations, RBAC, DR, upgrades, and
-  release packets;
-- **2.x direction**: multi-modal spatial asset indexing, maintained summaries,
-  branches/releases, and digital-twin-scale SQL/control-plane workflows.
+Plans and schemas are design contracts. They become product claims only when the
+matching workload runs at the stated scale and source SHA with reviewable
+artifacts.

@@ -24,15 +24,17 @@ Status: 🟢 in sync · 🟡 local patches, upstreamable · 🔴 blocked.
     `UserDefinedLogicalNode::as_any()` where still required. `MetricType` casing,
     `partition_statistics -> Arc<Statistics>`, `PartitionedFile.table_reference`,
     `MemoryPool::{name, Display}`, generic accumulator `'static` bounds.
-- **Upstream plan:** PR after local M1/M2 soak. The bump is large enough that
-  submitting after quality coverage is preferable.
+- **Upstream plan:** PR after the DF54 path has repeatable local and
+  managed-service quality evidence. The bump is large enough that submitting
+  after representative coverage is preferable.
 
 ### `adonm/datafusion-postgres` — 🟡 upstreamable
 
 - **Upstream:** `datafusion-contrib/datafusion-postgres` (`master`, currently
   DF 53 / Arrow 58).
-- **Consumed via:** root `Cargo.toml`, branch `quackgis/fixes`.
-- **Head:** `2c2e5d9` (pushed to `adonm/datafusion-postgres@quackgis/fixes`).
+- **Consumed via:** root `Cargo.toml`, vendored path
+  `vendor/datafusion-postgres/datafusion-postgres`.
+- **Base:** `2c2e5d9` (pushed to `adonm/datafusion-postgres@quackgis/fixes`).
 - **Purpose:** track QuackGIS stack (DF 54) and carry correctness + client-
   compatibility patches found by M2 probes (psql, tokio-postgres, Martin).
 - **Patches:**
@@ -86,26 +88,29 @@ Status: 🟢 in sync · 🟡 local patches, upstreamable · 🔴 blocked.
       back to DataFusion integer values, and geometry/geography WKB payloads are
       encoded through bytea-compatible serializers while retaining the advertised
       geometry/geography OIDs.
-- **Remaining fork target:** G3(b), extended-protocol `FETCH` RowDescription
+  20. local vendored patch — add a raw pre-parse `QueryHook::rewrite_sql` hook so
+      QuackGIS can lower parser-level compatibility syntax (currently
+      `AS OF SNAPSHOT <id>`) before the PostgreSQL dialect parser rejects it.
+- **Remaining fork target:** extended-protocol `FETCH` RowDescription
   mismatch (`DataRow field count does not match`). Not blocking QGIS/libpq.
 - **Upstream plan:** split into small PRs after local soak: Arc recursion fix
   first, binary cursor second, DF54 bump if upstream has not already moved.
   Martin-specific rewrites (7-14) are QuackGIS-specific and stay in-fork.
 
-### `datafusion-ducklake` vendored fork — 🟡 QuackGIS G5 patches
+### `datafusion-ducklake` vendored fork — 🟡 atomic mutation patches
 
 - **Upstream:** `datafusion-contrib/datafusion-ducklake` (`main`, currently DF
   54 / Arrow 58). This is the Rust-native path closest to official DuckLake
   v1.0+.
 - **Consumed via:** root `Cargo.toml`, path `vendor/datafusion-ducklake`.
 - **Base:** `adonm/datafusion-ducklake` main commit `117c0c5`.
-- **Local patches:** G5 atomic table-mutation surface: `DeleteFileMutation`,
+- **Local patches:** atomic table-mutation surface: `DeleteFileMutation`,
   `TableMutation`, `MetadataWriter::commit_table_mutation(...)`, SQLite and
   multicatalog PostgreSQL implementations,
   `DuckLakeTableWriter::write_pending_data_file(...)`, plus oracles proving
   multi-file deletes, mixed delete+append/retire+append commits, pending-file
   visibility, and stale-conflict rollback.
-- **Remaining fork targets:** G7 file/partition pruning and any upstream API
+- **Remaining fork targets:** structural file/partition pruning and any upstream API
   cleanup after QuackGIS native DML/compaction soak.
 
 ## Rebase hygiene

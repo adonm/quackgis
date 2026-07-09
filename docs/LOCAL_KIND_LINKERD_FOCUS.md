@@ -1,11 +1,12 @@
 # Local Kind + Linkerd capability focus
 
-Near-term QuackGIS roadmap execution should maximize the capability we can prove
-on a trusted developer/CI machine with **Kind + Linkerd + in-cluster PostgreSQL +
-s3s-fs** before spending roadmap energy on external services.
+Local QuackGIS work should maximize the capability we can prove on a trusted
+developer/CI machine with **Kind + Linkerd + in-cluster PostgreSQL + s3s-fs** while
+managed-service and copied-data promotion proceed as separate roadmap work.
 
 This does not create production durability claims. It makes local evidence deeper,
-repeatable, and cheap enough that later external-service runs have a strong base.
+repeatable, and cheap enough to diagnose external-service runs without allowing
+endless local refinement to postpone them.
 
 ## Local maximum envelope
 
@@ -84,9 +85,7 @@ dashboard with the source SHA.
 
 ## Roadmap rule
 
-Prefer implementing and documenting features that can be proven by this local
-Kind+Linkerd ladder. Keep external-service tasks in the roadmap, but treat them as
-promotion/validation work after local maximum evidence is boring. The local ladder
-is a proving ring for the larger goal, not the goal itself: once a claim is stable
-locally, promote it to managed services, copied real datasets, broader client/API
-matrices, and release evidence.
+Give every expensive feature a proof in this local Kind+Linkerd ladder, then run
+the relevant managed-service or copied-data gate as soon as the local prerequisite
+is stable. The local ladder is a proving ring for the larger goal, not a serial
+phase that must be perfected before external work starts.

@@ -16,8 +16,9 @@ platform/application services over shared DuckLake storage:
 - common map/client queries that filter by area and often by time.
 
 Correctness never depends on the layout. Every spatial predicate is still
-rechecked by SedonaDB. The layout only decides which DuckLake partitions, files,
-and Parquet row groups can be skipped by many readers in parallel.
+rechecked by SedonaDB. The current layout helps skip Parquet row groups/files with
+ordinary hidden-column statistics. True DuckLake partition pruning is a target,
+not a current claim.
 
 Current preview status: WKB-derived hidden bbox/bucket/sort columns, safe
 single-table bbox rewrites, simple temporal `BETWEEN` bucket prefilters,
@@ -57,16 +58,18 @@ QuackGIS should support spatial data in tiers so common PostGIS clients work now
 and high-fidelity CAD/reality-capture data can load without destructive
 conversion.
 
-### Tier 1: queryable geometry/geography
+### Tier 1: queryable geometry and geography target
 
-These are first-class SQL columns, advertised through PostGIS-compatible catalog
-metadata and eligible for automatic layout/pruning:
+Geometry columns with recognized names are the current first-class automatic
+layout/pruning path. The table also records the intended geography contract;
+current geography support is narrower and must not be inferred from geometry
+layout support:
 
 | Type family | Initial storage | Query direction |
 |---|---|---|
-| `geometry(Point|LineString|Polygon|Multi*|GeometryCollection, SRID)` | WKB/EWKB Binary with `GEOMETRY` catalog type | Full 2D OGC Simple Features path through SedonaDB |
+| `geometry(Point|LineString|Polygon|Multi*|GeometryCollection, SRID)` | WKB/EWKB Binary; current Rust writer records Binary as `blob`, while QuackGIS supplies spatial identity through naming/catalog shims | Full 2D OGC Simple Features path through SedonaDB; migrate to durable spec-aligned geometry metadata |
 | `geometry(...Z)`, `geometry(...M)`, `geometry(...ZM)` | EWKB keeps Z/M/SRID when supplied | Preserve dimensions; 2D bbox layout uses XY; Z/M predicates are explicit future work |
-| `geography(...)` | EWKB plus geodetic CRS metadata, normally EPSG:4326 | Use lon/lat layout for pruning; exact geodesic functions as Sedona/PostGIS compatibility grows |
+| `geography(...)` | Current wire/catalog type identity is limited; `geography_columns` and automatic geography-name layout discovery are not populated | Target EWKB plus geodetic CRS metadata, lon/lat candidate layout, and exact geodesic functions as Sedona/PostGIS compatibility grows |
 | Nullable/empty geometry | Null or empty WKB | No spatial bucket pruning; exact predicate decides |
 
 The first implementation should be strict about the queryable contract: if
@@ -134,34 +137,39 @@ calling one SQL UDF per output column.
 | Column | Source | Purpose | Physical role |
 |---|---|---|---|
 | `_qg_minx/_qg_miny/_qg_maxx/_qg_maxy` | Sedona `wkb_bounds_xy` over the geometry WKB | exact bbox facts for the row | ordinary Parquet columns with min/max stats |
-| `_qg_space_bucket` | adaptive spatial cell | bounded area partition pruning | DuckLake partition column |
-| `_qg_space_sort` | Hilbert key inside the bucket | row-group locality and stable compaction order | ordinary Parquet column, sort key |
-| `_qg_time_start/_qg_time_end` | detected/configured time column or interval | temporal overlap pruning | future ordinary Parquet columns with min/max stats |
-| `_qg_time_bucket` | adaptive time bucket | bounded temporal partition pruning | future DuckLake partition column |
+| `_qg_space_bucket` | deterministic coarse grid cell | grouping and candidate filtering | current ordinary Parquet column; possible future DuckLake partition column |
+| `_qg_space_sort` | Morton/Z-order key inside the grid | row-group locality and stable compaction order | ordinary Parquet column, sort key |
+| `_qg_time_bucket` | recognized numeric time value/bucket, otherwise integer `0` | simple temporal candidate filtering and write order | current ordinary `Int64` Parquet column on every laid-out table |
+| `_qg_time_start/_qg_time_end` | configured timestamp/interval metadata | richer temporal overlap pruning | future ordinary Parquet columns |
 
-Default target physical order: `(_qg_time_bucket, _qg_space_bucket,
-_qg_space_sort)`. The current preview orders by spatial bucket/sort only. The
-target DuckLake partition spec includes only coarse bucket columns. Bbox, time
-bounds, and sort keys stay as ordinary data columns so Parquet row-group and file
-statistics can do fine pruning without exploding DuckLake catalog metadata.
+Current physical order is `(_qg_time_bucket, _qg_space_bucket,
+_qg_space_sort)`; tables without a recognized time column use integer bucket `0`.
+All `_qg_*` fields are ordinary data
+columns today. A future DuckLake partition spec may promote only coarse bucket
+columns after writer-fanout, catalog-growth, pruning, and reference-reader gates;
+bbox, time bounds, and sort keys should remain ordinary columns.
 
 Null, empty, invalid, or wraparound geometries do not participate in spatial
 bucket pruning: their layout columns are null or assigned to a small overflow
 bucket, and correctness falls back to the exact SedonaDB predicate.
 
-## Automatic partition selection
+## Target automatic partition selection
+
+The following is the intended evolution after current hidden-column/row-group
+evidence. It is not yet the writer contract.
 
 The default mode is `AUTO`:
 
 1. **Detect time.** Prefer explicit table options. Otherwise choose a timestamp
    column with common names such as `time`, `timestamp`, `datetime`,
-   `observed_at`, `captured_at`, `acquired_at`, or `created_at`. Tables without
-   time use a single `_qg_time_bucket = 'none'` bucket.
+   `observed_at`, `captured_at`, `acquired_at`, or `created_at`. Preserve the
+   current integer representation: tables without time use
+   `_qg_time_bucket = 0`.
 2. **Choose time granularity.** Pick hour/day/month/year buckets from the batch
    min/max and estimated row count, targeting large files and avoiding tiny
    buckets.
 3. **Choose spatial mode.** Use WebMercator integer cells for SRID 4326/3857
-   data. Use a table-local normalized Hilbert grid for arbitrary projected/CAD
+   data. Evaluate a table-local normalized Morton or Hilbert grid for arbitrary projected/CAD
    coordinates where WebMercator cells are meaningless. Prefer compact integer
    bucket IDs over string quadkeys in the physical files; expose readable names
    only in diagnostics.
@@ -169,7 +177,7 @@ The default mode is `AUTO`:
    would exceed the configured open-partition budget, coarsen time first, then
    space.
 5. **Write clustered files.** Sort each write batch by time bucket, space bucket,
-   and Hilbert key before writing target-sized Parquet files. If a writer would
+   and locality key before writing target-sized Parquet files. If a writer would
    open too many partitions, coarsen bucket resolution and record that choice in
    table layout metadata for deterministic future appends.
 
@@ -183,20 +191,26 @@ definitions.
 For a predicate such as `ST_Intersects(geom, envelope)` plus an optional time
 filter:
 
-1. Extract the query envelope from recognized shapes: `&&`, `ST_Intersects`,
-   `ST_Within`, `ST_Contains`, `ST_DWithin` with constant/parameter envelopes,
-   `ST_MakeEnvelope`, `ST_TileEnvelope`, and GeoServer/QGIS bbox patterns.
+1. Extract a literal query envelope from recognized `&&`, `ST_Intersects`,
+   `ST_Within`, `ST_Contains`, `ST_ContainsProperly`, `ST_CoveredBy`, `ST_Covers`,
+   `ST_Crosses`, `ST_Equals`, `ST_Overlaps`, or `ST_Touches` shapes using numeric
+   `ST_MakeEnvelope`/`ST_TileEnvelope` forms. Parameterized envelopes and
+   `ST_DWithin` remain future work.
 2. Add hidden bbox overlap predicates:
    `_qg_minx <= query_maxx AND _qg_maxx >= query_minx AND _qg_miny <= query_maxy
    AND _qg_maxy >= query_miny`.
-3. Derive candidate `_qg_space_bucket` values for coarse partition pruning.
-4. Derive candidate `_qg_time_bucket` values for temporal partition pruning.
-5. Let DuckLake/DataFusion prune partitions, files, and row groups with stats
-   for the bucket, bbox, and time columns.
-6. For OLAP fanout queries, keep projections narrow and push primitive filters,
+3. For recognized numeric `BETWEEN` filters, add `_qg_time_bucket` candidate
+   predicates.
+4. Let DataFusion/Parquet prune files and row groups with ordinary bucket, bbox,
+   and time-column statistics.
+5. For OLAP fanout queries, keep projections narrow and push primitive filters,
    calculations, and aggregates as close to the Parquet scan as DataFusion/
    DuckLake can support.
-7. Reapply the original SedonaDB predicate exactly.
+6. Reapply the original SedonaDB predicate exactly.
+
+Future true partition pruning may also derive bounded `_qg_space_bucket` and
+`_qg_time_bucket` sets, but only after the catalog and reader expose those
+partitions structurally.
 
 This gives a PostGIS-like spatial-index experience without a mutable GiST/R-tree
 side structure.
@@ -207,23 +221,25 @@ gets correct SedonaDB results.
 
 ## LayoutBench validation dataset
 
-Use a deterministic synthetic suite named **LayoutBench** for M5 validation. It
+Use a deterministic synthetic suite named **LayoutBench** for validation. It
 should be generated from a seed and scale factor so CI, developer machines, and
 nightly stress runs exercise the same distributions at different sizes.
 
 | Scale | Purpose | Approximate size |
 |---|---|---:|
 | `sf0` | CI smoke and exact-result oracle; implemented as `just layoutbench-sf0` | 252 rows today, grows as oracle cases are added |
-| `sf1` | local developer benchmark | 1M-5M rows |
-| `sf10` | nightly pruning/compaction benchmark | 10M-50M rows |
-| `sf100+` | manual multi-writer/storage stress; 10 TB proxy | 100M+ rows / generated streaming |
+| `sf1-local` (runner argument `sf1`) | fast local behavior/trend run currently used by the pgwire runner | 22,800 rows today |
+| `sf10m` | city-scale client/pruning/compaction gate | 10M+ rows |
+| `sf100m` | routine regional benchmark | 100M+ rows |
+| `sf1b` | scheduled regional/national stress | 1B+ rows |
+| `sf10tb` | manual object/catalog stress | 10TB+ generated or copied inventory |
 
 The suite should create these tables:
 
 | Table | Shape | What it validates |
 |---|---|---|
-| `layoutbench_aerial_frames` | Overlapping oriented photo footprints along flight strips, with `captured_at`, camera metadata, GSD, altitude, and mission id | area+time partitioning, many small polygons, high overlap, 10 TB aerial-capture ingest patterns |
-| `layoutbench_cad_objects` | Dense local-coordinate building/site features: points, lines, polygons, floor/level, object type, source object id, Z range, tessellation tolerance | table-local Hilbert layout, CAD/BIM provenance, high coordinate precision, local engineering grids |
+| `layoutbench_aerial_frames` | Overlapping oriented photo footprints along flight strips, with `captured_at`, camera metadata, GSD, altitude, and mission id | bbox/time hidden-column clustering and statistics, many small polygons, high overlap, 10 TB aerial-capture ingest patterns |
+| `layoutbench_cad_objects` | Dense local-coordinate building/site features: points, lines, polygons, floor/level, object type, source object id, Z range, tessellation tolerance | table-local Morton layout, CAD/BIM provenance, high coordinate precision, local engineering grids |
 | `layoutbench_assets` | One row per large asset: COPC/LAZ/E57 point cloud, COG/GeoTIFF raster, 3D Tiles/glTF mesh, IFC/CityGML/LandXML/DXF-derived layer | asset-footprint indexing without exploding every point/triangle into SQL rows |
 | `layoutbench_control_points` | Survey/control points observed at multiple acquisition epochs with known synthetic drift and vertical datum metadata | coordinate epoch, transform provenance, residual/accuracy checks over time |
 | `layoutbench_queries` | Optional expected-result table for the `sf0` oracle windows | deterministic row counts for exact-vs-pruned validation |
@@ -236,7 +252,7 @@ The generator should deliberately include hard cases:
 - overlapping aerial frames with 70-85% overlap along flight strips;
 - local CAD coordinates near large offsets, e.g. project grids with millimetre
   detail far from origin;
-- Z/M/ZM geometries and sidecar Z ranges, while the M5 layout remains XY;
+- Z/M/ZM geometries and sidecar Z ranges, while the current layout remains XY;
 - invalid/empty/null geometries that must fail closed into exact predicate
   evaluation;
 - source CRS changes and synthetic coordinate drift with known correction
@@ -314,14 +330,14 @@ For explicit transactions, keep the current single-table snapshot boundary:
 staged writes compute the same hidden columns, then publish one final DuckLake
 snapshot at commit.
 
-## Bulk ingest and sf1 findings
+## Bulk ingest and `sf1-local` findings
 
-The first pgwire `sf1` iteration uses a moderate local scale (`factor=100`,
+The first pgwire `sf1-local` iteration uses a moderate local scale (`factor=100`,
 22,800 rows total) to expose levers quickly before moving to nightly-sized data.
 The results are in `benchmarks/BENCHMARKS.md`; the architecture implications are:
 
 1. **COPY is the bulk ingest path.** Batched INSERT VALUES took about 16 s to seed
-   the current sf1; pgwire `COPY ... FROM STDIN` took about 0.9 s with the same
+   the current local run; pgwire `COPY ... FROM STDIN` took about 0.9 s with the same
    rows and correctness checks. QuackGIS therefore implements COPY IN as the path
    GDAL/OGR should use (`PG_USE_COPY=YES`) for `ogr2ogr`-style loads.
 2. **Layout sorting must run at bulk granularity.** Sorting each tiny autocommit
@@ -332,14 +348,14 @@ The results are in `benchmarks/BENCHMARKS.md`; the architecture implications are
    not only semantic grouping; they give QuackGIS a staging boundary for sorting a
    table delta once before publishing it to DuckLake.
 4. **Row groups are the current skip unit.** File/range pruning is not selective
-   in current local sf1 runs; Parquet row-group statistics are. Spatial prefilters
+   in current local runs; Parquet row-group statistics are. Spatial prefilters
    now combine with simple temporal `BETWEEN` bucket prefilters when a recognized
    time column such as `captured_minute` is present. The local default
    `QUACKGIS_DUCKLAKE_ROW_GROUP_ROWS=512` is intentionally small for this scale
    and can be disabled with `0`. Larger/nightly scales should migrate this from a
    row-count cap toward a bytes/row-count policy aligned with DuckLake defaults.
-5. **Compaction is the next architecture lever.** Many small autocommit append
-   files can now be rewritten into sorted bucket-local files through native
+5. **Compaction is the repair architecture lever.** Many small autocommit append
+   files can be rewritten into sorted bucket-local files through native
    delete+append metadata. Correctness remains the exact SedonaDB predicate. The
    local fragmented-bucket oracle now records catalog file-group/byte deltas:
    partial bucket compaction appends one sorted replacement and masks source
@@ -352,13 +368,13 @@ The first implementation is an explicit table-scoped command:
 CALL quackgis_compact_table('public.my_spatial_table');
 ```
 
-It is intentionally boring: read the table through DataFusion, normalize/project
-layout columns, sort by the hidden layout key, and rewrite the DuckLake table in
-one replacement snapshot. This already repairs the bad shuffled/autocommit sf1
-case (about 0.52 s to compact all three sf1 tables, cutting aerial from 22/18
-matched row groups to 22/1 and files/ranges from 23/23 to 1/1). The next step is
-to restrict this same primitive to changed coarse time/space buckets instead of
-rewriting the whole table.
+The full-table form is intentionally boring: read through DataFusion,
+normalize/project layout columns, sort by the hidden layout key, and rewrite the
+table in one replacement snapshot. The bucket-scoped form now writes one sorted
+pending replacement and masks old physical positions in the same native mutation
+commit, falling back to full replacement when safe lineage planning is unavailable.
+The next work is real-data/process-failure evidence and physical cleanup of masked
+source files, not another first bucket-compaction implementation.
 
 Current implemented path:
 
@@ -379,39 +395,32 @@ The low-maintenance path is:
 
 - automatic hidden columns on create/insert/CTAS;
 - automatic stats-driven pruning on read;
-- optional `ANALYZE` to refresh table extent/time summaries used by `AUTO`;
 - bucket-local compaction that preserves `(_qg_time_bucket, _qg_space_bucket,
   _qg_space_sort)` order;
 - no user-managed partition DDL and no mutable global spatial index.
 
-Manual table options remain an escape hatch for expert users:
+Target policy work, not current SQL surface:
 
-- geometry column and SRID;
-- time column and granularity;
+- `ANALYZE`-backed table extent/time summaries for adaptive `AUTO` policy;
+- explicit geometry/time column and granularity options;
 - spatial grid mode/resolution;
-- target file size and max open partitions;
-- compaction policy.
+- target file size and max-open-partition policy; and
+- per-table compaction policy.
 
-## Implementation sequence
+## Remaining evolution sequence
 
-1. Add table layout metadata and hidden columns for new spatial tables. Mark WKB
-   Arrow fields with `geoarrow.wkb` extension metadata where possible, but keep
-   DuckLake storage as WKB Binary/GEOMETRY.
-2. Add an internal batch layout projector in the DuckLake write path. It should
-   parse each geometry once with Sedona `wkb_bounds_xy`, emitting bbox, space
-   bucket, Hilbert sort key, and optional time columns.
-3. Apply the projector to CTAS, INSERT, UPDATE rewrites, and transaction staging.
-4. Sort write batches by time/space/sort key before handing them to the DuckLake
-   writer API.
-5. Add predicate rewrites for bbox/time pruning while preserving exact SedonaDB
-   predicate evaluation.
-6. Teach datafusion-ducklake, if needed, to expose enough partition/file stats to
-   verify pruning decisions.
-7. Implement LayoutBench `sf0` and assert exact-pruned equality plus deterministic
-   counts in CI.
-8. Add LayoutBench `sf1+` ingest/query/compaction benchmarks: aerial-like capture
-   footprints, CAD-like local coordinates, asset-footprint rows, and control-point
-   drift checks.
+1. Replace geometry-name heuristics with durable type/layout metadata while
+   preserving WKB/EWKB and maintained client behavior.
+2. Define byte/row-count file and row-group policies from `sf10m`/`sf100m`
+   evidence rather than the current small local row cap.
+3. Add structural file/partition statistics and catalog-roundtrip metrics before
+   introducing true DuckLake coarse partitions.
+4. Broaden timestamp/interval predicate support only from real workloads and keep
+   exact-vs-pruned equality oracles for every shape.
+5. Run real city/regional and asset inventories through compaction, process-kill,
+   external-storage, and reference-reader gates.
+6. Prefer upstream DuckLake statistics, Bloom, partition, or optimization
+   primitives when they pass the same correctness and catalog-growth budgets.
 
 ## Validation notes
 
@@ -426,5 +435,5 @@ geoarrow_first_point=(0,0)
 
 The probe validates that Arrow `Binary` WKB plus `ARROW:extension:name =
 geoarrow.wkb` is compatible with GeoArrow 0.8. It also confirms the path is still
-serialized WKB row parsing, so M5 should optimize the existing WKB/Sedona path
+serialized WKB row parsing, so the layout should optimize the existing WKB/Sedona path
 rather than pivot to native GeoArrow arrays.

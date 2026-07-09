@@ -38,9 +38,34 @@ const CASES: &[Case] = &[
         expected: "POINT(1 2)",
     },
     Case {
+        name: "point_constructor",
+        sql: "SELECT ST_AsText(ST_Point(3.0, 4.0))",
+        expected: "POINT(3 4)",
+    },
+    Case {
+        name: "point_constructor_srid",
+        sql: "SELECT ST_AsEWKT(ST_Point(3.0, 4.0, 4326))",
+        expected: "SRID=4326;POINT(3 4)",
+    },
+    Case {
+        name: "makepoint_constructor",
+        sql: "SELECT ST_AsText(ST_MakePoint(5.0, 6.0))",
+        expected: "POINT(5 6)",
+    },
+    Case {
         name: "setsrid_srid",
         sql: "SELECT CAST(ST_SRID(ST_SetSRID(ST_GeomFromText('POINT(1 2)'), 4326)) AS TEXT)",
         expected: "4326",
+    },
+    Case {
+        name: "asewkt_srid_point",
+        sql: "SELECT ST_AsEWKT(ST_SetSRID(ST_GeomFromText('POINT(1 2)'), 4326))",
+        expected: "SRID=4326;POINT(1 2)",
+    },
+    Case {
+        name: "ashexewkb_point",
+        sql: "SELECT ST_AsHEXEWKB(ST_GeomFromText('POINT(1 2)'))",
+        expected: "0101000000000000000000F03F0000000000000040",
     },
     Case {
         name: "transform_sets_target_srid",
@@ -88,6 +113,21 @@ const CASES: &[Case] = &[
         expected: "2",
     },
     Case {
+        name: "numinteriorrings_polygon",
+        sql: "SELECT CAST(ST_NumInteriorRings(ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0),(1 1,2 1,2 2,1 1))')) AS TEXT)",
+        expected: "1",
+    },
+    Case {
+        name: "exteriorring_polygon",
+        sql: "SELECT ST_AsText(ST_ExteriorRing(ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0),(1 1,2 1,2 2,1 1))')))",
+        expected: "LINESTRING(0 0,4 0,4 4,0 4,0 0)",
+    },
+    Case {
+        name: "interiorringn_polygon",
+        sql: "SELECT ST_AsText(ST_InteriorRingN(ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0),(1 1,2 1,2 2,1 1))'), 1))",
+        expected: "LINESTRING(1 1,2 1,2 2,1 1)",
+    },
+    Case {
         name: "isempty_point_false",
         sql: "SELECT CAST(ST_IsEmpty(ST_GeomFromText('POINT(1 2)')) AS TEXT)",
         expected: "false",
@@ -133,6 +173,11 @@ const CASES: &[Case] = &[
         expected: "5.0",
     },
     Case {
+        name: "perimeter_square",
+        sql: "SELECT CAST(ST_Perimeter(ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0))')) AS TEXT)",
+        expected: "16.0",
+    },
+    Case {
         name: "npoints_linestring",
         sql: "SELECT CAST(ST_NPoints(ST_GeomFromText('LINESTRING(0 0,3 4,6 8)')) AS TEXT)",
         expected: "3",
@@ -158,6 +203,36 @@ const CASES: &[Case] = &[
         expected: "POINT(3 4)",
     },
     Case {
+        name: "isclosed_closed_linestring",
+        sql: "SELECT CAST(ST_IsClosed(ST_GeomFromText('LINESTRING(0 0,3 0,0 0)')) AS TEXT)",
+        expected: "true",
+    },
+    Case {
+        name: "isring_square_linestring",
+        sql: "SELECT CAST(ST_IsRing(ST_GeomFromText('LINESTRING(0 0,4 0,4 4,0 4,0 0)')) AS TEXT)",
+        expected: "true",
+    },
+    Case {
+        name: "reverse_linestring",
+        sql: "SELECT ST_AsText(ST_Reverse(ST_GeomFromText('LINESTRING(0 0,3 4,6 8)')))",
+        expected: "LINESTRING(6 8,3 4,0 0)",
+    },
+    Case {
+        name: "flipcoordinates_point",
+        sql: "SELECT ST_AsText(ST_FlipCoordinates(ST_GeomFromText('POINT(3 4)')))",
+        expected: "POINT(4 3)",
+    },
+    Case {
+        name: "translate_point",
+        sql: "SELECT ST_AsText(ST_Translate(ST_GeomFromText('POINT(3 4)'), 2.0, -1.0))",
+        expected: "POINT(5 3)",
+    },
+    Case {
+        name: "scale_point",
+        sql: "SELECT ST_AsText(ST_Scale(ST_GeomFromText('POINT(3 4)'), 2.0, 0.5))",
+        expected: "POINT(6 2)",
+    },
+    Case {
         name: "numgeometries_point",
         sql: "SELECT CAST(ST_NumGeometries(ST_GeomFromText('POINT(3 4)')) AS TEXT)",
         expected: "1",
@@ -166,6 +241,21 @@ const CASES: &[Case] = &[
         name: "numgeometries_multipoint",
         sql: "SELECT CAST(ST_NumGeometries(ST_GeomFromText('MULTIPOINT((0 0),(1 1))')) AS TEXT)",
         expected: "2",
+    },
+    Case {
+        name: "geometryn_simple_point",
+        sql: "SELECT ST_AsText(ST_GeometryN(ST_GeomFromText('POINT(5 6)'), 1))",
+        expected: "POINT(5 6)",
+    },
+    Case {
+        name: "geometryn_multipoint",
+        sql: "SELECT ST_AsText(ST_GeometryN(ST_GeomFromText('MULTIPOINT((0 0),(1 1))'), 2))",
+        expected: "POINT(1 1)",
+    },
+    Case {
+        name: "geometryn_multilinestring",
+        sql: "SELECT ST_AsText(ST_GeometryN(ST_GeomFromText('MULTILINESTRING((0 0,1 1),(2 2,3 3))'), 2))",
+        expected: "LINESTRING(2 2,3 3)",
     },
     Case {
         name: "x_point_accessor",

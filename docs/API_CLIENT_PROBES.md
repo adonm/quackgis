@@ -15,7 +15,7 @@ This document defines the support bar for Python/API/BI-style clients.
 | GeoPandas `read_postgis` | read WKB-backed geometry into a GeoDataFrame, preserve CRS metadata when available | profile WKB row-query surface covered locally and in Kind; named GeoPandas dependency probe pending |
 | pg_featureserv-like reader | table discovery, bbox filters, JSON/GeoJSON-shaped API reads over pgwire | profile bbox/filter surface covered locally and in Kind; real server pending |
 | BI/SQL tools | simple/extended protocol SELECTs, projection/filter/grouped aggregates | profile grouped aggregate surface covered locally and in Kind; named BI client pending |
-| MVT consumers through Martin | table discovery, non-empty tile, attribute tags | Martin SQL/E2E base exists; profile non-empty MVT query covered locally and in Kind; encoder-level key/value tags covered; SQL/client attribute propagation pending |
+| MVT consumers through Martin | table discovery, non-empty tile, attribute tags | Martin SQL/E2E base exists; profile MVT query covers layer/key/value dictionaries locally and in Kind; real Martin OSM attribute matrix pending |
 
 ## Probe design rules
 
@@ -79,11 +79,12 @@ than named client containers and asserts the protocol/catalog surfaces first:
 - GeoPandas-style WKB row reads with documented SRID-0 behavior;
 - pg_featureserv-style bbox/filter query over a WKB layer;
 - BI-style grouped aggregate query; and
-- non-empty MVT bytes from `ST_AsMVTGeom` + `ST_AsMVT`.
+- non-empty MVT bytes plus layer/key/value dictionary tokens from
+  `ST_AsMVTGeom` + `ST_AsMVT(geom, layer, extent, attrs...)`.
 
 The MVT encoder itself now has a focused unit test for key/value dictionaries and
-feature tags. The public SQL/client probes still assert non-empty tiles only until
-Martin-style attribute propagation is wired through `ST_AsMVT` query shapes.
+feature tags. The public SQL/client probes now assert representative attribute
+tags too; copied OSM/Martin binary runs remain the real-data promotion gate.
 
 This is a local/wire gate, not a named-client support claim. Promotion still
 requires the containerized client or real server named in the matrix. The local
@@ -100,7 +101,7 @@ maintained Kind network using the shared probe ConfigMap. It emits one
 - `reflected_columns` for SQLAlchemy-style table/column reflection;
 - `bbox_count` for pg_featureserv-style spatial filters;
 - `groups` for BI-style grouped aggregates; and
-- `tile_bytes` for non-empty MVT output.
+- `tile_bytes` for non-empty MVT output with representative attribute tags.
 
 `just kind-probes`, `just kind-compatibility`, and `just kind-compat-report` now
 include this API-client profile row. This promotes the profile to a maintained
@@ -115,7 +116,7 @@ Martin workflows run with their own dependencies/traces.
 2. Promote the SQLAlchemy/GeoPandas surfaces into named Python dependency probes.
 3. Add a pg_featureserv-style server harness once the bbox/filter SQL surface is
    boring.
-4. Wire Martin MVT attribute tags through SQL/client probes over copied OSM or
-   demo layers.
+4. Run Martin MVT attribute tags through the real Martin binary over copied OSM
+   layers.
 5. Run the named client probes over copied real-data layers before claiming
    real-data workflow support.

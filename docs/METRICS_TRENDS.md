@@ -11,7 +11,7 @@ just metrics-dashboard path=.tmp/compatibility out=.tmp/metrics-dashboard.md
 just metrics-budget-check path=.tmp/compatibility require_budgeted=true
 ```
 
-The Markdown dashboard covers the Alpha/M6 signals that should be trended before
+The Markdown dashboard covers the Alpha signals that should be trended before
 production claims:
 
 - QPS plus p95/p99 latency for read, QPS, and OLAP probes;
@@ -34,6 +34,9 @@ overruns fail the workflow even when the report includes unrelated not-run rows.
 Compatibility and selected storage/benchmark recipes also pass `--require-check`
 for the probes that recipe is expected to produce, so a missing log cannot be
 silently treated as an allowed not-run row.
+The external-storage profile emits `native_mutation_aborts_budget=0` beside the
+scraped abort counter, making unexpected native mutation aborts a budget failure
+instead of only a dashboard signal.
 Release managers can attach that generated dashboard to release evidence or copy
 it into a release branch. The source artifact remains the machine-readable
 `metrics.json`; the dashboard is only a compact human review surface.
@@ -42,3 +45,5 @@ metrics and failed report rows. It also fails when the requested file/directory
 contains no `metrics.json`, so empty downloads or mistyped artifact paths cannot
 pass release checks. See
 [RELEASE_EVIDENCE.md](./RELEASE_EVIDENCE.md) for the release attachment policy.
+Minimum gates use `*_min` keys; the PostGIS regress artifact emits a 57-case
+minimum and `postgis_pass_rate_min=1.0` so conformance regressions fail closed.

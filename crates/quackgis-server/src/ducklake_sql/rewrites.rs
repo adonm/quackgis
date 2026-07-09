@@ -1,7 +1,164 @@
 // SPDX-License-Identifier: Apache-2.0
-//! String-literal compatibility rewrites applied before DataFusion planning.
+//! SQL compatibility rewrites applied at QuackGIS trust boundaries.
 
 use std::sync::LazyLock;
+
+use datafusion::sql::sqlparser::dialect::PostgreSqlDialect;
+use datafusion::sql::sqlparser::tokenizer::{Token, Tokenizer};
+
+pub(super) fn rewrite_as_of_snapshot_selectors(sql: &str) -> Option<String> {
+    let dialect = PostgreSqlDialect {};
+    let tokens = Tokenizer::new(&dialect, sql)
+        .with_unescape(false)
+        .tokenize()
+        .ok()?;
+    let code_tokens = tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, token)| (!matches!(token, Token::Whitespace(_))).then_some(idx))
+        .collect::<Vec<_>>();
+    let mut replacements = Vec::new();
+    let mut pos = 0;
+
+    while pos + 3 < code_tokens.len() {
+        let as_pos = pos;
+        let as_idx = code_tokens[as_pos];
+        if !token_word_eq(&tokens[as_idx], "as")
+            || !token_word_eq(&tokens[code_tokens[as_pos + 1]], "of")
+            || !token_word_eq(&tokens[code_tokens[as_pos + 2]], "snapshot")
+        {
+            pos += 1;
+            continue;
+        }
+
+        let Some((table_start_pos, table_end_pos)) =
+            preceding_table_name(&tokens, &code_tokens, as_pos)
+        else {
+            pos += 1;
+            continue;
+        };
+        let Some((snapshot_start_pos, snapshot_end_pos)) =
+            snapshot_integer_literal(&tokens, &code_tokens, as_pos + 3)
+        else {
+            pos += 1;
+            continue;
+        };
+
+        if !snapshot_literal_has_boundary(&tokens, &code_tokens, snapshot_end_pos) {
+            pos += 1;
+            continue;
+        }
+
+        replacements.push((
+            code_tokens[table_start_pos],
+            code_tokens[table_end_pos],
+            code_tokens[snapshot_start_pos],
+            code_tokens[snapshot_end_pos],
+        ));
+        pos = snapshot_end_pos + 1;
+    }
+
+    if replacements.is_empty() {
+        return None;
+    }
+
+    let mut out = String::with_capacity(sql.len());
+    let mut cursor = 0;
+    for (table_start, table_end, snapshot_start, snapshot_end) in replacements {
+        append_sql_tokens(&mut out, &tokens[cursor..table_start]);
+        append_sql_tokens(&mut out, &tokens[table_start..=table_end]);
+        out.push_str("(snapshot => ");
+        append_sql_tokens(&mut out, &tokens[snapshot_start..=snapshot_end]);
+        out.push(')');
+        cursor = snapshot_end + 1;
+    }
+    append_sql_tokens(&mut out, &tokens[cursor..]);
+    Some(out)
+}
+
+fn preceding_table_name(
+    tokens: &[Token],
+    code_tokens: &[usize],
+    as_pos: usize,
+) -> Option<(usize, usize)> {
+    if as_pos < 2 {
+        return None;
+    }
+    let mut table_start_pos = as_pos - 1;
+    if !token_is_identifier(&tokens[code_tokens[table_start_pos]]) {
+        return None;
+    }
+
+    while table_start_pos >= 2
+        && matches!(tokens[code_tokens[table_start_pos - 1]], Token::Period)
+        && token_is_identifier(&tokens[code_tokens[table_start_pos - 2]])
+    {
+        table_start_pos -= 2;
+    }
+
+    if table_start_pos == 0 {
+        return None;
+    }
+    let before_table = &tokens[code_tokens[table_start_pos - 1]];
+    if token_word_eq(before_table, "from") || token_word_eq(before_table, "join") {
+        Some((table_start_pos, as_pos - 1))
+    } else {
+        None
+    }
+}
+
+fn snapshot_integer_literal(
+    tokens: &[Token],
+    code_tokens: &[usize],
+    start_pos: usize,
+) -> Option<(usize, usize)> {
+    let first = tokens.get(*code_tokens.get(start_pos)?)?;
+    if matches!(first, Token::Plus) {
+        let number_pos = start_pos + 1;
+        let number = tokens.get(*code_tokens.get(number_pos)?)?;
+        if token_is_unsigned_integer(number) {
+            return Some((start_pos, number_pos));
+        }
+        return None;
+    }
+    if token_is_unsigned_integer(first) {
+        Some((start_pos, start_pos))
+    } else {
+        None
+    }
+}
+
+fn snapshot_literal_has_boundary(
+    tokens: &[Token],
+    code_tokens: &[usize],
+    snapshot_end_pos: usize,
+) -> bool {
+    let snapshot_idx = code_tokens[snapshot_end_pos];
+    let Some(next_idx) = code_tokens.get(snapshot_end_pos + 1) else {
+        return true;
+    };
+    let next = &tokens[*next_idx];
+    !(*next_idx == snapshot_idx + 1
+        && (token_is_identifier(next) || matches!(next, Token::Number(_, _))))
+}
+
+fn token_is_unsigned_integer(token: &Token) -> bool {
+    matches!(token, Token::Number(raw, false) if raw.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+fn token_word_eq(token: &Token, expected: &str) -> bool {
+    matches!(token, Token::Word(word) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case(expected))
+}
+
+fn token_is_identifier(token: &Token) -> bool {
+    matches!(token, Token::Word(_))
+}
+
+fn append_sql_tokens(out: &mut String, tokens: &[Token]) {
+    for token in tokens {
+        out.push_str(&token.to_string());
+    }
+}
 
 pub(super) fn rewrite_pg_escape_bytea_literals(sql: &str) -> String {
     let bytes = sql.as_bytes();
@@ -277,4 +434,50 @@ fn tag_wkb_srid(wkb: &[u8], srid: u32) -> Option<Vec<u8>> {
     }
     out.extend_from_slice(&wkb[5..]);
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rewrites_as_of_snapshot_table_selector() {
+        let sql = "SELECT id FROM public.assets AS OF SNAPSHOT 42 WHERE id = 7";
+
+        assert_eq!(
+            rewrite_as_of_snapshot_selectors(sql).as_deref(),
+            Some("SELECT id FROM public.assets(snapshot => 42) WHERE id = 7")
+        );
+    }
+
+    #[test]
+    fn rewrites_quoted_as_of_snapshot_table_selector_with_alias() {
+        let sql = "SELECT a.id FROM \"public\".\"asset table\" AS OF SNAPSHOT +42 AS a";
+
+        assert_eq!(
+            rewrite_as_of_snapshot_selectors(sql).as_deref(),
+            Some("SELECT a.id FROM \"public\".\"asset table\"(snapshot => +42) AS a")
+        );
+    }
+
+    #[test]
+    fn ignores_as_of_snapshot_outside_from_or_join() {
+        let sql = "SELECT value AS OF SNAPSHOT 42 FROM public.assets";
+
+        assert_eq!(rewrite_as_of_snapshot_selectors(sql), None);
+    }
+
+    #[test]
+    fn ignores_as_of_snapshot_inside_strings_and_comments() {
+        let sql = "SELECT 'FROM public.assets AS OF SNAPSHOT 42' AS text -- FROM public.assets AS OF SNAPSHOT 7\nFROM public.assets";
+
+        assert_eq!(rewrite_as_of_snapshot_selectors(sql), None);
+    }
+
+    #[test]
+    fn leaves_unsupported_as_of_timestamp_for_parser_error() {
+        let sql = "SELECT id FROM public.assets AS OF TIMESTAMP '2026-07-09T12:00:00Z'";
+
+        assert_eq!(rewrite_as_of_snapshot_selectors(sql), None);
+    }
 }

@@ -2,7 +2,7 @@
 
 This directory is a production-style example for the Alpha PostgreSQL/S3 storage
 profile. It is not a Helm chart and is not a production claim; use it as a
-reviewable starting point for platform manifests after the Alpha/M6 gates pass in
+reviewable starting point for platform manifests after the Alpha gates pass in
 your environment.
 
 The example assumes secrets are created outside Git:

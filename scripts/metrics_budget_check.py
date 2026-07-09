@@ -35,6 +35,11 @@ BUDGET_PAIRS = [
     ("native_mutation_aborts", "native_mutation_aborts_budget"),
 ]
 
+MINIMUM_BUDGET_PAIRS = [
+    ("postgis_total", "postgis_total_min"),
+    ("postgis_pass_rate", "postgis_pass_rate_min"),
+]
+
 
 def discover_metrics(paths: list[Path]) -> list[Path]:
     metrics: list[Path] = []
@@ -105,6 +110,21 @@ def check_metrics(
             if metric > budget:
                 errors.append(
                     f"{path}: checks.{check_id}.{metric_key}={metric:g} exceeds {budget_key}={budget:g}"
+                )
+        for metric_key, budget_key in MINIMUM_BUDGET_PAIRS:
+            metric = number(metrics.get(metric_key))
+            budget = number(metrics.get(budget_key))
+            if budget is None:
+                continue
+            budget_assertions += 1
+            if metric is None:
+                errors.append(
+                    f"{path}: checks.{check_id}.{budget_key} is set but {metric_key} is missing/non-numeric"
+                )
+                continue
+            if metric < budget:
+                errors.append(
+                    f"{path}: checks.{check_id}.{metric_key}={metric:g} is below {budget_key}={budget:g}"
                 )
     return errors, budget_assertions, seen_checks
 

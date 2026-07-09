@@ -60,8 +60,8 @@ use names::{
 };
 use params::inline_params_if_needed;
 use rewrites::{
-    rewrite_mojibake_string_literals, rewrite_pg_escape_bytea_literals,
-    rewrite_st_geomfromwkb_zero_srid_literals,
+    rewrite_as_of_snapshot_selectors, rewrite_mojibake_string_literals,
+    rewrite_pg_escape_bytea_literals, rewrite_st_geomfromwkb_zero_srid_literals,
 };
 
 static TRANSACTION_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -70,6 +70,8 @@ static WRITE_DENIED_COUNTER: AtomicU64 = AtomicU64::new(0);
 static CATALOG_REFRESH_COUNTER: AtomicU64 = AtomicU64::new(0);
 static SHARED_CATALOG_READ_REFRESH_COUNTER: AtomicU64 = AtomicU64::new(0);
 static SHARED_CATALOG_STRONG_REFRESH_COUNTER: AtomicU64 = AtomicU64::new(0);
+static SNAPSHOT_READ_COUNTER: AtomicU64 = AtomicU64::new(0);
+static SNAPSHOT_READ_ERROR_COUNTER: AtomicU64 = AtomicU64::new(0);
 static NATIVE_DELETE_MUTATION_COUNTER: AtomicU64 = AtomicU64::new(0);
 static NATIVE_UPDATE_MUTATION_COUNTER: AtomicU64 = AtomicU64::new(0);
 static NATIVE_COMPACT_MUTATION_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -428,40 +430,58 @@ impl DuckLakeSqlHook {
             "__quackgis_snapshot_{}",
             QUERY_COUNTER.fetch_add(1, Ordering::Relaxed)
         );
-        let Some(rewrite) = snapshot_query_rewrite(statement, &catalog_name)? else {
-            return Ok(None);
+        let rewrite = match snapshot_query_rewrite(statement, &catalog_name) {
+            Ok(Some(rewrite)) => rewrite,
+            Ok(None) => return Ok(None),
+            Err(err) => {
+                SNAPSHOT_READ_ERROR_COUNTER.fetch_add(1, Ordering::Relaxed);
+                return Err(err);
+            }
         };
-        let provider = self
-            .paths
-            .metadata_provider()
-            .await
-            .map_err(storage_api_error)?;
-        let schema_meta = provider
-            .get_schema_by_name(&rewrite.schema, rewrite.snapshot_id)
-            .map_err(|e| PgWireError::ApiError(Box::new(e)))?
-            .ok_or_else(|| {
-                user_error(anyhow!(
-                    "schema {} was not visible at DuckLake snapshot {}",
-                    rewrite.schema,
-                    rewrite.snapshot_id
-                ))
-            })?;
-        provider
-            .get_table_by_name(schema_meta.schema_id, &rewrite.table, rewrite.snapshot_id)
-            .map_err(|e| PgWireError::ApiError(Box::new(e)))?
-            .ok_or_else(|| {
-                user_error(anyhow!(
-                    "table {}.{} was not visible at DuckLake snapshot {}",
-                    rewrite.schema,
-                    rewrite.table,
-                    rewrite.snapshot_id
-                ))
-            })?;
-        let ducklake = DuckLakeCatalog::with_snapshot(provider, rewrite.snapshot_id)
-            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-        let snapshot_context = SessionContext::new_with_state(session_context.state());
-        snapshot_context.register_catalog(&catalog_name, Arc::new(ducklake));
-        Ok(Some((snapshot_context, rewrite.sql)))
+        let outcome: PgWireResult<(SessionContext, String)> = async {
+            let provider = self
+                .paths
+                .metadata_provider()
+                .await
+                .map_err(storage_api_error)?;
+            let schema_meta = provider
+                .get_schema_by_name(&rewrite.schema, rewrite.snapshot_id)
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?
+                .ok_or_else(|| {
+                    user_error(anyhow!(
+                        "schema {} was not visible at DuckLake snapshot {}",
+                        rewrite.schema,
+                        rewrite.snapshot_id
+                    ))
+                })?;
+            provider
+                .get_table_by_name(schema_meta.schema_id, &rewrite.table, rewrite.snapshot_id)
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?
+                .ok_or_else(|| {
+                    user_error(anyhow!(
+                        "table {}.{} was not visible at DuckLake snapshot {}",
+                        rewrite.schema,
+                        rewrite.table,
+                        rewrite.snapshot_id
+                    ))
+                })?;
+            let ducklake = DuckLakeCatalog::with_snapshot(provider, rewrite.snapshot_id)
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            let snapshot_context = SessionContext::new_with_state(session_context.state());
+            snapshot_context.register_catalog(&catalog_name, Arc::new(ducklake));
+            Ok((snapshot_context, rewrite.sql))
+        }
+        .await;
+        match outcome {
+            Ok(value) => {
+                SNAPSHOT_READ_COUNTER.fetch_add(1, Ordering::Relaxed);
+                Ok(Some(value))
+            }
+            Err(err) => {
+                SNAPSHOT_READ_ERROR_COUNTER.fetch_add(1, Ordering::Relaxed);
+                Err(err)
+            }
+        }
     }
 }
 
@@ -473,6 +493,8 @@ pub struct DuckLakeSqlMetrics {
     pub catalog_refresh_total: u64,
     pub shared_catalog_read_refresh_total: u64,
     pub shared_catalog_strong_refresh_total: u64,
+    pub snapshot_reads_total: u64,
+    pub snapshot_read_errors_total: u64,
     pub native_delete_mutations_total: u64,
     pub native_update_mutations_total: u64,
     pub native_compact_mutations_total: u64,
@@ -492,6 +514,8 @@ pub fn metrics_snapshot() -> DuckLakeSqlMetrics {
             .load(Ordering::Relaxed),
         shared_catalog_strong_refresh_total: SHARED_CATALOG_STRONG_REFRESH_COUNTER
             .load(Ordering::Relaxed),
+        snapshot_reads_total: SNAPSHOT_READ_COUNTER.load(Ordering::Relaxed),
+        snapshot_read_errors_total: SNAPSHOT_READ_ERROR_COUNTER.load(Ordering::Relaxed),
         native_delete_mutations_total: NATIVE_DELETE_MUTATION_COUNTER.load(Ordering::Relaxed),
         native_update_mutations_total: NATIVE_UPDATE_MUTATION_COUNTER.load(Ordering::Relaxed),
         native_compact_mutations_total: NATIVE_COMPACT_MUTATION_COUNTER.load(Ordering::Relaxed),
@@ -565,6 +589,10 @@ impl datafusion_postgres::pgwire::api::copy::CopyHandler for DuckLakeCopyHandler
 
 #[async_trait]
 impl QueryHook for DuckLakeSqlHook {
+    fn rewrite_sql(&self, sql: &str) -> Option<String> {
+        rewrite_as_of_snapshot_selectors(sql)
+    }
+
     async fn handle_simple_query(
         &self,
         statement: &datafusion::sql::sqlparser::ast::Statement,

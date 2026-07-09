@@ -30,6 +30,8 @@ CHECKS = [
     ("PostGIS regress subset", "postgis-regress.log", ["postgis_regress_subset", "pass_rate=1.000"]),
 ]
 
+POSTGIS_REGRESS_MIN_CASES = 57
+
 
 def line_kv(line: str) -> dict[str, str]:
     values: dict[str, str] = {}
@@ -242,6 +244,7 @@ def metric_values(path: Path) -> dict[str, object]:
                 "native_mutation_aborts": last_int_after_prefix(
                     text, "metrics_native_mutation_aborts_total "
                 ),
+                "native_mutation_aborts_budget": 0,
             }
         )
 
@@ -251,7 +254,9 @@ def metric_values(path: Path) -> dict[str, object]:
             {
                 "postgis_passed": maybe_int(postgis.get("passed")),
                 "postgis_total": maybe_int(postgis.get("total")),
+                "postgis_total_min": POSTGIS_REGRESS_MIN_CASES,
                 "postgis_pass_rate": maybe_float(postgis.get("pass_rate")),
+                "postgis_pass_rate_min": 1.0,
             }
         )
 

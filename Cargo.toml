@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # QuackGIS workspace. See ARCHITECTURE.md for the layer model and
-# ROADMAP.md for the gap ledger (G1-G12) driving fork decisions.
+# DIVERGENCE.md for the fork ledger driving dependency decisions.
 #
 [workspace]
 resolver = "2"
 members = ["crates/quackgis-server"]
-exclude = [".tmp/ref/datafusion-postgres", "vendor/datafusion-ducklake"]
+exclude = [
+    ".tmp/ref/datafusion-postgres",
+    "vendor/datafusion-ducklake",
+    "vendor/datafusion-postgres",
+]
 
 [workspace.package]
 version = "0.2.0"
@@ -23,13 +27,11 @@ categories = ["database", "science::geo"]
 publish = false
 
 [workspace.dependencies]
-# Wire layer — adonm fork on the quackgis/fixes branch, currently carrying:
-#   - context.rs PgCatalogContextProvider-for-Arc<T> recursion fix (G2 pg_roles
-#     stack overflow, commit 2c43dc6). Upstream PR candidate.
-#   - hooks/cursor.rs DECLARE BINARY CURSOR keyword honoring (G3-BINARY,
-#     commit 98b3865). Upstream PR candidate.
-# Tracks upstream master; rebases at milestone boundaries.
-datafusion-postgres = { git = "https://github.com/adonm/datafusion-postgres", branch = "quackgis/fixes" }
+# Wire layer — vendored snapshot of adonm/datafusion-postgres quackgis/fixes.
+# Tracks upstream master; rebases at milestone boundaries. Kept in-tree so
+# QuackGIS can extend the raw pgwire parse boundary before upstream PR split.
+# See DIVERGENCE.md for the patch ledger.
+datafusion-postgres = { path = "vendor/datafusion-postgres/datafusion-postgres" }
 
 # DataFusion itself, same major as the current stack (54):
 # datafusion-postgres fork + sedona fork + datafusion-ducklake main.
@@ -52,7 +54,7 @@ geo-traits = "0.3"
 
 # Storage — DuckLake 1.0+ target. The vendored fork snapshot is based on
 # adonm/datafusion-ducklake main (Cargo.lock previously pinned 117c0c5) with
-# QuackGIS G5 atomic table-mutation patches; see vendor/datafusion-ducklake and
+# QuackGIS atomic table-mutation patches; see vendor/datafusion-ducklake and
 # docs/NATIVE_DML_FORK_PLAN.md. It currently tracks DataFusion 54.
 # SQLite/local remains the default correctness profile; PostgreSQL catalog +
 # S3-compatible object storage is the Alpha scaled-storage profile.

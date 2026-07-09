@@ -232,24 +232,43 @@ async fn assert_mvt_surface(client: &tokio_postgres::Client) -> Result<()> {
     let tile: Vec<u8> = client
         .query_one(
             "SELECT ST_AsMVT(
-                 ST_AsMVTGeom(
+                  ST_AsMVTGeom(
                    geom,
                    ST_MakeEnvelope(-1.0, -1.0, 2.0, 2.0, 3857),
                    4096,
                    64,
-                   true
-                 )
-              )
-              FROM public.api_probe_points
-              WHERE id <= 2",
+                    true
+                  ),
+                  'api_probe_points',
+                  4096,
+                  name,
+                  category
+               )
+               FROM public.api_probe_points
+               WHERE id <= 2",
             &[],
         )
         .await
         .context("MVT tile query")?
         .get(0);
     ensure!(!tile.is_empty(), "MVT tile was empty");
-    println!("api_client_mvt_surface tile_bytes={}", tile.len());
+    for expected in ["api_probe_points", "name", "origin", "category", "alpha"] {
+        ensure!(
+            contains_bytes(&tile, expected.as_bytes()),
+            "MVT tile missing expected attribute/layer token {expected:?}"
+        );
+    }
+    println!(
+        "api_client_mvt_surface tile_bytes={} attributes=True",
+        tile.len()
+    );
     Ok(())
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
 }
 
 fn point_wkb(x: f64, y: f64) -> Vec<u8> {

@@ -36,6 +36,12 @@ pub fn render_prometheus() -> String {
             "# HELP quackgis_shared_catalog_strong_refresh_total Shared-catalog refreshes forced by write, DDL, or maintenance statements.\n",
             "# TYPE quackgis_shared_catalog_strong_refresh_total counter\n",
             "quackgis_shared_catalog_strong_refresh_total {}\n",
+            "# HELP quackgis_snapshot_reads_total Snapshot-pinned read queries that registered a snapshot catalog.\n",
+            "# TYPE quackgis_snapshot_reads_total counter\n",
+            "quackgis_snapshot_reads_total {}\n",
+            "# HELP quackgis_snapshot_read_errors_total Snapshot-pinned read queries rejected before execution.\n",
+            "# TYPE quackgis_snapshot_read_errors_total counter\n",
+            "quackgis_snapshot_read_errors_total {}\n",
             "# HELP quackgis_native_delete_mutations_total Native DuckLake DELETE mutations committed.\n",
             "# TYPE quackgis_native_delete_mutations_total counter\n",
             "quackgis_native_delete_mutations_total {}\n",
@@ -58,6 +64,8 @@ pub fn render_prometheus() -> String {
         metrics.catalog_refresh_total,
         metrics.shared_catalog_read_refresh_total,
         metrics.shared_catalog_strong_refresh_total,
+        metrics.snapshot_reads_total,
+        metrics.snapshot_read_errors_total,
         metrics.native_delete_mutations_total,
         metrics.native_update_mutations_total,
         metrics.native_compact_mutations_total,
@@ -118,6 +126,8 @@ mod tests {
         assert!(body.contains("# TYPE quackgis_queries_started_total counter"));
         assert!(body.contains("quackgis_write_denied_total"));
         assert!(body.contains("quackgis_catalog_refresh_total"));
+        assert!(body.contains("quackgis_snapshot_reads_total"));
+        assert!(body.contains("quackgis_snapshot_read_errors_total"));
         assert!(body.contains("quackgis_native_delete_mutations_total"));
         assert!(body.contains("quackgis_native_mutation_aborts_total"));
         assert!(body.contains("quackgis_compactions_total"));

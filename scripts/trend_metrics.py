@@ -59,7 +59,9 @@ METRIC_COLUMNS = [
     "mvt_multipolygons_tile_bytes",
     "postgis_passed",
     "postgis_total",
+    "postgis_total_min",
     "postgis_pass_rate",
+    "postgis_pass_rate_min",
 ]
 
 BASE_COLUMNS = [
@@ -174,6 +176,8 @@ def render_markdown(rows: list[dict[str, Any]]) -> str:
         "native_compact_retired_files",
         "native_mutation_aborts",
         "postgis_pass_rate",
+        "postgis_total_min",
+        "postgis_pass_rate_min",
     ]
     lines = ["| " + " | ".join(columns) + " |", "|" + "---|" * len(columns)]
     for row in rows:

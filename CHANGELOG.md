@@ -1,142 +1,75 @@
 # Changelog
 
-## Unreleased — architecture redesign: pgwire adaptor, no PostgreSQL
+This changelog tracks the current Rust pgwire architecture. QuackGIS has not yet
+published a Git release tag; old `v0.1`/`v0.2` names were internal prototype eras,
+not stable releases. See [docs/HISTORY.md](./docs/HISTORY.md) for the architectural
+story, useful commit anchors, and lessons for contributors.
 
-Full PostgreSQL judged too heavy for the goal (PG-wire compatibility good
-enough for QGIS/GeoServer). Redesigned around three DataFusion-native
-components in one Rust binary:
+## Unreleased — Rust pgwire spatial lakehouse preview
 
-- **Wire**: [datafusion-postgres](https://github.com/datafusion-contrib/datafusion-postgres)
-  (pgwire server, auth, TLS, pg_catalog emulation, Arrow↔PG type mapping).
-- **Spatial**: [Apache SedonaDB](https://github.com/apache/sedona-db) used
-  natively (replaces this repo's DuckDB `sedonadb` extension wrapper).
-- **Storage**: [datafusion-ducklake](https://github.com/datafusion-contrib/datafusion-ducklake)
-  (replaces vendored pg_ducklake).
+### Added
 
-Retired: PostgreSQL server, `vendor/pg_ducklake`, `pg_geometry` C extension,
-DuckDB extension packaging, `container/init.d` SQL stubs. Success metric moved
-from PostGIS regress pass rate to scripted QGIS/GeoServer/OGR client
-workflows (regress subset stays as secondary metric). Upstreams consumed as
-pinned forks — capabilities missing upstream (DuckLake UPDATE/DELETE and
-pruning, SQL cursors, deep pg_catalog, SedonaDB wire encodings) are built
-in-fork per the gap ledger; upstreaming is opportunistic. See ARCHITECTURE.md
-and ROADMAP.md (milestones M0–M7, gap ledger G1–G10).
+- A single Rust `quackgis-server` that exposes PostGIS-compatible SQL over pgwire
+  without running PostgreSQL or DuckDB as the query engine.
+- DataFusion + SedonaDB query/spatial execution and DuckLake/Parquet persistence
+  for SQLite/local and PostgreSQL/object-storage profiles.
+- CTAS, CREATE/ALTER-add-column, INSERT, PostgreSQL text `COPY FROM STDIN`,
+  UPDATE/DELETE, `RETURNING`, single-table staged transactions, and explicit
+  compaction.
+- Fork-backed atomic positional DELETE, UPDATE replacement rows, and bucket
+  compaction under one visible DuckLake snapshot.
+- WKB/EWKB wire handling, sentinel geometry/geography OIDs, PostGIS metadata,
+  spatial functions/adapters, MVT output, and trace-driven catalog compatibility.
+- QGIS read/edit, OGR load/read, GeoServer WFS/WMS/WFS-T, Martin, PostGIS regress,
+  API/client-profile, and real OSM comparison gates.
+- Hidden bbox/time/space/Morton layout columns, safe statistics-based candidate
+  pruning, exact SedonaDB recheck, LayoutBench, and scan/latency budgets.
+- Shared-catalog Kind Alpha gates for multi-pod reads/writes, QPS, OLAP, Linkerd
+  mTLS visibility, conflict/retry, native mutation metadata, and metrics reports.
+- SCRAM password mode, optional TLS, coarse read-only/read-write authorization,
+  safe metrics, backup/restore oracles, and operations/security runbooks.
+- Snapshot metadata inspection and narrow single-table time travel through named
+  selectors and `AS OF SNAPSHOT <id>` preprocessing.
 
-## v0.1.0 — release candidate (Milestones 0–6)
+### Changed
 
-First QuackGIS container release candidate. Thin PostgreSQL facade backed by
-DuckDB, sedonadb, and DuckLake.
+- Retired the original DuckDB extension and the PostgreSQL + pg_ducklake + C
+  geometry-extension facade. Their useful compatibility ideas were reimplemented
+  at explicit Rust pgwire/catalog boundaries.
+- Vendored `datafusion-postgres` and `datafusion-ducklake` where QuackGIS needs
+  parser-boundary and atomic-mutation behavior. Divergence is recorded in
+  `DIVERGENCE.md` and `docs/DUCKLAKE_ALIGNMENT.md`.
+- Reframed the roadmap around managed-service, city, regional, dataset-release,
+  multi-modal, and national-scale product outcomes with measurable exit gates.
+- Split documentation authority: roadmap for future outcomes, architecture for
+  invariants, status for implemented evidence, and this changelog for release
+  deltas.
 
-### Milestone 0 — target reset and docs
+### Current pre-release boundaries
 
-- Product target reset from standalone DuckDB extension to Postgres facade
-  container.
-- All docs consolidated around the new target.
-- Reference repo findings documented (pg_duckdb, pg_ducklake, PostDuck,
-  DuckFlock).
+- The PostgreSQL DuckLake multicatalog backend is library-specific/non-spec until
+  reference-reader or tested export/migration evidence exists.
+- SQLite is deterministic and spec-oriented but not yet a drop-in DuckDB-writable
+  catalog.
+- Geometry discovery still relies partly on conventional column names and
+  sentinel OIDs; durable DuckLake geometry identity remains forward work.
+- General extended-protocol portal/fetch-size suspension is not implemented.
+- Explicit transactions are intentionally single-table and do not provide general
+  read-your-writes SELECT or multi-table atomicity.
+- Timestamp time travel, protected releases, CDC rows, object-level RBAC, managed-
+  service failure drills, and real multi-modal inventories remain roadmap work.
 
-### Milestone 1 — base image spike
+## Historical prototype eras
 
-- Multi-stage `container/Dockerfile`: sedonadb built from source (GDAL builder),
-  layered on `pg_duckdb` image with spatial runtime libraries.
-- Init scripts: DuckDB config, sedonadb load, diagnostic views, PostGIS-compat
-  SQL wrappers.
-- `docker-compose.yml` for local dev.
-- `container/smoke-test.sh` — 6-check black-box psql harness.
+These eras were important experiments but are not supported release lines:
 
-### Milestone 2 — DuckLake storage path
+| Date | Era | What it taught us |
+|---|---|---|
+| 2026-06-28 | DuckDB WKB spatial extension prototype | Vectorized WKB/GeoRust execution and a PostGIS-like SQL surface were viable; the real SedonaDB bridge remained future work. |
+| 2026-06-29 | DuckLake + Sedona bridge exploration | Literal SedonaDB bridging, snapshot storage, and spatial layout belonged in the design, but the first plan was too broad and speculative. |
+| 2026-07-04 | PostgreSQL facade prototype | The facade explored client compatibility but was not validated end to end; PostgreSQL, pg_ducklake, DuckDB, GDAL, and a C geometry type exposed the wrong operational/ABI stack. |
+| 2026-07-05 onward | Rust pgwire architecture | Keep PostgreSQL/PostGIS at the compatibility edge; own explicit protocol/catalog boundaries and use DataFusion + SedonaDB + DuckLake directly. |
 
-- `container/entrypoint.sh` — DuckLake catalog/data-path config from env vars.
-- `quackgis.connect_lake()` — idempotent per-session catalog attach.
-- `quackgis.create_spatial_table()` — CTAS with layout columns (minx/miny/maxx/
-  maxy, quadkey, Hilbert) + partitioning.
-- `quackgis.spatial_query_count()` / `exact_query_count()` / `pruning_report()`.
-- `container/test-ducklake.sh` — 5-phase persistence + parity test.
-
-### Milestone 3 — SQL/type compatibility shim
-
-- `DOMAIN geometry OVER bytea` with text→geometry cast.
-- `&&` (bbox overlap) and `<->` (KNN distance) operators.
-- ~50 PostGIS function stubs (constructors, accessors, predicates,
-  measurements, set ops, transforms, layout keys).
-- Rewrite mode GUC (`strict`/`warn`/`off`).
-- `quackgis.rewrite_sql()` — PG-level rewriter delegating to Rust engine.
-- `quackgis.compat_check()` — diagnostic function.
-- `postgis_version()` / `geometry_columns` / `spatial_ref_sys` stubs.
-- `container/test-compat.sh` — 20-check compatibility harness.
-
-### Milestone 4 — black-box facade test suite
-
-- `container/run-all-tests.sh` — unified runner (build, start, all phases).
-- `container/tests/postgis-fixtures/` — 6 SQL files (30+ checks).
-- `container/tests/test_psycopg.py` — psycopg v3 suite (10 checks).
-- `ci/all-checks.sh` restructured into Engine (E1–E6) + Facade (F1–F5) tracks.
-
-### Milestone 5 — Kubernetes hardening
-
-- Helm chart (`deploy/helm/quackgis/`): StatefulSet, Service, PVCs, Secret,
-  NetworkPolicy, NOTES.txt.
-- Plain K8s manifests (`deploy/k8s/quackgis.yaml`).
-- KinD smoke test (`deploy/test-kind.sh`): deploy, query, restart, persistence.
-- Security: non-root UID 999, capability drops, NetworkPolicy, OCI labels,
-  `.dockerignore`.
-- SBOM + image size reporting (`deploy/image-report.sh`).
-
-### Milestone 6 — release candidate
-
-- Compatibility matrix (`docs/COMPATIBILITY_MATRIX.md`): PG 14–18, DuckDB,
-  DuckLake modes, object-store backends, client compatibility.
-- Operations guide (`docs/OPERATIONS.md`): backup, restore, upgrade, rollback,
-  object-store credentials (S3/GCS/Azure), monitoring.
-- Known limitations (`docs/KNOWN_LIMITATIONS.md`): consolidated product-behavior
-  doc.
-- Release script (`deploy/release.sh`): engine checks → build → manifest → SBOM
-  → tag guidance.
-- Release checklist updated with backup/restore validation, upgrade path
-  validation.
-
-### Verification
-
-```
-cargo test --lib               → engine unit tests
-./tests/run_sql.sh             → SQL regression suite
-./ci/all-checks.sh             → full engine CI pipeline
-./container/run-all-tests.sh   → full facade test suite
-./deploy/test-kind.sh          → Kubernetes smoke test
-```
-
-## v0.2.0 — pg_ducklake migration + aggregates + backup + auto-stubs (M7–M10)
-
-### Milestone 7 — switch to pg_ducklake base
-
-- Base image changed from `pgduckdb/pgduckdb:18-main` to
-  `pgducklake/pgducklake:18-main`.
-- DuckLake tables are now native PG tables via table AM (`USING ducklake`).
-  No per-session ATTACH needed — the #1 UX blocker is resolved.
-- `.duckdbrc` auto-loads sedonadb on DuckDB instance init.
-- Bridge table pattern (`quackgis._bridge`) for standalone spatial calls.
-- Init scripts simplified and consolidated.
-
-### Milestone 8 — aggregate function stubs
-
-- `CREATE AGGREGATE` stubs for `st_union_agg`, `st_union`, `st_collect`,
-  `st_makeline_agg`, `st_makeline`, `st_envelope_agg`.
-- State type `bytea[]`, final function delegates to DuckDB/sedonadb.
-
-### Milestone 9 — pg_dump / backup testing
-
-- `container/test-backup.sh`: pg_dump --insert, DuckLake snapshots, persisted
-  spatial query verification.
-
-### Milestone 10 — auto-generated ST_* stubs
-
-- `container/generate-stubs.sh`: reads registry.rs, generates 112 bridge-table
-  stubs covering the full 180+ st_* catalog.
-
-### Milestone 11 — CI/CD pipeline
-
-- `.github/workflows/ci.yml`: 5-job pipeline (engine, lint, container-build,
-  facade-tests, docs-check) with GHA Docker layer caching.
-- `.github/workflows/release.yml`: tag-triggered release (build, push to GHCR,
-  SBOM, image report, GitHub Release).
-- `docker-bake.hcl`: coordinated multi-target builds with cache scopes.
+Do not copy commands, deployment manifests, or support claims from a historical
+era into current work. Use them only to understand a decision or recover a useful
+test idea.

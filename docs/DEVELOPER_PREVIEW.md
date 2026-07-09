@@ -7,10 +7,9 @@ Project direction is broader than this local preview: QuackGIS is for
 platform/application developers building high-throughput spatial services over a
 shared DuckLake/Parquet data lake, including DuckDB-style columnar OLAP analysis
 over filtered spatial records without embedding DuckDB. See
-[PROJECT_DIRECTION.md](./PROJECT_DIRECTION.md). The preview proves the local
-shape before the Alpha promotion ladder (Kind+Linkerd, PostgreSQL catalog + S3,
-parallel readers/writers, high-QPS gates, OLAP fanout probes, and operations
-evidence).
+[PROJECT_DIRECTION.md](./PROJECT_DIRECTION.md). The preview is the deterministic
+local ring beneath the existing Kind+Linkerd Alpha and future managed-service,
+real-data, and release rings.
 
 ## Preview goal
 
@@ -25,9 +24,10 @@ spatial execution:
 5. repair fragmented appends with explicit compaction;
 6. use the same tables from QGIS, GDAL/OGR, GeoServer, and Martin smoke paths.
 
-The preview is intentionally single-node/local-storage first. PostgreSQL catalog
-+ S3 object storage is not a side quest; it is the next alpha storage profile and
-the scaled deployment target.
+The preview is intentionally single-node/local-storage first. The library-specific
+PostgreSQL multicatalog + S3 object-storage profile is already exercised in Kind
+Alpha and remains the managed-service scale target, subject to the explicit
+interoperability/export decision in `docs/DUCKLAKE_ALIGNMENT.md`.
 
 Preview priorities, in order:
 
@@ -112,14 +112,14 @@ cargo run -p quackgis-server --example developer_preview -- --host 127.0.0.1 --p
 
 ## Performance levers proven so far
 
-Current local LayoutBench `sf1` (`factor=100`) shows:
+Current local LayoutBench `sf1-local` (runner argument `sf1`, `factor=100`) shows:
 
 - COPY seed is about 18× faster than batched INSERT VALUES at this scale.
 - Transaction/COPY grouping gives better layout than many autocommit INSERTs.
 - Compaction repairs bad shuffled/autocommit layouts: aerial went from
   row-groups `22/18/4` to `22/1/21` and files/ranges `23/23/0` to `1/1/0`.
 - Local row-group cap `QUACKGIS_DUCKLAKE_ROW_GROUP_ROWS=512` is the current best
-  balance for sf1; set it to `0` to disable the override.
+  balance for this local scale; set it to `0` to disable the override.
 
 Reproduce the main local checks:
 
@@ -143,8 +143,9 @@ These are preview limitations, not bugs in the preview claim:
   whole-table compaction. Optional bucket arguments use native bucket-local
   delete+append metadata when row-lineage planning succeeds, with the safe
   full-table replacement path retained as fallback.
-- Transactions are single-table staged write transactions. DDL and multi-table
-  write transactions fail closed; arbitrary in-transaction `SELECT` reads the
+- Transactions are single-table staged write transactions. The maintained
+  `ALTER TABLE ... ADD COLUMN` edit workflow is staged; other DDL and multi-table
+  write transactions fail closed. Arbitrary in-transaction `SELECT` reads the
   committed catalog, not private staged rows.
 - Autocommit DELETE and UPDATE use native DuckLake positional delete files through
   the vendored fork; UPDATE stages replacement rows and commits delete+append

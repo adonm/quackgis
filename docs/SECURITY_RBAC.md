@@ -30,6 +30,13 @@ This document defines what must be true before widening the security claim.
 4. **Metrics endpoint.** Bind only on private interfaces or scrape through a
    trusted network; metrics never include SQL text, usernames, object paths, or
    secrets.
+5. **Catalog and operational metadata.** `pg_catalog`, `information_schema`,
+   DuckLake metadata UDTFs, snapshot history, and maintenance diagnostics can
+   reveal object names or lifecycle state even when table reads are denied. Future
+   object authorization must filter these surfaces consistently.
+6. **Snapshot/maintenance operations.** Time travel, snapshot protection/restore,
+   compaction, cleanup, and CDC have separate read/administrative effects and must
+   not inherit permission from ordinary SELECT accidentally.
 
 ## Failure-mode probes before production claims
 
@@ -42,6 +49,9 @@ This document defines what must be true before widening the security claim.
 | Secret rotation | rolling pods pick up new catalog/object/pgwire secrets; old credentials no longer work |
 | TLS/mTLS enforcement | plaintext path is blocked by deployment/network policy when production profile requires TLS |
 | Catalog/object credential revoke | in-flight operations fail explicitly; no partial data claim without mutation drill evidence |
+| Unauthorized metadata/snapshot access | data, `pg_catalog`, metadata UDTFs, snapshot history, and maintenance diagnostics deny or filter the same object consistently |
+| Unauthorized protection/restore/cleanup | denied before catalog/object mutation and recorded as a redacted administrative denial |
+| Asset URI read | no signed URL, object credential, or unauthorized collection path is returned or logged |
 
 External-service runs should combine this checklist with
 [ALPHA_EXTERNAL_SERVICES.md](./ALPHA_EXTERNAL_SERVICES.md).
@@ -53,12 +63,18 @@ authorization only when a real admin/client workflow requires it. The preferred
 order:
 
 1. deny-by-default write authorization remains at the DuckLake SQL hook;
-2. schema/table allowlists for write-capable service accounts;
-3. read allowlists only if a client/API deployment requires tenant separation;
-4. `information_schema`/`pg_catalog` metadata filtered consistently with the data
+2. explicit service identities and schema/table allowlists for write-capable jobs;
+3. read allowlists when a client/API deployment requires tenant separation;
+4. `information_schema`/`pg_catalog`/DuckLake metadata filtered consistently with the data
    authorization decision;
-5. focused tests for every denied SQL shape: DDL, `COPY`, DML, compaction, and
-   future snapshot/CDC operations.
+5. separate administrative capabilities for compaction, snapshot protection,
+   restore, retention cleanup, and future CDC; and
+6. focused tests for every denied SQL shape: DDL, `COPY`, DML, compaction,
+   metadata reads, asset URI discovery, snapshot/restore, cleanup, and CDC.
+
+Authorization policy should be evaluated from normalized object identity, not raw
+SQL text. A compatibility shortcut may shape a catalog response but may not bypass
+the same object decision used by ordinary table access.
 
 ## Logging and audit posture
 
@@ -66,6 +82,13 @@ Current info logs record process-local query ids, protocol, pid, user, and
 statement kind. They intentionally omit SQL text and object paths. If audit logs
 are added later, they must be explicit opt-in, redacted by default, and covered by
 tests that prevent secrets/object-store credentials from appearing.
+
+A production audit event should have a stable schema: event id/time, authenticated
+service identity, operation class, normalized schema/table or dataset id, outcome,
+reason code, snapshot before/after where applicable, and correlation id. It should
+record denied mutations, maintenance, protection/restore, retention cleanup, and
+administrative policy changes without recording SQL literals, WKB, signed asset
+URIs, passwords, tokens, or catalog/object credentials.
 
 ## Release claim rule
 

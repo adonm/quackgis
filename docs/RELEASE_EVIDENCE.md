@@ -59,9 +59,11 @@ preview/manual build and include the exact replacement command transcript.
   metrics artifacts.
 - QPS/OLAP scan budgets did not regress unexpectedly.
 - Native DML/compaction/abort counters and row-count checks match the roadmap
-  claim.
+  claim; external-profile artifacts keep `native_mutation_aborts` within its zero
+  budget unless the release notes explicitly describe the injected failure.
 - PostGIS regress pass-rate is recorded and unsupported surfaces are documented in
-  `docs/POSTGIS_CONFORMANCE.md`.
+  `docs/POSTGIS_CONFORMANCE.md`; release-selected metrics keep
+  `postgis_total` and `postgis_pass_rate` at or above their emitted minimums.
 - External PostgreSQL/S3 claims are not made unless the evidence packet includes
   `docs/ALPHA_EXTERNAL_SERVICES.md` drill results.
 - Release notes call out any DuckLake alignment or reference-reader caveat from

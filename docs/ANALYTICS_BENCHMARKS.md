@@ -3,7 +3,7 @@
 QuackGIS' product claim is not just that GIS clients connect: it must answer
 large spatial/lakehouse questions with measurable pruning, columnar OLAP, and
 stable client results. This document defines the benchmark evidence contract for
-local Alpha, external Alpha promotion, M9 analytics, and 1.0 release reports.
+local Alpha, managed-service promotion, M10 regional analytics, and 1.0 release reports.
 
 ## Current benchmark base
 
@@ -41,10 +41,10 @@ query-specific detail can stay in the rendered compatibility/storage report.
 | A0 | LayoutBench `sf0`, local SQLite/files | correctness and static pruning oracle | required in fast/local checks |
 | A1 | LayoutBench local smoke, compacted/uncompacted variants | catch runner and layout regressions | temp-server smoke passes |
 | A2 | Kind PostgreSQL/s3s-fs `kind-qps-smoke` + `kind-olap-smoke` | Alpha multi-pod/storage evidence | scheduled artifacts with budgets |
-| A3 | LayoutBench `sf10+` manual | larger generated rows and row-group/file budgets | dashboard published with hardware profile |
+| A3 | LayoutBench `sf10m` then `sf100m` | city/regional generated rows and row-group/file budgets | dashboard published with hardware profile |
 | A4 | Monaco/Andorra OSM-derived layers | real geometry/attribute distribution | real-data matrix report across clients |
 | A5 | Overture/GeoParquet-style wide layers | wide attributes, mixed geometry columns, OLAP fanout | copied-layer schema parity + OLAP dashboard |
-| A6 | External PostgreSQL/S3 regional/manual stress | object-store/catalog behavior under real services | external-service evidence packet |
+| A6 | External PostgreSQL/S3 `sf100m`/`sf1b` and manual `sf10tb` stress | object-store/catalog behavior under real services | external-service evidence packet |
 
 Do not move a phase from manual to scheduled until it has a deterministic size
 budget and a cheap companion gate.

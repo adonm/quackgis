@@ -12,20 +12,26 @@ the pgwire query path.
 
 Use one DuckLake table per asset family with:
 
-- a stable integer/string identity column for clients;
+- stable collection, asset, source-object, and version identity for clients;
 - a `geom` or `footprint` WKB `BINARY` column for PostGIS-compatible discovery;
 - source-object metadata (`asset_uri`, `media_type`, `source_object_id`,
   `collection`, `captured_at`/bucket fields);
 - quality/scale fields (`resolution_cm`, `gsd_cm`, `point_spacing_cm`,
   `accuracy_cm`, `tolerance_mm`, `z_min`, `z_max`);
 - CRS/epoch/provenance fields (`srid`, `coordinate_epoch`, `vertical_datum`,
-  `transform_pipeline`, `lineage_json`).
+  `transform_pipeline`, `lineage_json`); and
+- integrity/lifecycle fields such as checksum/etag, byte size, created/replaced
+  snapshot, release/retention class, and source/derived relationship.
 
 QuackGIS computes hidden layout columns from the WKB footprint at write time, so
 the same spatial pruning/exact-recheck path works for asset inventories and for
 ordinary vector layers.
 
 ## Starter DDL shapes
+
+These are cheap schema-oracle examples, not promoted inventory schemas. Real
+inventories must use a superset that includes the identity, version, checksum,
+object-size, lifecycle/retention, and source/derived fields above.
 
 ```sql
 CREATE TABLE public.raster_footprints (
@@ -97,9 +103,50 @@ column uses a conventional geometry name (`geom`, `footprint`, `shape`, or OGR/Q
 variants that QuackGIS recognizes). Heavy source artifacts stay in object storage
 and are fetched by application code only after SQL narrows the candidate set.
 
+## Identity, lifecycle, and security
+
+An asset URI is not a durable identity. Importers must preserve a stable logical
+asset id across object rewrites and record the exact object version/checksum used
+to derive the footprint. A release or protected snapshot must retain both the
+index row and the referenced object version; deleting either independently breaks
+reproducibility.
+
+Object URIs may reveal bucket structure or grant access through embedded tokens.
+QuackGIS catalog/API surfaces should therefore store stable non-secret locations,
+filter asset rows with the same authorization as their collection, and leave
+short-lived object authorization to the application/object-store boundary. SQL,
+logs, metrics, and audit events must not expose signed URLs or credentials.
+
+Derived geometry must name its source, transform pipeline, software/version,
+tolerance, and acquisition/coordinate epoch. A future reprocessor should be able
+to regenerate the query footprint and compare residuals without guessing how the
+original conversion was performed.
+
 ## Current validation
 
 `just layoutbench-sf0` is the cheap validation gate. It creates representative
 aerial frame, CAD object, generic asset, and control-point tables, verifies hidden
 layout values against sidecar bbox metadata, and proves bbox-prefiltered queries
 return the same counts as exact SedonaDB predicates.
+
+This is schema/discovery evidence only; it is not support for the underlying asset
+formats.
+
+## Product acceptance ladder
+
+Each asset family advances independently:
+
+1. **Schema oracle:** deterministic footprint/layout/discovery checks (`sf0`).
+2. **Real inventory:** ingest a copied collection and validate identity, checksums,
+   CRS/epoch, footprint fidelity, missing/corrupt objects, and URI policy.
+3. **Workload gate:** coverage/gap, quality filter, change-candidate, provenance,
+   and mixed vector/asset queries with exact-result and scan budgets.
+4. **Lifecycle gate:** replace/version/protect/release/restore an inventory while
+   retaining the correct object versions and derived metadata.
+5. **Scale gate:** record rows, object count/bytes, catalog size/refresh, query
+   latency, files/row groups, and cost at regional then 10TB+ inventory scale.
+
+The first promoted set should include one COG/raster collection and one COPC/LAZ
+point-cloud collection. 3D Tiles, CAD/BIM, imagery, and reality capture follow the
+same ladder rather than gaining support from a DDL example alone. Every promotion
+must keep the maintained vector QGIS/GeoServer/GDAL gates green.

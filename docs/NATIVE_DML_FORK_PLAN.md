@@ -1,4 +1,4 @@
-# Native DuckLake DML fork path
+# Native DuckLake DML design
 
 QuackGIS now carries a vendored `datafusion-ducklake` fork snapshot with an
 atomic table-mutation metadata API. Autocommit `DELETE` and `UPDATE` use that
@@ -12,13 +12,14 @@ QuackGIS can batch those workflows through the same native mutation model.
 Bucket-scoped compaction is wired to the native mutation path when row-lineage
 planning succeeds, with the previous full-table rewrite retained as a fallback.
 
-## Fork primitives in use
+## Fork primitives available and tested
 
 The vendored fork is based on `adonm/datafusion-ducklake` `117c0c5` and adds the
-QuackGIS G5 atomic mutation surface:
+QuackGIS atomic mutation surface:
 
 - `DuckLakeTable::resolve_positions(...)` scans a data file and returns physical
-  row positions matching a DataFusion physical predicate.
+  row positions matching a DataFusion physical predicate. Fork oracles exercise
+  it; the current QuackGIS SQL path uses row-lineage `rowid` projection instead.
 - `DuckLakeTableWriter::write_delete_file(...)` writes standard positional
   delete Parquet files with `(file_path, pos)` rows.
 - `MetadataWriter::set_delete_file(...)` registers one cumulative delete file for
@@ -26,7 +27,8 @@ QuackGIS G5 atomic mutation surface:
   delete-file generation.
 - `MetadataWriter::set_delete_files(...)` registers multiple cumulative delete
   files for one table in a single metadata transaction/snapshot. SQLite and
-  multicatalog PostgreSQL both implement it.
+  multicatalog PostgreSQL both implement it. These lower-level registration APIs
+  remain available/tested; QuackGIS runtime publication uses `TableMutation`.
 - `TableMutation` plus `MetadataWriter::commit_table_mutation(...)` commits
   positional delete-file generations, appended data-file metadata, and selected
   data-file retirements under one snapshot. Stale target files/delete generations
@@ -60,17 +62,29 @@ atomic commit:
 3. a live-data-file / previous-delete-file conflict check for each affected file;
 4. one resulting catalog head.
 
-## Remaining integration shape
+### Physical-position invariant
 
-The metadata commit and pending data-file primitives now exist. QuackGIS-side
-autocommit `UPDATE` and bucket compaction both gather target file generations and
-write replacement rows before the one metadata commit:
+Positional delete correctness depends on physical file row order. Row-lineage
+scans therefore run in a dedicated mode that disables repartitioning, filter
+pruning, and sort/pushdown transformations that could renumber positions. This is
+intentionally less optimized than an ordinary SELECT. Performance work must keep
+that isolation explicit rather than reusing plans whose row order is only
+logically equivalent.
+
+## Current integration shape
+
+The metadata commit and pending data-file primitives now exist. The current
+QuackGIS runtime path is:
 
 ```text
-begin_table_mutation(schema, table) -> base_snapshot, table_id, files, schema
-write_data_file(schema, table, batches) -> pending DataFileInfo
-write_delete_file(schema, table, file_path, positions) -> pending DeleteFileInfo
-commit_table_mutation(base_snapshot, table_id, data_files, delete_files_with_expected_prev) -> snapshot
+read current snapshot + live files with row_id_start/max_row_count
+register a snapshot-pinned DuckLake catalog with row lineage enabled
+SELECT rowid ... WHERE <predicate>
+map each rowid into (data_file_id, physical_position)
+merge prior delete positions and write cumulative pending delete files
+for UPDATE/compaction, write_pending_data_file(...)
+build TableMutation with expected prior file/delete generations
+commit_table_mutation(table_id, schema, table, base_snapshot, mutation)
 ```
 
 The final commit covers new data files as well as delete files. Autocommit
@@ -78,7 +92,7 @@ The final commit covers new data files as well as delete files. Autocommit
 inside the fork so QuackGIS does not duplicate DuckLake field-id or
 catalog-layout rules.
 
-## SQL integration steps
+## Current SQL adoption
 
 1. Autocommit `DELETE` uses native delete files. Unsupported row-lineage planning
    fails closed to the previous full-table rewrite path; catalog conflicts remain
@@ -95,6 +109,20 @@ catalog-layout rules.
    _qg_space_bucket)` group, writes one sorted replacement data file, and masks
    the old positions in the same mutation commit. If native row-lineage planning
    fails, it falls back to the prior whole-table replacement path.
+
+## Remaining work
+
+1. Extend pre-commit failpoints to process-kill tests before and after catalog
+   publication, then run the same matrix in Kind and managed-service profiles.
+2. Expose an operator-safe orphan inventory/quarantine/cleanup flow for prewritten
+   objects, with proofs that live snapshot objects cannot be removed.
+3. Batch explicit transactions through native mutations only if one visible
+   snapshot, conflict behavior, `RETURNING`, and edit-client semantics remain
+   equivalent to the staged fallback.
+4. Measure real edit/compaction traces across fragmented files, cumulative delete
+   generations, and concurrent writers.
+5. Add reference-reader gates and migrate to upstream deletion-vector/Puffin
+   primitives when they preserve the same atomic boundary.
 
 ## Evidence gates
 
@@ -117,15 +145,16 @@ catalog-layout rules.
   and `pending_data_file_requires_existing_table_without_metadata_leak` prove
   staged replacement rows have no catalog visibility until the atomic mutation
   snapshot publishes them, and failed staging setup creates no schema/table rows.
-- Run the native DELETE/UPDATE/COMPACT oracle on PostgreSQL/S3 Kind storage before
-  claiming production-scale DML performance.
+- The PostgreSQL/S3-like Kind oracle is integration evidence, not production-scale
+  DML proof. Repeat native DELETE/UPDATE/COMPACT failure and performance gates on
+  managed services before production claims.
 - Local QuackGIS tests `ducklake_native_delete_failpoint_before_commit_leaves_catalog_unchanged`,
   `ducklake_native_update_failpoint_before_commit_leaves_catalog_unchanged`, and
   `ducklake_native_compact_failpoint_before_commit_leaves_catalog_unchanged`
   inject aborts after native object prewrites and before `commit_table_mutation`,
   proving no catalog data-file/delete-file rows become visible for those
   boundaries. Extend the same crash/retry probes to process-kill/retry, Kind, and
-  external profiles; no committed snapshot may expose partial deletes, duplicate
+  managed-service profiles; no committed snapshot may expose partial deletes, duplicate
   update rows, or lost bucket-compaction rows. The drill ladder and evidence packet
   are documented in
   `docs/MUTATION_FAILURE_DRILLS.md`.

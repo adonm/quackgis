@@ -791,6 +791,7 @@ async fn ducklake_snapshot_selector_reads_pinned_table() {
         .await
         .expect("connect");
     let _conn = tokio::spawn(conn);
+    let metrics_before = ducklake_sql::metrics_snapshot();
 
     client
         .batch_execute(
@@ -851,6 +852,20 @@ async fn ducklake_snapshot_selector_reads_pinned_table() {
         .collect();
     assert_eq!(snapshot_id_alias_ids, vec![1]);
 
+    let as_of_snapshot_ids: Vec<i32> = client
+        .query(
+            &format!(
+                "SELECT id FROM public.snapshot_points AS OF SNAPSHOT {snapshot_id} ORDER BY id"
+            ),
+            &[],
+        )
+        .await
+        .expect("AS OF SNAPSHOT table query")
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert_eq!(as_of_snapshot_ids, vec![1]);
+
     let snapshot_count_extent = client
         .query_one(
             &format!(
@@ -878,6 +893,15 @@ async fn ducklake_snapshot_selector_reads_pinned_table() {
     assert!(
         missing.is_err(),
         "snapshot read must fail closed when the table is absent at the snapshot"
+    );
+    let metrics_after = ducklake_sql::metrics_snapshot();
+    assert!(
+        metrics_after.snapshot_reads_total >= metrics_before.snapshot_reads_total + 4,
+        "successful snapshot reads should increment metrics: before={metrics_before:?} after={metrics_after:?}"
+    );
+    assert!(
+        metrics_after.snapshot_read_errors_total > metrics_before.snapshot_read_errors_total,
+        "failed snapshot reads should increment metrics: before={metrics_before:?} after={metrics_after:?}"
     );
 }
 
