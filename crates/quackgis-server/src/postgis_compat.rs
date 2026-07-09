@@ -5,21 +5,26 @@
 use std::sync::Arc;
 
 use datafusion::arrow::array::{
-    Array, Int32Array, Int64Array, ListArray, ListBuilder, RecordBatch, StringArray, StringBuilder,
+    Array, ArrayRef, BooleanArray, Int32Array, Int64Array, ListArray, ListBuilder, RecordBatch,
+    StringArray, StringBuilder,
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::Result as DFResult;
-use datafusion::logical_expr::Volatility;
+use datafusion::logical_expr::{
+    ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, TypeSignature, Volatility,
+};
 use datafusion::physical_plan::ColumnarValue;
 use datafusion::prelude::SessionContext;
+
+use crate::auth::{AccessRole, AuthConfig, AuthMode};
 
 const POSTGIS_VERSION: &str = "3.4.0";
 const POSTGIS_VERSION_FULL: &str = "POSTGIS=\"3.4.0\" QUACKGIS";
 
-pub fn register_postgis_compat(ctx: &SessionContext) -> DFResult<()> {
+pub fn register_postgis_compat(ctx: &SessionContext, auth: &AuthConfig) -> DFResult<()> {
     register_postgis_version_udfs(ctx)?;
     register_pg_recovery_udf(ctx)?;
-    register_privilege_udfs(ctx)?;
+    register_privilege_udfs(ctx, auth)?;
     register_pg_serial_sequence_udf(ctx)?;
     register_current_setting_udf(ctx)?;
     register_pg_array_search_path_udfs(ctx)?;
@@ -69,25 +74,37 @@ fn make_const_string_udf(name: &str, value: String) -> datafusion::logical_expr:
     )
 }
 
-fn register_privilege_udfs(ctx: &SessionContext) -> DFResult<()> {
+fn register_privilege_udfs(ctx: &SessionContext, auth: &AuthConfig) -> DFResult<()> {
     // GIS clients check table/schema/database/column editability via PostgreSQL
-    // privilege helpers. QuackGIS has no RBAC yet, so the dev/read-write posture
-    // is allow-all for the common text-name overloads clients issue.
-    ctx.register_udf(make_allow_all_privilege_udf(
+    // privilege helpers. The two-argument "current user" forms stay allow-all
+    // for compatibility because DataFusion scalar UDFs do not receive pgwire
+    // session identity. Explicit-user forms fail closed for configured read-only
+    // users and unknown users in password mode; DuckLakeSqlHook remains the
+    // authoritative write boundary.
+    ctx.register_udf(make_privilege_udf(
         "has_table_privilege",
-        vec![DataType::Utf8, DataType::Utf8],
+        PrivilegeObject::Table,
+        auth,
     ));
-    ctx.register_udf(make_allow_all_privilege_udf(
+    ctx.register_udf(make_privilege_udf(
         "has_schema_privilege",
-        vec![DataType::Utf8, DataType::Utf8],
+        PrivilegeObject::Schema,
+        auth,
     ));
-    ctx.register_udf(make_allow_all_privilege_udf(
+    ctx.register_udf(make_privilege_udf(
         "has_database_privilege",
-        vec![DataType::Utf8, DataType::Utf8],
+        PrivilegeObject::Database,
+        auth,
     ));
-    ctx.register_udf(make_allow_all_privilege_udf(
+    ctx.register_udf(make_privilege_udf(
         "has_column_privilege",
-        vec![DataType::Utf8, DataType::Utf8, DataType::Utf8],
+        PrivilegeObject::Column,
+        auth,
+    ));
+    ctx.register_udf(make_privilege_udf(
+        "has_any_column_privilege",
+        PrivilegeObject::Column,
+        auth,
     ));
     ctx.register_udf(datafusion::logical_expr::create_udf(
         "pg_has_role",
@@ -99,17 +116,150 @@ fn register_privilege_udfs(ctx: &SessionContext) -> DFResult<()> {
     Ok(())
 }
 
-fn make_allow_all_privilege_udf(
-    name: &str,
-    arg_types: Vec<DataType>,
-) -> datafusion::logical_expr::ScalarUDF {
-    datafusion::logical_expr::create_udf(
-        name,
-        arg_types,
-        DataType::Boolean,
-        Volatility::Stable,
-        Arc::new(|_| Ok(datafusion::scalar::ScalarValue::Boolean(Some(true)).into())),
-    )
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+enum PrivilegeObject {
+    Database,
+    Schema,
+    Table,
+    Column,
+}
+
+#[derive(Debug, Hash, PartialEq, Eq)]
+struct PrivilegeUdf {
+    signature: Signature,
+    name: String,
+    object: PrivilegeObject,
+    password_mode: bool,
+    roles: Vec<(String, AccessRole)>,
+}
+
+fn make_privilege_udf(name: &str, object: PrivilegeObject, auth: &AuthConfig) -> ScalarUDF {
+    let signatures = match object {
+        PrivilegeObject::Column => vec![
+            TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8, DataType::Utf8]),
+            TypeSignature::Exact(vec![
+                DataType::Utf8,
+                DataType::Utf8,
+                DataType::Utf8,
+                DataType::Utf8,
+            ]),
+        ],
+        PrivilegeObject::Database | PrivilegeObject::Schema | PrivilegeObject::Table => vec![
+            TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8]),
+            TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8, DataType::Utf8]),
+        ],
+    };
+    let mut roles = auth
+        .users()
+        .map(|(name, user)| (name.to_string(), user.role))
+        .collect::<Vec<_>>();
+    roles.sort_by(|(left, _), (right, _)| left.cmp(right));
+    PrivilegeUdf {
+        signature: Signature::one_of(signatures, Volatility::Stable),
+        name: name.to_string(),
+        object,
+        password_mode: auth.mode() == AuthMode::Password,
+        roles,
+    }
+    .into_scalar_udf()
+}
+
+impl PrivilegeUdf {
+    fn into_scalar_udf(self) -> ScalarUDF {
+        ScalarUDF::new_from_impl(self)
+    }
+
+    fn role_for_explicit_user(&self, username: &str) -> Option<AccessRole> {
+        self.roles
+            .iter()
+            .find_map(|(candidate, role)| (candidate == username).then_some(*role))
+    }
+
+    fn evaluate(&self, explicit_user: Option<&str>, privilege: Option<&str>) -> Option<bool> {
+        let Some(privilege) = privilege else {
+            return Some(false);
+        };
+
+        // Trust mode and current-user compatibility forms preserve the existing
+        // allow-all metadata surface. Write statements are still authorized by
+        // DuckLakeSqlHook with the real pgwire session identity.
+        if !self.password_mode || explicit_user.is_none() {
+            return Some(true);
+        }
+
+        let Some(role) = explicit_user.and_then(|user| self.role_for_explicit_user(user)) else {
+            return Some(false);
+        };
+        Some(match role {
+            AccessRole::ReadWrite => true,
+            AccessRole::ReadOnly => self.readonly_allows(privilege),
+        })
+    }
+
+    fn readonly_allows(&self, privilege: &str) -> bool {
+        if privilege.to_ascii_uppercase().contains("GRANT") {
+            return false;
+        }
+        let permissions = privilege
+            .split(|ch: char| ch == ',' || ch.is_whitespace())
+            .filter(|part| !part.is_empty())
+            .map(str::to_ascii_uppercase)
+            .collect::<Vec<_>>();
+        if permissions.is_empty() {
+            return false;
+        }
+
+        permissions.iter().all(|permission| match self.object {
+            PrivilegeObject::Database => matches!(permission.as_str(), "CONNECT"),
+            PrivilegeObject::Schema => matches!(permission.as_str(), "USAGE"),
+            PrivilegeObject::Table | PrivilegeObject::Column => {
+                matches!(permission.as_str(), "SELECT")
+            }
+        })
+    }
+}
+
+impl ScalarUDFImpl for PrivilegeUdf {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Boolean)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let args = ColumnarValue::values_to_arrays(&args.args)?;
+        let len = args.first().map(|arg| arg.len()).unwrap_or(1);
+        let explicit_user_idx = explicit_user_index(self.object, args.len());
+        let privilege_idx = args.len().saturating_sub(1);
+        let mut builder = BooleanArray::builder(len);
+        for row in 0..len {
+            let explicit_user = explicit_user_idx.and_then(|idx| string_at(&args[idx], row));
+            let privilege = string_at(&args[privilege_idx], row);
+            builder.append_option(self.evaluate(explicit_user, privilege));
+        }
+        Ok(ColumnarValue::Array(Arc::new(builder.finish())))
+    }
+}
+
+fn explicit_user_index(object: PrivilegeObject, arg_count: usize) -> Option<usize> {
+    match (object, arg_count) {
+        (PrivilegeObject::Column, 4) => Some(0),
+        (PrivilegeObject::Database | PrivilegeObject::Schema | PrivilegeObject::Table, 3) => {
+            Some(0)
+        }
+        _ => None,
+    }
+}
+
+fn string_at(array: &ArrayRef, row: usize) -> Option<&str> {
+    let strings = array.as_any().downcast_ref::<StringArray>()?;
+    (!strings.is_null(row)).then(|| strings.value(row))
 }
 
 fn register_pg_serial_sequence_udf(ctx: &SessionContext) -> DFResult<()> {

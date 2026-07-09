@@ -114,10 +114,23 @@ jobs:
               },
               "scheduled_evidence": {
                   "compatibility_metrics_artifact_prefix": f"compatibility-metrics-{os.environ.get('GITHUB_SHA', '')}-",
+                  "compatibility_report_artifact_prefix": f"compatibility-report-{os.environ.get('GITHUB_SHA', '')}-",
                   "storage_metrics_artifact_prefix": f"storage-metrics-kind-alpha-smoke-{os.environ.get('GITHUB_SHA', '')}-",
+                  "storage_logs_artifact_prefix": f"storage-kind-logs-kind-alpha-smoke-{os.environ.get('GITHUB_SHA', '')}-",
+                  "benchmark_metrics_artifact_prefix": f"benchmark-metrics-<recipe>-{os.environ.get('GITHUB_SHA', '')}-",
+                  "benchmark_report_artifact_prefix": f"benchmark-report-<recipe>-{os.environ.get('GITHUB_SHA', '')}-",
+                  "postgis_regress_artifact_prefix": f"postgis-regress-{os.environ.get('GITHUB_SHA', '')}-",
                   "metrics_file": "metrics.json",
+                  "dashboard_file": "metrics-dashboard.md",
               },
-          }
+              "docs": {
+                  "release_evidence_policy": "docs/RELEASE_EVIDENCE.md",
+                  "compatibility_matrix": "docs/COMPATIBILITY_MATRIX.md",
+                  "known_limits": "docs/COMPATIBILITY.md",
+                  "postgis_conformance": "docs/POSTGIS_CONFORMANCE.md",
+                  "ducklake_alignment": "docs/DUCKLAKE_ALIGNMENT.md",
+              },
+           }
           (dist / f"release-evidence-{version}.json").write_text(
               json.dumps(evidence, indent=2, sort_keys=True) + "\n",
               encoding="utf-8",

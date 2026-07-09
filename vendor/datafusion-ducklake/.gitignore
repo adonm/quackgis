@@ -1,0 +1,9 @@
+target
+
+# IDEA
+/.idea/
+*.iml
+
+# Benchmark data and results
+benchmark/data/
+benchmark/results/

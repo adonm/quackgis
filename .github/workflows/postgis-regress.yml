@@ -68,6 +68,16 @@ jobs:
             grep 'postgis_regress_subset' .tmp/postgis-regress/postgis-regress.log >> "$GITHUB_STEP_SUMMARY" || true
           fi
 
+      - name: Render PostGIS trend dashboard
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f .tmp/postgis-regress/metrics.json ]; then
+            mise exec -- just metrics-dashboard path=.tmp/postgis-regress out=.tmp/postgis-regress/metrics-dashboard.md
+            cat .tmp/postgis-regress/metrics-dashboard.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Upload PostGIS regress evidence
         if: always()
         uses: actions/upload-artifact@v4

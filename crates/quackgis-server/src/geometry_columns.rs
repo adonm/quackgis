@@ -8,8 +8,8 @@
 //! conventions to detect geometry columns.
 //!
 //! Convention: columns named `geom`, `geometry`, `the_geom`, `wkb_geometry`,
-//! `wkb_geom`, or `shape` are treated as geometry columns. This covers the
-//! common naming used by QGIS, GDAL, and typical CREATE TABLE statements.
+//! `wkb_geom`, `shape`, or `footprint` are treated as geometry columns. This
+//! covers common QGIS/GDAL naming plus asset-index sidecar tables.
 
 use std::sync::Arc;
 
@@ -31,6 +31,7 @@ const GEOMETRY_COLUMN_NAMES: &[&str] = &[
     "wkb_geometry",
     "wkb_geom",
     "shape",
+    "footprint",
     "way", // OpenStreetMap convention
 ];
 

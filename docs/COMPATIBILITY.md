@@ -31,7 +31,7 @@ missing upstream that we build in tracked fork branches.
 | Feature | Status |
 |---|---|
 | Simple + extended query protocol | ✅ upstream |
-| TLS, password auth, RBAC roles | TLS and cleartext-password startup are wired; coarse read/write vs read-only DuckLake write authorization is implemented. SCRAM and richer catalog privilege metadata remain M8 hardening. |
+| TLS, password auth, RBAC roles | TLS and SCRAM-SHA-256 password startup are wired; coarse read/write vs read-only DuckLake write authorization, matching `pg_roles`, and explicit-user privilege helper metadata are implemented. Full object-level RBAC remains M8 hardening; see `docs/SECURITY_RBAC.md`. |
 | pg_catalog + information_schema emulation | ✅ upstream (datafusion-pg-catalog) |
 | Portals / fetch-size suspension | general `setFetchSize` suspension still deferred (G4); maintained GeoServer WFS/WMS smoke does not require it |
 | `DECLARE BINARY CURSOR` / `FETCH` | ✅ simple-query/libpq path; narrow PostgreSQL-driver extended cursor shim for OGR read; general extended-protocol FETCH still deferred (G3/G4) |
@@ -53,12 +53,12 @@ missing upstream that we build in tracked fork branches.
 - Per-row EWKB SRID tags are preserved by `ST_SetSRID`, `ST_GeomFromEWKT`,
   `ST_MakeEnvelope(..., srid)`, and `ST_Transform(..., srid)`; `ST_SRID`
   reads those tags and returns `0` for untagged WKB.
-- Function conformance is tracked by `just postgis-regress`, a starter curated
-  PostGIS regress subset that prints `postgis_regress_subset passed=<n>
-  total=<n> pass_rate=<x>` for scheduled trend artifacts. The subset is small by
-  design today and grows only for functions QuackGIS intentionally claims. The
-  `PostGIS regress subset` workflow runs it weekly/manual and uploads the raw log
-  plus `metrics.json` pass-rate evidence.
+- Function conformance is tracked in
+  [POSTGIS_CONFORMANCE.md](./POSTGIS_CONFORMANCE.md). The release pgwire claim is
+  `just postgis-regress`, a starter curated PostGIS regress subset that prints
+  `postgis_regress_subset passed=<n> total=<n> pass_rate=<x>` for scheduled trend
+  artifacts. Broader SQL portability fixtures remain function-kernel evidence
+  until promoted by pgwire tests or client traces.
 
 ## Storage (DuckLake 1.0+ via datafusion-ducklake)
 
@@ -67,17 +67,19 @@ missing upstream that we build in tracked fork branches.
 | Dev path: SQLite catalog + local Parquet files | ✅ validated in M1 tests |
 | Scaled profile: PostgreSQL catalog + S3/object-store Parquet | ✅ Alpha Kind gate via `kind-lake-smoke`, `kind-lake-multipod-smoke`, `kind-write-smoke`, `kind-qps-smoke`, and `kind-olap-smoke`; not a production durability claim |
 | datafusion-ducklake main HEAD (DF54) | ✅ current integration target |
-| SQL writes into DuckLake from pgwire | ✅ CTAS, bare CREATE TABLE, INSERT SELECT, INSERT VALUES with column mapping, UPDATE, DELETE (single-table/full-table rewrite), PostgreSQL text `COPY FROM STDIN`, plus simple/extended `INSERT`/`UPDATE`/`DELETE ... RETURNING` for edit-client refresh |
+| SQL writes into DuckLake from pgwire | ✅ CTAS, bare CREATE TABLE, INSERT SELECT, INSERT VALUES with column mapping, autocommit UPDATE/DELETE, PostgreSQL text `COPY FROM STDIN`, plus simple/extended `INSERT`/`UPDATE`/`DELETE ... RETURNING` for edit-client refresh |
 | PostgreSQL catalog writes | ⚠️ exercised by Alpha Kind gates; upstream path remains experimental/non-spec and QuackGIS still needs spec hardening (G6) |
-| UPDATE / DELETE | ✅ QuackGIS full-table rewrite semantics for single-table statements; native delete files still future optimization |
+| UPDATE / DELETE | ✅ Autocommit `DELETE` uses fork-backed atomic positional delete files; autocommit `UPDATE` stages replacement rows and commits delete+append metadata under one snapshot; `... RETURNING` preserves current result semantics. Explicit transactions still use staged rewrites. |
 | Spatial layout | ✅ WKB-first hidden `_qg_*` bbox/bucket/sort columns are automatically materialized on spatial writes and hidden from client metadata |
-| Spatial predicate pruning | ✅ Safe bbox rewrite for recognized single-table spatial predicates with exact SedonaDB recheck; unsupported predicates remain correct but may scan more |
+| Spatial predicate pruning | ✅ Safe bbox rewrite for recognized single-table spatial predicates, plus simple temporal `BETWEEN` bucket prefilters when a recognized time column exists; exact SedonaDB recheck remains authoritative and unsupported predicates remain correct but may scan more |
 | Columnar OLAP fanout | ✅ Alpha smoke for grouped spatial/attribute stats, primitive calculations, pruning/aggregate evidence, and candidate filtering before exact SedonaDB recheck; larger benchmark variants remain future hardening |
-| Compaction | ✅ `CALL quackgis_compact_table('schema.table')` and alias `CALL quackgis_compact(...)` rewrite a table into layout order; currently whole-table, not bucket-local |
-| Snapshot time travel (SQL `AS OF`) | ❌ programmatic only (G8) |
+| Compaction | ✅ `CALL quackgis_compact_table('schema.table')` and alias `CALL quackgis_compact(...)` rewrite a table into layout order; optional `(time_bucket, space_bucket)` uses native bucket-scoped delete+pending-append metadata when row-lineage planning succeeds, falling back to an atomic full-table replacement for unsupported shapes. Local tests report visible-file, scan-byte, and row-group deltas for fragmented appends |
+| DuckLake metadata table functions | ✅ `ducklake_snapshots()`, `ducklake_table_info()`, and `ducklake_list_files()` are exposed through pgwire for catalog inspection; CDC row table functions stay disabled until pgwire projection is safe |
+| Snapshot time travel (SQL `AS OF`) | ❌ programmatic only (G8); target syntax and restore/CDC policy documented in `docs/SNAPSHOT_OPERATIONS.md` |
 | Generic filter pushdown/pruning path | ✅ datafusion-ducklake declares inexact filter pushdown; QuackGIS adds spatial-layout rewrites above it |
 | DuckDB-inlined data reads | ❌ — avoid inlining when writing from DuckDB |
 | Object stores | ✅ local FS validated; S3-compatible storage exercised in Kind with `s3s-fs`; production object-store soak remains future hardening |
+| Multi-modal asset footprint tables | ✅ starter raster/point-cloud/3D/CAD/BIM/aerial/reality-capture footprint/sidecar schemas documented; `footprint` columns are discoverable as geometry metadata |
 
 Interop target: QuackGIS storage changes should remain forward-compatible with
 official DuckLake 1.0+ and readable by reference DuckLake readers where
@@ -102,9 +104,10 @@ fanout. Extending datafusion-ducklake for that target is explicitly in scope.
   read projection for QGIS/GDAL feature identity. QGIS edit/save smoke tests now
   pass on `_quackgis_rowid`; multi-table transaction semantics remain future
   hardening.
-- `CALL quackgis_compact_table(...)` currently rewrites the whole table. It is
-  the preview maintenance command for fragmented autocommit/INSERT layouts;
-  bucket-local/incremental compaction is future optimization.
+- `CALL quackgis_compact_table(...)` whole-table mode commits through one
+  replacement snapshot. Optional bucket arguments use native partial-file
+  delete+append compaction when row-lineage planning succeeds, and fall back to
+  the safe full-table replacement path for unsupported shapes.
 - QuackGIS is not a document database or OLTP application database. It emulates
   enough transactional/catalog behavior for common GIS clients when possible, but
   the core workload is large analytical spatial and columnar OLAP queries over

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use clap::Parser;
 use datafusion::prelude::SessionContext;
 use datafusion_postgres::ServerOptions;
+use tokio::net::TcpListener;
 use tokio::signal;
 
 use quackgis_server::auth::{AuthConfig, AuthMode};
@@ -63,13 +64,25 @@ async fn main() -> anyhow::Result<()> {
         quackgis_server::context::StoragePaths::new(&cli.catalog_path, &cli.data_path)?
     };
     let ctx: Arc<SessionContext> =
-        quackgis_server::context::build_session_context_with_storage(storage_paths.clone()).await?;
+        quackgis_server::context::build_session_context_with_storage_and_auth(
+            storage_paths.clone(),
+            &auth,
+        )
+        .await?;
 
     let opts = ServerOptions::new()
         .with_host(cli.host.clone())
         .with_port(cli.port)
         .with_tls_cert_path(cli.tls_cert.clone())
         .with_tls_key_path(cli.tls_key.clone());
+
+    if let Some(metrics_port) = cli.metrics_port {
+        let metrics_addr = format!("{}:{metrics_port}", cli.metrics_host);
+        let listener = TcpListener::bind(&metrics_addr).await?;
+        let local_addr = listener.local_addr()?;
+        log::info!("quackgis metrics endpoint listening on http://{local_addr}/metrics");
+        tokio::spawn(quackgis_server::metrics::serve_listener(listener));
+    }
 
     let tls_note = if cli.tls_cert.is_some() {
         "TLS enabled"
@@ -78,7 +91,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let auth_note = match auth.mode() {
         AuthMode::Trust => "trust auth (dev mode)",
-        AuthMode::Password => "password auth",
+        AuthMode::Password => "SCRAM password auth",
     };
     log::info!(
         "quackgis-server listening on {}:{} ({tls_note}; {auth_note}); spatial engine: SedonaDB; pg_catalog: on",

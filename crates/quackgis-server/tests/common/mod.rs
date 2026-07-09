@@ -9,7 +9,7 @@ use datafusion::prelude::SessionContext;
 use datafusion_postgres::ServerOptions;
 
 use quackgis_server::auth::AuthConfig;
-use quackgis_server::context::{StoragePaths, build_session_context_with_storage};
+use quackgis_server::context::{StoragePaths, build_session_context_with_storage_and_auth};
 
 pub struct ServerHandle {
     /// Host clients connect to.
@@ -73,7 +73,7 @@ impl ServerHandle {
         let addr = listener.local_addr().expect("local_addr");
         drop(listener); // free the port so datafusion-postgres can rebind
 
-        let ctx = build_session_context_with_storage(paths.clone())
+        let ctx = build_session_context_with_storage_and_auth(paths.clone(), &auth)
             .await
             .expect("context builds");
         let ctx_for_server = Arc::clone(&ctx);

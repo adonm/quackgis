@@ -1,9 +1,12 @@
 # Architecture
 
-QuackGIS is a PostGIS-compatible, Sedona-powered spatial lakehouse database in a
-single Rust binary. It is built first for platform/application developers who
-need to answer large, complex spatial questions over shared DuckLake/Parquet data
-with high throughput, horizontal read scaling, and columnar OLAP analysis.
+QuackGIS is a PostGIS-compatible front door to a Sedona-powered spatial lakehouse
+in a single Rust binary. It is built first for platform/application developers
+who need to answer large, complex spatial questions over shared DuckLake/Parquet
+data with high throughput, horizontal read scaling, and columnar OLAP analysis.
+The long-term architecture also treats raster, point-cloud, CAD/BIM, 3D tile, and
+reality-capture datasets as queryable asset indexes plus sidecars rather than as
+heavy decoders in the SQL hot path.
 
 QuackGIS speaks the PostgreSQL wire protocol but does **not** run PostgreSQL as a
 query engine. Three DataFusion-native components share one `SessionContext`:
@@ -25,10 +28,10 @@ built immediately in-fork — see the gap ledger in
 ```text
 ┌──────────────────────────────────────────────────────────────┐
 │ PostgreSQL clients                                           │
-│ QGIS · GeoServer · Martin · GDAL/OGR/ogr2ogr · psql · psycopg  │
+│ QGIS · GeoServer · Martin · GDAL/OGR · psql · psycopg · Python │
 ├──────────────────────────────────────────────────────────────┤
 │ datafusion-postgres                                          │
-│ pgwire · simple+extended protocol · auth · TLS · portals     │
+│ pgwire · simple+extended protocol · SCRAM auth · TLS · portals │
 ├──────────────────────────────────────────────────────────────┤
 │ quackgis compatibility layer (owned code)                    │
 │ geometry type over the wire (OID + WKB/EWKB text/binary)     │
@@ -94,12 +97,30 @@ may be used as DuckLake catalog metadata storage in the scaled profile.
    scaled multi-writer/high-QPS deployment target. Extending datafusion-ducklake
    for QuackGIS requirements is in scope, but changes must remain
    forward-compatible with the official DuckLake 1.0+ spec and interoperable with
-   reference DuckLake readers where possible.
+   reference DuckLake readers where possible. When upstream DuckLake stabilizes
+   equivalent primitives — deletion-vector/Puffin updates, protected snapshots,
+   branch/merge, materialized views, VARIANT/UDT/fixed-size-array support, Bloom
+   filters, metadata-scan improvements, or PostgreSQL catalog roundtrip reductions
+   — QuackGIS should migrate toward them instead of preserving private storage
+   semantics.
 
 7. **Client-driven compatibility.** The definition of done is scripted QGIS,
-    GeoServer, Martin, and OGR/`ogr2ogr` workflows passing against the server, not a
-    function-count. The compatibility promise is “common PostGIS GIS clients and
-    tools work without significant changes,” not “QuackGIS is PostgreSQL.”
+   GeoServer, Martin, Python/SQL, and OGR/`ogr2ogr` workflows passing against the
+   server, not a function-count. The compatibility promise is “common PostGIS GIS
+   clients and tools work without significant changes,” not “QuackGIS is
+   PostgreSQL.”
+
+8. **Operations and metadata are product features.** DuckLake metadata UDTFs,
+   `pg_roles`, privilege helpers, compatibility reports, trendable metrics,
+   backup/restore oracles, and catalog refresh behavior are part of the public
+   platform contract. A lakehouse that cannot be inspected or restored is not
+   credible no matter how fast a single query is.
+
+9. **Heavy spatial formats enter through index rows and sidecars first.** Raster,
+   point-cloud, CAD/BIM, 3D tiles, and reality-capture content should expose
+   footprints, CRS/epoch metadata, quality/resolution fields, lineage, and object
+   URIs in SQL while preserving high-fidelity artifacts outside the vectorized
+   query path until a specific reader/kernel is justified.
 
 ## Lessons from the preview/Alpha gates
 
@@ -124,6 +145,16 @@ may be used as DuckLake catalog metadata storage in the scaled profile.
    and report rendering checks catch drift before a Kind image build or external
    storage run. Every new large/manual probe should have a small deterministic
    companion gate.
+6. **Auth and write authorization have different trust boundaries.** SCRAM/TLS
+   authenticate the pgwire session; DuckLake SQL hooks still enforce write
+   authorization close to mutation planning. Catalog privilege metadata helps
+   clients choose editability but is not the write boundary.
+7. **Native DML is only safe when it publishes once.** Positional delete files,
+   staged replacement data files, and bucket compaction metadata must become
+   visible under one DuckLake snapshot. Prewritten objects can be cleanup work;
+   partially visible mutations are correctness bugs. Upstream multi-deletion-vector
+   Puffin support should be adopted only with reference-reader interop and the same
+   single-snapshot visibility guarantee.
 
 ## Geometry strategy: EWKB everywhere with a real type OID
 
@@ -216,9 +247,11 @@ above DuckLake/Parquet statistics, then always rechecks the exact SedonaDB
 predicate.
 
 The design deliberately avoids mutable GiST/R-tree side indexes. Parallel writers
-can write independent files and publish DuckLake snapshots. Current compaction is
-explicit and whole-table; the scaled direction is bucket-local compaction when
-small files accumulate.
+can write independent files and publish DuckLake snapshots. Whole-table
+compaction is explicit and commits through one replacement snapshot; bucket-
+targeted compaction uses native positional deletes plus one pending replacement
+file when row-lineage planning succeeds, so small-file repair can stay scoped to
+one coarse time/space bucket.
 
 Layout is part of write strategy as much as read strategy: COPY and explicit
 transaction grouping let QuackGIS sort larger batches by hidden layout keys,

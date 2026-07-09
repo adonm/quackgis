@@ -5,7 +5,7 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use datafusion::arrow::array::{BinaryArray, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
@@ -13,6 +13,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion_ducklake::DuckLakeTableWriter;
 use quackgis_server::auth::AuthConfig;
 use quackgis_server::context::StoragePaths;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_postgres::NoTls;
 use tokio_postgres::types::Type;
 
@@ -31,6 +32,54 @@ async fn connect() -> (
         let _ = connection.await;
     });
     (server, client, conn_task)
+}
+
+async fn startup_auth_code(port: u16, user: &str) -> i32 {
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("raw startup TCP connect");
+
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&196_608_i32.to_be_bytes()); // protocol 3.0
+    for (key, value) in [("user", user), ("database", "quackgis")] {
+        payload.extend_from_slice(key.as_bytes());
+        payload.push(0);
+        payload.extend_from_slice(value.as_bytes());
+        payload.push(0);
+    }
+    payload.push(0);
+    let len = (payload.len() + 4) as i32;
+    stream
+        .write_all(&len.to_be_bytes())
+        .await
+        .expect("write startup length");
+    stream
+        .write_all(&payload)
+        .await
+        .expect("write startup payload");
+
+    let mut tag = [0_u8; 1];
+    stream
+        .read_exact(&mut tag)
+        .await
+        .expect("read startup response tag");
+    assert_eq!(
+        tag[0], b'R',
+        "first startup response should be Authentication"
+    );
+
+    let mut len_bytes = [0_u8; 4];
+    stream
+        .read_exact(&mut len_bytes)
+        .await
+        .expect("read auth response length");
+    let body_len = i32::from_be_bytes(len_bytes) as usize - 4;
+    let mut body = vec![0_u8; body_len];
+    stream
+        .read_exact(&mut body)
+        .await
+        .expect("read auth response body");
+    i32::from_be_bytes(body[0..4].try_into().expect("auth code bytes"))
 }
 
 fn point_wkb(x: f64, y: f64) -> Vec<u8> {
@@ -130,9 +179,55 @@ async fn password_auth_and_readonly_role_fail_closed() {
     .expect("auth config");
     let server = ServerHandle::start_with_auth(auth).await;
 
+    assert_eq!(
+        startup_auth_code(server.port(), "postgres").await,
+        10,
+        "password auth must negotiate PostgreSQL SASL/SCRAM, not cleartext-password"
+    );
+
     let bad_login =
         tokio_postgres::connect(&format!("{} password=wrong", server.conn_str()), NoTls).await;
     assert!(bad_login.is_err(), "bad password unexpectedly connected");
+
+    let unknown_login = tokio_postgres::connect(
+        &format!(
+            "host=127.0.0.1 port={} user=unknown dbname=quackgis password=readwrite-secret",
+            server.port()
+        ),
+        NoTls,
+    )
+    .await;
+    assert!(
+        unknown_login.is_err(),
+        "unknown user unexpectedly connected"
+    );
+
+    let bad_readonly_login = tokio_postgres::connect(
+        &format!(
+            "host=127.0.0.1 port={} user=quackgis_readonly dbname=quackgis password=wrong",
+            server.port()
+        ),
+        NoTls,
+    )
+    .await;
+    assert!(
+        bad_readonly_login.is_err(),
+        "readonly user with bad password unexpectedly connected"
+    );
+
+    let concurrent_rw = format!("{} password=readwrite-secret", server.conn_str());
+    let concurrent_ro = format!(
+        "host=127.0.0.1 port={} user=quackgis_readonly dbname=quackgis password=readonly-secret",
+        server.port()
+    );
+    let (concurrent_rw, concurrent_ro) = tokio::join!(
+        tokio_postgres::connect(&concurrent_rw, NoTls),
+        tokio_postgres::connect(&concurrent_ro, NoTls),
+    );
+    let (_concurrent_rw, concurrent_rw_connection) = concurrent_rw.expect("concurrent rw login");
+    let (_concurrent_ro, concurrent_ro_connection) = concurrent_ro.expect("concurrent ro login");
+    let _concurrent_rw_conn = tokio::spawn(concurrent_rw_connection);
+    let _concurrent_ro_conn = tokio::spawn(concurrent_ro_connection);
 
     let (writer, writer_connection) = tokio_postgres::connect(
         &format!("{} password=readwrite-secret", server.conn_str()),
@@ -140,11 +235,78 @@ async fn password_auth_and_readonly_role_fail_closed() {
     )
     .await
     .expect("readwrite login");
+    assert_eq!(writer_connection.parameter("is_superuser"), Some("off"));
+    assert_eq!(
+        writer_connection.parameter("default_transaction_read_only"),
+        Some("off")
+    );
     let _writer_conn = tokio::spawn(writer_connection);
     writer
         .simple_query("CREATE TABLE public.auth_rw_points (id INT, geom BINARY)")
         .await
         .expect("readwrite role can create DuckLake tables");
+    writer
+        .simple_query(
+            "INSERT INTO public.auth_rw_points VALUES \
+             (1, X'010100000000000000000000000000000000000000')",
+        )
+        .await
+        .expect("readwrite role can seed DuckLake tables");
+
+    let roles = writer
+        .query(
+            "SELECT rolname, rolsuper, rolcanlogin, rolcreatedb, rolcreaterole, rolreplication \
+             FROM pg_catalog.pg_roles \
+             WHERE rolname IN ('postgres', 'quackgis_readonly')",
+            &[],
+        )
+        .await
+        .expect("pg_roles reflects configured login roles");
+    let role_flags: BTreeMap<String, (bool, bool, bool, bool, bool)> = roles
+        .into_iter()
+        .map(|row| {
+            (
+                row.get::<_, String>(0),
+                (
+                    row.get::<_, bool>(1),
+                    row.get::<_, bool>(2),
+                    row.get::<_, bool>(3),
+                    row.get::<_, bool>(4),
+                    row.get::<_, bool>(5),
+                ),
+            )
+        })
+        .collect();
+    assert_eq!(
+        role_flags.get("postgres"),
+        Some(&(false, true, false, false, false))
+    );
+    assert_eq!(
+        role_flags.get("quackgis_readonly"),
+        Some(&(false, true, false, false, false))
+    );
+
+    let privilege_metadata = writer
+        .query_one(
+            "SELECT \
+               has_database_privilege('quackgis_readonly', 'quackgis', 'CONNECT'), \
+               has_schema_privilege('quackgis_readonly', 'public', 'USAGE'), \
+               has_table_privilege('quackgis_readonly', 'public.auth_rw_points', 'SELECT'), \
+               has_table_privilege('quackgis_readonly', 'public.auth_rw_points', 'UPDATE'), \
+               has_column_privilege('quackgis_readonly', 'public.auth_rw_points', 'geom', 'UPDATE'), \
+               has_table_privilege('postgres', 'public.auth_rw_points', 'UPDATE'), \
+               has_table_privilege('missing_user', 'public.auth_rw_points', 'SELECT')",
+            &[],
+        )
+        .await
+        .expect("explicit-user privilege metadata reflects configured roles");
+    assert!(privilege_metadata.get::<_, bool>(0));
+    assert!(privilege_metadata.get::<_, bool>(1));
+    assert!(privilege_metadata.get::<_, bool>(2));
+    assert!(!privilege_metadata.get::<_, bool>(3));
+    assert!(!privilege_metadata.get::<_, bool>(4));
+    assert!(privilege_metadata.get::<_, bool>(5));
+    assert!(!privilege_metadata.get::<_, bool>(6));
 
     let readonly_conn = format!(
         "host=127.0.0.1 port={} user=quackgis_readonly dbname=quackgis password=readonly-secret",
@@ -153,18 +315,61 @@ async fn password_auth_and_readonly_role_fail_closed() {
     let (readonly, readonly_connection) = tokio_postgres::connect(&readonly_conn, NoTls)
         .await
         .expect("readonly login");
+    assert_eq!(readonly_connection.parameter("is_superuser"), Some("off"));
+    assert_eq!(
+        readonly_connection.parameter("default_transaction_read_only"),
+        Some("on")
+    );
     let _readonly_conn = tokio::spawn(readonly_connection);
     let count: i64 = readonly
         .query_one("SELECT COUNT(*) FROM public.auth_rw_points", &[])
         .await
         .expect("readonly role can query")
         .get(0);
-    assert_eq!(count, 0);
+    assert_eq!(count, 1);
 
-    let denied = readonly
-        .simple_query("CREATE TABLE public.auth_ro_denied (id INT)")
+    for (label, sql) in [
+        (
+            "create table",
+            "CREATE TABLE public.auth_ro_denied (id INT)",
+        ),
+        (
+            "insert",
+            "INSERT INTO public.auth_rw_points VALUES \
+             (2, X'0101000000000000000000F03F000000000000F03F')",
+        ),
+        (
+            "update",
+            "UPDATE public.auth_rw_points SET id = 3 WHERE id = 1",
+        ),
+        ("delete", "DELETE FROM public.auth_rw_points WHERE id = 1"),
+        ("drop", "DROP TABLE public.auth_rw_points"),
+        (
+            "compact",
+            "CALL quackgis_compact_table('public.auth_rw_points')",
+        ),
+    ] {
+        let denied = readonly.simple_query(sql).await;
+        assert!(
+            denied.is_err(),
+            "readonly role unexpectedly executed {label}: {sql}"
+        );
+    }
+
+    let copy_denied = readonly
+        .copy_in::<_, std::io::Cursor<Vec<u8>>>("COPY public.auth_rw_points FROM STDIN")
         .await;
-    assert!(denied.is_err(), "readonly role unexpectedly wrote");
+    assert!(
+        copy_denied.is_err(),
+        "readonly role unexpectedly entered COPY FROM STDIN"
+    );
+
+    let count_after_denials: i64 = writer
+        .query_one("SELECT COUNT(*) FROM public.auth_rw_points", &[])
+        .await
+        .expect("readwrite role can verify readonly denials")
+        .get(0);
+    assert_eq!(count_after_denials, 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -693,6 +898,37 @@ async fn privilege_metadata_surface_allows_common_text_helpers() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn catalog_misc_surface_shims_return_expected_shapes() {
+    let (_server, client, _conn) = connect().await;
+
+    let instance_rows = client
+        .simple_query("SELECT quackgis_instance_id() AS quackgis_instance_id")
+        .await
+        .expect("instance id surface");
+    let instance_id = instance_rows.iter().find_map(|message| match message {
+        tokio_postgres::SimpleQueryMessage::Row(row) => row.get("quackgis_instance_id"),
+        _ => None,
+    });
+    assert!(
+        instance_id.is_some_and(|value| !value.is_empty()),
+        "instance id should be present"
+    );
+
+    let geom_typename_rows = client
+        .simple_query(
+            "SELECT t.typname FROM pg_attribute a JOIN pg_type t ON a.atttypid = t.oid \
+             WHERE a.attname = 'geom'",
+        )
+        .await
+        .expect("geometry type-name surface");
+    let typname = geom_typename_rows.iter().find_map(|message| match message {
+        tokio_postgres::SimpleQueryMessage::Row(row) => row.get("typname"),
+        _ => None,
+    });
+    assert_eq!(typname, Some("geometry"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn postgis_extent_surface_returns_box2d_bounds() {
     let server = ServerHandle::start().await;
     let (client, connection) = tokio_postgres::connect(&server.conn_str(), NoTls)
@@ -828,6 +1064,37 @@ async fn geometry_columns_discovers_tables_with_geom_column() {
     assert_eq!(blob_len, 1, "only 'geom' should appear, not 'payload'");
     let only_col: String = blob_rows[0].get(0);
     assert_eq!(only_col, "geom");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn geometry_columns_discovers_asset_footprint_columns() {
+    let (_server, client, _conn) = connect().await;
+    client
+        .simple_query(
+            "CREATE TABLE public.asset_footprints (
+                id INT,
+                asset_uri TEXT,
+                captured_minute INT,
+                footprint BINARY
+            )",
+        )
+        .await
+        .expect("create asset footprint table");
+
+    let rows = client
+        .query(
+            "SELECT f_table_schema, f_table_name, f_geometry_column, type
+             FROM geometry_columns
+             WHERE f_table_name = 'asset_footprints'",
+            &[],
+        )
+        .await
+        .expect("geometry_columns asset footprint query");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get::<_, String>(0), "public");
+    assert_eq!(rows[0].get::<_, String>(1), "asset_footprints");
+    assert_eq!(rows[0].get::<_, String>(2), "footprint");
+    assert_eq!(rows[0].get::<_, String>(3), "GEOMETRY");
 }
 
 #[tokio::test(flavor = "multi_thread")]

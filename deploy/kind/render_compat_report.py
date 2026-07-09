@@ -19,12 +19,14 @@ CHECKS = [
     ("OSM PostGIS/QGIS parity", "osm-postgis-parity.log", ["osm_postgis_to_quackgis_copy_ok True", "osm_qgis_open_ok True", "osm_qgis_render_ok True"]),
     ("Kind demo seed", "quackgis-demo.log", ["demo_ok True"]),
     ("Lake PostgreSQL/S3 storage", "lake-probe.log", ["storage_ok True"]),
+    ("External profile storage", "external-lake-probe.log", ["storage_ok True", "native_delete_ok True", "native_update_ok True", "native_compact_ok True", "delete_files=2", "delete_snapshots=1", "appended_files=1", "retired_files=0", "metrics_ok True"]),
     ("Lake multi-pod storage", "lake-multipod.log", ["storage_ok True"]),
     ("Lake load-balanced service", "lb-probe.log", ["lb_ok True"]),
     ("Lake read workload", "read-probe.log", ["read_ok True"]),
     ("Lake QPS readers", "qps-probe.log", ["qps_ok True", "qps_scan", "max_bytes_scanned="]),
     ("Lake writer conflict/retry", "write-verify.log", ["write_conflict", "conflict_observed=True", "write_ok True"]),
     ("Lake OLAP fanout", "olap-probe.log", ["olap_ok True", "olap_scan", "max_bytes_scanned="]),
+    ("PostGIS regress subset", "postgis-regress.log", ["postgis_regress_subset", "pass_rate=1.000"]),
 ]
 
 
@@ -122,6 +124,7 @@ def metric_values(path: Path) -> dict[str, object]:
             {
                 "qps": maybe_float(result.get("qps")),
                 "p95_ms": maybe_float(result.get("p95_ms")),
+                "p99_ms": maybe_float(result.get("p99_ms")),
                 "queries": maybe_int(result.get("queries")),
                 "workers": maybe_int(result.get("workers")),
                 "seeded_rows": maybe_int(config.get("seeded_rows")),
@@ -142,6 +145,7 @@ def metric_values(path: Path) -> dict[str, object]:
             {
                 "qps": maybe_float(result.get("qps")),
                 "p95_ms": maybe_float(result.get("p95_ms")),
+                "p99_ms": maybe_float(result.get("p99_ms")),
                 "queries": maybe_int(result.get("queries")),
                 "workers": maybe_int(result.get("workers")),
                 "seeded_rows": maybe_int(config.get("seeded_rows")),
@@ -185,7 +189,46 @@ def metric_values(path: Path) -> dict[str, object]:
             {
                 "qps": maybe_float(result.get("qps")),
                 "p95_ms": maybe_float(result.get("p95_ms")),
+                "p99_ms": maybe_float(result.get("p99_ms")),
                 "bytes_scanned": maybe_int(scan.get("bytes_scanned")),
+            }
+        )
+
+    if name == "external-lake-probe.log":
+        native_delete = line_kv(last_line(text, "native_delete ") or "")
+        native_update = line_kv(last_line(text, "native_update ") or "")
+        native_compact = line_kv(last_line(text, "native_compact ") or "")
+        return compact(
+            {
+                "native_delete_files": maybe_int(native_delete.get("delete_files")),
+                "native_delete_snapshots": maybe_int(
+                    native_delete.get("delete_snapshots")
+                ),
+                "native_update_delete_files": maybe_int(
+                    native_update.get("delete_files")
+                ),
+                "native_update_appended_files": maybe_int(
+                    native_update.get("appended_files")
+                ),
+                "native_compact_delete_files": maybe_int(
+                    native_compact.get("delete_files")
+                ),
+                "native_compact_appended_files": maybe_int(
+                    native_compact.get("appended_files")
+                ),
+                "native_compact_retired_files": maybe_int(
+                    native_compact.get("retired_files")
+                ),
+            }
+        )
+
+    if name == "postgis-regress.log":
+        postgis = line_kv(last_line(text, "postgis_regress_subset ") or "")
+        return compact(
+            {
+                "postgis_passed": maybe_int(postgis.get("passed")),
+                "postgis_total": maybe_int(postgis.get("total")),
+                "postgis_pass_rate": maybe_float(postgis.get("pass_rate")),
             }
         )
 
@@ -208,6 +251,7 @@ def metric_summary(path: Path) -> str:
             for item in [
                 f"qps={result.get('qps')}" if result.get("qps") else "",
                 f"p95_ms={result.get('p95_ms')}" if result.get("p95_ms") else "",
+                f"p99_ms={result.get('p99_ms')}" if result.get("p99_ms") else "",
                 f"max_scan_bytes={max_bytes}/{config.get('max_bytes_scanned')}"
                 if max_bytes is not None and config.get("max_bytes_scanned")
                 else "",
@@ -227,6 +271,7 @@ def metric_summary(path: Path) -> str:
             for item in [
                 f"qps={result.get('qps')}" if result.get("qps") else "",
                 f"p95_ms={result.get('p95_ms')}" if result.get("p95_ms") else "",
+                f"p99_ms={result.get('p99_ms')}" if result.get("p99_ms") else "",
                 f"bytes_scanned={scan.get('bytes_scanned')}/{config.get('max_bytes_scanned')}"
                 if scan.get("bytes_scanned") and config.get("max_bytes_scanned")
                 else "",
@@ -273,7 +318,44 @@ def metric_summary(path: Path) -> str:
             for item in [
                 f"qps={result.get('qps')}" if result.get("qps") else "",
                 f"p95_ms={result.get('p95_ms')}" if result.get("p95_ms") else "",
+                f"p99_ms={result.get('p99_ms')}" if result.get("p99_ms") else "",
                 f"bytes_scanned={scan.get('bytes_scanned')}" if scan.get("bytes_scanned") else "",
+            ]
+            if item
+        )
+
+    if name == "external-lake-probe.log":
+        native_delete = line_kv(last_line(text, "native_delete ") or "")
+        native_update = line_kv(last_line(text, "native_update ") or "")
+        native_compact = line_kv(last_line(text, "native_compact ") or "")
+        return "; ".join(
+            item
+            for item in [
+                f"delete_files={native_delete.get('delete_files')}"
+                if native_delete.get("delete_files")
+                else "",
+                f"update_appended={native_update.get('appended_files')}"
+                if native_update.get("appended_files")
+                else "",
+                f"compact_appended={native_compact.get('appended_files')}"
+                if native_compact.get("appended_files")
+                else "",
+                f"compact_retired={native_compact.get('retired_files')}"
+                if native_compact.get("retired_files")
+                else "",
+            ]
+            if item
+        )
+
+    if name == "postgis-regress.log":
+        postgis = line_kv(last_line(text, "postgis_regress_subset ") or "")
+        return "; ".join(
+            item
+            for item in [
+                f"passed={postgis.get('passed')}/{postgis.get('total')}"
+                if postgis.get("passed") and postgis.get("total")
+                else "",
+                f"pass_rate={postgis.get('pass_rate')}" if postgis.get("pass_rate") else "",
             ]
             if item
         )

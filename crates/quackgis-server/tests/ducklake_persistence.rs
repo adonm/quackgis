@@ -9,7 +9,9 @@
 
 mod common;
 
+use std::fs;
 use std::io::Cursor;
+use std::path::Path;
 use std::pin::pin;
 use std::sync::Arc;
 
@@ -18,6 +20,7 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion_ducklake::DuckLakeTableWriter;
 use futures::SinkExt;
+use sqlx::Row;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_postgres::NoTls;
 
@@ -65,6 +68,20 @@ async fn write_nums(paths: &StoragePaths, table: &str, values: &[i32]) {
         .write_table("main", table, &[batch])
         .await
         .expect("write table");
+}
+
+fn copy_dir_all(src: &Path, dst: &Path) {
+    fs::create_dir_all(dst).expect("create destination directory");
+    for entry in fs::read_dir(src).expect("read source directory") {
+        let entry = entry.expect("source directory entry");
+        let ty = entry.file_type().expect("source entry type");
+        let target = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_all(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).expect("copy backup file");
+        }
+    }
 }
 
 async fn write_geo(paths: &StoragePaths) {
@@ -424,6 +441,589 @@ async fn ducklake_compact_table_rewrites_without_changing_results() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn ducklake_compact_table_accepts_layout_bucket_scope() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let catalog_path = tmp.path().join("quackgis.db");
+    let server = ServerHandle::start_with_tempdir(tmp).await;
+    let (client, conn) = tokio_postgres::connect(&server.conn_str(), NoTls)
+        .await
+        .expect("connect");
+    let _conn = tokio::spawn(conn);
+
+    client
+        .batch_execute(
+            "CREATE TABLE public.compact_bucket_points (
+                 id INT,
+                 captured_minute INT,
+                 geom BINARY,
+                 name TEXT
+             );
+             INSERT INTO public.compact_bucket_points (id, captured_minute, geom, name) VALUES
+                (1, 10, X'010100000000000000000000000000000000000000', 'a');
+              INSERT INTO public.compact_bucket_points (id, captured_minute, geom, name) VALUES
+                (2, 80, X'010100000000000000000000400000000000000040', 'b');
+              INSERT INTO public.compact_bucket_points (id, captured_minute, geom, name) VALUES
+                (3, 10, X'010100000000000000000010400000000000001040', 'c');",
+        )
+        .await
+        .expect("seed compact bucket target");
+
+    let bucket = client
+        .query_one(
+            "SELECT _qg_time_bucket, _qg_space_bucket
+             FROM quackgis.main.compact_bucket_points
+             WHERE id = 1",
+            &[],
+        )
+        .await
+        .expect("read layout bucket");
+    let time_bucket: i64 = bucket.get(0);
+    let space_bucket: i64 = bucket.get(1);
+
+    let before: Vec<(i32, i32, String)> = client
+        .query(
+            "SELECT id, captured_minute, ST_AsText(ST_GeomFromWKB(geom))
+             FROM public.compact_bucket_points
+             ORDER BY id",
+            &[],
+        )
+        .await
+        .expect("select before bucket compact")
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2)))
+        .collect();
+
+    client
+        .batch_execute(&format!(
+            "CALL quackgis_compact_table('public.compact_bucket_points', {time_bucket}, {space_bucket})"
+        ))
+        .await
+        .expect("compact layout bucket");
+
+    let after: Vec<(i32, i32, String)> = client
+        .query(
+            "SELECT id, captured_minute, ST_AsText(ST_GeomFromWKB(geom))
+             FROM public.compact_bucket_points
+             ORDER BY id",
+            &[],
+        )
+        .await
+        .expect("select after bucket compact")
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2)))
+        .collect();
+
+    assert_eq!(after, before);
+    assert_eq!(
+        after,
+        vec![
+            (1, 10, "POINT(0 0)".to_string()),
+            (2, 80, "POINT(2 2)".to_string()),
+            (3, 10, "POINT(4 4)".to_string()),
+        ]
+    );
+
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", catalog_path.display()))
+        .await
+        .expect("catalog pool");
+    let metadata = sqlx::query(
+        "WITH target_table AS (
+             SELECT t.table_id
+             FROM ducklake_table t
+             JOIN ducklake_schema s ON s.schema_id = t.schema_id
+             WHERE s.schema_name = 'main'
+               AND t.table_name = 'compact_bucket_points'
+               AND t.end_snapshot IS NULL
+         ), delete_snapshot AS (
+             SELECT DISTINCT df.begin_snapshot AS snapshot_id
+             FROM ducklake_delete_file df
+             JOIN target_table tt ON tt.table_id = df.table_id
+         )
+         SELECT
+             (SELECT COUNT(*) FROM ducklake_delete_file df
+              JOIN target_table tt ON tt.table_id = df.table_id) AS delete_files,
+             (SELECT COUNT(DISTINCT df.data_file_id) FROM ducklake_delete_file df
+              JOIN target_table tt ON tt.table_id = df.table_id) AS affected_data_files,
+             (SELECT COUNT(*) FROM delete_snapshot) AS delete_snapshots,
+             (SELECT COUNT(*) FROM ducklake_data_file data
+              JOIN target_table tt ON tt.table_id = data.table_id
+              WHERE data.begin_snapshot IN (SELECT snapshot_id FROM delete_snapshot)) AS appended_files,
+             (SELECT COUNT(*) FROM ducklake_data_file data
+              JOIN target_table tt ON tt.table_id = data.table_id
+              WHERE data.end_snapshot IN (SELECT snapshot_id FROM delete_snapshot)) AS retired_files",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("bucket compaction metadata");
+    let delete_files: i64 = metadata.try_get("delete_files").unwrap();
+    let affected_data_files: i64 = metadata.try_get("affected_data_files").unwrap();
+    let delete_snapshots: i64 = metadata.try_get("delete_snapshots").unwrap();
+    let appended_files: i64 = metadata.try_get("appended_files").unwrap();
+    let retired_files: i64 = metadata.try_get("retired_files").unwrap();
+    assert_eq!(delete_files, 2, "one delete file per bucket source file");
+    assert_eq!(affected_data_files, 2, "bucket rows span two data files");
+    assert_eq!(delete_snapshots, 1, "bucket masks share one snapshot");
+    assert_eq!(
+        appended_files, 1,
+        "compacted bucket is one replacement file"
+    );
+    assert_eq!(
+        retired_files, 0,
+        "bucket compaction must not retire whole data files"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ducklake_metadata_table_functions_roundtrip_through_wire() {
+    let server = ServerHandle::start().await;
+    let (client, conn) = tokio_postgres::connect(&server.conn_str(), NoTls)
+        .await
+        .expect("connect");
+    let _conn = tokio::spawn(conn);
+
+    client
+        .batch_execute(
+            "CREATE TABLE public.metadata_points (id INT, geom BINARY, name TEXT);
+             INSERT INTO public.metadata_points (id, geom, name) VALUES
+                (1, X'010100000000000000000000000000000000000000', 'kept'),
+                (2, X'0101000000000000000000F03F000000000000F03F', 'deleted');
+             DELETE FROM public.metadata_points WHERE id = 2;",
+        )
+        .await
+        .expect("seed metadata table-function target");
+
+    let max_snapshot: i64 = client
+        .query_one("SELECT MAX(snapshot_id) FROM ducklake_snapshots()", &[])
+        .await
+        .expect("ducklake_snapshots")
+        .get(0);
+    assert!(max_snapshot >= 3, "unexpected snapshot id {max_snapshot}");
+
+    let info = client
+        .query_one(
+            "SELECT file_count, delete_file_count
+             FROM ducklake_table_info()
+             WHERE schema_name = 'main' AND table_name = 'metadata_points'",
+            &[],
+        )
+        .await
+        .expect("ducklake_table_info");
+    let file_count: i64 = info.get(0);
+    let delete_file_count: i64 = info.get(1);
+    assert!(
+        file_count >= 1,
+        "expected visible data files, got {file_count}"
+    );
+    assert_eq!(delete_file_count, 1, "native delete file is visible");
+
+    let files_with_deletes: i64 = client
+        .query_one(
+            "SELECT COUNT(*)
+             FROM ducklake_list_files()
+             WHERE schema_name = 'main'
+               AND table_name = 'metadata_points'
+               AND has_delete_file",
+            &[],
+        )
+        .await
+        .expect("ducklake_list_files")
+        .get(0);
+    assert_eq!(files_with_deletes, 1);
+
+    let cdc_unregistered = client
+        .simple_query(&format!(
+            "SELECT * FROM ducklake_table_deletions('main.metadata_points', 0, {max_snapshot})"
+        ))
+        .await;
+    assert!(
+        cdc_unregistered.is_err(),
+        "CDC row table functions stay disabled until pgwire projection is safe"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ducklake_bucket_compaction_reports_fragmented_file_delta() {
+    let server = ServerHandle::start().await;
+    let (client, conn) = tokio_postgres::connect(&server.conn_str(), NoTls)
+        .await
+        .expect("connect");
+    let _conn = tokio::spawn(conn);
+
+    client
+        .batch_execute(
+            "CREATE TABLE public.compact_fragment_points (
+                 id INT,
+                 captured_minute INT,
+                 geom BINARY,
+                 name TEXT
+             );
+             INSERT INTO public.compact_fragment_points (id, captured_minute, geom, name) VALUES
+                (1, 10, X'010100000000000000000000000000000000000000', 'a');
+             INSERT INTO public.compact_fragment_points (id, captured_minute, geom, name) VALUES
+                (2, 10, X'010100000000000000000000000000000000000000', 'b');
+             INSERT INTO public.compact_fragment_points (id, captured_minute, geom, name) VALUES
+                (3, 10, X'010100000000000000000000000000000000000000', 'c');
+             INSERT INTO public.compact_fragment_points (id, captured_minute, geom, name) VALUES
+                (4, 10, X'010100000000000000000000000000000000000000', 'd');",
+        )
+        .await
+        .expect("seed fragmented compaction target");
+
+    let before = table_info(&client, "compact_fragment_points").await;
+    assert!(
+        before.file_count >= 4,
+        "autocommit inserts fragment files: {before:?}"
+    );
+    assert_eq!(before.delete_file_count, 0);
+    assert!(before.file_size_bytes > 0);
+
+    let bucket = client
+        .query_one(
+            "SELECT _qg_time_bucket, _qg_space_bucket
+             FROM quackgis.main.compact_fragment_points
+             WHERE id = 1",
+            &[],
+        )
+        .await
+        .expect("read fragmented layout bucket");
+    let time_bucket: i64 = bucket.get(0);
+    let space_bucket: i64 = bucket.get(1);
+
+    client
+        .batch_execute(&format!(
+            "CALL quackgis_compact_table('public.compact_fragment_points', {time_bucket}, {space_bucket})"
+        ))
+        .await
+        .expect("compact fragmented layout bucket");
+
+    let rows: Vec<i32> = client
+        .query(
+            "SELECT id FROM public.compact_fragment_points ORDER BY id",
+            &[],
+        )
+        .await
+        .expect("select after fragmented compact")
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert_eq!(rows, vec![1, 2, 3, 4]);
+
+    let after = table_info(&client, "compact_fragment_points").await;
+    assert_eq!(
+        after.delete_file_count, 4,
+        "one delete file masks each source fragment"
+    );
+    assert_eq!(
+        after.file_count,
+        before.file_count + 1,
+        "partial bucket compaction appends one replacement while source files stay visible"
+    );
+    assert!(
+        after.file_size_bytes >= before.file_size_bytes,
+        "catalog bytes should include replacement file"
+    );
+
+    let summary = format!(
+        "bucket_compaction_fragmented file_groups={}->{} delete_files={} bytes={}->{}",
+        before.file_count,
+        after.file_count,
+        after.delete_file_count,
+        before.file_size_bytes,
+        after.file_size_bytes,
+    );
+    assert!(
+        summary.contains(&format!(
+            "file_groups={}->{}",
+            before.file_count, after.file_count
+        )),
+        "{summary}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ducklake_full_compaction_reports_scan_metric_improvement() {
+    let server = ServerHandle::start().await;
+    let (client, conn) = tokio_postgres::connect(&server.conn_str(), NoTls)
+        .await
+        .expect("connect");
+    let _conn = tokio::spawn(conn);
+
+    client
+        .batch_execute(
+            "CREATE TABLE public.compact_scan_points (
+                 id INT,
+                 captured_minute INT,
+                 geom BINARY,
+                 name TEXT
+             );
+             INSERT INTO public.compact_scan_points (id, captured_minute, geom, name) VALUES
+                (1, 10, X'010100000000000000000000000000000000000000', 'a');
+             INSERT INTO public.compact_scan_points (id, captured_minute, geom, name) VALUES
+                (2, 20, X'0101000000000000000000F03F000000000000F03F', 'b');
+             INSERT INTO public.compact_scan_points (id, captured_minute, geom, name) VALUES
+                (3, 30, X'010100000000000000000000400000000000000040', 'c');
+             INSERT INTO public.compact_scan_points (id, captured_minute, geom, name) VALUES
+                (4, 40, X'010100000000000000000008400000000000000840', 'd');
+             INSERT INTO public.compact_scan_points (id, captured_minute, geom, name) VALUES
+                (5, 50, X'010100000000000000000010400000000000001040', 'e');
+             INSERT INTO public.compact_scan_points (id, captured_minute, geom, name) VALUES
+                (6, 60, X'010100000000000000000014400000000000001440', 'f');",
+        )
+        .await
+        .expect("seed fragmented scan target");
+
+    let scan_sql = "SELECT COUNT(*) AS n
+         FROM quackgis.main.compact_scan_points
+         WHERE _qg_minx <= 6.0 AND _qg_maxx >= -1.0
+           AND _qg_miny <= 6.0 AND _qg_maxy >= -1.0
+           AND ST_Intersects(
+             ST_GeomFromWKB(geom),
+             ST_GeomFromWKB(ST_MakeEnvelope(-1.0, -1.0, 6.0, 6.0, 3857)))";
+
+    let before_count: i64 = client
+        .query_one(scan_sql, &[])
+        .await
+        .expect("count before scan compact")
+        .get(0);
+    assert_eq!(before_count, 6);
+
+    let before_info = table_info(&client, "compact_scan_points").await;
+    assert!(
+        before_info.file_count >= 6,
+        "autocommit inserts should fragment scan target: {before_info:?}"
+    );
+    let before_scan = explain_scan_metric(&server.conn_str(), scan_sql).await;
+    assert!(
+        before_scan.file_groups.is_some(),
+        "expected scan file-group evidence before compaction: {before_scan:?}"
+    );
+    assert!(
+        before_scan.row_groups_total.unwrap_or(0) >= 6,
+        "expected fragmented row-group evidence before compaction: {before_scan:?}"
+    );
+    assert!(
+        before_scan.bytes_scanned.is_some(),
+        "expected scan-byte evidence before compaction: {before_scan:?}"
+    );
+
+    client
+        .batch_execute("CALL quackgis_compact_table('public.compact_scan_points')")
+        .await
+        .expect("whole-table compact scan target");
+
+    let after_count: i64 = client
+        .query_one(scan_sql, &[])
+        .await
+        .expect("count after scan compact")
+        .get(0);
+    assert_eq!(after_count, before_count);
+
+    let after_info = table_info(&client, "compact_scan_points").await;
+    assert!(
+        after_info.file_count < before_info.file_count,
+        "whole-table compaction should reduce visible file count: before={before_info:?} after={after_info:?}"
+    );
+    let after_scan = explain_scan_metric(&server.conn_str(), scan_sql).await;
+    assert!(
+        after_scan.file_groups <= before_scan.file_groups,
+        "compaction should not increase scan file groups: before={before_scan:?} after={after_scan:?}"
+    );
+    assert!(
+        after_scan.bytes_scanned.is_some(),
+        "expected scan-byte evidence after compaction: {after_scan:?}"
+    );
+    assert!(
+        after_scan.row_groups_total <= before_scan.row_groups_total,
+        "compaction should not increase scanned row groups: before={before_scan:?} after={after_scan:?}"
+    );
+
+    println!(
+        "compaction_scan file_groups={}->{} bytes_scanned={}->{} row_groups={}->{} visible_files={}->{}",
+        fmt_scan(before_scan.file_groups),
+        fmt_scan(after_scan.file_groups),
+        fmt_scan(before_scan.bytes_scanned),
+        fmt_scan(after_scan.bytes_scanned),
+        before_scan.row_group_summary(),
+        after_scan.row_group_summary(),
+        before_info.file_count,
+        after_info.file_count,
+    );
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DuckLakeTableInfo {
+    file_count: i64,
+    file_size_bytes: i64,
+    delete_file_count: i64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ScanMetric {
+    bytes_scanned: Option<u64>,
+    file_groups: Option<u64>,
+    row_groups_total: Option<u64>,
+    row_groups_matched: Option<u64>,
+}
+
+impl ScanMetric {
+    fn row_group_summary(self) -> String {
+        match (self.row_groups_total, self.row_groups_matched) {
+            (Some(total), Some(matched)) => format!("{matched}/{total}"),
+            _ => "NA".to_string(),
+        }
+    }
+}
+
+async fn table_info(client: &tokio_postgres::Client, table_name: &str) -> DuckLakeTableInfo {
+    let row = client
+        .query_one(
+            "SELECT file_count, file_size_bytes, delete_file_count
+             FROM ducklake_table_info()
+             WHERE schema_name = 'main' AND table_name = $1",
+            &[&table_name],
+        )
+        .await
+        .expect("ducklake_table_info row");
+    DuckLakeTableInfo {
+        file_count: row.get(0),
+        file_size_bytes: row.get(1),
+        delete_file_count: row.get(2),
+    }
+}
+
+async fn explain_scan_metric(conn_str: &str, sql: &str) -> ScanMetric {
+    let plan = explain_analyze_plan(conn_str, sql).await;
+    let metric = scan_metric_from_plan(&plan);
+    assert!(
+        plan.contains("DataSourceExec"),
+        "EXPLAIN ANALYZE did not include a DataSourceExec plan:\n{plan}"
+    );
+    metric
+}
+
+async fn explain_analyze_plan(conn_str: &str, sql: &str) -> String {
+    raw_simple_query_text(conn_str, &format!("EXPLAIN ANALYZE {sql}"))
+        .await
+        .join("\n")
+}
+
+async fn raw_simple_query_text(conn_str: &str, sql: &str) -> Vec<String> {
+    let (host, port) = parse_conn_addr(conn_str);
+    let mut stream = tokio::net::TcpStream::connect((host.as_str(), port))
+        .await
+        .expect("raw pgwire connect for simple query");
+    send_startup(&mut stream).await;
+    read_until_ready(&mut stream).await;
+
+    send_frontend_message(&mut stream, b'Q', cstring_body(sql).as_slice()).await;
+    let mut values = Vec::new();
+    loop {
+        let (typ, body) = read_backend_message(&mut stream).await;
+        match typ {
+            b'D' => values.extend(parse_text_data_row(&body).into_iter().flatten()),
+            b'Z' => break,
+            b'E' => panic!("simple query failed: {}", error_message(&body)),
+            _ => {}
+        }
+    }
+    values
+}
+
+fn parse_text_data_row(body: &[u8]) -> Vec<Option<String>> {
+    assert!(body.len() >= 2, "DataRow missing column count");
+    let mut pos = 2;
+    let columns = i16::from_be_bytes([body[0], body[1]]) as usize;
+    let mut values = Vec::with_capacity(columns);
+    for _ in 0..columns {
+        assert!(pos + 4 <= body.len(), "DataRow missing column length");
+        let len = i32::from_be_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]);
+        pos += 4;
+        if len < 0 {
+            values.push(None);
+            continue;
+        }
+        let len = len as usize;
+        assert!(
+            pos + len <= body.len(),
+            "DataRow column length exceeds body"
+        );
+        values.push(Some(
+            String::from_utf8_lossy(&body[pos..pos + len]).into_owned(),
+        ));
+        pos += len;
+    }
+    values
+}
+
+fn scan_metric_from_plan(plan: &str) -> ScanMetric {
+    let mut metric = ScanMetric {
+        bytes_scanned: metric_value(plan, "bytes_scanned"),
+        file_groups: file_group_count(plan),
+        ..ScanMetric::default()
+    };
+    if let Some((total, matched)) = pruning_pair(plan, "row_groups_pruned_statistics") {
+        metric.row_groups_total = Some(total);
+        metric.row_groups_matched = Some(matched);
+    }
+    metric
+}
+
+fn metric_value(plan: &str, metric_name: &str) -> Option<u64> {
+    let needle = format!("{metric_name}=");
+    let start = plan.find(&needle)? + needle.len();
+    parse_u64_prefix(&plan[start..])
+}
+
+fn file_group_count(plan: &str) -> Option<u64> {
+    let start = plan.find("file_groups={")? + "file_groups={".len();
+    parse_u64_prefix(&plan[start..])
+}
+
+fn pruning_pair(plan: &str, metric_name: &str) -> Option<(u64, u64)> {
+    let needle = format!("{metric_name}=");
+    let start = plan.find(&needle)? + needle.len();
+    let rest = &plan[start..];
+    let total = parse_u64_prefix(rest)?;
+    let matched_end = rest.find(" matched")?;
+    let matched = parse_last_u64(&rest[..matched_end])?;
+    Some((total, matched))
+}
+
+fn parse_u64_prefix(value: &str) -> Option<u64> {
+    let digits = value
+        .chars()
+        .skip_while(|ch| ch.is_whitespace())
+        .take_while(|ch| ch.is_ascii_digit() || *ch == ',')
+        .filter(|ch| *ch != ',')
+        .collect::<String>();
+    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
+}
+
+fn parse_last_u64(value: &str) -> Option<u64> {
+    let mut end = None;
+    for (idx, ch) in value.char_indices().rev() {
+        if ch.is_ascii_digit() || ch == ',' {
+            end = Some(idx + ch.len_utf8());
+            break;
+        }
+    }
+    let end = end?;
+    let start = value[..end]
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| !ch.is_ascii_digit() && *ch != ',')
+        .map(|(idx, ch)| idx + ch.len_utf8())
+        .unwrap_or(0);
+    value[start..end].replace(',', "").parse().ok()
+}
+
+fn fmt_scan(value: Option<u64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "NA".to_string())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn ducklake_writer_api_roundtrip_through_wire() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let paths = StoragePaths::new(
@@ -472,6 +1072,36 @@ async fn ducklake_data_survives_process_restart() {
         .to_string();
     assert!(rendered.contains("1"), "expected 1 in output:\n{rendered}");
     assert!(rendered.contains("2"), "expected 2 in output:\n{rendered}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ducklake_local_backup_restore_copy_roundtrip() {
+    let source = tempfile::TempDir::new().expect("source tempdir");
+    let source_catalog = source.path().join("quackgis.db");
+    let source_data = source.path().join("data");
+    let source_paths = StoragePaths::new(
+        source_catalog.to_str().unwrap(),
+        source_data.to_str().unwrap(),
+    )
+    .expect("source paths");
+    write_nums(&source_paths, "backup_nums", &[10, 20, 30]).await;
+
+    let restored = tempfile::TempDir::new().expect("restored tempdir");
+    fs::copy(&source_catalog, restored.path().join("quackgis.db")).expect("copy catalog");
+    copy_dir_all(&source_data, &restored.path().join("data"));
+
+    let server = ServerHandle::start_with_tempdir(restored).await;
+    let (client, conn) = tokio_postgres::connect(&server.conn_str(), NoTls)
+        .await
+        .expect("connect restored backup");
+    let _conn = tokio::spawn(conn);
+
+    let restored_sum: i64 = client
+        .query_one("SELECT SUM(id) FROM quackgis.main.backup_nums", &[])
+        .await
+        .expect("query restored backup")
+        .get(0);
+    assert_eq!(restored_sum, 60);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -547,6 +1177,152 @@ async fn ducklake_bare_create_insert_values_update_delete() {
     assert_eq!(
         got,
         vec![(2, 21, "z".to_string()), (3, 30, "c".to_string())]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ducklake_delete_uses_atomic_native_delete_files_across_data_files() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let catalog_path = tmp.path().join("quackgis.db");
+    let server = ServerHandle::start_with_tempdir(tmp).await;
+    let (client, conn) = tokio_postgres::connect(&server.conn_str(), NoTls)
+        .await
+        .expect("connect");
+    let _conn = tokio::spawn(conn);
+
+    client
+        .batch_execute(
+            "CREATE TABLE public.native_delete_points (id INT, geom BINARY, name TEXT);
+             INSERT INTO public.native_delete_points (id, geom, name) VALUES
+                (1, X'010100000000000000000000000000000000000000', 'a'),
+                (2, X'0101000000000000000000F03F000000000000F03F', 'b');
+             INSERT INTO public.native_delete_points (id, geom, name) VALUES
+                (3, X'010100000000000000000000400000000000000040', 'c'),
+                (4, X'010100000000000000000008400000000000000840', 'd');",
+        )
+        .await
+        .expect("seed native delete target");
+
+    let deleted = client
+        .execute(
+            "DELETE FROM public.native_delete_points WHERE id = 2 OR id = 4",
+            &[],
+        )
+        .await
+        .expect("native DELETE");
+    assert_eq!(deleted, 2);
+
+    let ids: Vec<i32> = client
+        .query(
+            "SELECT id FROM public.native_delete_points ORDER BY id",
+            &[],
+        )
+        .await
+        .expect("select survivors")
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert_eq!(ids, vec![1, 3]);
+
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", catalog_path.display()))
+        .await
+        .expect("catalog pool");
+    let metadata = sqlx::query(
+        "SELECT COUNT(*) AS delete_files,
+                COUNT(DISTINCT begin_snapshot) AS delete_snapshots
+         FROM ducklake_delete_file",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("delete metadata");
+    let delete_files: i64 = metadata.try_get("delete_files").unwrap();
+    let delete_snapshots: i64 = metadata.try_get("delete_snapshots").unwrap();
+    assert_eq!(delete_files, 2, "one delete file per affected data file");
+    assert_eq!(
+        delete_snapshots, 1,
+        "both delete files must be committed under one snapshot"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ducklake_update_uses_atomic_native_delete_and_append() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let catalog_path = tmp.path().join("quackgis.db");
+    let server = ServerHandle::start_with_tempdir(tmp).await;
+    let (client, conn) = tokio_postgres::connect(&server.conn_str(), NoTls)
+        .await
+        .expect("connect");
+    let _conn = tokio::spawn(conn);
+
+    client
+        .batch_execute(
+            "CREATE TABLE public.native_update_points (id INT, geom BINARY, name TEXT);
+             INSERT INTO public.native_update_points (id, geom, name) VALUES
+                (1, X'010100000000000000000000000000000000000000', 'a'),
+                (2, X'0101000000000000000000F03F000000000000F03F', 'b');
+             INSERT INTO public.native_update_points (id, geom, name) VALUES
+                (3, X'010100000000000000000000400000000000000040', 'c'),
+                (4, X'010100000000000000000008400000000000000840', 'd');",
+        )
+        .await
+        .expect("seed native update target");
+
+    let updated = client
+        .execute(
+            "UPDATE public.native_update_points SET name = 'updated' WHERE id = 2 OR id = 4",
+            &[],
+        )
+        .await
+        .expect("native UPDATE");
+    assert_eq!(updated, 2);
+
+    let rows: Vec<(i32, String)> = client
+        .query(
+            "SELECT id, name FROM public.native_update_points ORDER BY id",
+            &[],
+        )
+        .await
+        .expect("select updated rows")
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            (1, "a".to_string()),
+            (2, "updated".to_string()),
+            (3, "c".to_string()),
+            (4, "updated".to_string()),
+        ]
+    );
+
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", catalog_path.display()))
+        .await
+        .expect("catalog pool");
+    let metadata = sqlx::query(
+        "WITH delete_snapshot AS (
+             SELECT begin_snapshot AS snapshot_id FROM ducklake_delete_file GROUP BY begin_snapshot
+         )
+         SELECT
+             (SELECT COUNT(*) FROM ducklake_delete_file) AS delete_files,
+             (SELECT COUNT(*) FROM delete_snapshot) AS delete_snapshots,
+             (SELECT COUNT(*) FROM ducklake_data_file
+              WHERE begin_snapshot = (SELECT snapshot_id FROM delete_snapshot)) AS appended_files",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("update metadata");
+    let delete_files: i64 = metadata.try_get("delete_files").unwrap();
+    let delete_snapshots: i64 = metadata.try_get("delete_snapshots").unwrap();
+    let appended_files: i64 = metadata.try_get("appended_files").unwrap();
+    assert_eq!(
+        delete_files, 2,
+        "one delete file per affected old data file"
+    );
+    assert_eq!(delete_snapshots, 1, "old-row masks share one snapshot");
+    assert_eq!(
+        appended_files, 1,
+        "replacement rows are appended in the same mutation snapshot"
     );
 }
 

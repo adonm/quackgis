@@ -49,6 +49,14 @@ in the release evidence record.
 - DuckLake catalog/object data should remain forward-compatible with the official
   DuckLake 1.0+ direction where practical; QuackGIS-specific behavior must be
   documented when it depends on forked APIs.
+- Native delete-file or partial-rewrite DML must not be enabled from independent
+  per-file metadata commits. The vendored fork now provides atomic table
+  mutations for delete files, appended data files, and selected file retirement;
+  native autocommit `UPDATE` is routed through that single-snapshot API, and
+  bucket compaction must follow the same rule. See `docs/NATIVE_DML_FORK_PLAN.md`.
+- `docs/DUCKLAKE_ALIGNMENT.md` is the compatibility ledger for fork-backed or
+  upstream-sensitive DuckLake behavior: current implementation, upstream target,
+  interop gate, and migration trigger.
 - Before claiming upgrade compatibility between releases, validate an existing
   DuckLake catalog/data prefix with the new binary: table discovery, representative
   counts/bboxes, spatial reads, `geometry_columns`, and compaction on a copied
@@ -62,5 +70,7 @@ For every tag/main artifact build, attach or reference:
 
 - `release-evidence-<version>.json` from the artifact workflow;
 - matching compatibility/storage `metrics.json` artifacts for the source SHA;
+- matching `metrics-dashboard.md` summaries when metrics artifacts exist;
 - any dependency rebase notes and `DIVERGENCE.md` changes;
+- updated `docs/DUCKLAKE_ALIGNMENT.md` entries for storage behavior changes;
 - known data/catalog compatibility limits for the release.

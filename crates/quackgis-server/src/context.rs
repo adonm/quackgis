@@ -16,8 +16,14 @@ use datafusion_ducklake::{
     DuckLakeCatalog, MetadataProvider, MetadataWriter, MulticatalogManager, MulticatalogProvider,
     PostgresMetadataWriter, SqliteMetadataProvider, SqliteMetadataWriter,
     initialize_multicatalog_schema,
+    table_functions::{
+        DucklakeListFilesFunction, DucklakeSnapshotsFunction, DucklakeTableInfoFunction,
+    },
 };
 use datafusion_postgres::auth::AuthManager;
+use datafusion_postgres::datafusion_pg_catalog::pg_catalog::context::{
+    Grant, Permission, ResourceType, Role, User,
+};
 use datafusion_postgres::datafusion_pg_catalog::setup_pg_catalog;
 use object_store::ObjectStore;
 use object_store::aws::AmazonS3Builder;
@@ -25,6 +31,8 @@ use object_store::local::LocalFileSystem;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use tokio::sync::OnceCell;
 use url::Url;
+
+use crate::auth::{AccessRole, AuthConfig, AuthMode};
 
 /// Default name of the DuckLake catalog as seen by clients. Persisted tables
 /// live under `quackgis.main.<table>`. The default catalog for unqualified
@@ -421,6 +429,16 @@ pub async fn build_session_context() -> Result<Arc<SessionContext>> {
 pub async fn build_session_context_with_storage(
     paths: StoragePaths,
 ) -> Result<Arc<SessionContext>> {
+    let auth = AuthConfig::trust();
+    build_session_context_with_storage_and_auth(paths, &auth).await
+}
+
+/// Same as [`build_session_context_with_storage`] but with explicit pgwire auth
+/// metadata so `pg_catalog.pg_roles` matches the login profile clients see.
+pub async fn build_session_context_with_storage_and_auth(
+    paths: StoragePaths,
+    auth: &AuthConfig,
+) -> Result<Arc<SessionContext>> {
     // 0. Configure the pure-Rust CRS engine before any SedonaDB functions
     //    are registered. This replaces libproj with proj-wkt/proj-core.
     //    Idempotent: safe to call multiple times (subsequent calls no-op).
@@ -429,6 +447,7 @@ pub async fn build_session_context_with_storage(
     // 1. DuckLake: writer creates the catalog schema if missing, then a
     //    snapshot is required before any read or write can happen.
     let (provider, writer) = paths.init_ducklake_metadata().await?;
+    let ducklake_function_provider = Arc::clone(&provider);
     let ducklake = DuckLakeCatalog::with_writer(provider, writer)
         .map_err(|e| anyhow!("DuckLakeCatalog::with_writer: {e}"))?;
 
@@ -454,6 +473,7 @@ pub async fn build_session_context_with_storage(
     register_sedona_function_catalog(&ctx)
         .map_err(|e| anyhow!("register SedonaDB function catalog failed: {e}"))?;
     let ctx = Arc::new(ctx);
+    register_ducklake_metadata_functions(&ctx, ducklake_function_provider);
 
     // Expose DuckLake `quackgis.main` tables as PostgreSQL-style `public.*`
     // before pg_catalog is installed so QGIS pg_class/pg_namespace probes see
@@ -461,13 +481,15 @@ pub async fn build_session_context_with_storage(
     crate::public_schema::register_public_schema_alias(&ctx)
         .map_err(|e| anyhow!("register_public_schema_alias failed: {e}"))?;
 
-    // 3. pg_catalog attached to the in-memory "datafusion" catalog. Default
-    //    AuthManager has the single 'postgres' role; RBAC arrives at M6.
+    // 3. pg_catalog attached to the in-memory "datafusion" catalog. In password
+    //    mode, mirror the configured login roles so client metadata does not
+    //    advertise a superuser-only world.
     let auth_manager = Arc::new(AuthManager::new());
+    configure_pg_catalog_auth(auth_manager.as_ref(), auth).await?;
     setup_pg_catalog(&ctx, "datafusion", auth_manager)
         .map_err(|e| anyhow!("setup_pg_catalog failed: {e}"))?;
 
-    crate::postgis_compat::register_postgis_compat(&ctx)
+    crate::postgis_compat::register_postgis_compat(&ctx, auth)
         .map_err(|e| anyhow!("register_postgis_compat failed: {e}"))?;
 
     crate::geometry_columns::register_geometry_columns(&ctx)
@@ -477,6 +499,83 @@ pub async fn build_session_context_with_storage(
         .map_err(|e| anyhow!("register_spatial_udfs failed: {e}"))?;
 
     Ok(ctx)
+}
+
+async fn configure_pg_catalog_auth(auth_manager: &AuthManager, auth: &AuthConfig) -> Result<()> {
+    if auth.mode() == AuthMode::Trust {
+        return Ok(());
+    }
+
+    for (username, user) in auth.users() {
+        let role = pg_catalog_role(username, user.role);
+        let account = User {
+            username: username.to_string(),
+            password_hash: "SCRAM-SHA-256:<redacted>".to_string(),
+            roles: vec![username.to_string()],
+            is_superuser: false,
+            can_login: true,
+            connection_limit: None,
+        };
+        auth_manager
+            .add_role(role)
+            .await
+            .map_err(|e| anyhow!("register pg_catalog role {username:?}: {e}"))?;
+        auth_manager
+            .add_user(account)
+            .await
+            .map_err(|e| anyhow!("register pg_catalog user {username:?}: {e}"))?;
+    }
+
+    Ok(())
+}
+
+fn pg_catalog_role(name: &str, access: AccessRole) -> Role {
+    Role {
+        name: name.to_string(),
+        is_superuser: false,
+        can_login: true,
+        can_create_db: false,
+        can_create_role: false,
+        can_create_user: false,
+        can_replication: false,
+        grants: pg_catalog_grants(access),
+        inherited_roles: vec![],
+    }
+}
+
+fn pg_catalog_grants(access: AccessRole) -> Vec<Grant> {
+    let permissions = match access {
+        AccessRole::ReadWrite => vec![Permission::All],
+        AccessRole::ReadOnly => vec![Permission::Select, Permission::Usage, Permission::Connect],
+    };
+
+    permissions
+        .into_iter()
+        .map(|permission| Grant {
+            permission,
+            resource: ResourceType::All,
+            granted_by: "quackgis".to_string(),
+            with_grant_option: false,
+        })
+        .collect()
+}
+
+fn register_ducklake_metadata_functions(ctx: &SessionContext, provider: Arc<dyn MetadataProvider>) {
+    // Safe catalog-inspection UDTFs for operations and trend probes. CDC row
+    // functions remain unregistered here until their projected row schema is
+    // safe through the pgwire/arrow-pg encoder path.
+    ctx.register_udtf(
+        "ducklake_snapshots",
+        Arc::new(DucklakeSnapshotsFunction::new(Arc::clone(&provider))),
+    );
+    ctx.register_udtf(
+        "ducklake_table_info",
+        Arc::new(DucklakeTableInfoFunction::new(Arc::clone(&provider))),
+    );
+    ctx.register_udtf(
+        "ducklake_list_files",
+        Arc::new(DucklakeListFilesFunction::new(provider)),
+    );
 }
 
 fn configured_target_partitions() -> Result<Option<usize>> {

@@ -92,15 +92,21 @@ Status: 🟢 in sync · 🟡 local patches, upstreamable · 🔴 blocked.
   first, binary cursor second, DF54 bump if upstream has not already moved.
   Martin-specific rewrites (7-14) are QuackGIS-specific and stay in-fork.
 
-### `adonm/datafusion-ducklake` — 🟢 no local patches yet
+### `datafusion-ducklake` vendored fork — 🟡 QuackGIS G5 patches
 
 - **Upstream:** `datafusion-contrib/datafusion-ducklake` (`main`, currently DF
   54 / Arrow 58). This is the Rust-native path closest to official DuckLake
   v1.0+.
-- **Consumed via:** root `Cargo.toml`, branch `main`.
-- **Head:** follows upstream fork main (no QuackGIS patches yet).
-- **Known upcoming fork targets:** G5 UPDATE/DELETE write path and G7
-  file/partition pruning. M1 routes CTAS, bare CREATE, INSERT SELECT/VALUES, UPDATE, and DELETE through a QuackGIS hook into the writer API using full-table rewrite semantics where needed. Generic filter pushdown path is covered by tests; spatial-layout pruning remains M5.
+- **Consumed via:** root `Cargo.toml`, path `vendor/datafusion-ducklake`.
+- **Base:** `adonm/datafusion-ducklake` main commit `117c0c5`.
+- **Local patches:** G5 atomic table-mutation surface: `DeleteFileMutation`,
+  `TableMutation`, `MetadataWriter::commit_table_mutation(...)`, SQLite and
+  multicatalog PostgreSQL implementations,
+  `DuckLakeTableWriter::write_pending_data_file(...)`, plus oracles proving
+  multi-file deletes, mixed delete+append/retire+append commits, pending-file
+  visibility, and stale-conflict rollback.
+- **Remaining fork targets:** G7 file/partition pruning and any upstream API
+  cleanup after QuackGIS native DML/compaction soak.
 
 ## Rebase hygiene
 

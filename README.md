@@ -76,6 +76,7 @@ COPY public.points (id, name, geom) FROM STDIN;              -- GDAL/OGR-style b
 2	one	\\x0101000000000000000000f03f000000000000f03f
 \.
 CALL quackgis_compact_table('public.points');                -- rewrite into spatial layout order
+CALL quackgis_compact_table('public.points', 0, 0);          -- target one layout bucket (safe full-replace fallback)
 SELECT postgis_version();                                -- 3.4 QUACKGIS
 ```
 
@@ -87,20 +88,52 @@ SELECT postgis_version();                                -- 3.4 QUACKGIS
   user, non-goals, current preview, Alpha evidence, and broader direction.
 - [ROADMAP.md](./ROADMAP.md) — current evidence, ambitious forward milestones,
   success metrics, and risks.
+- [docs/ROADMAP_STATUS.md](./docs/ROADMAP_STATUS.md) — locally closed roadmap
+  contracts vs execution-heavy remaining work.
 - [docs/DEVELOPER_PREVIEW.md](./docs/DEVELOPER_PREVIEW.md) — exact local preview
   claim, one-command smoke, manual COPY example, gates, and limitations.
 - [docs/COMPATIBILITY.md](./docs/COMPATIBILITY.md) — client compatibility
   targets and known limitations.
 - [docs/COMPATIBILITY_MATRIX.md](./docs/COMPATIBILITY_MATRIX.md) — supported
   probe/client versions and evidence commands.
+- [docs/POSTGIS_CONFORMANCE.md](./docs/POSTGIS_CONFORMANCE.md) — supported
+  PostGIS function families, evidence tiers, known deltas, and unsupported
+  surfaces.
 - [docs/OPERATIONS.md](./docs/OPERATIONS.md) — current local + Kind client-probe
   workflow for the single Rust pgwire binary.
+- [docs/ALPHA_EXTERNAL_SERVICES.md](./docs/ALPHA_EXTERNAL_SERVICES.md) — real
+  PostgreSQL/S3 Alpha hardening runbook and failure-drill evidence ladder.
+- [docs/SECURITY_RBAC.md](./docs/SECURITY_RBAC.md) — security trust boundaries,
+  RBAC target, and auth/TLS/secret-rotation failure-mode checklist.
+- [deploy/kubernetes/](./deploy/kubernetes/) — production-style Alpha
+  Kubernetes example with external PostgreSQL/S3 secrets, TLS, metrics, probes,
+  and resource limits.
 - [docs/DEPENDENCY_POLICY.md](./docs/DEPENDENCY_POLICY.md) — fork, rebase,
   upgrade, and data/catalog compatibility policy.
+- [docs/DUCKLAKE_ALIGNMENT.md](./docs/DUCKLAKE_ALIGNMENT.md) — DuckLake
+  upstream-alignment ledger for storage behavior, interop gates, and migration
+  triggers.
+- [docs/NATIVE_DML_FORK_PLAN.md](./docs/NATIVE_DML_FORK_PLAN.md) — fail-closed
+  native DuckLake delete-file/partial-rewrite fork path.
+- [docs/MUTATION_FAILURE_DRILLS.md](./docs/MUTATION_FAILURE_DRILLS.md) — native
+  DML/compaction crash, retry, and orphan-cleanup evidence ladder.
+- [docs/SNAPSHOT_OPERATIONS.md](./docs/SNAPSHOT_OPERATIONS.md) — snapshot
+  rollback, future SQL `AS OF`, protected snapshot, and CDC exposure plan.
+- [docs/MULTIMODAL_ASSETS.md](./docs/MULTIMODAL_ASSETS.md) — raster,
+  point-cloud, 3D tile, CAD/BIM, aerial, and reality-capture footprint/sidecar
+  schema patterns.
 - [examples/](./examples/) — QGIS, GDAL/OGR, and GeoServer examples using stable
   demo layers.
 - [docs/OSM_POSTGIS_PARITY.md](./docs/OSM_POSTGIS_PARITY.md) — real OSM data
   side-by-side PostGIS parity roadmap and copy/sync recipes.
+- [docs/REAL_DATA_CLIENT_MATRIX.md](./docs/REAL_DATA_CLIENT_MATRIX.md) — evidence
+  contract for widening real-data client matrices beyond the current OSM gate.
+- [docs/ANALYTICS_BENCHMARKS.md](./docs/ANALYTICS_BENCHMARKS.md) — QPS, OLAP,
+  compaction, spatial analytics, asset-inventory scale ladder, and budget policy.
+- [docs/API_CLIENT_PROBES.md](./docs/API_CLIENT_PROBES.md) — probe contract for
+  psycopg, SQLAlchemy/GeoPandas, pg_featureserv-style, BI, and MVT clients.
+- [docs/RELEASE_EVIDENCE.md](./docs/RELEASE_EVIDENCE.md) — release artifact,
+  metrics dashboard, and evidence-review policy.
 - [CHANGELOG.md](./CHANGELOG.md) — history, including the retired v0.1 facade.
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — contribution guide.
 
@@ -127,6 +160,7 @@ just check-fast                # fmt + clippy + focused regression loop
 just layoutbench-sf0           # layout/pruning correctness oracle
 just layoutbench-local-smoke   # temp-server layoutbench smoke
 just postgis-regress           # starter curated PostGIS function regress subset
+just postgis-conformance-summary # static fixture coverage summary
 just runtime-static-check      # guard single-binary native-free runtime image
 just martin-sql                # Martin-generated SQL compatibility gate
 just martin-e2e                # opt-in real Martin binary E2E
@@ -142,6 +176,7 @@ just kind-ogr-probe            # GDAL/OGR PostgreSQL-driver load/read gate
 just kind-geoserver-probe      # GeoServer 3.0.0 datastore + WFS/WMS/WFS-T gate
 just kind-compatibility        # build/deploy + QGIS/OGR/GeoServer compatibility probes
 just kind-lake-smoke           # Kind PostgreSQL catalog + s3s-fs object storage smoke
+just kind-external-alpha-smoke # env-driven external PostgreSQL/S3 storage profile
 just kind-lake-multipod-smoke  # shared-catalog smoke through multiple QuackGIS pods
 just kind-write-smoke          # parallel ingest + deterministic snapshot conflict/retry evidence
 just kind-qps-smoke            # high-QPS spatial readers over the shared lake profile
@@ -149,6 +184,8 @@ just kind-olap-smoke           # grouped OLAP fanout + pruning/recheck evidence
 just kind-alpha-smoke          # maintained Alpha scaled-storage gate bundle
 just kind-osm-postgis-parity   # opt-in real OSM PostGIS -> QuackGIS parity
 just metrics-trend path=.tmp/compatibility # flatten metrics.json artifacts to CSV
+just metrics-dashboard path=.tmp/compatibility # render release-ready Markdown trends
+QUACKGIS_METRICS_PORT=9187 just server # optional Prometheus /metrics endpoint
 ```
 
 For one-off commands without shell activation, keep the same recipes and let mise

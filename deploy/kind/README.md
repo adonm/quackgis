@@ -51,6 +51,14 @@ creates a table, loads WKB points with PostgreSQL text `COPY FROM STDIN`, querie
 via PostGIS-style functions, compacts the DuckLake table, and verifies unchanged
 results.
 
+`just kind-external-alpha-smoke` deploys `external-lake`, a second QuackGIS
+service configured only from the `external-storage` Secret. Defaults point at the
+Kind `pg`/`s3` emulators with a separate `quackgis_external` PostgreSQL
+database; set `EXTERNAL_ALPHA_USE_KIND_EMULATORS=false` and `EXTERNAL_QUACKGIS_*`
+variables to point at real external services. The probe
+also verifies autocommit `DELETE` writes native DuckLake delete files for two
+data files under one PostgreSQL metadata snapshot.
+
 `just kind-qps-smoke` is the parallel-reader gate for that lake profile. It
 scales `lake` to three pods, seeds a compacted LayoutBench-style table, runs 16
 parallel pgwire reader connections for 240 selective spatial queries across

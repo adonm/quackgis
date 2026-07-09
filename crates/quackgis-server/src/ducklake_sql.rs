@@ -5,7 +5,7 @@
 //! maps the SQL clients actually send (CTAS / INSERT) onto that writer API for
 //! the `quackgis.main.<table>` catalog path.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -25,10 +25,11 @@ use datafusion::prelude::SessionContext;
 use datafusion::sql::sqlparser::ast::{
     AlterTable, AlterTableOperation, AssignmentTarget, ColumnDef, CopyLegacyOption, CopyOption,
     CopySource, CopyTarget, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident,
-    ObjectName, SelectItem, Statement, Value,
+    ObjectName, SelectItem, Statement, UnaryOperator, Value,
 };
 use datafusion_ducklake::{
-    DuckLakeCatalog, DuckLakeTableWriter, MetadataWriter, TableWriteSession, WriteMode,
+    DeleteFileMutation, DuckLakeCatalog, DuckLakeTable, DuckLakeTableFile, DuckLakeTableWriter,
+    MetadataWriter, TableMutation, TableWriteSession, WriteMode,
 };
 use datafusion_postgres::arrow_pg::datatypes::{arrow_schema_to_pg_fields, encode_recordbatch};
 use datafusion_postgres::hooks::{HookClient, QueryHook};
@@ -65,6 +66,13 @@ use rewrites::{
 static TRANSACTION_COUNTER: AtomicU64 = AtomicU64::new(1);
 static QUERY_COUNTER: AtomicU64 = AtomicU64::new(1);
 static WRITE_DENIED_COUNTER: AtomicU64 = AtomicU64::new(0);
+static CATALOG_REFRESH_COUNTER: AtomicU64 = AtomicU64::new(0);
+static SHARED_CATALOG_READ_REFRESH_COUNTER: AtomicU64 = AtomicU64::new(0);
+static SHARED_CATALOG_STRONG_REFRESH_COUNTER: AtomicU64 = AtomicU64::new(0);
+static NATIVE_DELETE_MUTATION_COUNTER: AtomicU64 = AtomicU64::new(0);
+static NATIVE_UPDATE_MUTATION_COUNTER: AtomicU64 = AtomicU64::new(0);
+static NATIVE_COMPACT_MUTATION_COUNTER: AtomicU64 = AtomicU64::new(0);
+static COMPACTION_COUNTER: AtomicU64 = AtomicU64::new(0);
 const DEFAULT_DUCKLAKE_ROW_GROUP_ROWS: usize = 512;
 const DUCKLAKE_ROW_GROUP_ROWS_ENV: &str = "QUACKGIS_DUCKLAKE_ROW_GROUP_ROWS";
 const DEFAULT_SHARED_CATALOG_REFRESH_MS: u64 = 1_000;
@@ -190,6 +198,16 @@ struct StagedTable {
     writer_session: Option<TableWriteSession>,
 }
 
+struct NativeRowPlan {
+    snapshot_id: i64,
+    table_id: i64,
+    files: Vec<DuckLakeTableFile>,
+    positions_by_file: HashMap<i64, HashSet<i64>>,
+    affected_count: usize,
+    rowid_context: SessionContext,
+    catalog_name: String,
+}
+
 impl DuckLakeSqlHook {
     pub fn new(paths: StoragePaths) -> Self {
         Self::new_with_auth(paths, AuthConfig::trust())
@@ -221,6 +239,39 @@ impl DuckLakeSqlHook {
                 )))
             }
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DuckLakeSqlMetrics {
+    pub queries_started_total: u64,
+    pub transaction_ids_allocated_total: u64,
+    pub writes_denied_total: u64,
+    pub catalog_refresh_total: u64,
+    pub shared_catalog_read_refresh_total: u64,
+    pub shared_catalog_strong_refresh_total: u64,
+    pub native_delete_mutations_total: u64,
+    pub native_update_mutations_total: u64,
+    pub native_compact_mutations_total: u64,
+    pub compactions_total: u64,
+}
+
+pub fn metrics_snapshot() -> DuckLakeSqlMetrics {
+    DuckLakeSqlMetrics {
+        queries_started_total: QUERY_COUNTER.load(Ordering::Relaxed).saturating_sub(1),
+        transaction_ids_allocated_total: TRANSACTION_COUNTER
+            .load(Ordering::Relaxed)
+            .saturating_sub(1),
+        writes_denied_total: WRITE_DENIED_COUNTER.load(Ordering::Relaxed),
+        catalog_refresh_total: CATALOG_REFRESH_COUNTER.load(Ordering::Relaxed),
+        shared_catalog_read_refresh_total: SHARED_CATALOG_READ_REFRESH_COUNTER
+            .load(Ordering::Relaxed),
+        shared_catalog_strong_refresh_total: SHARED_CATALOG_STRONG_REFRESH_COUNTER
+            .load(Ordering::Relaxed),
+        native_delete_mutations_total: NATIVE_DELETE_MUTATION_COUNTER.load(Ordering::Relaxed),
+        native_update_mutations_total: NATIVE_UPDATE_MUTATION_COUNTER.load(Ordering::Relaxed),
+        native_compact_mutations_total: NATIVE_COMPACT_MUTATION_COUNTER.load(Ordering::Relaxed),
+        compactions_total: COMPACTION_COUNTER.load(Ordering::Relaxed),
     }
 }
 
@@ -889,16 +940,32 @@ fn is_compact_call(function: &Function) -> bool {
     })
 }
 
-fn compact_call_parts(function: &Function) -> PgWireResult<(String, String)> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompactScope {
+    WholeTable,
+    LayoutBucket { time_bucket: i64, space_bucket: i64 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompactTarget {
+    schema: String,
+    table: String,
+    scope: CompactScope,
+}
+
+fn compact_call_parts(function: &Function) -> PgWireResult<CompactTarget> {
     let FunctionArguments::List(args) = &function.args else {
         return Err(user_error(anyhow!(
-            "{} requires one table-name argument",
+            "{} requires a table-name argument",
             function.name
         )));
     };
-    if args.args.len() != 1 || !args.clauses.is_empty() || args.duplicate_treatment.is_some() {
+    if !matches!(args.args.len(), 1 | 3)
+        || !args.clauses.is_empty()
+        || args.duplicate_treatment.is_some()
+    {
         return Err(user_error(anyhow!(
-            "{} requires exactly one positional table-name argument",
+            "{} requires one table-name argument, optionally followed by time_bucket and space_bucket",
             function.name
         )));
     }
@@ -909,7 +976,67 @@ fn compact_call_parts(function: &Function) -> PgWireResult<(String, String)> {
         )));
     };
     let table = compact_table_arg_text(expr)?;
-    table_text_parts(&table).ok_or_else(|| user_error(anyhow!("invalid table name: {table}")))
+    let (schema, table) = table_text_parts(&table)
+        .ok_or_else(|| user_error(anyhow!("invalid table name: {table}")))?;
+    let scope = if args.args.len() == 3 {
+        let time_bucket = compact_i64_arg(&args.args[1], "time_bucket")?;
+        let space_bucket = compact_i64_arg(&args.args[2], "space_bucket")?;
+        CompactScope::LayoutBucket {
+            time_bucket,
+            space_bucket,
+        }
+    } else {
+        CompactScope::WholeTable
+    };
+    Ok(CompactTarget {
+        schema,
+        table,
+        scope,
+    })
+}
+
+fn compact_i64_arg(arg: &FunctionArg, name: &str) -> PgWireResult<i64> {
+    let FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) = arg else {
+        return Err(user_error(anyhow!(
+            "compact table {name} argument must be an integer literal"
+        )));
+    };
+    compact_i64_expr(expr, name)
+}
+
+fn compact_i64_expr(expr: &Expr, name: &str) -> PgWireResult<i64> {
+    match expr {
+        Expr::Value(value) => match &value.value {
+            Value::Number(value, _) => value.parse::<i64>().map_err(|e| {
+                user_error(anyhow!(
+                    "compact table {name} argument must be a 64-bit integer: {e}"
+                ))
+            }),
+            Value::SingleQuotedString(value)
+            | Value::EscapedStringLiteral(value)
+            | Value::DoubleQuotedString(value) => value.parse::<i64>().map_err(|e| {
+                user_error(anyhow!(
+                    "compact table {name} argument must be a 64-bit integer: {e}"
+                ))
+            }),
+            other => Err(user_error(anyhow!(
+                "compact table {name} argument must be an integer literal, got {other}"
+            ))),
+        },
+        Expr::UnaryOp {
+            op: UnaryOperator::Minus,
+            expr,
+        } => compact_i64_expr(expr, name).and_then(|value| {
+            value.checked_neg().ok_or_else(|| {
+                user_error(anyhow!(
+                    "compact table {name} argument is below the 64-bit integer range"
+                ))
+            })
+        }),
+        other => Err(user_error(anyhow!(
+            "compact table {name} argument must be an integer literal, got {other}"
+        ))),
+    }
 }
 
 fn compact_table_arg_text(expr: &Expr) -> PgWireResult<String> {
@@ -1576,9 +1703,16 @@ impl DuckLakeSqlHook {
                 "quackgis_compact_table inside explicit transactions is not supported"
             )));
         }
-        let (schema, table) = compact_call_parts(function)?;
-        let rows = self.compact_table(session_context, &schema, &table).await?;
-        Ok(Response::Execution(Tag::new(&format!("COMPACT {rows}"))))
+        let target = compact_call_parts(function)?;
+        let rows = self
+            .compact_table(session_context, &target.schema, &target.table, target.scope)
+            .await?;
+        COMPACTION_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tag = match target.scope {
+            CompactScope::WholeTable => format!("COMPACT {rows}"),
+            CompactScope::LayoutBucket { .. } => format!("COMPACT BUCKET {rows}"),
+        };
+        Ok(Response::Execution(Tag::new(&tag)))
     }
 
     async fn compact_table(
@@ -1586,17 +1720,167 @@ impl DuckLakeSqlHook {
         session_context: &SessionContext,
         schema: &str,
         table: &str,
+        scope: CompactScope,
     ) -> PgWireResult<usize> {
         let table_ref = ducklake_table_ref(schema, table);
+        if let CompactScope::LayoutBucket {
+            time_bucket,
+            space_bucket,
+        } = scope
+            && let Some(rows) = self
+                .try_native_compact_bucket(
+                    session_context,
+                    schema,
+                    table,
+                    time_bucket,
+                    space_bucket,
+                )
+                .await?
+        {
+            self.refresh_ducklake_catalog(session_context).await?;
+            return Ok(rows);
+        }
+
         let (batches, rows) = collect_normalized_query_batches(
             session_context,
             &format!("SELECT * FROM {table_ref}"),
         )
         .await?;
+        let rows = match scope {
+            CompactScope::WholeTable => rows,
+            CompactScope::LayoutBucket {
+                time_bucket,
+                space_bucket,
+            } => {
+                self.compact_bucket_row_count(
+                    session_context,
+                    &table_ref,
+                    time_bucket,
+                    space_bucket,
+                )
+                .await?
+            }
+        };
         self.write_batches(schema, table, &batches, WriteDisposition::Replace)
             .await?;
         self.refresh_ducklake_catalog(session_context).await?;
         Ok(rows)
+    }
+
+    async fn try_native_compact_bucket(
+        &self,
+        session_context: &SessionContext,
+        schema: &str,
+        table: &str,
+        time_bucket: i64,
+        space_bucket: i64,
+    ) -> PgWireResult<Option<usize>> {
+        let predicate = format!(
+            "{} = {time_bucket} AND {} = {space_bucket}",
+            quote_ident(layout::TIME_BUCKET),
+            quote_ident(layout::SPACE_BUCKET)
+        );
+        let Some(mut plan) = self
+            .plan_native_rows(session_context, schema, table, Some(&predicate), "compact")
+            .await?
+        else {
+            return Ok(None);
+        };
+        if plan.affected_count == 0 {
+            return Ok(Some(0));
+        }
+
+        let table_ref = ducklake_table_ref(schema, table);
+        let schema_ref = self.table_schema(session_context, &table_ref).await?;
+        let select_items = schema_ref
+            .fields()
+            .iter()
+            .map(|field| quote_ident(field.name()))
+            .collect::<Vec<_>>();
+        let rowid_table_ref = format!(
+            "{}.{}.{}",
+            quote_ident(&plan.catalog_name),
+            quote_ident(schema),
+            quote_ident(table)
+        );
+        let replacement_query = format!(
+            "SELECT {} FROM {rowid_table_ref} WHERE {predicate}",
+            select_items.join(", ")
+        );
+        let replacement_batches = match collect_query_batches(
+            &plan.rowid_context,
+            &replacement_query,
+        )
+        .await
+        {
+            Ok(batches) => batches,
+            Err(err) => {
+                log::debug!(
+                    "native bucket compaction replacement-row planning failed for {schema}.{table}; falling back to rewrite: {err}"
+                );
+                return Ok(None);
+            }
+        };
+        let replacement_rows = replacement_batches
+            .iter()
+            .map(|b| b.num_rows())
+            .sum::<usize>();
+        if replacement_rows != plan.affected_count || replacement_batches.is_empty() {
+            log::debug!(
+                "native bucket compaction planned {} rowids but {} replacement rows for {schema}.{table}; falling back to rewrite",
+                plan.affected_count,
+                replacement_rows
+            );
+            return Ok(None);
+        }
+        let replacement_batches =
+            normalize_batches_for_ducklake(replacement_batches).map_err(user_error)?;
+        let replacement_batches =
+            layout::project_batches(replacement_batches).map_err(user_error)?;
+        let replacement_batches =
+            layout::sort_batches_by_layout(replacement_batches).map_err(user_error)?;
+
+        let writer = self.storage_writer().await?;
+        let object_store = self.storage_object_store()?;
+        let table_writer = configured_ducklake_table_writer(Arc::clone(&writer), object_store)?;
+        let pending_file = table_writer
+            .write_pending_data_file(schema, table, &replacement_batches)
+            .await
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+        let mutation = TableMutation::new().append_data_file(pending_file);
+        let mutation = self
+            .add_native_delete_files_to_mutation(&mut plan, schema, table, &table_writer, mutation)
+            .await?;
+        writer
+            .commit_table_mutation(plan.table_id, schema, table, plan.snapshot_id, &mutation)
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+        NATIVE_COMPACT_MUTATION_COUNTER.fetch_add(1, Ordering::Relaxed);
+        Ok(Some(plan.affected_count))
+    }
+
+    async fn compact_bucket_row_count(
+        &self,
+        session_context: &SessionContext,
+        table_ref: &str,
+        time_bucket: i64,
+        space_bucket: i64,
+    ) -> PgWireResult<usize> {
+        let time_col = quote_ident(layout::TIME_BUCKET);
+        let space_col = quote_ident(layout::SPACE_BUCKET);
+        let query = format!(
+            "SELECT COUNT(*) FROM {table_ref} WHERE {time_col} = {time_bucket} AND {space_col} = {space_bucket}"
+        );
+        let (batches, _) = collect_normalized_query_batches(session_context, &query).await?;
+        let batch = batches
+            .first()
+            .ok_or_else(|| user_error(anyhow!("compact bucket count returned no batches")))?;
+        if batch.num_rows() != 1 || batch.num_columns() != 1 {
+            return Err(user_error(anyhow!(
+                "compact bucket count returned an unexpected shape"
+            )));
+        }
+        let rows = scalar_i64_at(batch.column(0).as_ref(), 0).map_err(user_error)?;
+        usize::try_from(rows).map_err(|e| user_error(anyhow!("compact bucket count overflow: {e}")))
     }
 
     async fn handle_copy_from_stdin(
@@ -1951,13 +2235,24 @@ impl DuckLakeSqlHook {
             .map(|predicate| format!("NOT ({predicate})"))
             .unwrap_or_else(|| "FALSE".to_string());
         let returning_batches = if let Some(returning) = delete.returning.as_deref() {
-            let predicate = predicate.unwrap_or_else(|| "TRUE".to_string());
+            let predicate = predicate.clone().unwrap_or_else(|| "TRUE".to_string());
             let returning_query =
                 returning_query_from_table(&table_ref, returning, Some(&predicate));
             Some(collect_query_batches(session_context, &returning_query).await?)
         } else {
             None
         };
+        if let Some(deleted) = self
+            .try_native_delete(session_context, &schema, &table, predicate.as_deref())
+            .await?
+        {
+            self.refresh_ducklake_catalog(session_context).await?;
+            if let Some(batches) = returning_batches {
+                return query_response_from_batches_with_format(batches, result_format)
+                    .map(Response::Query);
+            }
+            return Ok(Response::Execution(Tag::new(&format!("DELETE {deleted}"))));
+        }
         let query = format!("SELECT * FROM {table_ref} WHERE {where_clause}");
         let remaining = self
             .write_query(
@@ -1975,6 +2270,302 @@ impl DuckLakeSqlHook {
         Ok(Response::Execution(Tag::new(&format!(
             "DELETE {remaining}"
         ))))
+    }
+
+    async fn plan_native_rows(
+        &self,
+        session_context: &SessionContext,
+        schema: &str,
+        table: &str,
+        predicate: Option<&str>,
+        purpose: &str,
+    ) -> PgWireResult<Option<NativeRowPlan>> {
+        let provider = self
+            .paths
+            .metadata_provider()
+            .await
+            .map_err(storage_api_error)?;
+        let snapshot_id = provider
+            .get_current_snapshot()
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+        let schema_meta = provider
+            .get_schema_by_name(schema, snapshot_id)
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?
+            .ok_or_else(|| user_error(anyhow!("schema not found: {schema}")))?;
+        let table_meta = provider
+            .get_table_by_name(schema_meta.schema_id, table, snapshot_id)
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?
+            .ok_or_else(|| user_error(anyhow!("table not found: {schema}.{table}")))?;
+        let files = provider
+            .get_table_files_for_select(table_meta.table_id, snapshot_id)
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+        if files.is_empty() {
+            return Ok(Some(NativeRowPlan {
+                snapshot_id,
+                table_id: table_meta.table_id,
+                files,
+                positions_by_file: HashMap::new(),
+                affected_count: 0,
+                rowid_context: SessionContext::new_with_state(session_context.state()),
+                catalog_name: String::new(),
+            }));
+        }
+        if files
+            .iter()
+            .any(|file| file.row_id_start.is_none() || file.max_row_count.is_none())
+        {
+            return Ok(None);
+        }
+
+        let rowid_catalog = DuckLakeCatalog::with_snapshot(Arc::clone(&provider), snapshot_id)
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?
+            .with_row_lineage(true);
+        let rowid_context = SessionContext::new_with_state(session_context.state());
+        let catalog_name = format!(
+            "__quackgis_native_{purpose}_{}",
+            QUERY_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        rowid_context.register_catalog(&catalog_name, Arc::new(rowid_catalog));
+        let rowid_table_ref = format!(
+            "{}.{}.{}",
+            quote_ident(&catalog_name),
+            quote_ident(schema),
+            quote_ident(table)
+        );
+        let where_clause = predicate
+            .map(|predicate| format!(" WHERE {predicate}"))
+            .unwrap_or_default();
+        let rowid_query = format!(
+            "SELECT {} FROM {rowid_table_ref}{where_clause}",
+            quote_ident("rowid")
+        );
+        let rowid_batches = match collect_query_batches(&rowid_context, &rowid_query).await {
+            Ok(batches) => batches,
+            Err(err) => {
+                log::debug!(
+                    "native {purpose} rowid planning failed for {schema}.{table}; falling back to rewrite: {err}"
+                );
+                return Ok(None);
+            }
+        };
+        let mut rowids = Vec::new();
+        for batch in &rowid_batches {
+            if batch.num_columns() != 1 {
+                return Ok(None);
+            }
+            for row in 0..batch.num_rows() {
+                if batch.column(0).is_null(row) {
+                    return Ok(None);
+                }
+                rowids.push(scalar_i64_at(batch.column(0).as_ref(), row).map_err(user_error)?);
+            }
+        }
+        if rowids.is_empty() {
+            return Ok(Some(NativeRowPlan {
+                snapshot_id,
+                table_id: table_meta.table_id,
+                files,
+                positions_by_file: HashMap::new(),
+                affected_count: 0,
+                rowid_context,
+                catalog_name,
+            }));
+        }
+        let affected_count = rowids.len();
+
+        let mut positions_by_file: HashMap<i64, HashSet<i64>> = HashMap::new();
+        for rowid in rowids {
+            let mut matched = false;
+            for file in &files {
+                let start = file.row_id_start.expect("checked above");
+                let count = file.max_row_count.expect("checked above");
+                if rowid >= start && rowid < start.saturating_add(count) {
+                    positions_by_file
+                        .entry(file.data_file_id)
+                        .or_default()
+                        .insert(rowid - start);
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched {
+                log::debug!(
+                    "native {purpose} could not map rowid {rowid} to a live data file for {schema}.{table}; falling back to rewrite"
+                );
+                return Ok(None);
+            }
+        }
+
+        Ok(Some(NativeRowPlan {
+            snapshot_id,
+            table_id: table_meta.table_id,
+            files,
+            positions_by_file,
+            affected_count,
+            rowid_context,
+            catalog_name,
+        }))
+    }
+
+    async fn add_native_delete_files_to_mutation(
+        &self,
+        plan: &mut NativeRowPlan,
+        schema: &str,
+        table: &str,
+        table_writer: &DuckLakeTableWriter,
+        mut mutation: TableMutation,
+    ) -> PgWireResult<TableMutation> {
+        let table_provider = plan
+            .rowid_context
+            .catalog(&plan.catalog_name)
+            .and_then(|catalog| catalog.schema(schema))
+            .ok_or_else(|| user_error(anyhow!("native DML rowid catalog lookup failed")))?
+            .table(table)
+            .await
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?
+            .ok_or_else(|| user_error(anyhow!("native DML rowid table lookup failed")))?;
+        let ducklake_table = (table_provider.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<DuckLakeTable>()
+            .ok_or_else(|| user_error(anyhow!("native DML expected a DuckLake table")))?;
+
+        let state = plan.rowid_context.state();
+        for file in &plan.files {
+            let Some(positions) = plan.positions_by_file.get_mut(&file.data_file_id) else {
+                continue;
+            };
+            if let Some(delete_file) = file.delete_file.as_ref() {
+                let prior = ducklake_table
+                    .read_delete_file_positions(&state, delete_file)
+                    .await
+                    .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+                positions.extend(prior);
+            }
+            let mut positions = positions.iter().copied().collect::<Vec<_>>();
+            positions.sort_unstable();
+            let delete_info = table_writer
+                .write_delete_file(schema, table, &file.file.path, &positions)
+                .await
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            mutation = mutation.set_delete_file(DeleteFileMutation::new(
+                file.data_file_id,
+                file.delete_file_id,
+                delete_info,
+            ));
+        }
+        Ok(mutation)
+    }
+
+    async fn try_native_delete(
+        &self,
+        session_context: &SessionContext,
+        schema: &str,
+        table: &str,
+        predicate: Option<&str>,
+    ) -> PgWireResult<Option<usize>> {
+        let Some(mut plan) = self
+            .plan_native_rows(session_context, schema, table, predicate, "delete")
+            .await?
+        else {
+            return Ok(None);
+        };
+        if plan.affected_count == 0 {
+            return Ok(Some(0));
+        }
+
+        let writer = self.storage_writer().await?;
+        let object_store = self.storage_object_store()?;
+        let table_writer = configured_ducklake_table_writer(Arc::clone(&writer), object_store)?;
+        let mutation = self
+            .add_native_delete_files_to_mutation(
+                &mut plan,
+                schema,
+                table,
+                &table_writer,
+                TableMutation::new(),
+            )
+            .await?;
+        if mutation.is_empty() {
+            return Ok(Some(0));
+        }
+        writer
+            .commit_table_mutation(plan.table_id, schema, table, plan.snapshot_id, &mutation)
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+        NATIVE_DELETE_MUTATION_COUNTER.fetch_add(1, Ordering::Relaxed);
+        Ok(Some(plan.affected_count))
+    }
+
+    async fn try_native_update(
+        &self,
+        session_context: &SessionContext,
+        schema: &str,
+        table: &str,
+        predicate: Option<&str>,
+        select_items: &[String],
+    ) -> PgWireResult<Option<usize>> {
+        let Some(mut plan) = self
+            .plan_native_rows(session_context, schema, table, predicate, "update")
+            .await?
+        else {
+            return Ok(None);
+        };
+        if plan.affected_count == 0 {
+            return Ok(Some(0));
+        }
+
+        let rowid_table_ref = format!(
+            "{}.{}.{}",
+            quote_ident(&plan.catalog_name),
+            quote_ident(schema),
+            quote_ident(table)
+        );
+        let where_clause = predicate
+            .map(|predicate| format!(" WHERE {predicate}"))
+            .unwrap_or_default();
+        let updated_query = format!(
+            "SELECT {} FROM {rowid_table_ref}{where_clause}",
+            select_items.join(", ")
+        );
+        let updated_batches = match collect_query_batches(&plan.rowid_context, &updated_query).await
+        {
+            Ok(batches) => batches,
+            Err(err) => {
+                log::debug!(
+                    "native update replacement-row planning failed for {schema}.{table}; falling back to rewrite: {err}"
+                );
+                return Ok(None);
+            }
+        };
+        let updated_rows = updated_batches.iter().map(|b| b.num_rows()).sum::<usize>();
+        if updated_rows != plan.affected_count || updated_batches.is_empty() {
+            log::debug!(
+                "native update planned {} rowids but {} replacement rows for {schema}.{table}; falling back to rewrite",
+                plan.affected_count,
+                updated_rows
+            );
+            return Ok(None);
+        }
+        let updated_batches =
+            normalize_batches_for_ducklake(updated_batches).map_err(user_error)?;
+        let updated_batches = layout::project_batches(updated_batches).map_err(user_error)?;
+        let updated_batches =
+            layout::sort_batches_by_layout(updated_batches).map_err(user_error)?;
+
+        let writer = self.storage_writer().await?;
+        let object_store = self.storage_object_store()?;
+        let table_writer = configured_ducklake_table_writer(Arc::clone(&writer), object_store)?;
+        let pending_file = table_writer
+            .write_pending_data_file(schema, table, &updated_batches)
+            .await
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+        let mutation = TableMutation::new().append_data_file(pending_file);
+        let mutation = self
+            .add_native_delete_files_to_mutation(&mut plan, schema, table, &table_writer, mutation)
+            .await?;
+        writer
+            .commit_table_mutation(plan.table_id, schema, table, plan.snapshot_id, &mutation)
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+        NATIVE_UPDATE_MUTATION_COUNTER.fetch_add(1, Ordering::Relaxed);
+        Ok(Some(plan.affected_count))
     }
 
     async fn handle_update(
@@ -2054,6 +2645,24 @@ impl DuckLakeSqlHook {
         } else {
             None
         };
+        if let Some(updated) = self
+            .try_native_update(
+                session_context,
+                &schema,
+                &table_name,
+                predicate.as_deref(),
+                &select_items,
+            )
+            .await?
+        {
+            self.refresh_ducklake_catalog(session_context).await?;
+            if let Some(batches) = returning_batches {
+                return query_response_from_batches_with_format(batches, result_format)
+                    .map(Response::Query);
+            }
+            return Ok(Response::Execution(Tag::new(&format!("UPDATE {updated}"))));
+        }
+
         let rows = self
             .write_query(
                 session_context,
@@ -2331,6 +2940,7 @@ impl DuckLakeSqlHook {
         session_context.register_catalog(DUCKLAKE_CATALOG, Arc::new(ducklake));
         crate::public_schema::register_public_schema_alias(session_context)
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+        CATALOG_REFRESH_COUNTER.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
@@ -2347,6 +2957,7 @@ impl DuckLakeSqlHook {
         }
 
         self.refresh_ducklake_catalog(session_context).await?;
+        SHARED_CATALOG_READ_REFRESH_COUNTER.fetch_add(1, Ordering::Relaxed);
         *last_refresh = Some(Instant::now());
         Ok(())
     }
@@ -2357,6 +2968,7 @@ impl DuckLakeSqlHook {
     ) -> PgWireResult<()> {
         let mut last_refresh = self.shared_catalog_refresh.last_refresh.lock().await;
         self.refresh_ducklake_catalog(session_context).await?;
+        SHARED_CATALOG_STRONG_REFRESH_COUNTER.fetch_add(1, Ordering::Relaxed);
         *last_refresh = Some(Instant::now());
         Ok(())
     }

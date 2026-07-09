@@ -7,7 +7,7 @@
 
 use std::sync::LazyLock;
 
-use datafusion::arrow::datatypes::Schema;
+use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::prelude::SessionContext;
 use datafusion::sql::sqlparser::ast::Statement;
 use regex::Regex;
@@ -64,8 +64,14 @@ pub(super) async fn rewrite_spatial_pruning_query(
             continue;
         }
 
-        let bbox_predicate = bbox_predicate(envelope, target.qualifier.as_deref());
-        if let Some(rewritten) = inject_bbox_predicate(&sql, &target, &bbox_predicate) {
+        let mut prefilters = vec![bbox_predicate(envelope, target.qualifier.as_deref())];
+        if let Some(time_predicate) =
+            time_bucket_predicate(&sql, table_schema.as_ref(), target.qualifier.as_deref())
+        {
+            prefilters.push(time_predicate);
+        }
+        let pruning_predicate = prefilters.join(" AND ");
+        if let Some(rewritten) = inject_bbox_predicate(&sql, &target, &pruning_predicate) {
             return Some(rewritten);
         }
     }
@@ -598,6 +604,72 @@ fn bbox_predicate(envelope: Envelope, qualifier: Option<&str>) -> String {
     )
 }
 
+fn time_bucket_predicate(sql: &str, schema: &Schema, qualifier: Option<&str>) -> Option<String> {
+    if !schema
+        .fields()
+        .iter()
+        .any(|field| field.name().eq_ignore_ascii_case(layout::TIME_BUCKET))
+    {
+        return None;
+    }
+
+    for field in schema.fields() {
+        let Some(width) = time_bucket_width(field.as_ref()) else {
+            continue;
+        };
+        let Some((lo, hi)) = extract_between_range(sql, field.name()) else {
+            continue;
+        };
+        let start = (lo.min(hi) / width).floor() as i64;
+        let end = (lo.max(hi) / width).floor() as i64;
+        let col = qualifier
+            .map(|qualifier| format!("{qualifier}.{}", quote_ident(layout::TIME_BUCKET)))
+            .unwrap_or_else(|| quote_ident(layout::TIME_BUCKET));
+        return Some(format!("{col} BETWEEN {start} AND {end}"));
+    }
+    None
+}
+
+fn time_bucket_width(field: &Field) -> Option<f64> {
+    if layout::is_layout_column(field.name())
+        || !matches!(
+            field.data_type(),
+            DataType::Int32 | DataType::Int64 | DataType::Float64
+        )
+    {
+        return None;
+    }
+    let name = field.name().to_ascii_lowercase();
+    if name.contains("minute") {
+        Some(60.0)
+    } else if name == "time"
+        || name == "timestamp"
+        || name == "datetime"
+        || name.ends_with("_time")
+        || name.ends_with("_timestamp")
+        || name.ends_with("_at")
+        || name.contains("epoch")
+    {
+        Some(1.0)
+    } else {
+        None
+    }
+}
+
+fn extract_between_range(sql: &str, column: &str) -> Option<(f64, f64)> {
+    let pattern = format!(
+        r#"(?is)(?:(?:"[^"]+"|[a-z_][\w$]*)\s*\.\s*)?(?:"{}"|\b{}\b)\s+between\s+({n})\s+and\s+({n})"#,
+        regex::escape(column),
+        regex::escape(&column.to_ascii_lowercase()),
+        n = NUMBER_RE
+    );
+    let re = Regex::new(&pattern).expect("valid time BETWEEN regex");
+    let captures = re
+        .captures_iter(sql)
+        .find(|captures| captures.get(0).is_some_and(|m| is_code_at(sql, m.start())))?;
+    Some((parse_capture(&captures, 1)?, parse_capture(&captures, 2)?))
+}
+
 fn inject_bbox_predicate(
     sql: &str,
     target: &RewriteTarget,
@@ -672,6 +744,38 @@ mod tests {
         assert!(rewritten.contains("\"_qg_minx\" <= 3"));
         assert!(rewritten.contains("\"_qg_maxy\" >= 2"));
         assert!(rewritten.contains("ST_Intersects"));
+    }
+
+    #[test]
+    fn temporal_between_adds_time_bucket_prefilter() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("captured_minute", DataType::Int32, false),
+            Field::new("geom", DataType::Binary, true),
+            Field::new(layout::TIME_BUCKET, DataType::Int64, true),
+            Field::new(layout::MINX, DataType::Float64, true),
+            Field::new(layout::MINY, DataType::Float64, true),
+            Field::new(layout::MAXX, DataType::Float64, true),
+            Field::new(layout::MAXY, DataType::Float64, true),
+        ]);
+        let sql = "SELECT COUNT(*) FROM public.frames AS f \
+                   WHERE f.captured_minute BETWEEN 40 AND 170 \
+                   AND f.geom && ST_MakeEnvelope(1,2,3,4,3857)";
+        let predicate = time_bucket_predicate(sql, &schema, Some("f")).expect("time predicate");
+        assert_eq!(predicate, "f.\"_qg_time_bucket\" BETWEEN 0 AND 2");
+    }
+
+    #[test]
+    fn temporal_between_ignores_literals_and_comments() {
+        let schema = Schema::new(vec![
+            Field::new("captured_minute", DataType::Int32, false),
+            Field::new(layout::TIME_BUCKET, DataType::Int64, true),
+        ]);
+        let sql = "SELECT COUNT(*) FROM public.frames \
+                   WHERE note = 'captured_minute BETWEEN 1 AND 99' \
+                   -- captured_minute BETWEEN 1 AND 99\n\
+                   AND id > 0";
+        assert!(time_bucket_predicate(sql, &schema, None).is_none());
     }
 
     #[test]

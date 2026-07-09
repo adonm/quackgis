@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: external-lake-probe
+  namespace: quackgis
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      volumes:
+        - name: probe-scripts
+          configMap:
+            name: quackgis-probe-scripts
+            defaultMode: 0755
+      containers:
+        - name: external-lake-probe
+          image: docker.io/qgis/qgis:ltr-questing
+          env:
+            - name: QUACKGIS_HOST
+              value: external-lake.quackgis.svc.cluster.local
+            - name: QUACKGIS_PORT
+              value: "5434"
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: QUACKGIS_CATALOG_URL
+              valueFrom:
+                secretKeyRef:
+                  name: external-storage
+                  key: catalog-url
+            - name: QUACKGIS_DUCKLAKE_CATALOG_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: external-storage
+                  key: ducklake-catalog-name
+          volumeMounts:
+            - name: probe-scripts
+              mountPath: /opt/quackgis-probes
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              PYTHONPATH=/opt/quackgis-probes python3 /opt/quackgis-probes/storage_probe.py
+              PYTHONPATH=/opt/quackgis-probes python3 /opt/quackgis-probes/native_delete_probe.py
+              python3 - <<'PY'
+              import os
+              import urllib.request
+
+              host = os.environ["QUACKGIS_HOST"]
+              with urllib.request.urlopen(f"http://{host}:9187/metrics", timeout=5) as response:
+                  body = response.read().decode("utf-8")
+
+              required = [
+                  "# TYPE quackgis_queries_started_total counter",
+                  "quackgis_queries_started_total",
+                  "quackgis_write_denied_total",
+              ]
+              missing = [needle for needle in required if needle not in body]
+              if missing:
+                  raise SystemExit(f"missing metrics output: {missing!r}")
+              print("metrics_ok True")
+              PY

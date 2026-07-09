@@ -161,9 +161,10 @@ layout:
 | CAD | 84.2 ms, row groups 20/19/1, files 21/21/0 | 32.8 ms, row groups 19/1/18, files 1/1/0 |
 | assets | 45.0 ms, row groups 5/5/0, files 6/6/0 | 29.5 ms, row groups 5/1/4, files 1/1/0 |
 
-This validates the compaction lever. The current implementation rewrites the
-whole table; the production direction is bucket-local compaction using the same
-projection/sort/write primitive.
+This validates the compaction lever. Whole-table compaction remains available;
+bucket-scoped compaction now uses the native delete+pending-append mutation path
+when row-lineage planning succeeds. The next benchmark step is to compare
+file-group/bytes-scanned improvements on fragmented per-bucket append workloads.
 
 Current pinned `sf0` counts:
 

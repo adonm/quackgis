@@ -5,6 +5,9 @@ PostGIS as the reference source. It is intentionally **opt-in**: real OSM data i
 downloaded into temporary runtime storage and is not committed to this
 repository.
 
+See [REAL_DATA_CLIENT_MATRIX.md](./REAL_DATA_CLIENT_MATRIX.md) for the broader
+dataset/client evidence contract that this OSM track feeds.
+
 ## Why this track matters
 
 Synthetic point probes are good for fast compatibility triage, but they do not
@@ -100,8 +103,9 @@ For each copied OSM layer, open both the PostGIS source and QuackGIS copy with:
 | GeoServer | ✅ | ✅ | datastore publish, WFS count, WMS PNG |
 | Martin | ✅ | ✅ | discovery and non-empty MVT tile |
 
-This phase should produce an explicit compatibility report per layer rather than
-claiming broad OSM support from a single points table.
+This phase should produce an explicit compatibility report per layer following
+the real-data matrix contract rather than claiming broad OSM support from a
+single points table.
 
 ### Phase 3 — documented copy workflows
 

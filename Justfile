@@ -29,6 +29,15 @@ qps_deep_min_instances := env_var_or_default("QPS_DEEP_MIN_INSTANCES", "3")
 qps_deep_min_qps := env_var_or_default("QPS_DEEP_MIN_QPS", "1.0")
 qps_deep_disk_budget_gib := env_var_or_default("QPS_DEEP_DISK_BUDGET_GIB", "1024")
 qps_shared_catalog_refresh_ms := env_var_or_default("QPS_SHARED_CATALOG_REFRESH_MS", "60000")
+external_alpha_use_kind_emulators := env_var_or_default("EXTERNAL_ALPHA_USE_KIND_EMULATORS", "true")
+external_catalog_url := env_var_or_default("EXTERNAL_QUACKGIS_CATALOG_URL", "postgres://postgres:postgres@pg.quackgis.svc.cluster.local:5432/quackgis_external")
+external_ducklake_catalog_name := env_var_or_default("EXTERNAL_QUACKGIS_DUCKLAKE_CATALOG_NAME", "quackgis_external")
+external_data_path := env_var_or_default("EXTERNAL_QUACKGIS_DATA_PATH", "s3://quackgis/external-ducklake")
+external_s3_endpoint := env_var_or_default("EXTERNAL_QUACKGIS_S3_ENDPOINT", "http://s3.quackgis.svc.cluster.local:8014")
+external_s3_access_key_id := env_var_or_default("EXTERNAL_QUACKGIS_S3_ACCESS_KEY_ID", "quackgis")
+external_s3_secret_access_key := env_var_or_default("EXTERNAL_QUACKGIS_S3_SECRET_ACCESS_KEY", "quackgis")
+external_s3_region := env_var_or_default("EXTERNAL_QUACKGIS_S3_REGION", "us-east-1")
+external_s3_allow_http := env_var_or_default("EXTERNAL_QUACKGIS_S3_ALLOW_HTTP", "true")
 ref_datafusion_postgres_url := env_var_or_default("REF_DATAFUSION_POSTGRES_URL", "https://github.com/adonm/datafusion-postgres")
 ref_datafusion_postgres_branch := env_var_or_default("REF_DATAFUSION_POSTGRES_BRANCH", "quackgis/fixes")
 ref_datafusion_postgres_upstream_url := env_var_or_default("REF_DATAFUSION_POSTGRES_UPSTREAM_URL", "https://github.com/datafusion-contrib/datafusion-postgres")
@@ -222,6 +231,12 @@ test-fast:
 # Run the starter curated PostGIS function regress subset and print pass-rate evidence.
 postgis-regress:
     cargo test -p quackgis-server --test postgis_regress -- --nocapture
+
+# Summarize PostGIS conformance fixture coverage for docs/release notes.
+postgis-conformance-summary format="markdown":
+    @format_arg='{{format}}'; \
+    format_arg="${format_arg#format=}"; \
+    python3 scripts/postgis_conformance_summary.py --format "${format_arg}"
 
 # Run the deterministic LayoutBench sf0 oracle for spatial-layout work.
 layoutbench-sf0:
@@ -448,6 +463,7 @@ probe-static-check:
     PYTHONPYCACHEPREFIX=.tmp/pycache python3 -m py_compile scripts/probe_static_check.py scripts/runtime_static_check.py scripts/trend_metrics.py deploy/kind/render_compat_report.py deploy/kind/check_linkerd_injected.py deploy/kind/probes/*.py
     bash -n deploy/kind/probes/*.sh
     python3 scripts/probe_static_check.py deploy/kind
+    python3 scripts/probe_static_check.py deploy/kubernetes
 
 # Static guard that the maintained runtime image remains one native-free Rust binary.
 runtime-static-check:
@@ -455,7 +471,23 @@ runtime-static-check:
 
 # Flatten one or more compatibility/storage metrics artifacts for trend analysis.
 metrics-trend path=".tmp/compatibility" format="csv":
-    python3 scripts/trend_metrics.py --format {{format}} "{{path}}"
+    @set -eu; \
+    path_arg='{{path}}'; \
+    format_arg='{{format}}'; \
+    path_arg="${path_arg#path=}"; \
+    format_arg="${format_arg#format=}"; \
+    python3 scripts/trend_metrics.py --format "${format_arg}" "${path_arg}"
+
+# Render a Markdown metrics dashboard from one or more metrics artifacts.
+metrics-dashboard path=".tmp/compatibility" out=".tmp/metrics-dashboard.md":
+    @set -eu; \
+    path_arg='{{path}}'; \
+    out_arg='{{out}}'; \
+    path_arg="${path_arg#path=}"; \
+    out_arg="${out_arg#out=}"; \
+    mkdir -p "$(dirname "${out_arg}")"; \
+    python3 scripts/trend_metrics.py --format dashboard "${path_arg}" > "${out_arg}"; \
+    printf "wrote %s\n" "${out_arg}"
 
 # Build, load, and deploy QuackGIS into Kind.
 kind-refresh: kind-build-image kind-load-image kind-deploy
@@ -500,6 +532,32 @@ kind-lake-deploy:
 
 # Build, load, and deploy the lake profile into Kind.
 kind-lake-refresh: kind-build-image-fast kind-load-image kind-lake-deploy
+
+# Deploy QuackGIS against env-driven external PostgreSQL/S3 endpoints.
+# Defaults point at the Kind pg/s3 emulators so the wiring is CI/local repeatable;
+# set EXTERNAL_ALPHA_USE_KIND_EMULATORS=false plus EXTERNAL_QUACKGIS_* for real services.
+kind-external-alpha-deploy:
+    kubectl create namespace quackgis --dry-run=client -o yaml | kubectl apply -f -
+    kubectl -n quackgis create secret generic external-storage --from-literal=catalog-url="{{external_catalog_url}}" --from-literal=ducklake-catalog-name="{{external_ducklake_catalog_name}}" --from-literal=data-path="{{external_data_path}}" --from-literal=s3-endpoint="{{external_s3_endpoint}}" --from-literal=s3-access-key-id="{{external_s3_access_key_id}}" --from-literal=s3-secret-access-key="{{external_s3_secret_access_key}}" --from-literal=s3-region="{{external_s3_region}}" --from-literal=s3-allow-http="{{external_s3_allow_http}}" --dry-run=client -o yaml | kubectl apply -f -
+    kubectl apply -f deploy/kind/external-lake.yaml
+    kubectl -n quackgis rollout restart deployment/external-lake
+    kubectl -n quackgis rollout status deployment/external-lake --timeout=180s
+    kubectl -n quackgis wait deployment/external-lake --for=condition=Available --timeout=180s
+
+# Run storage smoke through the env-driven external profile. By default, starts Kind pg/s3 emulators.
+kind-external-alpha-smoke: kind-ready kind-probe-scripts
+    @if [ "{{external_alpha_use_kind_emulators}}" = "true" ]; then \
+        just kind-lake-refresh; \
+        kubectl -n quackgis exec deployment/pg -c postgres -- sh -c 'createdb -U "$POSTGRES_USER" quackgis_external || psql -U "$POSTGRES_USER" -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '\''quackgis_external'\''" | grep -q 1'; \
+    else \
+        just kind-build-image-fast; \
+        just kind-load-image; \
+    fi
+    just kind-external-alpha-deploy
+    kubectl -n quackgis delete job external-lake-probe --ignore-not-found=true
+    kubectl apply -f deploy/kind/external-lake-probe.yaml
+    kubectl -n quackgis wait job/external-lake-probe --for=condition=complete --timeout=240s || (kubectl -n quackgis logs deployment/external-lake --tail=200 || true; kubectl -n quackgis logs job/external-lake-probe || true; false)
+    kubectl -n quackgis logs job/external-lake-probe
 
 # Run the lake storage smoke in Kind against PostgreSQL catalog + s3s-fs object storage.
 kind-lake-smoke: kind-ready kind-probe-scripts
@@ -750,9 +808,10 @@ kind-compat-report:
     mkdir -p .tmp/compatibility
     kubectl -n quackgis get pods,jobs,svc,deploy,statefulset -o wide > .tmp/compatibility/kubernetes.txt 2>&1 || true
     kubectl -n quackgis logs statefulset/quackgis --tail=-1 > .tmp/compatibility/quackgis.log 2>&1 || true
-    @for job in qgis-probe qgis-edit-probe ogr-probe geoserver-probe osm-postgis-parity quackgis-demo lake-probe lake-multipod lb-probe read-seed read-probe qps-seed qps-probe write-setup write-workers write-verify olap-seed olap-probe; do \
+    @for job in qgis-probe qgis-edit-probe ogr-probe geoserver-probe osm-postgis-parity quackgis-demo lake-probe external-lake-probe lake-multipod lb-probe read-seed read-probe qps-seed qps-probe write-setup write-workers write-verify olap-seed olap-probe; do \
         kubectl -n quackgis logs "job/${job}" --tail=-1 > ".tmp/compatibility/${job}.log" 2>&1 || true; \
     done
+    kubectl -n quackgis logs deployment/external-lake --all-containers=true --tail=-1 > .tmp/compatibility/external-lake.log 2>&1 || true
     kubectl -n quackgis logs deployment/mesh-client --all-containers=true --tail=-1 > .tmp/compatibility/mesh-client.log 2>&1 || true
     kubectl -n linkerd logs deployment/linkerd-identity --all-containers=true --tail=-1 > .tmp/compatibility/linkerd-identity.log 2>&1 || true
     python3 deploy/kind/render_compat_report.py .tmp/compatibility

@@ -309,6 +309,23 @@ mod tests {
             "SELECT pg_get_indexdef(90101)",
             CatalogSurface::PgGetIndexdef,
         );
+        assert_surface(
+            "SELECT relkind FROM pg_class WHERE oid = 'public.points'::regclass",
+            CatalogSurface::PgClassRelkindRegclass,
+        );
+        assert_surface(
+            "SELECT attidentity FROM pg_attribute WHERE attrelid = 'public.points'::regclass",
+            CatalogSurface::PgAttributeRegclassIdentity,
+        );
+        assert_surface(
+            "SELECT attname FROM pg_attribute WHERE attrelid = 'public.points'::regclass",
+            CatalogSurface::PgAttributeRegclassName,
+        );
+        assert_surface(
+            "SELECT t.typname FROM pg_attribute a JOIN pg_type t ON a.atttypid = t.oid \
+             WHERE a.attname = 'geom'",
+            CatalogSurface::PgAttributeGeomTypeName,
+        );
     }
 
     #[test]

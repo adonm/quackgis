@@ -47,12 +47,13 @@ The default local server listens on `127.0.0.1:5434` and uses:
 | `QUACKGIS_AUTH_MODE` | `trust` | `trust` dev mode or `password` pgwire password mode |
 | `QUACKGIS_READWRITE_USER` / `QUACKGIS_READWRITE_PASSWORD` | `postgres` / unset | read/write login; password required in password mode |
 | `QUACKGIS_READONLY_USER` / `QUACKGIS_READONLY_PASSWORD` | `quackgis_readonly` / unset | optional read-only login in password mode |
+| `QUACKGIS_METRICS_HOST` / `QUACKGIS_METRICS_PORT` | `127.0.0.1` / unset | optional Prometheus `/metrics` bind; disabled when port is unset |
 | `QUACKGIS_LOG` | `info` | Rust log filter |
 
 Dev auth is intentionally minimal: connect as user `postgres` to database
-`quackgis` with no password unless a future auth layer is enabled. Alpha storage
-and multi-process deployment docs must cover production auth/TLS/RBAC plus
-catalog/object-store credentials.
+`quackgis` with no password in `trust` mode. Password mode uses SCRAM-SHA-256
+and coarse read/write vs read-only roles; platform deployments still need TLS,
+secret management, and catalog/object-store credential controls.
 
 ## Security profile
 
@@ -62,9 +63,10 @@ enforcement. For non-dev deployments, switch to `QUACKGIS_AUTH_MODE=password`,
 set `QUACKGIS_READWRITE_PASSWORD`, and optionally enable a read-only login with
 `QUACKGIS_READONLY_PASSWORD`. Read-only users can run SQL reads but fail closed
 on DuckLake write and maintenance statements such as `CREATE TABLE`, `COPY FROM
-STDIN`, DML, and compaction. PostgreSQL catalog privilege helpers still expose an
-allow-all compatibility surface so QGIS/OGR/GeoServer can determine editability;
-the DuckLake write hook is the current authorization boundary.
+STDIN`, DML, and compaction. PostgreSQL `pg_roles` and explicit-user privilege
+helpers reflect configured read/write vs read-only users; current-user privilege
+helper forms remain compatibility-oriented because the DuckLake write hook is the
+authoritative authorization boundary.
 
 Transport TLS is available with matching certificate/key configuration:
 
@@ -79,10 +81,9 @@ quackgis-server --host 0.0.0.0 --port 5434
 
 The server fails closed if only one of `QUACKGIS_TLS_CERT` or `QUACKGIS_TLS_KEY`
 is set, or if password auth is enabled without a non-empty read/write password.
-Password auth uses PostgreSQL cleartext-password negotiation, so pair it with
-direct TLS, a trusted mTLS mesh, or an authenticated PostgreSQL-aware proxy. Do
-not expose cleartext password auth on an unencrypted network; SCRAM remains M8
-hardening.
+Password auth negotiates PostgreSQL SASL/SCRAM-SHA-256; still pair it with
+direct TLS, a trusted mTLS mesh, or an authenticated PostgreSQL-aware proxy so
+queries, metadata, and object/catalog paths are not exposed on the wire.
 
 Safe Alpha defaults before any external exposure:
 
@@ -99,8 +100,13 @@ Safe Alpha defaults before any external exposure:
 - keep `QUACKGIS_LOG=info` unless debugging in a trusted workspace, because query
   text and object paths may be sensitive.
 
-Target M8 production profiles still need SCRAM, richer RBAC/catalog privilege
-metadata, documented default TLS manifests, and broader denied-connection tests.
+Target M8 production profiles still need full object-level RBAC, documented
+default TLS manifests, and broader failure-mode probes. A production-style
+Kubernetes starting point lives under `deploy/kubernetes/`; it keeps secrets out
+of Git and enables pgwire TLS, password auth, metrics, probes, and resource
+limits for the external PostgreSQL/S3 profile. See
+[SECURITY_RBAC.md](./SECURITY_RBAC.md) for the security/RBAC hardening contract
+and failure-mode probe checklist.
 
 Storage profiles:
 
@@ -128,6 +134,7 @@ just demo-kind           # deploy, seed stable public.demo_* layers, print hints
 just kind-up
 just kind-compatibility  # build/deploy + QGIS read/edit, OGR, GeoServer probes
 just kind-lake-smoke     # PostgreSQL catalog + s3s-fs object storage smoke
+just kind-external-alpha-smoke # env-driven external PostgreSQL/S3 profile wiring
 just kind-qps-smoke      # parallel-reader QPS gate over the lake profile
 just kind-qps-mtls-smoke # QPS gate with Linkerd TCP/TLS observability evidence
 just kind-qps-deep-smoke # larger Linkerd-observed reader gate; QPS_DEEP_* tunable
@@ -171,6 +178,18 @@ full local/CI recipe: it runs `kind-refresh-fast` and then `kind-probes`.
 `pg` for the DuckLake PostgreSQL catalog, and `s3` for local S3-compatible Parquet
 storage. The probe covers CREATE TABLE, text COPY, spatial read-back, compaction,
 and read-back after compaction against that storage profile.
+
+`just kind-external-alpha-smoke` deploys a separate `external-lake` QuackGIS
+service whose storage is configured only through the `external-storage` Secret.
+By default it points at the same Kind `pg` and `s3` emulators so local/CI can
+exercise external-profile wiring deterministically; the default emulator path
+uses a separate `quackgis_external` PostgreSQL database so DuckLake data-path
+metadata does not collide with the main lake profile. Set
+`EXTERNAL_ALPHA_USE_KIND_EMULATORS=false` and provide `EXTERNAL_QUACKGIS_*`
+values to run the same probe against real PostgreSQL/S3-compatible services. It
+also checks that autocommit `DELETE` creates two native DuckLake delete files
+under one PostgreSQL metadata snapshot and scrapes the opt-in Prometheus metrics
+endpoint exposed on the `external-lake` Service.
 
 On the shared PostgreSQL catalog profile, QuackGIS refreshes DuckLake catalog
 metadata strongly for DDL/write/compaction statements and caches read-side
@@ -354,6 +373,7 @@ object-storage behavior.
 ```sh
 eval "$(mise activate bash)"
 just kind-lake-smoke           # PostgreSQL catalog + S3-compatible storage basics
+just kind-external-alpha-smoke # env-driven storage wiring + native DML metadata
 just kind-lake-multipod-smoke  # concurrent probes through multiple QuackGIS pods
 just kind-write-smoke          # parallel ingest plus snapshot conflict/retry evidence
 just kind-qps-smoke            # high-QPS selective spatial readers
@@ -369,6 +389,25 @@ bytes-scanned ceilings from `EXPLAIN ANALYZE` (`QPS_MAX_BYTES_SCANNED`,
 Kind uses disposable local defaults (`postgres/postgres`, database `quackgis`,
 S3 access key `quackgis`). Override the `storage` Secret for any non-dev
 cluster; do not reuse the Kind credentials outside a trusted local workspace.
+
+For external service wiring, run:
+
+```sh
+EXTERNAL_ALPHA_USE_KIND_EMULATORS=false \
+EXTERNAL_QUACKGIS_CATALOG_URL='postgres://user:pass@postgres.example:5432/quackgis' \
+EXTERNAL_QUACKGIS_DATA_PATH='s3://bucket/quackgis-alpha' \
+EXTERNAL_QUACKGIS_S3_ENDPOINT='https://s3.example' \
+EXTERNAL_QUACKGIS_S3_ACCESS_KEY_ID='...' \
+EXTERNAL_QUACKGIS_S3_SECRET_ACCESS_KEY='...' \
+EXTERNAL_QUACKGIS_S3_ALLOW_HTTP=false \
+just kind-external-alpha-smoke
+```
+
+The default emulator mode is a useful preflight, but not a production durability
+claim. Use [ALPHA_EXTERNAL_SERVICES.md](./ALPHA_EXTERNAL_SERVICES.md) for the
+real PostgreSQL/S3 evidence ladder: credential rotation, catalog restart,
+object-store latency/throttling, backup/restore, failed-writer cleanup, and
+catalog-refresh visibility.
 
 ### Alpha backup/restore runbook
 
@@ -397,7 +436,9 @@ quiesced backup window for any restore drill:
 Kind's in-cluster PostgreSQL and `s3s-fs` deployments are smoke-test stand-ins,
 not backup tooling. Production backup/restore evidence must be collected against
 the external PostgreSQL and S3-compatible services that will actually hold the
-catalog and object prefix.
+catalog and object prefix. The fast local gate includes a SQLite/filesystem
+copy-restore oracle for the shape of a matched catalog+data backup set; it is not
+a substitute for external-service restore drills.
 
 ### Failed-writer and object-prefix cleanup
 
@@ -460,6 +501,17 @@ same Justfile recipes as local development through `mise exec -- just ...`.
   Kind compatibility/storage report to the job summary, and uploads Kind logs.
   Manual dispatch can still run any single storage recipe, including deeper
   QPS/mTLS variants, for focused triage.
+- `Benchmark ladder` is a manual workflow for LayoutBench/QPS/OLAP scale recipes;
+  it uploads `benchmark-report-*` and `benchmark-metrics-*` artifacts and renders
+  `metrics-dashboard.md` when metrics are available.
+- External PostgreSQL/S3 hardening runs should follow
+  [ALPHA_EXTERNAL_SERVICES.md](./ALPHA_EXTERNAL_SERVICES.md); Kind emulator runs
+  remain smoke evidence, not production durability evidence.
+- Native DML and compaction crash/retry/orphan drills should follow
+  [MUTATION_FAILURE_DRILLS.md](./MUTATION_FAILURE_DRILLS.md); successful ordinary
+  DML tests alone are not production failure-mode evidence.
+- Snapshot rollback, future SQL `AS OF`, protected snapshot, and CDC exposure
+  policy is documented in [SNAPSHOT_OPERATIONS.md](./SNAPSHOT_OPERATIONS.md).
 
 Every `kind-compat-report` artifact includes `metrics.json` with both probe
 metrics and GitHub run metadata (`github_sha`, workflow, run id, run URL, and
@@ -472,11 +524,15 @@ metrics-only artifacts named with the source SHA:
 Tag/main artifact builds write `release-evidence-<version>.json` next to the
 binary archive. That manifest records source SHA, binary SHA256, image tags, and
 the metrics artifact prefixes a release manager should attach to the release
-evidence record.
+evidence record. See [RELEASE_EVIDENCE.md](./RELEASE_EVIDENCE.md) for the
+release artifact set, dashboard attachment policy, and review checklist.
 
 Use `just metrics-trend path/to/artifact-dir` to flatten one or more downloaded
 `metrics.json` files into CSV for trend dashboards. The helper also supports
-`format=json` and `format=markdown` for release notes or manual inspection.
+`format=json`, `format=markdown`, and `format=dashboard` for release notes or
+manual inspection. `just metrics-dashboard path=path/to/artifact-dir` writes a
+release-ready Markdown dashboard; see
+[Metrics trend dashboard](./METRICS_TRENDS.md) for the signal contract.
 
 ## Logs and observability
 
@@ -497,8 +553,25 @@ denials emit a separate counter line:
 quackgis_write_denied user=quackgis_readonly statement_kind=create_table denied_total=1
 ```
 
-Future M8 observability work should export these counters to metrics and add
-object-store/catalog refresh counters without requiring log scraping.
+M8 observability now includes process-local catalog refresh and native
+DML/compaction mutation counters without requiring log scraping. Object-store IO
+and writer-conflict counters remain future work.
+
+For process-local scrape evidence, set `QUACKGIS_METRICS_PORT` (and optionally
+`QUACKGIS_METRICS_HOST`, default `127.0.0.1`) to expose a small Prometheus text
+endpoint:
+
+```sh
+QUACKGIS_METRICS_PORT=9187 just server
+curl http://127.0.0.1:9187/metrics
+```
+
+The endpoint is disabled by default and currently exports only safe process
+counters: pgwire hook statements started, transaction staging ids allocated,
+read-only write denials, DuckLake catalog refreshes, shared-catalog read/strong
+refreshes, native delete/update/bucket-compaction mutations, and successful
+compaction calls. It intentionally does not expose SQL text, object-store paths,
+usernames, or secrets.
 
 ## Persistence model
 

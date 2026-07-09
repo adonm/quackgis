@@ -6,7 +6,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/quackgis-server"]
-exclude = [".tmp/ref/datafusion-postgres"]
+exclude = [".tmp/ref/datafusion-postgres", "vendor/datafusion-ducklake"]
 
 [workspace.package]
 version = "0.2.0"
@@ -50,13 +50,13 @@ sedona-proj = { git = "https://github.com/adonm/sedona-db.git", branch = "quackg
 sedona-geometry = { git = "https://github.com/adonm/sedona-db.git", branch = "quackgis/df54", package = "sedona-geometry" }
 geo-traits = "0.3"
 
-# Storage — DuckLake 1.0+ target. datafusion-ducklake main HEAD is the
-# Rust-native path closest to the official DuckLake 1.0 spec; it currently
-# tracks DataFusion 54. Consumed from adonm fork main so we can patch quickly
-# for G5 (UPDATE/DELETE) and G7 (file pruning) when those milestones land.
+# Storage — DuckLake 1.0+ target. The vendored fork snapshot is based on
+# adonm/datafusion-ducklake main (Cargo.lock previously pinned 117c0c5) with
+# QuackGIS G5 atomic table-mutation patches; see vendor/datafusion-ducklake and
+# docs/NATIVE_DML_FORK_PLAN.md. It currently tracks DataFusion 54.
 # SQLite/local remains the default correctness profile; PostgreSQL catalog +
 # S3-compatible object storage is the Alpha scaled-storage profile.
-datafusion-ducklake = { git = "https://github.com/adonm/datafusion-ducklake", branch = "main", default-features = false, features = ["metadata-sqlite", "write-sqlite", "metadata-postgres", "write-postgres", "multicatalog-postgres"] }
+datafusion-ducklake = { path = "vendor/datafusion-ducklake", default-features = false, features = ["metadata-sqlite", "write-sqlite", "metadata-postgres", "write-postgres", "multicatalog-postgres"] }
 
 # Object-store plumbing — versions aligned with DF 54 / ducklake main.
 object_store = { version = "0.13", default-features = false, features = ["aws"] }

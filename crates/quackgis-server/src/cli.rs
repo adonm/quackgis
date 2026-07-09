@@ -7,7 +7,7 @@ use clap::{Parser, ValueEnum};
 pub enum CliAuthMode {
     /// Trust startup packets and do not request a password. Development only.
     Trust,
-    /// Require PostgreSQL cleartext-password authentication for configured users.
+    /// Require PostgreSQL SCRAM-SHA-256 password authentication for configured users.
     Password,
 }
 
@@ -107,4 +107,12 @@ pub struct Cli {
     /// Log filter (`env_logger` syntax). Falls back to the `RUST_LOG` env var.
     #[arg(long, env = "QUACKGIS_LOG", default_value = "info")]
     pub log: String,
+
+    /// Bind host for the optional Prometheus metrics endpoint.
+    #[arg(long, env = "QUACKGIS_METRICS_HOST", default_value = "127.0.0.1")]
+    pub metrics_host: String,
+
+    /// Optional Prometheus metrics endpoint port. Disabled when unset.
+    #[arg(long, env = "QUACKGIS_METRICS_PORT")]
+    pub metrics_port: Option<u16>,
 }

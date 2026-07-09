@@ -63,6 +63,16 @@ const CASES: &[Case] = &[
         expected: "16.0",
     },
     Case {
+        name: "distance_3_4_5",
+        sql: "SELECT CAST(ST_Distance(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('POINT(3 4)')) AS TEXT)",
+        expected: "5.0",
+    },
+    Case {
+        name: "length_3_4_5",
+        sql: "SELECT CAST(ST_Length(ST_GeomFromText('LINESTRING(0 0,3 4)')) AS TEXT)",
+        expected: "5.0",
+    },
+    Case {
         name: "intersects_disjoint_points",
         sql: "SELECT CAST(ST_Intersects(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('POINT(2 2)')) AS TEXT)",
         expected: "false",

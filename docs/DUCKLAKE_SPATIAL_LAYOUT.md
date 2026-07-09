@@ -20,9 +20,12 @@ rechecked by SedonaDB. The layout only decides which DuckLake partitions, files,
 and Parquet row groups can be skipped by many readers in parallel.
 
 Current preview status: WKB-derived hidden bbox/bucket/sort columns, safe
-single-table bbox rewrites, LayoutBench `sf0`, COPY/INSERT ingest variants, and
-whole-table compaction are implemented. Temporal layout, bucket-local compaction,
-and PostgreSQL/S3 multi-process storage probes are Alpha/hardening work.
+single-table bbox rewrites, simple temporal `BETWEEN` bucket prefilters,
+LayoutBench `sf0`, COPY/INSERT ingest variants, whole-table compaction, native
+bucket-local partial compaction, and PostgreSQL/S3 multi-process storage probes
+are implemented. Broader temporal predicate shapes and larger real-data
+compaction evidence are Alpha/hardening work. The same layout path is used for
+the footprint/sidecar asset schemas in [MULTIMODAL_ASSETS.md](./MULTIMODAL_ASSETS.md).
 
 ## Decision
 
@@ -329,14 +332,19 @@ The results are in `benchmarks/BENCHMARKS.md`; the architecture implications are
    not only semantic grouping; they give QuackGIS a staging boundary for sorting a
    table delta once before publishing it to DuckLake.
 4. **Row groups are the current skip unit.** File/range pruning is not selective
-   in current local sf1 runs; Parquet row-group statistics are. The local default
+   in current local sf1 runs; Parquet row-group statistics are. Spatial prefilters
+   now combine with simple temporal `BETWEEN` bucket prefilters when a recognized
+   time column such as `captured_minute` is present. The local default
    `QUACKGIS_DUCKLAKE_ROW_GROUP_ROWS=512` is intentionally small for this scale
    and can be disabled with `0`. Larger/nightly scales should migrate this from a
    row-count cap toward a bytes/row-count policy aligned with DuckLake defaults.
 5. **Compaction is the next architecture lever.** Many small autocommit append
-   files should be rewritten into sorted bucket-local files. Correctness remains
-   the exact SedonaDB predicate; compaction should only reduce files/ranges and
-   row groups read.
+   files can now be rewritten into sorted bucket-local files through native
+   delete+append metadata. Correctness remains the exact SedonaDB predicate. The
+   local fragmented-bucket oracle now records catalog file-group/byte deltas:
+   partial bucket compaction appends one sorted replacement and masks source
+   fragments with delete files, while old partial files remain visible until a
+   later whole-file/snapshot cleanup path can reduce physical scan groups.
 
 The first implementation is an explicit table-scoped command:
 

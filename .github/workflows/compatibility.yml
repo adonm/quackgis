@@ -72,6 +72,16 @@ jobs:
             printf 'Compatibility report was not generated.\n' >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      - name: Render compatibility trend dashboard
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f .tmp/compatibility/metrics.json ]; then
+            mise exec -- just metrics-dashboard path=.tmp/compatibility out=.tmp/compatibility/metrics-dashboard.md
+            cat .tmp/compatibility/metrics-dashboard.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Upload compatibility report
         if: always()
         uses: actions/upload-artifact@v4

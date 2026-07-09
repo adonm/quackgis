@@ -1,29 +1,55 @@
 // SPDX-License-Identifier: Apache-2.0
 //! QuackGIS pgwire authentication and coarse role configuration.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt};
 
 use anyhow::{Result, anyhow};
 use datafusion_postgres::pgwire::api::ClientInfo;
+use datafusion_postgres::pgwire::api::auth::sasl::scram::{
+    SCRAM_ITERATIONS, gen_salted_password, random_nonce,
+};
 
 const METADATA_USER: &str = "user";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AuthMode {
     Trust,
     Password,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AccessRole {
     ReadWrite,
     ReadOnly,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AuthUser {
-    pub password: String,
     pub role: AccessRole,
+    pub(crate) scram_salt: Vec<u8>,
+    pub(crate) scram_salted_password: Vec<u8>,
+}
+
+impl fmt::Debug for AuthUser {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthUser")
+            .field("role", &self.role)
+            .field("scram_salt_len", &self.scram_salt.len())
+            .field("scram_salted_password", &"<redacted>")
+            .finish()
+    }
+}
+
+impl AuthUser {
+    fn scram(password: &str, role: AccessRole) -> Self {
+        let scram_salt = random_nonce().into_bytes();
+        let scram_salted_password = gen_salted_password(password, &scram_salt, SCRAM_ITERATIONS);
+        Self {
+            role,
+            scram_salt,
+            scram_salted_password,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -58,10 +84,7 @@ impl AuthConfig {
         let mut users = HashMap::new();
         users.insert(
             readwrite_user.clone(),
-            AuthUser {
-                password: readwrite_password,
-                role: AccessRole::ReadWrite,
-            },
+            AuthUser::scram(&readwrite_password, AccessRole::ReadWrite),
         );
 
         if let Some((readonly_user, readonly_password)) = readonly {
@@ -75,10 +98,7 @@ impl AuthConfig {
             }
             users.insert(
                 readonly_user,
-                AuthUser {
-                    password: readonly_password,
-                    role: AccessRole::ReadOnly,
-                },
+                AuthUser::scram(&readonly_password, AccessRole::ReadOnly),
             );
         }
 
@@ -94,6 +114,10 @@ impl AuthConfig {
 
     pub fn user(&self, name: &str) -> Option<&AuthUser> {
         self.users.get(name)
+    }
+
+    pub fn users(&self) -> impl Iterator<Item = (&str, &AuthUser)> {
+        self.users.iter().map(|(name, user)| (name.as_str(), user))
     }
 
     pub fn role_for_user(&self, name: Option<&str>) -> AccessRole {
@@ -120,9 +144,19 @@ fn validate_user_password(label: &str, user: &str, password: &str) -> Result<()>
             "{label} user cannot be empty in password auth mode"
         ));
     }
+    if user != user.trim() || user.chars().any(char::is_control) {
+        return Err(anyhow!(
+            "{label} user cannot contain leading/trailing whitespace or control characters in password auth mode"
+        ));
+    }
     if password.is_empty() {
         return Err(anyhow!(
             "{label} password cannot be empty in password auth mode"
+        ));
+    }
+    if password.contains('\0') {
+        return Err(anyhow!(
+            "{label} password cannot contain NUL bytes in password auth mode"
         ));
     }
     Ok(())

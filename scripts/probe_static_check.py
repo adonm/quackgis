@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Cheap static checks for Kind probe manifests.
+"""Cheap static checks for Kubernetes manifests.
 
 This intentionally avoids requiring a live Kubernetes cluster. It is not a YAML
-schema validator; it catches the common pre-Kind mistakes that otherwise waste a
-full image build/probe cycle: tabs in manifests, empty manifest documents, and
-missing top-level Kubernetes document markers.
+schema validator; it catches common mistakes that otherwise waste a full image
+build/probe cycle: tabs in manifests, empty manifest documents, and missing
+top-level Kubernetes document markers.
 """
 
 from __future__ import annotations

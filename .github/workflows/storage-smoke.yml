@@ -15,6 +15,7 @@ name: Storage smoke
         type: choice
         options:
           - kind-alpha-smoke
+          - kind-external-alpha-smoke
           - kind-lake-smoke
           - kind-lake-multipod-smoke
           - kind-lb-smoke
@@ -60,6 +61,14 @@ jobs:
         run: |
           if [ -f .tmp/compatibility/README.md ]; then
             cat .tmp/compatibility/README.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Render storage trend dashboard
+        if: always()
+        run: |
+          if [ -f .tmp/compatibility/metrics.json ]; then
+            just metrics-dashboard path=.tmp/compatibility out=.tmp/compatibility/metrics-dashboard.md
+            cat .tmp/compatibility/metrics-dashboard.md >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Upload Kind logs

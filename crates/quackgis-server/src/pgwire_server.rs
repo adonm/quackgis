@@ -5,7 +5,7 @@
 //! pgwire COPY sub-protocol handler. This module keeps the binary and tests on
 //! the same handler stack.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use datafusion::prelude::SessionContext;
@@ -13,10 +13,12 @@ use datafusion_postgres::hooks::QueryHook;
 use datafusion_postgres::hooks::cursor::CursorStatementHook;
 use datafusion_postgres::hooks::set_show::SetShowHook;
 use datafusion_postgres::hooks::transactions::TransactionStatementHook;
-use datafusion_postgres::pgwire::api::auth::cleartext::CleartextPasswordAuthStartupHandler;
 use datafusion_postgres::pgwire::api::auth::noop::NoopStartupHandler;
+use datafusion_postgres::pgwire::api::auth::sasl::SASLAuthStartupHandler;
+use datafusion_postgres::pgwire::api::auth::sasl::scram::ScramAuth;
 use datafusion_postgres::pgwire::api::auth::{
-    AuthSource, DefaultServerParameterProvider, LoginInfo, Password, StartupHandler,
+    AuthSource, DefaultServerParameterProvider, LoginInfo, Password, ServerParameterProvider,
+    StartupHandler,
 };
 use datafusion_postgres::pgwire::api::cancel::{CancelHandler, DefaultCancelHandler};
 use datafusion_postgres::pgwire::api::copy::CopyHandler;
@@ -26,7 +28,7 @@ use datafusion_postgres::pgwire::api::{
 };
 use datafusion_postgres::{DfSessionService, ServerOptions, serve_with_handlers};
 
-use crate::auth::{AuthConfig, AuthMode};
+use crate::auth::{AccessRole, AuthConfig, AuthMode};
 use crate::catalog_compat::CatalogCompatHook;
 use crate::context::StoragePaths;
 use crate::ducklake_sql::{DuckLakeCopyHandler, DuckLakeSqlHook};
@@ -87,12 +89,10 @@ impl QuackGisHandlerFactory {
                 connection_manager: Arc::clone(&connection_manager),
             }),
             AuthMode::Password => {
-                let handler = CleartextPasswordAuthStartupHandler::new(
-                    StaticPasswordAuthSource { auth: auth.clone() },
-                    DefaultServerParameterProvider::default(),
-                )
-                .with_connection_manager(Arc::clone(&connection_manager));
-                QuackGisStartupHandler::Password(Box::new(handler))
+                QuackGisStartupHandler::Password(Box::new(PerConnectionScramStartupHandler::new(
+                    auth.clone(),
+                    Arc::clone(&connection_manager),
+                )))
             }
         };
         Self {
@@ -131,20 +131,101 @@ impl AuthSource for StaticPasswordAuthSource {
                 ),
             );
         };
-        Ok(Password::new(None, user.password.as_bytes().to_vec()))
+        Ok(Password::new(
+            Some(user.scram_salt.clone()),
+            user.scram_salted_password.clone(),
+        ))
+    }
+}
+
+#[derive(Debug)]
+struct QuackGisServerParameterProvider {
+    auth: AuthConfig,
+}
+
+impl QuackGisServerParameterProvider {
+    fn new(auth: AuthConfig) -> Self {
+        Self { auth }
+    }
+}
+
+impl ServerParameterProvider for QuackGisServerParameterProvider {
+    fn server_parameters<C>(&self, client: &C) -> Option<HashMap<String, String>>
+    where
+        C: ClientInfo,
+    {
+        let mut params = DefaultServerParameterProvider::default().server_parameters(client)?;
+        let role = self.auth.role_for_client(client);
+        params.insert("is_superuser".to_string(), "off".to_string());
+        params.insert(
+            "default_transaction_read_only".to_string(),
+            match role {
+                AccessRole::ReadWrite => "off",
+                AccessRole::ReadOnly => "on",
+            }
+            .to_string(),
+        );
+        Some(params)
+    }
+}
+
+struct ScramStartupSession {
+    handler: SASLAuthStartupHandler<QuackGisServerParameterProvider>,
+}
+
+#[derive(Debug)]
+struct PerConnectionScramStartupHandler {
+    auth_source: Arc<StaticPasswordAuthSource>,
+    parameter_provider: Arc<QuackGisServerParameterProvider>,
+    connection_manager: Arc<ConnectionManager>,
+}
+
+impl PerConnectionScramStartupHandler {
+    fn new(auth: AuthConfig, connection_manager: Arc<ConnectionManager>) -> Self {
+        Self {
+            auth_source: Arc::new(StaticPasswordAuthSource { auth: auth.clone() }),
+            parameter_provider: Arc::new(QuackGisServerParameterProvider::new(auth)),
+            connection_manager,
+        }
+    }
+
+    fn startup_session(&self) -> ScramStartupSession {
+        let auth_source: Arc<dyn AuthSource> = self.auth_source.clone();
+        ScramStartupSession {
+            handler: SASLAuthStartupHandler::new(Arc::clone(&self.parameter_provider))
+                .with_scram(ScramAuth::new(auth_source))
+                .with_connection_manager(Arc::clone(&self.connection_manager)),
+        }
+    }
+}
+
+#[async_trait]
+impl StartupHandler for PerConnectionScramStartupHandler {
+    async fn on_startup<C>(
+        &self,
+        client: &mut C,
+        message: datafusion_postgres::pgwire::messages::PgWireFrontendMessage,
+    ) -> datafusion_postgres::pgwire::error::PgWireResult<()>
+    where
+        C: ClientInfo
+            + futures::Sink<datafusion_postgres::pgwire::messages::PgWireBackendMessage>
+            + Unpin
+            + Send
+            + Sync,
+        C::Error: std::fmt::Debug,
+        datafusion_postgres::pgwire::error::PgWireError:
+            From<<C as futures::Sink<datafusion_postgres::pgwire::messages::PgWireBackendMessage>>::Error>,
+    {
+        let session = client
+            .session_extensions()
+            .get_or_insert_with(|| self.startup_session());
+        session.handler.on_startup(client, message).await
     }
 }
 
 enum QuackGisStartupHandler {
     Trust(SimpleStartupHandler),
-    Password(
-        Box<
-            CleartextPasswordAuthStartupHandler<
-                StaticPasswordAuthSource,
-                DefaultServerParameterProvider,
-            >,
-        >,
-    ),
+    Password(Box<PerConnectionScramStartupHandler>),
 }
 
 #[async_trait]

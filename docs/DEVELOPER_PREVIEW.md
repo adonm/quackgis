@@ -106,7 +106,7 @@ cargo run -p quackgis-server --example developer_preview -- --host 127.0.0.1 --p
 | Spatial query | WKB-first geometry with PostGIS-style `ST_*` aliases over SedonaDB | `wire_spatial`, `martin_compat` |
 | Layout | hidden `_qg_*` bbox/bucket/sort columns, automatic projection, public metadata hiding | `layoutbench_sf0` |
 | Pruning | safe bbox rewrite for supported single-table spatial predicates; exact SedonaDB predicate recheck | `layoutbench_sf0`, LayoutBench local runs |
-| Compaction | explicit whole-table rewrite via `CALL quackgis_compact_table(...)` | `ducklake_compact_table_rewrites_without_changing_results`, LayoutBench compact mode |
+| Compaction | explicit rewrite via `CALL quackgis_compact_table(...)`, with optional bucket-target arguments | `ducklake_compact_table_rewrites_without_changing_results`, `ducklake_compact_table_accepts_layout_bucket_scope`, LayoutBench compact mode |
 | Client smoke | QGIS read/edit, GDAL/OGR load/read, GeoServer WFS/WMS/WFS-T, Martin tiles | Kind/manual compatibility probes; see `docs/COMPATIBILITY.md` |
 
 ## Performance levers proven so far
@@ -138,13 +138,17 @@ These are preview limitations, not bugs in the preview claim:
 - Local preview storage is SQLite catalog + local Parquet. PostgreSQL catalog +
   S3-compatible storage is exercised by the Alpha Kind gates, but is not claimed
   by this local preview gate.
-- `CALL quackgis_compact_table(...)` rewrites the whole table. Bucket-local
-  compaction is the next maintenance step.
+- `CALL quackgis_compact_table(...)` commits through one replacement snapshot for
+  whole-table compaction. Optional bucket arguments use native bucket-local
+  delete+append metadata when row-lineage planning succeeds, with the safe
+  full-table replacement path retained as fallback.
 - Transactions are single-table staged write transactions. DDL and multi-table
   write transactions fail closed; arbitrary in-transaction `SELECT` reads the
   committed catalog, not private staged rows.
-- UPDATE/DELETE are correct full-table rewrites, not native DuckLake delete-file
-  operations yet.
+- Autocommit DELETE and UPDATE use native DuckLake positional delete files through
+  the vendored fork; UPDATE stages replacement rows and commits delete+append
+  metadata in one snapshot. Explicit-transaction DML remains on the correct
+  staged/full rewrite path.
 - Spatial layout pruning only rewrites recognized safe single-table predicate
   shapes. Unsupported predicates still return correct exact SedonaDB results but
   may scan more.
