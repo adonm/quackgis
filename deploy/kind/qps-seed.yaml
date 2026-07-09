@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qps-seed
+  namespace: quackgis
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      volumes:
+        - name: probe-scripts
+          configMap:
+            name: quackgis-probe-scripts
+            defaultMode: 0755
+      containers:
+        - name: qps-seed
+          image: docker.io/qgis/qgis:ltr-questing
+          env:
+            - name: QUACKGIS_HOST
+              value: lake.quackgis.svc.cluster.local
+            - name: QUACKGIS_PORT
+              value: "5434"
+            - name: QPS_FACTOR
+              value: "50"
+            - name: QPS_WORKERS
+              value: "16"
+            - name: QPS_QUERIES
+              value: "240"
+            - name: QPS_MIN_INSTANCES
+              value: "2"
+            - name: QPS_MIN_QPS
+              value: "1.0"
+            - name: QPS_MODE
+              value: seed
+            - name: QPS_TABLE
+              value: qps_aerial
+          volumeMounts:
+            - name: probe-scripts
+              mountPath: /opt/quackgis-probes
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              PYTHONPATH=/opt/quackgis-probes python3 /opt/quackgis-probes/qps_probe.py

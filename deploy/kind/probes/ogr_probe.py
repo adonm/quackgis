@@ -18,6 +18,7 @@ from probe_common import (
 def main() -> int:
     read_table = table_name("ogr_probe")
     load_table = table_name("ogr_load")
+    keyless_table = table_name("ogr_keyless")
 
     conn = pg_connect()
     conn.autocommit = True
@@ -25,10 +26,26 @@ def main() -> int:
         seed_point_table(conn, read_table, geom_col="wkb_geometry")
         with conn.cursor() as cur:
             cur.execute(f"CREATE TABLE public.{quote_ident(load_table)} (id INT, wkb_geometry BINARY, name TEXT)")
+            cur.execute(
+                f"CREATE TABLE public.{quote_ident(keyless_table)} (wkb_geometry BINARY, name TEXT)"
+            )
+            cur.execute(
+                f"INSERT INTO public.{quote_ident(keyless_table)} (wkb_geometry, name) VALUES "
+                "(X'010100000000000000000000000000000000000000', 'keyless-origin'), "
+                "(X'0101000000000000000000F03F000000000000F03F', 'keyless-one') "
+                "RETURNING \"_quackgis_rowid\", name"
+            )
+            print("ogr_keyless_seed_rows", cur.fetchall())
     finally:
         conn.close()
 
     dsn = pg_dsn()
+
+    # QuackGIS serves WKB-backed layers over the PostgreSQL wire, but it does
+    # not need GDAL's PostGIS-extension datasource-open probes for this target.
+    # Disabling those probes keeps the maintained OGR gate focused on the
+    # portable PostgreSQL-driver read/load/readback contract.
+    os.environ["PG_USE_POSTGIS"] = "NO"
     run_cmd(["ogrinfo", dsn, read_table, "-so"])
     run_cmd(["ogr2ogr", "-f", "GeoJSON", "/tmp/out.geojson", dsn, read_table])
 
@@ -112,7 +129,58 @@ def main() -> int:
     require_equal(names, ["load-a", "load-b"], "load_names")
     require_equal(categories, ["client", "client"], "load_categories")
     require_equal(geometry_types, ["Point", "Point"], "load_geometry_types")
+
+    run_cmd(["ogrinfo", dsn, keyless_table, "-so"])
+    run_cmd(["ogr2ogr", "-f", "GeoJSON", "/tmp/keyless.geojson", dsn, keyless_table])
+    keyless_fc = load_geojson("/tmp/keyless.geojson")
+    keyless_features = keyless_fc["features"]
+    keyless_names = sorted(feature["properties"].get("name") for feature in keyless_features)
+    keyless_rowids = sorted(rowid_from_geojson(feature) for feature in keyless_features)
+    print("ogr_keyless_feature_count", len(keyless_features))
+    print("ogr_keyless_names", keyless_names)
+    print("ogr_keyless_rowids", keyless_rowids)
+    require_equal(len(keyless_features), 2, "ogr_keyless_feature_count")
+    require_equal(keyless_names, ["keyless-one", "keyless-origin"], "ogr_keyless_names")
+    require_equal(keyless_rowids, ["1", "2"], "ogr_keyless_rowids")
+
+    compact_conn = pg_connect()
+    compact_conn.autocommit = True
+    try:
+        with compact_conn.cursor() as cur:
+            cur.execute(
+                f"SELECT \"_quackgis_rowid\", name FROM public.{quote_ident(keyless_table)} "
+                "ORDER BY \"_quackgis_rowid\""
+            )
+            before_compact = cur.fetchall()
+            cur.execute(f"CALL quackgis_compact_table('public.{keyless_table}')")
+            cur.execute(
+                f"SELECT \"_quackgis_rowid\", name FROM public.{quote_ident(keyless_table)} "
+                "ORDER BY \"_quackgis_rowid\""
+            )
+            after_compact = cur.fetchall()
+    finally:
+        compact_conn.close()
+    print("ogr_keyless_before_compact", before_compact)
+    print("ogr_keyless_after_compact", after_compact)
+    require_equal(after_compact, before_compact, "ogr_keyless_compact_rows")
+
+    run_cmd(["ogr2ogr", "-f", "GeoJSON", "/tmp/keyless_after_compact.geojson", dsn, keyless_table])
+    compact_fc = load_geojson("/tmp/keyless_after_compact.geojson")
+    compact_rowids = sorted(rowid_from_geojson(feature) for feature in compact_fc["features"])
+    print("ogr_keyless_compact_rowids", compact_rowids)
+    require_equal(compact_rowids, ["1", "2"], "ogr_keyless_compact_rowids")
+    print("ogr_keyless_compact_ok True")
     return 0
+
+
+def rowid_from_geojson(feature) -> str:
+    raw = feature.get("properties", {}).get("_quackgis_rowid")
+    if raw is None:
+        raw = feature.get("id")
+    value = str(raw)
+    if "." in value:
+        value = value.rsplit(".", 1)[-1]
+    return value
 
 
 if __name__ == "__main__":

@@ -3,6 +3,12 @@
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CatalogSurface {
+    OgrSystemMetadataTableExists,
+    OgrSystemMetadataRead,
+    OgrSystemMetadataPrivilegeProbe,
+    OgrSystemMetadataSuperuserProbe,
+    OgrSystemMetadataEventTriggerProbe,
+    OgrSystemMetadataNoopCommand,
     PgTypePostgisProbe,
     StyleTableExists,
     PgJdbcTableListing,
@@ -29,6 +35,28 @@ pub(super) enum CatalogSurface {
 pub(super) fn classify_catalog_surface(sql: &str) -> Option<CatalogSurface> {
     let select_end = sql.find(" from ").unwrap_or(sql.len());
     let select_list = &sql[..select_end];
+    let sql_no_ws = sql.split_whitespace().collect::<String>();
+    let select_list_no_ws = select_list.split_whitespace().collect::<String>();
+    if is_ogr_system_metadata_table_exists(&sql_no_ws, &select_list_no_ws) {
+        return Some(CatalogSurface::OgrSystemMetadataTableExists);
+    }
+    if is_ogr_system_metadata_read(&sql_no_ws, &select_list_no_ws) {
+        return Some(CatalogSurface::OgrSystemMetadataRead);
+    }
+    if is_ogr_system_metadata_privilege_probe(&sql_no_ws) {
+        return Some(CatalogSurface::OgrSystemMetadataPrivilegeProbe);
+    }
+    if sql_no_ws.contains("pg_user") && sql_no_ws.contains("usesuper") {
+        return Some(CatalogSurface::OgrSystemMetadataSuperuserProbe);
+    }
+    if sql_no_ws.contains("pg_event_trigger")
+        && sql_no_ws.contains("ogr_system_tables_event_trigger_for_metadata")
+    {
+        return Some(CatalogSurface::OgrSystemMetadataEventTriggerProbe);
+    }
+    if is_ogr_system_metadata_noop_command(&sql_no_ws) {
+        return Some(CatalogSurface::OgrSystemMetadataNoopCommand);
+    }
     if sql.contains("pg_type")
         && sql.contains("oid")
         && sql.contains("typname")
@@ -194,4 +222,109 @@ pub(super) fn is_ogr_pg_class_oid_lookup(sql: &str) -> bool {
             || sql.contains("relname op")
             || sql.contains("relname =")
             || sql.contains("relname="))
+}
+
+fn is_ogr_system_metadata_table_exists(sql: &str, select_list: &str) -> bool {
+    sql.contains("pg_class")
+        && sql.contains("pg_namespace")
+        && select_list.contains("c.oid")
+        && sql.contains("relname='metadata'")
+        && sql.contains("nspname='ogr_system_tables'")
+}
+
+fn is_ogr_system_metadata_read(sql: &str, select_list: &str) -> bool {
+    (sql.contains("fromogr_system_tables.metadata")
+        || sql.contains("from\"ogr_system_tables\".\"metadata\""))
+        && select_list.contains("metadata")
+}
+
+fn is_ogr_system_metadata_privilege_probe(sql: &str) -> bool {
+    (sql.contains("has_database_privilege")
+        || sql.contains("has_schema_privilege")
+        || sql.contains("has_table_privilege"))
+        && sql.contains("ogr_system_tables")
+}
+
+fn is_ogr_system_metadata_noop_command(sql: &str) -> bool {
+    (sql.starts_with("createschema") && sql.contains("ogr_system_tables"))
+        || (sql.starts_with("createtable") && sql.contains("ogr_system_tables.metadata"))
+        || (sql.starts_with("deletefrom") && sql.contains("ogr_system_tables.metadata"))
+        || (sql.starts_with("insertinto") && sql.contains("ogr_system_tables.metadata"))
+        || (sql.starts_with("dropfunction") && sql.contains("ogr_system_tables"))
+        || (sql.starts_with("createfunction") && sql.contains("ogr_system_tables"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_surface(sql: &str, expected: CatalogSurface) {
+        assert_eq!(
+            classify_catalog_surface(&sql.to_ascii_lowercase()),
+            Some(expected),
+            "unexpected surface for {sql}"
+        );
+    }
+
+    #[test]
+    fn classifies_pgjdbc_metadata_surfaces() {
+        assert_surface(
+            "SELECT current_database() AS TABLE_CAT, n.nspname AS TABLE_SCHEM, \
+                    c.relname AS TABLE_NAME, 'TABLE' AS TABLE_TYPE \
+             FROM pg_catalog.pg_namespace n, pg_catalog.pg_class c \
+             WHERE c.relnamespace = n.oid",
+            CatalogSurface::PgJdbcTableListing,
+        );
+        assert_surface(
+            "SELECT result.TABLE_CAT, result.TABLE_SCHEM, result.TABLE_NAME, \
+                    result.COLUMN_NAME, result.KEY_SEQ, result.PK_NAME \
+             FROM (SELECT (information_schema._pg_expandarray(i.indkey)).n AS KEY_SEQ, \
+                          a.attname AS COLUMN_NAME, ci.relname AS PK_NAME \
+                   FROM pg_catalog.pg_index i JOIN pg_catalog.pg_attribute a ON true) result",
+            CatalogSurface::PgJdbcPrimaryKeys,
+        );
+        assert_surface(
+            "SELECT a.attname, a.atttypid, nullif(a.attidentity, '') AS attidentity, \
+                    nullif(a.attgenerated, '') AS attgenerated, t.typbasetype, t.typtype \
+             FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_type t ON a.atttypid = t.oid",
+            CatalogSurface::PgJdbcColumns,
+        );
+    }
+
+    #[test]
+    fn classifies_index_and_type_surfaces() {
+        assert_surface(
+            "SELECT oid, typname, typtype, typelem FROM pg_type WHERE oid IN (90001)",
+            CatalogSurface::PgTypePostgisProbe,
+        );
+        assert_surface(
+            "SELECT indexrelid FROM pg_index WHERE indrelid='\"public\".\"points\"'::regclass",
+            CatalogSurface::PgIndexForTable,
+        );
+        assert_surface(
+            "SELECT indkey FROM pg_index WHERE indexrelid=90101",
+            CatalogSurface::PgIndexIndkey,
+        );
+        assert_surface(
+            "SELECT pg_get_indexdef(90101)",
+            CatalogSurface::PgGetIndexdef,
+        );
+    }
+
+    #[test]
+    fn classifies_ogr_system_metadata_surfaces() {
+        assert_surface(
+            "SELECT has_schema_privilege('ogr_system_tables', 'USAGE')",
+            CatalogSurface::OgrSystemMetadataPrivilegeProbe,
+        );
+        assert_surface(
+            "SELECT c.oid FROM pg_class c JOIN pg_namespace n ON c.relnamespace = n.oid \
+             WHERE c.relname='metadata' AND n.nspname='ogr_system_tables'",
+            CatalogSurface::OgrSystemMetadataTableExists,
+        );
+        assert_surface(
+            "SELECT metadata FROM \"ogr_system_tables\".\"metadata\"",
+            CatalogSurface::OgrSystemMetadataRead,
+        );
+    }
 }

@@ -19,8 +19,10 @@ use datafusion::sql::sqlparser::ast::Statement;
 use datafusion_postgres::hooks::{HookClient, QueryHook};
 use datafusion_postgres::pgwire::api::ClientInfo;
 use datafusion_postgres::pgwire::api::Type;
-use datafusion_postgres::pgwire::api::results::{FieldFormat, FieldInfo, QueryResponse, Response};
-use datafusion_postgres::pgwire::error::PgWireResult;
+use datafusion_postgres::pgwire::api::results::{
+    FieldFormat, FieldInfo, QueryResponse, Response, Tag,
+};
+use datafusion_postgres::pgwire::error::{PgWireError, PgWireResult};
 
 mod cursors;
 mod encoding;
@@ -35,7 +37,8 @@ mod sql_parse;
 mod surfaces;
 
 use encoding::{
-    current_portal_result_format, empty_response, single_bool_row, single_i64_row, single_text_row,
+    current_portal_result_format, empty_response, single_bool_row_with_format, single_i64_row,
+    single_text_row,
 };
 use sql_parse::count_positional_placeholders;
 use surfaces::{
@@ -60,7 +63,7 @@ impl QueryHook for CatalogCompatHook {
         session_context: &SessionContext,
         _client: &mut dyn HookClient,
     ) -> Option<PgWireResult<Response>> {
-        catalog_query_response(statement, session_context).await
+        catalog_query_response(statement, session_context, FieldFormat::Text).await
     }
 
     async fn handle_extended_parse_query(
@@ -96,6 +99,17 @@ impl QueryHook for CatalogCompatHook {
         ) {
             return Some(pg_type::oid_typname_logical_plan(session_context, param_count).await);
         }
+        if let Some(
+            surface @ (CatalogSurface::OgrSystemMetadataTableExists
+            | CatalogSurface::OgrSystemMetadataRead
+            | CatalogSurface::OgrSystemMetadataPrivilegeProbe
+            | CatalogSurface::OgrSystemMetadataSuperuserProbe
+            | CatalogSurface::OgrSystemMetadataEventTriggerProbe
+            | CatalogSurface::OgrSystemMetadataNoopCommand),
+        ) = classify_catalog_surface(&sql_lower)
+        {
+            return Some(catalog_surface_logical_plan(surface, &sql_lower, session_context).await);
+        }
         if is_ogr_pg_class_oid_lookup(&sql_lower) {
             return Some(pg_class::ogr_oid_lookup_logical_plan(&sql, session_context).await);
         }
@@ -126,6 +140,24 @@ impl QueryHook for CatalogCompatHook {
             );
         }
         let sql = statement.to_string().to_lowercase();
+        if matches!(
+            classify_catalog_surface(&sql),
+            Some(
+                CatalogSurface::OgrSystemMetadataTableExists
+                    | CatalogSurface::OgrSystemMetadataRead
+                    | CatalogSurface::OgrSystemMetadataPrivilegeProbe
+                    | CatalogSurface::OgrSystemMetadataSuperuserProbe
+                    | CatalogSurface::OgrSystemMetadataEventTriggerProbe
+                    | CatalogSurface::OgrSystemMetadataNoopCommand
+            )
+        ) {
+            return catalog_query_response(
+                statement,
+                session_context,
+                current_portal_result_format(_client),
+            )
+            .await;
+        }
         if is_ogr_pg_class_oid_lookup(&sql) {
             return Some(
                 pg_class::oid_lookup_response(&sql, current_portal_result_format(_client))
@@ -146,7 +178,13 @@ impl QueryHook for CatalogCompatHook {
         if let Some(response) = pg_type::extended_info_response(statement, params, _client) {
             return Some(response);
         }
-        if let Some(response) = catalog_query_response(statement, session_context).await {
+        if let Some(response) = catalog_query_response(
+            statement,
+            session_context,
+            current_portal_result_format(_client),
+        )
+        .await
+        {
             return Some(response);
         }
         cursors::postgres_driver_cursor_response(statement, session_context).await
@@ -156,6 +194,7 @@ impl QueryHook for CatalogCompatHook {
 async fn catalog_query_response(
     statement: &Statement,
     session_context: &SessionContext,
+    field_format: FieldFormat,
 ) -> Option<PgWireResult<Response>> {
     let sql = statement.to_string().to_lowercase();
     if is_instance_id_query(&sql) {
@@ -167,11 +206,34 @@ async fn catalog_query_response(
 
     let surface = classify_catalog_surface(&sql)?;
     match surface {
+        CatalogSurface::OgrSystemMetadataTableExists => {
+            Some(empty_response("oid", Type::INT4).map(Response::Query))
+        }
+        CatalogSurface::OgrSystemMetadataRead => {
+            Some(empty_response("metadata", Type::VARCHAR).map(Response::Query))
+        }
+        CatalogSurface::OgrSystemMetadataPrivilegeProbe => Some(
+            single_bool_row_with_format(
+                ogr_system_metadata_privilege_column(&sql),
+                false,
+                field_format,
+            )
+            .map(Response::Query),
+        ),
+        CatalogSurface::OgrSystemMetadataSuperuserProbe => {
+            Some(single_bool_row_with_format("usesuper", false, field_format).map(Response::Query))
+        }
+        CatalogSurface::OgrSystemMetadataEventTriggerProbe => {
+            Some(empty_response("?column?", Type::INT4).map(Response::Query))
+        }
+        CatalogSurface::OgrSystemMetadataNoopCommand => Some(Ok(Response::Execution(Tag::new(
+            ogr_system_metadata_command_tag(&sql),
+        )))),
         CatalogSurface::PgTypePostgisProbe => {
             Some(pg_type::oid_typname_probe_response(&sql).map(Response::Query))
         }
         CatalogSurface::StyleTableExists => {
-            Some(single_bool_row("exists", false).map(Response::Query))
+            Some(single_bool_row_with_format("exists", false, field_format).map(Response::Query))
         }
         CatalogSurface::PgJdbcTableListing => {
             Some(pgjdbc::table_listing_response(session_context).map(Response::Query))
@@ -249,6 +311,66 @@ fn instance_id() -> String {
     std::env::var("QUACKGIS_INSTANCE_ID")
         .or_else(|_| std::env::var("HOSTNAME"))
         .unwrap_or_else(|_| "unknown".to_string())
+}
+
+async fn catalog_surface_logical_plan(
+    surface: CatalogSurface,
+    sql: &str,
+    session_context: &SessionContext,
+) -> PgWireResult<LogicalPlan> {
+    let query = match surface {
+        CatalogSurface::OgrSystemMetadataTableExists => {
+            "SELECT CAST(NULL AS INTEGER) AS oid WHERE FALSE".to_string()
+        }
+        CatalogSurface::OgrSystemMetadataRead => {
+            "SELECT CAST(NULL AS TEXT) AS metadata WHERE FALSE".to_string()
+        }
+        CatalogSurface::OgrSystemMetadataPrivilegeProbe => format!(
+            "SELECT CAST(NULL AS BOOLEAN) AS {} WHERE FALSE",
+            ogr_system_metadata_privilege_column(sql)
+        ),
+        CatalogSurface::OgrSystemMetadataSuperuserProbe => {
+            "SELECT CAST(NULL AS BOOLEAN) AS usesuper WHERE FALSE".to_string()
+        }
+        CatalogSurface::OgrSystemMetadataEventTriggerProbe => {
+            "SELECT CAST(NULL AS INTEGER) AS \"?column?\" WHERE FALSE".to_string()
+        }
+        CatalogSurface::OgrSystemMetadataNoopCommand => "SELECT 1 WHERE FALSE".to_string(),
+        _ => "SELECT 1 WHERE FALSE".to_string(),
+    };
+    let dataframe = session_context
+        .sql(&query)
+        .await
+        .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+    dataframe
+        .into_optimized_plan()
+        .map_err(|e| PgWireError::ApiError(Box::new(e)))
+}
+
+fn ogr_system_metadata_privilege_column(sql: &str) -> &'static str {
+    if sql.contains("has_database_privilege") {
+        "has_database_privilege"
+    } else if sql.contains("has_schema_privilege") {
+        "has_schema_privilege"
+    } else {
+        "has_table_privilege"
+    }
+}
+
+fn ogr_system_metadata_command_tag(sql: &str) -> &'static str {
+    if sql.starts_with("create schema") {
+        "CREATE SCHEMA"
+    } else if sql.starts_with("create table") {
+        "CREATE TABLE"
+    } else if sql.starts_with("delete from") {
+        "DELETE 0"
+    } else if sql.starts_with("insert into") {
+        "INSERT 0 1"
+    } else if sql.starts_with("drop function") {
+        "DROP FUNCTION"
+    } else {
+        "CREATE FUNCTION"
+    }
 }
 
 fn geography_columns_probe_response() -> PgWireResult<QueryResponse> {

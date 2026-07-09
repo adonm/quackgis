@@ -6,6 +6,7 @@ set -euo pipefail
 source /opt/quackgis-probes/probe_common.sh
 
 table="$(probe_table_from_uid geoserver_probe)"
+keyless_table="$(probe_table_from_uid geoserver_keyless)"
 workspace="quackgis"
 store="quackgis"
 base="http://127.0.0.1:8080/geoserver"
@@ -198,5 +199,84 @@ probe_xml_success /tmp/wfst-delete.out
 probe_curl_auth "${base}/${workspace}/ows?service=WFS&version=1.0.0&request=GetFeature&typeName=${workspace}:${table}&outputFormat=application/json" -o /tmp/features-after-delete.json
 ! grep -q '"name"[[:space:]]*:[[:space:]]*"wfst-updated"' /tmp/features-after-delete.json
 printf '%s\n' 'wfst_transaction_ok True'
+
+cat >/tmp/keyless-featuretype.xml <<XML
+<featureType>
+  <name>${keyless_table}</name>
+  <nativeName>${keyless_table}</nativeName>
+  <title>${keyless_table}</title>
+  <srs>EPSG:4326</srs>
+  <nativeCRS>EPSG:4326</nativeCRS>
+  <projectionPolicy>FORCE_DECLARED</projectionPolicy>
+  <nativeBoundingBox>
+    <minx>-1</minx><maxx>8</maxx>
+    <miny>-1</miny><maxy>8</maxy>
+    <crs>EPSG:4326</crs>
+  </nativeBoundingBox>
+  <latLonBoundingBox>
+    <minx>-1</minx><maxx>8</maxx>
+    <miny>-1</miny><maxy>8</maxy>
+    <crs>EPSG:4326</crs>
+  </latLonBoundingBox>
+  <attributes>
+    <attribute>
+      <name>_quackgis_rowid</name>
+      <binding>java.lang.Long</binding>
+      <minOccurs>1</minOccurs><maxOccurs>1</maxOccurs><nillable>false</nillable>
+    </attribute>
+    <attribute>
+      <name>geom</name>
+      <binding>org.locationtech.jts.geom.Point</binding>
+      <minOccurs>0</minOccurs><maxOccurs>1</maxOccurs><nillable>true</nillable>
+    </attribute>
+    <attribute>
+      <name>name</name>
+      <binding>java.lang.String</binding>
+      <minOccurs>0</minOccurs><maxOccurs>1</maxOccurs><nillable>true</nillable>
+    </attribute>
+  </attributes>
+  <enabled>true</enabled>
+</featureType>
+XML
+probe_curl_auth -H "Content-Type: text/xml" \
+  -d @/tmp/keyless-featuretype.xml \
+  "${base}/rest/workspaces/${workspace}/datastores/${store}/featuretypes" \
+  >/tmp/keyless-featuretype.out
+
+probe_curl_auth \
+  "${base}/${workspace}/ows?service=WFS&version=1.0.0&request=GetFeature&typeName=${workspace}:${keyless_table}&outputFormat=application/json" \
+  -o /tmp/keyless-features.json
+grep -q '"name"[[:space:]]*:[[:space:]]*"keyless-origin"' /tmp/keyless-features.json
+grep -q '"name"[[:space:]]*:[[:space:]]*"keyless-one"' /tmp/keyless-features.json
+keyless_point_count="$(grep -o '"type"[[:space:]]*:[[:space:]]*"Point"' /tmp/keyless-features.json | wc -l | tr -d ' ')"
+printf 'geoserver_keyless_wfs_point_count %s\n' "${keyless_point_count}"
+test "${keyless_point_count}" -ge 2
+
+cat >/tmp/keyless-wfst-update.xml <<XML
+<wfs:Transaction service="WFS" version="1.0.0"
+    xmlns:wfs="http://www.opengis.net/wfs"
+    xmlns:ogc="http://www.opengis.net/ogc"
+    xmlns:quackgis="http://quackgis">
+  <wfs:Update typeName="${workspace}:${keyless_table}">
+    <wfs:Property>
+      <wfs:Name>name</wfs:Name>
+      <wfs:Value>keyless-updated</wfs:Value>
+    </wfs:Property>
+    <ogc:Filter>
+      <ogc:PropertyIsEqualTo>
+        <ogc:PropertyName>_quackgis_rowid</ogc:PropertyName>
+        <ogc:Literal>1</ogc:Literal>
+      </ogc:PropertyIsEqualTo>
+    </ogc:Filter>
+  </wfs:Update>
+</wfs:Transaction>
+XML
+probe_curl_auth -H "Content-Type: text/xml" -d @/tmp/keyless-wfst-update.xml "${base}/${workspace}/wfs" -o /tmp/keyless-wfst-update.out
+probe_xml_success /tmp/keyless-wfst-update.out
+probe_curl_auth "${base}/${workspace}/ows?service=WFS&version=1.0.0&request=GetFeature&typeName=${workspace}:${keyless_table}&outputFormat=application/json" -o /tmp/keyless-features-after-update.json
+grep -q '"name"[[:space:]]*:[[:space:]]*"keyless-updated"' /tmp/keyless-features-after-update.json
+grep -q '"name"[[:space:]]*:[[:space:]]*"keyless-one"' /tmp/keyless-features-after-update.json
+! grep -q '"name"[[:space:]]*:[[:space:]]*"keyless-origin"' /tmp/keyless-features-after-update.json
+printf '%s\n' 'geoserver_keyless_update_ok True'
 
 printf '%s\n' 'geoserver_probe_ok True'

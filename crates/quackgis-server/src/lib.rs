@@ -6,6 +6,7 @@
 pub mod cli;
 pub mod context;
 
+pub mod auth;
 pub mod catalog_compat;
 pub mod ducklake_sql;
 pub mod geometry_columns;

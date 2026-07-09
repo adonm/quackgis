@@ -117,6 +117,33 @@ def main() -> int:
         print("edit_ok", ok)
         if not ok:
             raise RuntimeError(f"unexpected final rows: {final_rows}")
+
+        stable_rowid = final_features[0]["_quackgis_rowid"]
+        compact_conn = pg_connect()
+        compact_conn.autocommit = True
+        try:
+            with compact_conn.cursor() as cur:
+                cur.execute(f"CALL quackgis_compact_table('public.{table}')")
+                cur.execute(
+                    f"SELECT \"_quackgis_rowid\", name FROM public.{quote_ident(table)} "
+                    "ORDER BY \"_quackgis_rowid\""
+                )
+                compact_rows = cur.fetchall()
+        finally:
+            compact_conn.close()
+        print("after_edit_compact_sql_rows", compact_rows)
+
+        layer = open_layer()
+        compact_features, compact_snapshot = snapshot(layer, "after_edit_compact")
+        compact_ok = (
+            len(compact_features) == 1
+            and compact_features[0]["_quackgis_rowid"] == stable_rowid
+            and compact_features[0]["name"] == "updated"
+            and compact_features[0].geometry().asWkt().lower().startswith("point")
+        )
+        print("compaction_after_edit_ok", compact_ok)
+        if not compact_ok:
+            raise RuntimeError(f"unexpected rows after edit compaction: {compact_snapshot}")
         return 0
     finally:
         app.exitQgis()

@@ -69,6 +69,12 @@ def int_env(name: str, default: int) -> int:
     return value
 
 
+def plan_metric_int(scan: dict[str, object], metric: str) -> int:
+    raw = scan[metric]
+    require(raw != "NA", f"EXPLAIN plan missed {metric}")
+    return int(str(raw))
+
+
 def table_ref(table: str) -> str:
     return f"public.{quote_ident(table)}"
 
@@ -450,7 +456,14 @@ def run_worker(worker_id: int, assigned_queries: int, sql: str, expected: dict[t
     return samples
 
 
-def run_probe(table: str, factor: int, workers: int, total_queries: int, seeded_rows: int | str) -> int:
+def run_probe(
+    table: str,
+    factor: int,
+    workers: int,
+    total_queries: int,
+    seeded_rows: int | str,
+    max_bytes_scanned: int,
+) -> int:
     expected = expected_groups(asset_rows(factor))
     require(expected, "OLAP fanout expected group set must not be empty")
 
@@ -464,7 +477,16 @@ def run_probe(table: str, factor: int, workers: int, total_queries: int, seeded_
     plan = explain_analyze(internal_sql)
     scan = scan_summary(plan)
     require(scan["hidden_bbox"], "EXPLAIN plan did not include hidden bbox predicate")
+    require(scan["parquet_predicate"], "EXPLAIN plan did not include Parquet predicate evidence")
     require(scan["aggregate_exec"], "EXPLAIN plan did not include aggregate execution")
+    require(scan["projection_evidence"], "EXPLAIN plan did not include projection evidence")
+    bytes_scanned = plan_metric_int(scan, "bytes_scanned")
+    plan_metric_int(scan, "row_groups_pruned_statistics")
+    plan_metric_int(scan, "files_ranges_pruned_statistics")
+    require(
+        bytes_scanned <= max_bytes_scanned,
+        f"OLAP scan read {scan['bytes_scanned']} bytes, expected <= {max_bytes_scanned}",
+    )
 
     candidates = candidate_groups(expected)
     require(candidates, "OLAP fanout candidate groups must not be empty")
@@ -481,6 +503,7 @@ def run_probe(table: str, factor: int, workers: int, total_queries: int, seeded_
         f"factor={factor}",
         f"workers={workers}",
         f"queries={total_queries}",
+        f"max_bytes_scanned={max_bytes_scanned}",
         f"window={OLAP_WINDOW.minx},{OLAP_WINDOW.miny},{OLAP_WINDOW.maxx},{OLAP_WINDOW.maxy}",
     )
     print(
@@ -539,6 +562,7 @@ def main() -> int:
     factor = int_env("OLAP_FACTOR", 30)
     workers = int_env("OLAP_WORKERS", 4)
     total_queries = int_env("OLAP_QUERIES", 24)
+    max_bytes_scanned = int_env("OLAP_MAX_BYTES_SCANNED", 1024)
     table = os.environ.get("OLAP_TABLE", "olap_assets")
 
     rows: int | str = "preseeded"
@@ -550,7 +574,7 @@ def main() -> int:
             return 0
 
     require(mode in ("probe", "seed-probe"), f"unsupported OLAP_MODE {mode!r}")
-    return run_probe(table, factor, workers, total_queries, rows)
+    return run_probe(table, factor, workers, total_queries, rows, max_bytes_scanned)
 
 
 if __name__ == "__main__":

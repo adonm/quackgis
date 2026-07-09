@@ -8,6 +8,7 @@ use std::sync::Arc;
 use datafusion::prelude::SessionContext;
 use datafusion_postgres::ServerOptions;
 
+use quackgis_server::auth::AuthConfig;
 use quackgis_server::context::{StoragePaths, build_session_context_with_storage};
 
 pub struct ServerHandle {
@@ -31,6 +32,17 @@ impl ServerHandle {
         Self::start_with_tempdir(tmp).await
     }
 
+    /// Start a server with an explicit pgwire auth configuration.
+    #[allow(dead_code)]
+    pub async fn start_with_auth(auth: AuthConfig) -> Self {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let catalog_path = tmp.path().join("quackgis.db");
+        let data_path = tmp.path().join("data");
+        let paths = StoragePaths::new(catalog_path.to_str().unwrap(), data_path.to_str().unwrap())
+            .expect("storage paths");
+        Self::start_with_storage_and_auth(tmp, paths, auth).await
+    }
+
     /// Start a server against an existing tempdir. Tests can pre-populate the
     /// DuckLake (writer API) before calling this to verify the server can read
     /// a specific on-disk state. The handle owns the tempdir and deletes it on
@@ -44,6 +56,14 @@ impl ServerHandle {
     }
 
     async fn start_with_storage(tmp: tempfile::TempDir, paths: StoragePaths) -> Self {
+        Self::start_with_storage_and_auth(tmp, paths, AuthConfig::trust()).await
+    }
+
+    async fn start_with_storage_and_auth(
+        tmp: tempfile::TempDir,
+        paths: StoragePaths,
+        auth: AuthConfig,
+    ) -> Self {
         // Bind a TCP listener ourselves first so we know the port before
         // handing it to datafusion-postgres (which would otherwise pick its
         // own and race the test).
@@ -64,7 +84,9 @@ impl ServerHandle {
 
         let serve_task = tokio::spawn(async move {
             // Run forever; the task is aborted when ServerHandle drops.
-            let _ = quackgis_server::pgwire_server::serve(ctx_for_server, &opts, paths).await;
+            let _ =
+                quackgis_server::pgwire_server::serve_with_auth(ctx_for_server, &opts, paths, auth)
+                    .await;
         });
 
         let handle = Self {
@@ -99,6 +121,12 @@ impl ServerHandle {
             "host={} port={} user=postgres dbname=quackgis",
             self.host, self.port
         )
+    }
+
+    /// TCP port used by this test server.
+    #[allow(dead_code)]
+    pub fn port(&self) -> u16 {
+        self.port
     }
 
     /// Per-test tempdir path (for tests that want to inspect the on-disk

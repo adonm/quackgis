@@ -1,20 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 name: Storage smoke
 
-on:
+"on":
+  schedule:
+    # Weekly maintained Alpha scaled-storage evidence: PostgreSQL catalog,
+    # S3-compatible object storage, multi-pod readers/writers, QPS, and OLAP.
+    - cron: "17 8 * * 1"
   workflow_dispatch:
     inputs:
       recipe:
         description: Kind storage recipe to run
         required: true
-        default: kind-lake-smoke
+        default: kind-alpha-smoke
         type: choice
         options:
+          - kind-alpha-smoke
           - kind-lake-smoke
           - kind-lake-multipod-smoke
           - kind-lb-smoke
+          - kind-mtls-smoke
           - kind-lake-layoutbench-smoke
           - kind-read-smoke
+          - kind-qps-smoke
+          - kind-qps-mtls-smoke
+          - kind-qps-deep-smoke
           - kind-write-smoke
           - kind-olap-smoke
 
@@ -23,12 +32,14 @@ permissions:
 
 jobs:
   kind-storage:
-    name: ${{ inputs.recipe }}
+    name: ${{ github.event_name == 'workflow_dispatch' && inputs.recipe || 'kind-alpha-smoke' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       CONTAINER_ENGINE: docker
       KIND_EXPERIMENTAL_PROVIDER: docker
+      QUACKGIS_REPORT_KIND: storage
+      STORAGE_RECIPE: ${{ github.event_name == 'workflow_dispatch' && inputs.recipe || 'kind-alpha-smoke' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -38,16 +49,39 @@ jobs:
           cache: true
 
       - name: Run storage smoke
-        run: just "${{ inputs.recipe }}"
+        run: just "$STORAGE_RECIPE"
 
       - name: Collect Kind logs
         if: always()
         run: just kind-compat-report || true
 
+      - name: Add storage report to job summary
+        if: always()
+        run: |
+          if [ -f .tmp/compatibility/README.md ]; then
+            cat .tmp/compatibility/README.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Upload Kind logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: storage-kind-logs
+          name: storage-kind-logs-${{ env.STORAGE_RECIPE }}-${{ github.sha }}-${{ github.run_id }}
           path: .tmp/compatibility
           if-no-files-found: ignore
+
+      - name: Upload storage metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: storage-metrics-${{ env.STORAGE_RECIPE }}-${{ github.sha }}-${{ github.run_id }}
+          path: .tmp/compatibility/metrics.json
+          if-no-files-found: ignore
+
+      - name: Fail on reported storage failures
+        if: always()
+        run: |
+          if [ -f .tmp/compatibility/README.md ] && grep -q '❌ fail' .tmp/compatibility/README.md; then
+            grep '^Summary:' .tmp/compatibility/README.md || true
+            exit 1
+          fi

@@ -43,6 +43,24 @@ Parquet pushdown rows, and whether the hidden `_qg_*` predicate reached the
 physical plan). The smoke recipe starts a temporary server and runs the sf0
 runner once.
 
+For Alpha shared-storage evidence, use the Kind lake profile instead of the
+SQLite/local profile:
+
+```sh
+just kind-write-smoke   # parallel ingest plus DuckLake snapshot conflict/retry
+just kind-qps-smoke     # high-QPS selective spatial reads over PostgreSQL/S3
+just kind-olap-smoke    # grouped OLAP fanout, pushdown/pruning, exact recheck
+```
+
+The writer gate now prints `write_conflict conflict_observed=True` before
+`write_ok True`, proving a stale transactional replace fails closed and a fresh
+retry preserves the concurrent row.
+
+The QPS and OLAP gates now fail if selective scans exceed configured
+bytes-scanned ceilings (`QPS_MAX_BYTES_SCANNED`, `OLAP_MAX_BYTES_SCANNED`), and
+QPS also enforces a file-group ceiling (`QPS_MAX_FILE_GROUPS`). That turns the
+printed pruning metrics into enforced regression budgets.
+
 ### Current `sf1` iteration notes (2026-07-08)
 
 Current local `sf1` is deliberately moderate (`factor=100`: 10,800 aerial rows,

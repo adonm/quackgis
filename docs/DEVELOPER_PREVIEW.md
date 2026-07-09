@@ -8,8 +8,8 @@ platform/application developers building high-throughput spatial services over a
 shared DuckLake/Parquet data lake, including DuckDB-style columnar OLAP analysis
 over filtered spatial records without embedding DuckDB. See
 [PROJECT_DIRECTION.md](./PROJECT_DIRECTION.md). The preview proves the local
-shape before the next milestone, **Alpha: scaled lakehouse storage** (PostgreSQL
-catalog + S3, parallel readers/writers, high-QPS gates, and OLAP fanout probes).
+shape before the Alpha hardening track (PostgreSQL catalog + S3, parallel
+readers/writers, high-QPS gates, OLAP fanout probes, and operations evidence).
 
 ## Preview goal
 
@@ -136,7 +136,8 @@ mise exec -- just layoutbench-local sf1 3 shuffled insert true
 These are preview limitations, not bugs in the preview claim:
 
 - Local preview storage is SQLite catalog + local Parquet. PostgreSQL catalog +
-  S3 is the alpha scaled-storage target and is not claimed by this preview gate.
+  S3-compatible storage is exercised by the Alpha Kind gates, but is not claimed
+  by this local preview gate.
 - `CALL quackgis_compact_table(...)` rewrites the whole table. Bucket-local
   compaction is the next maintenance step.
 - Transactions are single-table staged write transactions. DDL and multi-table

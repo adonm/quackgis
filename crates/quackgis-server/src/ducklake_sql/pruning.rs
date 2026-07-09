@@ -53,6 +53,7 @@ pub(super) async fn rewrite_spatial_pruning_query(
     for target in rewrite_targets(&sql) {
         if projection_has_wildcard_for_target(&sql, &target)
             || target_has_same_level_join(&sql, &target)
+            || target_predicate_has_top_level_or(&sql, &target)
         {
             continue;
         }
@@ -102,7 +103,7 @@ fn has_layout_columns(schema: &Schema) -> bool {
 
 fn mentions_spatial_predicate(sql: &str, schema: &Schema) -> bool {
     let sql_lower = sql.to_ascii_lowercase();
-    if !(sql_lower.contains("st_intersects") || sql_lower.contains("&&")) {
+    if !mentions_safe_bbox_spatial_predicate(&sql_lower) {
         return false;
     }
     schema.fields().iter().any(|field| {
@@ -113,6 +114,55 @@ fn mentions_spatial_predicate(sql: &str, schema: &Schema) -> bool {
             || field.name().eq_ignore_ascii_case("footprint"))
             && mentions_column(&sql_lower, field.name())
     })
+}
+
+fn mentions_safe_bbox_spatial_predicate(sql_lower: &str) -> bool {
+    contains_code_operator(sql_lower, b"&&")
+        || [
+            "st_contains",
+            "st_containsproperly",
+            "st_coveredby",
+            "st_covers",
+            "st_crosses",
+            "st_equals",
+            "st_intersects",
+            "st_overlaps",
+            "st_touches",
+            "st_within",
+        ]
+        .into_iter()
+        .any(|predicate| contains_code_token(sql_lower, predicate))
+}
+
+fn contains_code_token(sql: &str, token: &str) -> bool {
+    let bytes = sql.as_bytes();
+    let token = token.as_bytes();
+    let mut state = ScanState::default();
+    let mut i = 0;
+    while i + token.len() <= bytes.len() {
+        if state.is_code()
+            && bytes[i..].starts_with(token)
+            && is_keyword_boundary(bytes.get(i.wrapping_sub(1)).copied())
+            && is_keyword_boundary(bytes.get(i + token.len()).copied())
+        {
+            return true;
+        }
+        i = state.advance(bytes, i);
+    }
+    false
+}
+
+fn contains_code_operator(sql: &str, operator: &[u8]) -> bool {
+    let bytes = sql.as_bytes();
+    let mut state = ScanState::default();
+    let mut i = 0;
+    while i + operator.len() <= bytes.len() {
+        if state.is_code() && bytes[i..].starts_with(operator) {
+            return true;
+        }
+        i = state.advance(bytes, i);
+    }
+    false
 }
 
 fn mentions_column(sql_lower: &str, column: &str) -> bool {
@@ -265,6 +315,16 @@ fn target_has_same_level_join(sql: &str, target: &RewriteTarget) -> bool {
         .any(|keyword| {
             find_keyword_at_depth(sql, keyword, start, depth).is_some_and(|idx| idx < end)
         })
+}
+
+fn target_predicate_has_top_level_or(sql: &str, target: &RewriteTarget) -> bool {
+    let depth = depth_at(sql, target.table_span.start);
+    let Some(where_start) = where_start_after_target(sql, target, depth) else {
+        return false;
+    };
+    let predicate_start = where_start + "where".len();
+    let predicate_end = predicate_end(sql, predicate_start, depth);
+    find_keyword_at_depth(sql, "or", predicate_start, depth).is_some_and(|idx| idx < predicate_end)
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -446,7 +506,9 @@ fn extract_make_envelope(sql: &str) -> Option<Envelope> {
         ))
         .expect("valid ST_MakeEnvelope regex")
     });
-    let captures = MAKE_ENVELOPE_RE.captures(sql)?;
+    let captures = MAKE_ENVELOPE_RE
+        .captures_iter(sql)
+        .find(|captures| captures.get(0).is_some_and(|m| is_code_at(sql, m.start())))?;
     Some(Envelope {
         minx: parse_capture(&captures, 1)?,
         miny: parse_capture(&captures, 2)?,
@@ -463,7 +525,9 @@ fn extract_tile_envelope(sql: &str) -> Option<Envelope> {
         ))
         .expect("valid ST_TileEnvelope regex")
     });
-    let captures = TILE_ENVELOPE_RE.captures(sql)?;
+    let captures = TILE_ENVELOPE_RE
+        .captures_iter(sql)
+        .find(|captures| captures.get(0).is_some_and(|m| is_code_at(sql, m.start())))?;
     let z = parse_capture::<i32>(&captures, 1)?;
     let x = parse_capture::<i64>(&captures, 2)?;
     let y = parse_capture::<i64>(&captures, 3)?;
@@ -593,6 +657,7 @@ fn predicate_end(sql: &str, predicate_start: usize, depth: i32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use datafusion::arrow::datatypes::{DataType, Field};
 
     #[test]
     fn injects_bbox_and_internal_table_for_make_envelope() {
@@ -617,6 +682,19 @@ mod tests {
         assert_eq!(envelope.maxx, WEB_MERCATOR_WORLD);
         assert_eq!(envelope.miny, -WEB_MERCATOR_WORLD);
         assert_eq!(envelope.maxy, WEB_MERCATOR_WORLD);
+    }
+
+    #[test]
+    fn envelope_extraction_ignores_comments_and_string_literals() {
+        let sql = "SELECT COUNT(*) FROM public.frames \
+                   WHERE note = 'ST_MakeEnvelope(100, 100, 200, 200, 3857)' \
+                   -- ST_TileEnvelope(0, 0, 0)\n\
+                   AND geom && ST_MakeEnvelope(1, 2, 3, 4, 3857)";
+        let envelope = extract_envelope(sql).expect("code envelope");
+        assert_eq!(envelope.minx, 1.0);
+        assert_eq!(envelope.miny, 2.0);
+        assert_eq!(envelope.maxx, 3.0);
+        assert_eq!(envelope.maxy, 4.0);
     }
 
     #[test]
@@ -663,5 +741,91 @@ mod tests {
                    AND geom && ST_TileEnvelope(0, 0, 0)";
         let target = rewrite_targets(sql).pop().expect("target");
         assert!(!target_has_same_level_join(sql, &target));
+    }
+
+    #[test]
+    fn top_level_or_predicate_is_not_rewritten() {
+        let sql = "SELECT COUNT(*) FROM public.frames \
+                   WHERE id = 1 \
+                   OR ST_Intersects(ST_GeomFromWKB(geom), \
+                   ST_GeomFromWKB(ST_MakeEnvelope(1, 2, 3, 4, 3857)))";
+        let target = rewrite_targets(sql).pop().expect("target");
+        assert!(target_predicate_has_top_level_or(sql, &target));
+    }
+
+    #[test]
+    fn parenthesized_or_filter_remains_rewritable() {
+        let sql = "SELECT COUNT(*) FROM public.frames \
+                   WHERE ST_Intersects(ST_GeomFromWKB(geom), \
+                   ST_GeomFromWKB(ST_MakeEnvelope(1, 2, 3, 4, 3857))) \
+                   AND (mission = 'a' OR mission = 'b')";
+        let target = rewrite_targets(sql).pop().expect("target");
+        assert!(!target_predicate_has_top_level_or(sql, &target));
+    }
+
+    #[test]
+    fn positive_topological_predicates_are_safe_pruning_candidates() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("geom", DataType::Binary, true),
+            Field::new(layout::MINX, DataType::Float64, true),
+            Field::new(layout::MINY, DataType::Float64, true),
+            Field::new(layout::MAXX, DataType::Float64, true),
+            Field::new(layout::MAXY, DataType::Float64, true),
+        ]);
+        for predicate in [
+            "ST_Contains",
+            "ST_CoveredBy",
+            "ST_Covers",
+            "ST_Crosses",
+            "ST_Equals",
+            "ST_Intersects",
+            "ST_Overlaps",
+            "ST_Touches",
+            "ST_Within",
+            "&&",
+        ] {
+            let sql = if predicate == "&&" {
+                "SELECT COUNT(*) FROM frames WHERE geom && ST_MakeEnvelope(1,2,3,4,3857)"
+                    .to_string()
+            } else {
+                format!(
+                    "SELECT COUNT(*) FROM frames WHERE {predicate}(\
+                     ST_GeomFromWKB(geom), ST_GeomFromWKB(ST_MakeEnvelope(1,2,3,4,3857)))"
+                )
+            };
+            assert!(
+                mentions_spatial_predicate(&sql, &schema),
+                "{predicate} should allow bbox prefiltering"
+            );
+        }
+    }
+
+    #[test]
+    fn disjoint_predicate_is_not_a_pruning_candidate() {
+        let schema = Schema::new(vec![Field::new("geom", DataType::Binary, true)]);
+        assert!(!mentions_spatial_predicate(
+            "SELECT COUNT(*) FROM frames WHERE ST_Disjoint(\
+             ST_GeomFromWKB(geom), ST_GeomFromWKB(ST_MakeEnvelope(1,2,3,4,3857)))",
+            &schema
+        ));
+    }
+
+    #[test]
+    fn predicate_names_inside_literals_or_comments_do_not_trigger_pruning() {
+        let schema = Schema::new(vec![Field::new("geom", DataType::Binary, true)]);
+        assert!(!mentions_spatial_predicate(
+            "SELECT COUNT(*) FROM frames \
+             WHERE geom IS NOT NULL \
+               AND label = 'ST_Intersects(geom, ST_MakeEnvelope(1,2,3,4,3857))'",
+            &schema
+        ));
+        assert!(!mentions_spatial_predicate(
+            "SELECT COUNT(*) FROM frames \
+             WHERE geom IS NOT NULL \
+               -- geom && ST_MakeEnvelope(1,2,3,4,3857)\n\
+               AND id > 0",
+            &schema
+        ));
     }
 }

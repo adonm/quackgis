@@ -32,8 +32,10 @@ goal here is to make this workflow boring:
 
 Status: the opt-in gate covers Monaco `points`, `lines`, and `multipolygons`.
 It asserts deterministic count, stable IDs, `osm_id`, UTF-8 names, geometry type
-distribution, and bbox through GeoJSON exports, then repeats the
-`id`/`osm_id`/`name` comparison through SQL.
+distribution, and bbox through GeoJSON exports, repeats the `id`/`osm_id`/`name`
+comparison through SQL, then opens each copied QuackGIS layer through QGIS,
+iterates real features/geometries, applies a feature filter, and renders a small
+map image.
 
 - Add a Kind PostGIS reference deployment in the `quackgis` namespace.
 - Add an opt-in `just kind-osm-postgis-parity` target, separate from the default
@@ -47,6 +49,9 @@ distribution, and bbox through GeoJSON exports, then repeats the
   path users will run.
 - Compare counts, IDs, geometry types, and bbox through GeoJSON exports from
   both databases, then compare `id`/`osm_id`/UTF-8 `name` rows through SQL.
+- Open each copied QuackGIS OSM layer through QGIS's PostgreSQL provider and
+  assert provider validity, feature counts, filtered feature access, non-empty
+  geometries, and render success.
 
 ### Phase 1 — multi-layer OSM copy parity
 
@@ -66,10 +71,12 @@ The current probe copies these standard OGR OSM layers:
   - geometry type distribution;
   - bbox.
 
-Expected compatibility gaps to flush out:
+Expected compatibility gaps to flush out next:
 
 - GDAL layer creation defaults that assume real PostgreSQL DDL/type support.
 - Geometry type promotion (`POLYGON` vs `MULTIPOLYGON`, line variants).
+- QGIS PostGIS-source side-by-side over real OSM layers; current gate opens,
+  filters, iterates, and renders the copied QuackGIS layers.
 - Attribute type mapping and long `other_tags` strings.
 - Schema-derived OGR metadata for arbitrary appended columns. The maintained OGR
   probe now fails if an appended field is missing from GeoJSON export; repeat
@@ -89,7 +96,7 @@ For each copied OSM layer, open both the PostGIS source and QuackGIS copy with:
 | Client | PostGIS source | QuackGIS copy | Assertions |
 |---|---:|---:|---|
 | OGR | ✅ | ✅ | `ogrinfo`, GeoJSON export, count/bbox/type parity |
-| QGIS | ✅ | ✅ | provider validity, fields, feature iteration, render smoke |
+| QGIS | stretch | ✅ | provider validity, feature iteration/filtering, and render smoke for QuackGIS copy; PostGIS side-by-side remains next |
 | GeoServer | ✅ | ✅ | datastore publish, WFS count, WMS PNG |
 | Martin | ✅ | ✅ | discovery and non-empty MVT tile |
 

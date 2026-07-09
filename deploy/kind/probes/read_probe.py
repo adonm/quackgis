@@ -280,10 +280,18 @@ def metric_value(plan: str, metric_name: str):
     return match.group(1).replace(",", "")
 
 
+def file_group_count(plan: str):
+    matches = re.findall(r"file_groups=\{([0-9,]+)\s+groups?", plan)
+    if not matches:
+        return "NA"
+    return str(max(int(value.replace(",", "")) for value in matches))
+
+
 def scan_summary(plan: str) -> dict[str, object]:
     return {
         "output_rows": metric_value(plan, "output_rows"),
         "bytes_scanned": metric_value(plan, "bytes_scanned"),
+        "file_groups": file_group_count(plan),
         "hidden_bbox": all(
             token in plan for token in ("_qg_minx", "_qg_maxx", "_qg_miny", "_qg_maxy")
         ),
@@ -354,7 +362,7 @@ def main() -> int:
     scan_sql = scan_evidence_sql(table, AERIAL_CASE)
     scan_count = query_count(scan_sql)
     require_equal(scan_count, expected_count, "scan evidence count")
-    plan = explain_analyze(scan_sql)
+    plan = explain_analyze(sql)
     scan = scan_summary(plan)
     require(expected_count > 0, "read workload expected count must be non-zero")
     require(scan["hidden_bbox"], "EXPLAIN plan did not include injected hidden bbox predicate")
@@ -373,6 +381,7 @@ def main() -> int:
         f"expected_count={expected_count}",
         f"output_rows={scan['output_rows']}",
         f"bytes_scanned={scan['bytes_scanned']}",
+        f"file_groups={scan['file_groups']}",
         f"row_groups_pruned_statistics={scan['row_groups_pruned_statistics']}",
         f"files_ranges_pruned_statistics={scan['files_ranges_pruned_statistics']}",
         f"hidden_bbox={scan['hidden_bbox']}",

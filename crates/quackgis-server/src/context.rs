@@ -31,6 +31,7 @@ use url::Url;
 /// names remains `"datafusion"` (in-memory) so `setup_pg_catalog` can attach
 /// `pg_catalog` to it — DuckLake's catalog rejects schema registration.
 pub const DUCKLAKE_CATALOG: &str = "quackgis";
+const TARGET_PARTITIONS_ENV: &str = "QUACKGIS_TARGET_PARTITIONS";
 
 /// DuckLake storage profile. Local development defaults to SQLite catalog +
 /// filesystem Parquet; Kind Alpha can use a PostgreSQL catalog + S3-compatible
@@ -436,7 +437,10 @@ pub async fn build_session_context_with_storage(
     //    schema — DuckLake rejects schema registration). DuckLake is
     //    registered alongside as a separate catalog; persisted tables are
     //    accessed as `quackgis.main.<table>`. information_schema on.
-    let config = SessionConfig::new().with_information_schema(true);
+    let mut config = SessionConfig::new().with_information_schema(true);
+    if let Some(target_partitions) = configured_target_partitions()? {
+        config = config.with_target_partitions(target_partitions);
+    }
     let runtime = Arc::new(RuntimeEnv::default());
     paths.register_runtime_object_store(&runtime)?;
     let state = SessionStateBuilder::new()
@@ -475,6 +479,32 @@ pub async fn build_session_context_with_storage(
     Ok(ctx)
 }
 
+fn configured_target_partitions() -> Result<Option<usize>> {
+    match std::env::var(TARGET_PARTITIONS_ENV) {
+        Ok(value) => parse_target_partitions_value(&value),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(err) => Err(anyhow!("could not read {TARGET_PARTITIONS_ENV}: {err}")),
+    }
+}
+
+fn parse_target_partitions_value(value: &str) -> Result<Option<usize>> {
+    let value = value.trim();
+    if value.is_empty() || value == "0" {
+        return Ok(None);
+    }
+
+    let target_partitions = value.parse::<usize>().map_err(|err| {
+        anyhow!(
+            "{TARGET_PARTITIONS_ENV} must be a positive integer or 0 to preserve DataFusion's default: {err}"
+        )
+    })?;
+    if target_partitions == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(target_partitions))
+    }
+}
+
 fn register_sedona_function_catalog(ctx: &SessionContext) -> datafusion::common::Result<()> {
     let mut functions = sedona_functions::register::default_function_set();
 
@@ -501,6 +531,24 @@ fn register_sedona_function_catalog(ctx: &SessionContext) -> datafusion::common:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn target_partitions_parser_preserves_default_for_unset_values() {
+        assert_eq!(parse_target_partitions_value("").unwrap(), None);
+        assert_eq!(parse_target_partitions_value(" 0 ").unwrap(), None);
+    }
+
+    #[test]
+    fn target_partitions_parser_accepts_positive_values() {
+        assert_eq!(parse_target_partitions_value("1").unwrap(), Some(1));
+        assert_eq!(parse_target_partitions_value(" 8 ").unwrap(), Some(8));
+    }
+
+    #[test]
+    fn target_partitions_parser_rejects_invalid_values() {
+        assert!(parse_target_partitions_value("many").is_err());
+        assert!(parse_target_partitions_value("-1").is_err());
+    }
 
     /// Smoke: context builds, exposes SedonaDB ST_* functions, and answers
     /// spatial SQL in-process so regressions in either upstream are caught

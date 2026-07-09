@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mesh-client
+  namespace: quackgis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mesh-client
+  template:
+    metadata:
+      annotations:
+        linkerd.io/inject: enabled
+      labels:
+        app: mesh-client
+    spec:
+      volumes:
+        - name: probe-scripts
+          configMap:
+            name: quackgis-probe-scripts
+            defaultMode: 0755
+      containers:
+        - name: mesh-client
+          image: docker.io/qgis/qgis:ltr-questing
+          env:
+            - name: QUACKGIS_HOST
+              value: lake.quackgis.svc.cluster.local
+            - name: QUACKGIS_PORT
+              value: "5434"
+          volumeMounts:
+            - name: probe-scripts
+              mountPath: /opt/quackgis-probes
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              sleep infinity

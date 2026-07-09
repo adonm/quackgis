@@ -20,6 +20,15 @@ osm_polygon_limit := env_var_or_default("OSM_POLYGON_LIMIT", "50")
 container_engine := env_var_or_default("CONTAINER_ENGINE", "podman")
 kind_cluster := env_var_or_default("KIND_CLUSTER", "quackgis")
 quackgis_image := env_var_or_default("QUACKGIS_IMAGE", "localhost/quackgis:dev")
+linkerd_iptables_mode := env_var_or_default("LINKERD_IPTABLES_MODE", "nft")
+qps_deep_factor := env_var_or_default("QPS_DEEP_FACTOR", "10000")
+qps_deep_workers := env_var_or_default("QPS_DEEP_WORKERS", "32")
+qps_deep_queries := env_var_or_default("QPS_DEEP_QUERIES", "640")
+qps_deep_replicas := env_var_or_default("QPS_DEEP_REPLICAS", "4")
+qps_deep_min_instances := env_var_or_default("QPS_DEEP_MIN_INSTANCES", "3")
+qps_deep_min_qps := env_var_or_default("QPS_DEEP_MIN_QPS", "1.0")
+qps_deep_disk_budget_gib := env_var_or_default("QPS_DEEP_DISK_BUDGET_GIB", "1024")
+qps_shared_catalog_refresh_ms := env_var_or_default("QPS_SHARED_CATALOG_REFRESH_MS", "60000")
 ref_datafusion_postgres_url := env_var_or_default("REF_DATAFUSION_POSTGRES_URL", "https://github.com/adonm/datafusion-postgres")
 ref_datafusion_postgres_branch := env_var_or_default("REF_DATAFUSION_POSTGRES_BRANCH", "quackgis/fixes")
 ref_datafusion_postgres_upstream_url := env_var_or_default("REF_DATAFUSION_POSTGRES_UPSTREAM_URL", "https://github.com/datafusion-contrib/datafusion-postgres")
@@ -208,7 +217,11 @@ test:
 
 # Faster local regression loop: only QuackGIS's non-ignored integration gates.
 test-fast:
-    cargo test -p quackgis-server --lib --test ducklake_persistence --test layoutbench_sf0 --test martin_compat --test wire_spatial
+    cargo test -p quackgis-server --lib --test ducklake_persistence --test layoutbench_sf0 --test martin_compat --test postgis_regress --test wire_spatial
+
+# Run the starter curated PostGIS function regress subset and print pass-rate evidence.
+postgis-regress:
+    cargo test -p quackgis-server --test postgis_regress -- --nocapture
 
 # Run the deterministic LayoutBench sf0 oracle for spatial-layout work.
 layoutbench-sf0:
@@ -251,7 +264,7 @@ check: fmt-check clippy test
 check-fast: fmt-check clippy test-fast
 
 # Run the same fast gate used by GitHub Actions CI.
-ci: check-fast smoke-local-demo preview-smoke
+ci: check-fast smoke-local-demo preview-smoke probe-static-check runtime-static-check
 
 # Run the dev QuackGIS server on QUACKGIS_HOST/QUACKGIS_PORT.
 server:
@@ -429,6 +442,21 @@ kind-probe-scripts:
     kubectl create namespace quackgis --dry-run=client -o yaml | kubectl apply -f -
     kubectl -n quackgis create configmap quackgis-probe-scripts --from-file=deploy/kind/probes --dry-run=client -o yaml | kubectl apply -f -
 
+# Static pre-Kind validation for probe scripts and Kubernetes manifests.
+probe-static-check:
+    mkdir -p .tmp/pycache
+    PYTHONPYCACHEPREFIX=.tmp/pycache python3 -m py_compile scripts/probe_static_check.py scripts/runtime_static_check.py scripts/trend_metrics.py deploy/kind/render_compat_report.py deploy/kind/check_linkerd_injected.py deploy/kind/probes/*.py
+    bash -n deploy/kind/probes/*.sh
+    python3 scripts/probe_static_check.py deploy/kind
+
+# Static guard that the maintained runtime image remains one native-free Rust binary.
+runtime-static-check:
+    python3 scripts/runtime_static_check.py deploy/Containerfile.runtime
+
+# Flatten one or more compatibility/storage metrics artifacts for trend analysis.
+metrics-trend path=".tmp/compatibility" format="csv":
+    python3 scripts/trend_metrics.py --format {{format}} "{{path}}"
+
 # Build, load, and deploy QuackGIS into Kind.
 kind-refresh: kind-build-image kind-load-image kind-deploy
 
@@ -439,6 +467,24 @@ kind-refresh-fast: kind-build-image-fast kind-load-image kind-deploy
 kind-compatibility:
     just kind-refresh-fast
     just kind-probes
+
+# Install or upgrade Linkerd in Kind using Helm and repo-local ephemeral certs.
+kind-linkerd-up: kind-ready
+    mkdir -p .tmp/linkerd
+    @if [ ! -s .tmp/linkerd/ca.crt ] || [ ! -s .tmp/linkerd/ca.key ] || [ ! -s .tmp/linkerd/issuer.crt ] || [ ! -s .tmp/linkerd/issuer.key ]; then \
+        openssl ecparam -name prime256v1 -genkey -noout -out .tmp/linkerd/ca.key; \
+        openssl req -x509 -new -key .tmp/linkerd/ca.key -sha256 -days 365 -out .tmp/linkerd/ca.crt -subj "/CN=root.linkerd.cluster.local" -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign"; \
+        openssl ecparam -name prime256v1 -genkey -noout -out .tmp/linkerd/issuer.key; \
+        openssl req -new -key .tmp/linkerd/issuer.key -out .tmp/linkerd/issuer.csr -subj "/CN=identity.linkerd.cluster.local"; \
+        printf "basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\n" > .tmp/linkerd/issuer-ext.cnf; \
+        openssl x509 -req -in .tmp/linkerd/issuer.csr -CA .tmp/linkerd/ca.crt -CAkey .tmp/linkerd/ca.key -CAcreateserial -out .tmp/linkerd/issuer.crt -days 365 -sha256 -extfile .tmp/linkerd/issuer-ext.cnf; \
+    fi
+    helm repo add linkerd https://helm.linkerd.io/stable --force-update
+    helm repo update linkerd
+    kubectl create namespace linkerd --dry-run=client -o yaml | kubectl apply -f -
+    helm upgrade --install linkerd-crds linkerd/linkerd-crds -n linkerd --wait --timeout 5m
+    helm upgrade --install linkerd-control-plane linkerd/linkerd-control-plane -n linkerd --set-file identityTrustAnchorsPEM=.tmp/linkerd/ca.crt --set-file identity.issuer.tls.crtPEM=.tmp/linkerd/issuer.crt --set-file identity.issuer.tls.keyPEM=.tmp/linkerd/issuer.key --set proxyInit.iptablesMode={{linkerd_iptables_mode}} --wait --timeout 5m
+    kubectl -n linkerd wait deployment --all --for=condition=Available --timeout=300s
 
 # Deploy the lake profile: PostgreSQL DuckLake catalog + s3s-fs local S3.
 kind-lake-deploy:
@@ -485,6 +531,27 @@ kind-lb-smoke: kind-ready kind-probe-scripts
     kubectl -n quackgis wait job/lb-probe --for=condition=complete --timeout=240s || (kubectl -n quackgis get pods -l app=lake -o wide || true; kubectl -n quackgis logs deployment/lake --all-containers=true --tail=200 || true; kubectl -n quackgis logs job/lb-probe || true; false)
     kubectl -n quackgis logs job/lb-probe
 
+# Deploy an injected client pod used for Linkerd mTLS probes without Job sidecar hangs.
+kind-mesh-client-deploy: kind-probe-scripts
+    kubectl apply -f deploy/kind/mesh-client.yaml
+    kubectl -n quackgis rollout restart deployment/mesh-client
+    kubectl -n quackgis rollout status deployment/mesh-client --timeout=180s
+    kubectl -n quackgis wait pod -l app=mesh-client --for=condition=ready --timeout=180s
+
+# Run lake storage and load-balancing probes through Linkerd-injected pods.
+kind-mtls-smoke: kind-linkerd-up kind-probe-scripts
+    just kind-lake-refresh
+    kubectl -n quackgis rollout restart deployment/pg deployment/s3 deployment/lake
+    kubectl -n quackgis rollout status deployment/pg --timeout=180s
+    kubectl -n quackgis rollout status deployment/s3 --timeout=180s
+    kubectl -n quackgis rollout status deployment/lake --timeout=180s
+    kubectl -n quackgis scale deployment/lake --replicas=2
+    kubectl -n quackgis rollout status deployment/lake --timeout=180s
+    kubectl -n quackgis wait deployment/lake --for=condition=Available --timeout=180s
+    just kind-mesh-client-deploy
+    kubectl -n quackgis get pods -l 'app in (lake,pg,s3,mesh-client)' -o json | python3 deploy/kind/check_linkerd_injected.py lake pg s3 mesh-client
+    kubectl -n quackgis exec deployment/mesh-client -c mesh-client -- env PYTHONPATH=/opt/quackgis-probes QUACKGIS_HOST=lake.quackgis.svc.cluster.local QUACKGIS_PORT=5434 LB_CONNECTIONS=40 LB_MIN_INSTANCES=2 python3 /opt/quackgis-probes/mtls_probe.py
+
 # Run LayoutBench sf0 through the lake PostgreSQL catalog + S3 storage profile.
 kind-lake-layoutbench-smoke: kind-ready
     @set -eu; \
@@ -520,7 +587,59 @@ kind-read-smoke: kind-ready kind-probe-scripts
     kubectl -n quackgis wait job/read-probe --for=condition=complete --timeout=600s || (kubectl -n quackgis get pods -l app=lake -o wide || true; kubectl -n quackgis logs deployment/lake --all-containers=true --tail=200 || true; kubectl -n quackgis logs job/read-probe || true; false)
     kubectl -n quackgis logs job/read-probe
 
-# Run concurrent write workloads: independent tables plus same-table appends.
+# Run the high-concurrency parallel-reader gate against the lake PostgreSQL/S3 profile.
+kind-qps-smoke: kind-ready kind-probe-scripts
+    just kind-lake-refresh
+    kubectl -n quackgis set env deployment/lake QUACKGIS_SHARED_CATALOG_REFRESH_MS={{qps_shared_catalog_refresh_ms}} QUACKGIS_TARGET_PARTITIONS- QUACKGIS_SELECTIVE_READ_TARGET_PARTITIONS-
+    kubectl -n quackgis rollout status deployment/lake --timeout=180s
+    kubectl -n quackgis scale deployment/lake --replicas=3
+    kubectl -n quackgis rollout status deployment/lake --timeout=180s
+    kubectl -n quackgis wait deployment/lake --for=condition=Available --timeout=180s
+    kubectl -n quackgis delete job qps-seed qps-probe --ignore-not-found=true
+    kubectl apply -f deploy/kind/qps-seed.yaml
+    kubectl -n quackgis wait job/qps-seed --for=condition=complete --timeout=600s || (kubectl -n quackgis logs deployment/lake --all-containers=true --tail=200 || true; kubectl -n quackgis logs job/qps-seed || true; false)
+    kubectl -n quackgis logs job/qps-seed
+    kubectl apply -f deploy/kind/qps-probe.yaml
+    kubectl -n quackgis wait job/qps-probe --for=condition=complete --timeout=600s || (kubectl -n quackgis get pods -l app=lake -o wide || true; kubectl -n quackgis logs deployment/lake --all-containers=true --tail=200 || true; kubectl -n quackgis logs job/qps-probe || true; false)
+    kubectl -n quackgis logs job/qps-probe
+
+# Run the high-concurrency reader gate from a Linkerd-injected client and assert proxy TCP/TLS metrics.
+kind-qps-mtls-smoke: kind-linkerd-up kind-probe-scripts
+    just kind-lake-refresh
+    kubectl -n quackgis set env deployment/lake QUACKGIS_SHARED_CATALOG_REFRESH_MS={{qps_shared_catalog_refresh_ms}} QUACKGIS_TARGET_PARTITIONS- QUACKGIS_SELECTIVE_READ_TARGET_PARTITIONS-
+    kubectl -n quackgis rollout restart deployment/pg deployment/s3 deployment/lake
+    kubectl -n quackgis rollout status deployment/pg --timeout=180s
+    kubectl -n quackgis rollout status deployment/s3 --timeout=180s
+    kubectl -n quackgis rollout status deployment/lake --timeout=180s
+    kubectl -n quackgis scale deployment/lake --replicas=3
+    kubectl -n quackgis rollout status deployment/lake --timeout=180s
+    kubectl -n quackgis wait deployment/lake --for=condition=Available --timeout=180s
+    just kind-mesh-client-deploy
+    kubectl -n quackgis get pods -l 'app in (lake,pg,s3,mesh-client)' -o json | python3 deploy/kind/check_linkerd_injected.py lake pg s3 mesh-client
+    kubectl -n quackgis exec deployment/mesh-client -c mesh-client -- env PYTHONPATH=/opt/quackgis-probes QUACKGIS_HOST=lake.quackgis.svc.cluster.local QUACKGIS_PORT=5434 QPS_FACTOR=50 QPS_WORKERS=16 QPS_QUERIES=240 QPS_MIN_INSTANCES=2 QPS_MIN_QPS=1.0 QPS_TABLE=qps_aerial QPS_MODE=seed python3 /opt/quackgis-probes/qps_probe.py
+    kubectl -n quackgis exec deployment/mesh-client -c mesh-client -- env PYTHONPATH=/opt/quackgis-probes QUACKGIS_HOST=lake.quackgis.svc.cluster.local QUACKGIS_PORT=5434 QPS_FACTOR=50 QPS_WORKERS=16 QPS_QUERIES=240 QPS_MIN_INSTANCES=2 QPS_MIN_QPS=1.0 QPS_TABLE=qps_aerial QPS_MODE=probe QPS_LINKERD_METRICS_URL=http://127.0.0.1:4191/metrics QPS_REQUIRE_LINKERD=true python3 /opt/quackgis-probes/qps_probe.py
+
+# Guard the opt-in deep QPS run against accidental disk-budget overruns.
+qps-deep-disk-guard:
+    python3 -c 'import shutil, sys; factor=int(sys.argv[1]); budget_gib=int(sys.argv[2]); rows=factor*108; estimate=rows*1024; budget=budget_gib*1024**3; free=shutil.disk_usage(".").free; print(f"qps_deep_disk rows={rows} estimated_bytes={estimate} budget_bytes={budget} free_bytes={free}"); sys.exit(1 if estimate > budget or free < estimate * 2 else 0)' {{qps_deep_factor}} {{qps_deep_disk_budget_gib}}
+
+# Run a deeper Linkerd-observed QPS gate; tune QPS_DEEP_* env vars up to the disk budget.
+kind-qps-deep-smoke: kind-linkerd-up kind-probe-scripts qps-deep-disk-guard
+    just kind-lake-refresh
+    kubectl -n quackgis set env deployment/lake QUACKGIS_SHARED_CATALOG_REFRESH_MS={{qps_shared_catalog_refresh_ms}} QUACKGIS_TARGET_PARTITIONS- QUACKGIS_SELECTIVE_READ_TARGET_PARTITIONS-
+    kubectl -n quackgis rollout restart deployment/pg deployment/s3 deployment/lake
+    kubectl -n quackgis rollout status deployment/pg --timeout=180s
+    kubectl -n quackgis rollout status deployment/s3 --timeout=180s
+    kubectl -n quackgis rollout status deployment/lake --timeout=180s
+    kubectl -n quackgis scale deployment/lake --replicas={{qps_deep_replicas}}
+    kubectl -n quackgis rollout status deployment/lake --timeout=180s
+    kubectl -n quackgis wait deployment/lake --for=condition=Available --timeout=180s
+    just kind-mesh-client-deploy
+    kubectl -n quackgis get pods -l 'app in (lake,pg,s3,mesh-client)' -o json | python3 deploy/kind/check_linkerd_injected.py lake pg s3 mesh-client
+    kubectl -n quackgis exec deployment/mesh-client -c mesh-client -- env PYTHONPATH=/opt/quackgis-probes QUACKGIS_HOST=lake.quackgis.svc.cluster.local QUACKGIS_PORT=5434 QPS_FACTOR={{qps_deep_factor}} QPS_WORKERS={{qps_deep_workers}} QPS_QUERIES={{qps_deep_queries}} QPS_MIN_INSTANCES={{qps_deep_min_instances}} QPS_MIN_QPS={{qps_deep_min_qps}} QPS_TABLE=qps_deep_aerial QPS_MODE=seed python3 /opt/quackgis-probes/qps_probe.py
+    kubectl -n quackgis exec deployment/mesh-client -c mesh-client -- env PYTHONPATH=/opt/quackgis-probes QUACKGIS_HOST=lake.quackgis.svc.cluster.local QUACKGIS_PORT=5434 QPS_FACTOR={{qps_deep_factor}} QPS_WORKERS={{qps_deep_workers}} QPS_QUERIES={{qps_deep_queries}} QPS_MIN_INSTANCES={{qps_deep_min_instances}} QPS_MIN_QPS={{qps_deep_min_qps}} QPS_TABLE=qps_deep_aerial QPS_MODE=probe QPS_LINKERD_METRICS_URL=http://127.0.0.1:4191/metrics QPS_REQUIRE_LINKERD=true python3 /opt/quackgis-probes/qps_probe.py
+
+# Run concurrent write workloads plus deterministic snapshot conflict/retry evidence.
 kind-write-smoke: kind-ready kind-probe-scripts
     just kind-lake-refresh
     kubectl -n quackgis scale deployment/lake --replicas=2
@@ -550,6 +669,10 @@ kind-olap-smoke: kind-ready kind-probe-scripts
     kubectl apply -f deploy/kind/olap-probe.yaml
     kubectl -n quackgis wait job/olap-probe --for=condition=complete --timeout=600s || (kubectl -n quackgis get pods -l app=lake -o wide || true; kubectl -n quackgis logs deployment/lake --all-containers=true --tail=200 || true; kubectl -n quackgis logs job/olap-probe || true; false)
     kubectl -n quackgis logs job/olap-probe
+
+# Run Alpha scaled-storage gates: storage, multi-pod, writer conflict/retry, QPS, and OLAP.
+kind-alpha-smoke: kind-lake-smoke kind-lake-multipod-smoke kind-write-smoke kind-qps-smoke kind-olap-smoke
+    @printf "kind-alpha-smoke complete\n"
 
 # Run all maintained in-cluster client probes in one Kubernetes wait.
 kind-probes: kind-probe-scripts
@@ -627,9 +750,11 @@ kind-compat-report:
     mkdir -p .tmp/compatibility
     kubectl -n quackgis get pods,jobs,svc,deploy,statefulset -o wide > .tmp/compatibility/kubernetes.txt 2>&1 || true
     kubectl -n quackgis logs statefulset/quackgis --tail=-1 > .tmp/compatibility/quackgis.log 2>&1 || true
-    @for job in qgis-probe qgis-edit-probe ogr-probe geoserver-probe osm-postgis-parity quackgis-demo lake-probe lake-multipod lb-probe read-seed read-probe write-setup write-workers write-verify olap-seed olap-probe; do \
+    @for job in qgis-probe qgis-edit-probe ogr-probe geoserver-probe osm-postgis-parity quackgis-demo lake-probe lake-multipod lb-probe read-seed read-probe qps-seed qps-probe write-setup write-workers write-verify olap-seed olap-probe; do \
         kubectl -n quackgis logs "job/${job}" --tail=-1 > ".tmp/compatibility/${job}.log" 2>&1 || true; \
     done
+    kubectl -n quackgis logs deployment/mesh-client --all-containers=true --tail=-1 > .tmp/compatibility/mesh-client.log 2>&1 || true
+    kubectl -n linkerd logs deployment/linkerd-identity --all-containers=true --tail=-1 > .tmp/compatibility/linkerd-identity.log 2>&1 || true
     python3 deploy/kind/render_compat_report.py .tmp/compatibility
 
 # Show QuackGIS and client-probe logs from Kind.

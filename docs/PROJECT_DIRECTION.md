@@ -61,7 +61,7 @@ Example target workload:
 4. use the aggregate/calculated result to filter relevant records for follow-up
    exact SedonaDB spatial predicates or downstream clients.
 
-## Current preview vs alpha direction
+## Current preview, Alpha evidence, and broader direction
 
 The current developer preview proves the shape locally:
 
@@ -73,19 +73,25 @@ The current developer preview proves the shape locally:
    recheck;
 6. explicit compaction for fragmented append layouts.
 
-The next named milestone is **Alpha: scaled lakehouse storage**. It should make
-the strategic storage contract real enough for external platform developers:
+The Alpha evidence loop now exists in Kind: PostgreSQL DuckLake catalog,
+S3-compatible object storage, multiple QuackGIS pods, writer conflict/retry, QPS
+reader probes, OLAP fanout probes, and uploaded compatibility/storage reports.
+The next step is **Alpha hardening**: make that evidence credible enough for
+external platform developers instead of treating a single green smoke as a
+production claim.
 
-- PostgreSQL catalog + S3 object storage configuration and tests;
-- multiple QuackGIS processes reading the same catalog/data prefix;
-- parallel ingest writers with DuckLake snapshot conflict behavior documented and
-  tested;
-- high-QPS parallel reader benchmark/probe over object storage;
-- OLAP fanout benchmark/probe that scans many geometries, computes grouped
-  spatial/attribute statistics, verifies pushdown/pruning evidence, and filters
-  relevant records for exact spatial recheck;
-- operational docs for catalog/object-store credentials, compaction, backup, and
-  failure modes.
+- scheduled trend reports from `metrics.json` artifacts;
+- larger/manual QPS and OLAP gates over LayoutBench and real OSM/Overture-derived
+  layers;
+- external PostgreSQL and S3-compatible services, not only in-cluster stand-ins;
+- operational docs for catalog/object-store credentials, compaction, backup,
+  failed-writer cleanup, and failure modes;
+- production auth/RBAC/TLS and observability profiles.
+
+Beyond Alpha, the project should aim at real-data client matrices, bucket-local
+compaction/native write maintenance, temporal layout, snapshot time travel,
+broader PostGIS conformance, and a 1.0 release that platform teams can operate
+without reading the source tree.
 
 ## Scope boundaries
 
@@ -111,7 +117,9 @@ PostgreSQL illusion conflict, correctness and explicit limits win.
 Docs should distinguish:
 
 - **current preview claims**: only features covered by tests/smokes/benchmarks;
-- **alpha requirements**: PostgreSQL + S3, multi-process readers/writers, and
-  high-QPS scaled gates;
-- **later roadmap**: broader PostGIS parity, richer transactions, native
-  delete-file updates, and advanced spatial/temporal layout.
+- **alpha evidence**: PostgreSQL + S3, multi-process readers/writers, high-QPS
+  scaled gates, OLAP gates, and trendable metrics;
+- **alpha hardening**: real external services, larger scheduled datasets, and ops
+  docs before production claims;
+- **later roadmap**: broader real-data compatibility, native write maintenance,
+  temporal layout/time travel, production security, and advanced analytics.

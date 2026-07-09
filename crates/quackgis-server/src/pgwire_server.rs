@@ -13,8 +13,11 @@ use datafusion_postgres::hooks::QueryHook;
 use datafusion_postgres::hooks::cursor::CursorStatementHook;
 use datafusion_postgres::hooks::set_show::SetShowHook;
 use datafusion_postgres::hooks::transactions::TransactionStatementHook;
-use datafusion_postgres::pgwire::api::auth::StartupHandler;
+use datafusion_postgres::pgwire::api::auth::cleartext::CleartextPasswordAuthStartupHandler;
 use datafusion_postgres::pgwire::api::auth::noop::NoopStartupHandler;
+use datafusion_postgres::pgwire::api::auth::{
+    AuthSource, DefaultServerParameterProvider, LoginInfo, Password, StartupHandler,
+};
 use datafusion_postgres::pgwire::api::cancel::{CancelHandler, DefaultCancelHandler};
 use datafusion_postgres::pgwire::api::copy::CopyHandler;
 use datafusion_postgres::pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
@@ -23,6 +26,7 @@ use datafusion_postgres::pgwire::api::{
 };
 use datafusion_postgres::{DfSessionService, ServerOptions, serve_with_handlers};
 
+use crate::auth::{AuthConfig, AuthMode};
 use crate::catalog_compat::CatalogCompatHook;
 use crate::context::StoragePaths;
 use crate::ducklake_sql::{DuckLakeCopyHandler, DuckLakeSqlHook};
@@ -32,20 +36,40 @@ pub async fn serve(
     opts: &ServerOptions,
     storage_paths: StoragePaths,
 ) -> Result<(), std::io::Error> {
-    let factory = Arc::new(QuackGisHandlerFactory::new(session_context, storage_paths));
+    serve_with_auth(session_context, opts, storage_paths, AuthConfig::trust()).await
+}
+
+pub async fn serve_with_auth(
+    session_context: Arc<SessionContext>,
+    opts: &ServerOptions,
+    storage_paths: StoragePaths,
+    auth: AuthConfig,
+) -> Result<(), std::io::Error> {
+    let factory = Arc::new(QuackGisHandlerFactory::new(
+        session_context,
+        storage_paths,
+        auth,
+    ));
     serve_with_handlers(factory, opts).await
 }
 
 struct QuackGisHandlerFactory {
     session_service: Arc<DfSessionService>,
     cancel_handler: Arc<DefaultCancelHandler>,
-    startup_handler: Arc<SimpleStartupHandler>,
+    startup_handler: Arc<QuackGisStartupHandler>,
     copy_handler: Arc<DuckLakeCopyHandler>,
 }
 
 impl QuackGisHandlerFactory {
-    fn new(session_context: Arc<SessionContext>, storage_paths: StoragePaths) -> Self {
-        let ducklake_hook = Arc::new(DuckLakeSqlHook::new(storage_paths.clone()));
+    fn new(
+        session_context: Arc<SessionContext>,
+        storage_paths: StoragePaths,
+        auth: AuthConfig,
+    ) -> Self {
+        let ducklake_hook = Arc::new(DuckLakeSqlHook::new_with_auth(
+            storage_paths.clone(),
+            auth.clone(),
+        ));
         let hooks: Vec<Arc<dyn QueryHook>> = vec![
             ducklake_hook,
             Arc::new(CatalogCompatHook),
@@ -58,11 +82,91 @@ impl QuackGisHandlerFactory {
             hooks,
         ));
         let connection_manager = Arc::new(ConnectionManager::new());
+        let startup_handler = match auth.mode() {
+            AuthMode::Trust => QuackGisStartupHandler::Trust(SimpleStartupHandler {
+                connection_manager: Arc::clone(&connection_manager),
+            }),
+            AuthMode::Password => {
+                let handler = CleartextPasswordAuthStartupHandler::new(
+                    StaticPasswordAuthSource { auth: auth.clone() },
+                    DefaultServerParameterProvider::default(),
+                )
+                .with_connection_manager(Arc::clone(&connection_manager));
+                QuackGisStartupHandler::Password(Box::new(handler))
+            }
+        };
         Self {
             session_service,
             cancel_handler: Arc::new(DefaultCancelHandler::new(Arc::clone(&connection_manager))),
-            startup_handler: Arc::new(SimpleStartupHandler { connection_manager }),
-            copy_handler: Arc::new(DuckLakeCopyHandler::new(storage_paths, session_context)),
+            startup_handler: Arc::new(startup_handler),
+            copy_handler: Arc::new(DuckLakeCopyHandler::new_with_auth(
+                storage_paths,
+                session_context,
+                auth,
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct StaticPasswordAuthSource {
+    auth: AuthConfig,
+}
+
+#[async_trait]
+impl AuthSource for StaticPasswordAuthSource {
+    async fn get_password(
+        &self,
+        login: &LoginInfo,
+    ) -> datafusion_postgres::pgwire::error::PgWireResult<Password> {
+        let Some(username) = login.user() else {
+            return Err(
+                datafusion_postgres::pgwire::error::PgWireError::InvalidPassword(String::new()),
+            );
+        };
+        let Some(user) = self.auth.user(username) else {
+            return Err(
+                datafusion_postgres::pgwire::error::PgWireError::InvalidPassword(
+                    username.to_string(),
+                ),
+            );
+        };
+        Ok(Password::new(None, user.password.as_bytes().to_vec()))
+    }
+}
+
+enum QuackGisStartupHandler {
+    Trust(SimpleStartupHandler),
+    Password(
+        Box<
+            CleartextPasswordAuthStartupHandler<
+                StaticPasswordAuthSource,
+                DefaultServerParameterProvider,
+            >,
+        >,
+    ),
+}
+
+#[async_trait]
+impl StartupHandler for QuackGisStartupHandler {
+    async fn on_startup<C>(
+        &self,
+        client: &mut C,
+        message: datafusion_postgres::pgwire::messages::PgWireFrontendMessage,
+    ) -> datafusion_postgres::pgwire::error::PgWireResult<()>
+    where
+        C: ClientInfo
+            + futures::Sink<datafusion_postgres::pgwire::messages::PgWireBackendMessage>
+            + Unpin
+            + Send
+            + Sync,
+        C::Error: std::fmt::Debug,
+        datafusion_postgres::pgwire::error::PgWireError:
+            From<<C as futures::Sink<datafusion_postgres::pgwire::messages::PgWireBackendMessage>>::Error>,
+    {
+        match self {
+            Self::Trust(handler) => handler.on_startup(client, message).await,
+            Self::Password(handler) => handler.on_startup(client, message).await,
         }
     }
 }

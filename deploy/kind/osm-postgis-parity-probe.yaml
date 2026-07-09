@@ -13,6 +13,10 @@ spec:
         - name: osm-parity
           image: docker.io/qgis/qgis:ltr-questing
           env:
+            - name: QT_QPA_PLATFORM
+              value: offscreen
+            - name: XDG_RUNTIME_DIR
+              value: /tmp/runtime-root
             - name: QUACKGIS_HOST
               value: quackgis.quackgis.svc.cluster.local
             - name: QUACKGIS_PORT
@@ -49,9 +53,19 @@ spec:
           args:
             - |
               set -euo pipefail
+              mkdir -p "$XDG_RUNTIME_DIR"
+              chmod 700 "$XDG_RUNTIME_DIR"
               run_ogr() {
                 "$@" 2> >(grep -v -e 'unexpected field count in "D" message' -e '^ERROR 1: *$' >&2)
               }
+              # QuackGIS exposes WKB-backed layers over the PostgreSQL wire but
+              # does not need GDAL's PostGIS-only datasource-open probes for
+              # these target/readback commands. Keep real PostGIS enabled for
+              # the reference database commands below.
+              run_quackgis_ogr() (
+                export PG_USE_POSTGIS=NO
+                run_ogr "$@"
+              )
 
               export OGR_INTERLEAVED_READING=YES
               export PG_USE_COPY=NO
@@ -196,28 +210,26 @@ spec:
               quackgis.close()
               PY
 
-              run_ogr ogr2ogr \
-                -f PostgreSQL "${quackgis_dsn}" "${postgis_dsn}" \
-                -sql "SELECT id, osm_id, name, geom FROM public.osm_named_points ORDER BY id" \
+              run_ogr ogr2ogr -f GeoJSON /tmp/postgis_points.geojson "${postgis_dsn}" osm_named_points
+              run_ogr ogr2ogr -f GeoJSON /tmp/postgis_lines.geojson "${postgis_dsn}" osm_named_lines
+              run_ogr ogr2ogr -f GeoJSON /tmp/postgis_multipolygons.geojson "${postgis_dsn}" osm_named_multipolygons
+
+              run_quackgis_ogr ogr2ogr \
+                -f PostgreSQL "${quackgis_dsn}" /tmp/postgis_points.geojson \
                 -append -addfields -nln "${QUACKGIS_POINTS_TABLE}" -nlt POINT -lco GEOMETRY_NAME=wkb_geometry
-              run_ogr ogr2ogr \
-                -f PostgreSQL "${quackgis_dsn}" "${postgis_dsn}" \
-                -sql "SELECT id, osm_id, name, geom FROM public.osm_named_lines ORDER BY id" \
+              run_quackgis_ogr ogr2ogr \
+                -f PostgreSQL "${quackgis_dsn}" /tmp/postgis_lines.geojson \
                 -append -addfields -nln "${QUACKGIS_LINES_TABLE}" -nlt LINESTRING -lco GEOMETRY_NAME=wkb_geometry
-              run_ogr ogr2ogr \
-                -f PostgreSQL "${quackgis_dsn}" "${postgis_dsn}" \
-                -sql "SELECT id, osm_id, name, geom FROM public.osm_named_multipolygons ORDER BY id" \
+              run_quackgis_ogr ogr2ogr \
+                -f PostgreSQL "${quackgis_dsn}" /tmp/postgis_multipolygons.geojson \
                 -append -addfields -nln "${QUACKGIS_MULTIPOLYGONS_TABLE}" -nlt MULTIPOLYGON -lco GEOMETRY_NAME=wkb_geometry
 
-              run_ogr ogrinfo "${quackgis_dsn}" "${QUACKGIS_POINTS_TABLE}" -so
-              run_ogr ogrinfo "${quackgis_dsn}" "${QUACKGIS_LINES_TABLE}" -so
-              run_ogr ogrinfo "${quackgis_dsn}" "${QUACKGIS_MULTIPOLYGONS_TABLE}" -so
-              run_ogr ogr2ogr -f GeoJSON /tmp/postgis_points.geojson "${postgis_dsn}" osm_named_points
-              run_ogr ogr2ogr -f GeoJSON /tmp/quackgis_points.geojson "${quackgis_dsn}" "${QUACKGIS_POINTS_TABLE}"
-              run_ogr ogr2ogr -f GeoJSON /tmp/postgis_lines.geojson "${postgis_dsn}" osm_named_lines
-              run_ogr ogr2ogr -f GeoJSON /tmp/quackgis_lines.geojson "${quackgis_dsn}" "${QUACKGIS_LINES_TABLE}"
-              run_ogr ogr2ogr -f GeoJSON /tmp/postgis_multipolygons.geojson "${postgis_dsn}" osm_named_multipolygons
-              run_ogr ogr2ogr -f GeoJSON /tmp/quackgis_multipolygons.geojson "${quackgis_dsn}" "${QUACKGIS_MULTIPOLYGONS_TABLE}"
+              run_quackgis_ogr ogrinfo "${quackgis_dsn}" "${QUACKGIS_POINTS_TABLE}" -so
+              run_quackgis_ogr ogrinfo "${quackgis_dsn}" "${QUACKGIS_LINES_TABLE}" -so
+              run_quackgis_ogr ogrinfo "${quackgis_dsn}" "${QUACKGIS_MULTIPOLYGONS_TABLE}" -so
+              run_quackgis_ogr ogr2ogr -f GeoJSON /tmp/quackgis_points.geojson "${quackgis_dsn}" "${QUACKGIS_POINTS_TABLE}"
+              run_quackgis_ogr ogr2ogr -f GeoJSON /tmp/quackgis_lines.geojson "${quackgis_dsn}" "${QUACKGIS_LINES_TABLE}"
+              run_quackgis_ogr ogr2ogr -f GeoJSON /tmp/quackgis_multipolygons.geojson "${quackgis_dsn}" "${QUACKGIS_MULTIPOLYGONS_TABLE}"
 
               python3 - <<'PY'
               from collections import Counter
@@ -225,6 +237,16 @@ spec:
               import os
 
               import psycopg2
+              from qgis.PyQt.QtCore import QSize
+              from qgis.PyQt.QtGui import QColor
+              from qgis.core import (
+                  QgsApplication,
+                  QgsDataSourceUri,
+                  QgsFeatureRequest,
+                  QgsMapRendererSequentialJob,
+                  QgsMapSettings,
+                  QgsVectorLayer,
+              )
 
               layers = [
                   {
@@ -292,6 +314,7 @@ spec:
                   conn.close()
                   return rows
 
+              qgis_expected_counts = {}
               for layer in layers:
                   label = layer["label"]
                   postgis_features = load(layer["postgis_geojson"])
@@ -332,6 +355,67 @@ spec:
                   print(f"postgis_osm_{label}_sql_sample", postgis_rows[:5])
                   print(f"quackgis_osm_{label}_sql_sample", quackgis_rows[:5])
                   assert quackgis_rows == postgis_rows, (label, postgis_rows[:5], quackgis_rows[:5])
+                  qgis_expected_counts[label] = len(quackgis_rows)
 
               print("osm_postgis_to_quackgis_copy_ok True")
+
+              QgsApplication.setPrefixPath("/usr", True)
+              app = QgsApplication([], False)
+              app.initQgis()
+              try:
+                  for layer in layers:
+                      label = layer["label"]
+                      table = layer["quackgis_table"]
+                      uri = QgsDataSourceUri()
+                      uri.setConnection(
+                          os.environ["QUACKGIS_HOST"],
+                          os.environ["QUACKGIS_PORT"],
+                          "quackgis",
+                          "postgres",
+                          "",
+                      )
+                      uri.setDataSource("public", table, "wkb_geometry", "", "id")
+                      qgis_layer = QgsVectorLayer(uri.uri(False), f"osm_{label}", "postgres")
+                      print(f"qgis_osm_{label}_valid", qgis_layer.isValid())
+                      print(f"qgis_osm_{label}_error", qgis_layer.error().message())
+                      if qgis_layer.dataProvider():
+                          print(f"qgis_osm_{label}_provider_error", qgis_layer.dataProvider().error().message())
+                      assert qgis_layer.isValid(), f"QGIS failed to open {label} OSM layer"
+
+                      features = list(qgis_layer.getFeatures())
+                      wkts = [feature.geometry().asWkt() if feature.hasGeometry() else "" for feature in features]
+                      sample_ids = [feature["id"] for feature in features[:5]]
+                      print(f"qgis_osm_{label}_feature_count", len(features))
+                      print(f"qgis_osm_{label}_sample_ids", sample_ids)
+                      assert len(features) == qgis_expected_counts[label], (
+                          label,
+                          qgis_expected_counts[label],
+                          len(features),
+                      )
+                      assert all(wkts), f"QGIS returned empty geometries for {label}"
+
+                      filter_request = QgsFeatureRequest().setFilterExpression(f'"id" = {sample_ids[0]}')
+                      filtered = list(qgis_layer.getFeatures(filter_request))
+                      print(f"qgis_osm_{label}_filter_count", len(filtered))
+                      assert len(filtered) == 1, f"QGIS filter failed for {label}"
+
+                      extent = qgis_layer.extent()
+                      extent.scale(1.2)
+                      settings = QgsMapSettings()
+                      settings.setLayers([qgis_layer])
+                      settings.setExtent(extent)
+                      settings.setOutputSize(QSize(128, 128))
+                      settings.setBackgroundColor(QColor(255, 255, 255))
+                      render_job = QgsMapRendererSequentialJob(settings)
+                      render_job.start()
+                      render_job.waitForFinished()
+                      image = render_job.renderedImage()
+                      render_ok = (not image.isNull()) and image.width() == 128 and image.height() == 128
+                      print(f"qgis_osm_{label}_render_ok", render_ok)
+                      assert render_ok, f"QGIS render failed for {label}"
+              finally:
+                  app.exitQgis()
+
+              print("osm_qgis_open_ok True")
+              print("osm_qgis_render_ok True")
               PY

@@ -119,16 +119,20 @@ pub(super) fn empty_response(name: &str, ty: Type) -> PgWireResult<QueryResponse
     Ok(QueryResponse::new(Arc::new(fields), Box::pin(row_stream)))
 }
 
-pub(super) fn single_bool_row(name: &str, value: bool) -> PgWireResult<QueryResponse> {
+pub(super) fn single_bool_row_with_format(
+    name: &str,
+    value: bool,
+    field_format: FieldFormat,
+) -> PgWireResult<QueryResponse> {
     let fields = vec![FieldInfo::new(
         name.to_string(),
         None,
         None,
         Type::BOOL,
-        FieldFormat::Text,
+        field_format,
     )];
     let mut encoder = DataRowEncoder::new(Arc::new(fields.clone()));
-    encoder.encode_field(&Some(value))?;
+    encode_bool_field(&mut encoder, value, field_format)?;
     let row = Ok(encoder.take_row());
     let row_stream = futures::stream::once(async move { row });
     Ok(QueryResponse::new(Arc::new(fields), Box::pin(row_stream)))

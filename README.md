@@ -49,12 +49,12 @@ probes are green for the maintained paths. See
 [docs/DEVELOPER_PREVIEW.md](./docs/DEVELOPER_PREVIEW.md) for the runnable preview
 contract and [ROADMAP.md](./ROADMAP.md) for remaining hardening.
 
-Next named milestone: **Alpha: scaled lakehouse storage** — PostgreSQL catalog +
-S3 object storage, multi-process readers/writers, and high-QPS scaled gates while
-keeping SQLite + local files as a first-class local storage profile. Alpha also
-needs an OLAP fanout gate: scan many geometries, compute grouped spatial/attribute
-statistics, prove pruning/pushdown evidence, and filter relevant records for exact
-SedonaDB recheck.
+Alpha scaled-storage evidence now exists in Kind: PostgreSQL catalog +
+S3-compatible object storage, multi-process readers/writers, high-QPS scaled
+gates, writer conflict/retry, and OLAP fanout with pruning/pushdown evidence. The
+roadmap focus is Alpha hardening and then production ambition: external services,
+larger real-data workloads, trend reports, native write maintenance, security, and
+operations docs before production claims.
 
 ## Quick start (dev storage path)
 
@@ -84,14 +84,19 @@ SELECT postgis_version();                                -- 3.4 QUACKGIS
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — layer model, geometry over the wire,
   trust boundaries, what changed from v0.1.
 - [docs/PROJECT_DIRECTION.md](./docs/PROJECT_DIRECTION.md) — mission, primary
-  user, non-goals, current preview, and alpha direction.
-- [ROADMAP.md](./ROADMAP.md) — milestones, Alpha direction, success metrics, risks.
+  user, non-goals, current preview, Alpha evidence, and broader direction.
+- [ROADMAP.md](./ROADMAP.md) — current evidence, ambitious forward milestones,
+  success metrics, and risks.
 - [docs/DEVELOPER_PREVIEW.md](./docs/DEVELOPER_PREVIEW.md) — exact local preview
   claim, one-command smoke, manual COPY example, gates, and limitations.
 - [docs/COMPATIBILITY.md](./docs/COMPATIBILITY.md) — client compatibility
   targets and known limitations.
+- [docs/COMPATIBILITY_MATRIX.md](./docs/COMPATIBILITY_MATRIX.md) — supported
+  probe/client versions and evidence commands.
 - [docs/OPERATIONS.md](./docs/OPERATIONS.md) — current local + Kind client-probe
   workflow for the single Rust pgwire binary.
+- [docs/DEPENDENCY_POLICY.md](./docs/DEPENDENCY_POLICY.md) — fork, rebase,
+  upgrade, and data/catalog compatibility policy.
 - [examples/](./examples/) — QGIS, GDAL/OGR, and GeoServer examples using stable
   demo layers.
 - [docs/OSM_POSTGIS_PARITY.md](./docs/OSM_POSTGIS_PARITY.md) — real OSM data
@@ -121,6 +126,8 @@ just check                     # fmt + clippy + tests
 just check-fast                # fmt + clippy + focused regression loop
 just layoutbench-sf0           # layout/pruning correctness oracle
 just layoutbench-local-smoke   # temp-server layoutbench smoke
+just postgis-regress           # starter curated PostGIS function regress subset
+just runtime-static-check      # guard single-binary native-free runtime image
 just martin-sql                # Martin-generated SQL compatibility gate
 just martin-e2e                # opt-in real Martin binary E2E
 just kind-refresh              # host-cached build/load/deploy into Kind
@@ -135,7 +142,13 @@ just kind-ogr-probe            # GDAL/OGR PostgreSQL-driver load/read gate
 just kind-geoserver-probe      # GeoServer 3.0.0 datastore + WFS/WMS/WFS-T gate
 just kind-compatibility        # build/deploy + QGIS/OGR/GeoServer compatibility probes
 just kind-lake-smoke           # Kind PostgreSQL catalog + s3s-fs object storage smoke
+just kind-lake-multipod-smoke  # shared-catalog smoke through multiple QuackGIS pods
+just kind-write-smoke          # parallel ingest + deterministic snapshot conflict/retry evidence
+just kind-qps-smoke            # high-QPS spatial readers over the shared lake profile
+just kind-olap-smoke           # grouped OLAP fanout + pruning/recheck evidence
+just kind-alpha-smoke          # maintained Alpha scaled-storage gate bundle
 just kind-osm-postgis-parity   # opt-in real OSM PostGIS -> QuackGIS parity
+just metrics-trend path=.tmp/compatibility # flatten metrics.json artifacts to CSV
 ```
 
 For one-off commands without shell activation, keep the same recipes and let mise

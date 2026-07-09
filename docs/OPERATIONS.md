@@ -4,11 +4,14 @@ QuackGIS v0.2 is a single Rust pgwire server for PostGIS-compatible access to
 DuckLake/Parquet spatial data. It does **not** run PostgreSQL as the query engine,
 DuckDB, pg_ducklake, or C extensions in-process.
 
-Current operations are developer-preview/local-first: SQLite DuckLake catalog +
-local Parquet files. The focused Alpha direction is scaled lakehouse storage:
-PostgreSQL catalog + S3/object-store Parquet, many stateless readers, parallel
-ingest writers, OLAP fanout probes over columnar spatial data, and documented
-conflict/backup/compaction behavior.
+Current operations remain developer-preview/local-first for the default path:
+SQLite DuckLake catalog + local Parquet files. Alpha scaled-storage evidence now
+exists in Kind for PostgreSQL catalog + S3/object-store Parquet, many stateless
+readers, parallel ingest writers, OLAP fanout probes over columnar spatial data,
+and deterministic conflict/compaction behavior. The operations roadmap is to
+harden that profile against external PostgreSQL/S3 services, production auth/TLS,
+backup/restore, failed-writer cleanup, and trendable observability before making
+production claims.
 
 ## Local development
 
@@ -41,12 +44,63 @@ The default local server listens on `127.0.0.1:5434` and uses:
 | `QUACKGIS_S3_ACCESS_KEY_ID` / `QUACKGIS_S3_SECRET_ACCESS_KEY` | unset | S3 credentials |
 | `QUACKGIS_S3_REGION` | `us-east-1` | S3 signing region |
 | `QUACKGIS_S3_ALLOW_HTTP` | `false` | allow HTTP S3 endpoints for local development only |
+| `QUACKGIS_AUTH_MODE` | `trust` | `trust` dev mode or `password` pgwire password mode |
+| `QUACKGIS_READWRITE_USER` / `QUACKGIS_READWRITE_PASSWORD` | `postgres` / unset | read/write login; password required in password mode |
+| `QUACKGIS_READONLY_USER` / `QUACKGIS_READONLY_PASSWORD` | `quackgis_readonly` / unset | optional read-only login in password mode |
 | `QUACKGIS_LOG` | `info` | Rust log filter |
 
 Dev auth is intentionally minimal: connect as user `postgres` to database
 `quackgis` with no password unless a future auth layer is enabled. Alpha storage
 and multi-process deployment docs must cover production auth/TLS/RBAC plus
 catalog/object-store credentials.
+
+## Security profile
+
+Current QuackGIS defaults to trusted developer and controlled Alpha probe
+networks: `QUACKGIS_AUTH_MODE=trust` accepts startup packets without password
+enforcement. For non-dev deployments, switch to `QUACKGIS_AUTH_MODE=password`,
+set `QUACKGIS_READWRITE_PASSWORD`, and optionally enable a read-only login with
+`QUACKGIS_READONLY_PASSWORD`. Read-only users can run SQL reads but fail closed
+on DuckLake write and maintenance statements such as `CREATE TABLE`, `COPY FROM
+STDIN`, DML, and compaction. PostgreSQL catalog privilege helpers still expose an
+allow-all compatibility surface so QGIS/OGR/GeoServer can determine editability;
+the DuckLake write hook is the current authorization boundary.
+
+Transport TLS is available with matching certificate/key configuration:
+
+```sh
+QUACKGIS_TLS_CERT=/run/secrets/tls/tls.crt \
+QUACKGIS_TLS_KEY=/run/secrets/tls/tls.key \
+QUACKGIS_AUTH_MODE=password \
+QUACKGIS_READWRITE_PASSWORD='change-me' \
+QUACKGIS_READONLY_PASSWORD='read-only-change-me' \
+quackgis-server --host 0.0.0.0 --port 5434
+```
+
+The server fails closed if only one of `QUACKGIS_TLS_CERT` or `QUACKGIS_TLS_KEY`
+is set, or if password auth is enabled without a non-empty read/write password.
+Password auth uses PostgreSQL cleartext-password negotiation, so pair it with
+direct TLS, a trusted mTLS mesh, or an authenticated PostgreSQL-aware proxy. Do
+not expose cleartext password auth on an unencrypted network; SCRAM remains M8
+hardening.
+
+Safe Alpha defaults before any external exposure:
+
+- bind only to private interfaces/services;
+- keep `QUACKGIS_S3_ALLOW_HTTP=false` outside local Kind/s3s-fs probes;
+- enable `QUACKGIS_AUTH_MODE=password` and use distinct read/write and read-only
+  credentials for services that do not need writes;
+- source PostgreSQL catalog and object-store credentials from a secret manager or
+  Kubernetes Secret, not command history or committed manifests;
+- rotate catalog/object-store credentials by updating the secret and rolling all
+  QuackGIS pods; verify with a storage smoke immediately after rotation;
+- use platform TLS/mTLS for pod-to-pod traffic when direct pgwire TLS is not the
+  trust boundary;
+- keep `QUACKGIS_LOG=info` unless debugging in a trusted workspace, because query
+  text and object paths may be sensitive.
+
+Target M8 production profiles still need SCRAM, richer RBAC/catalog privilege
+metadata, documented default TLS manifests, and broader denied-connection tests.
 
 Storage profiles:
 
@@ -74,6 +128,10 @@ just demo-kind           # deploy, seed stable public.demo_* layers, print hints
 just kind-up
 just kind-compatibility  # build/deploy + QGIS read/edit, OGR, GeoServer probes
 just kind-lake-smoke     # PostgreSQL catalog + s3s-fs object storage smoke
+just kind-qps-smoke      # parallel-reader QPS gate over the lake profile
+just kind-qps-mtls-smoke # QPS gate with Linkerd TCP/TLS observability evidence
+just kind-qps-deep-smoke # larger Linkerd-observed reader gate; QPS_DEEP_* tunable
+just kind-mtls-smoke     # Linkerd-injected lake profile with mTLS evidence
 ```
 
 `mise.toml` pins Rust, Just, Kind, kubectl, Helm, and cargo-nextest; Podman is the
@@ -90,7 +148,9 @@ then restarts the StatefulSet so the fixed dev tag is picked up. For iterative
 probe triage, `just kind-refresh-fast` uses Cargo's `probe` profile (release-like
 but no thin-LTO/single-codegen-unit) to reduce rebuild latency. Use
 `just kind-build-image-container` for a slower clean build inside the container
-image.
+image. `just runtime-static-check` guards the maintained runtime image against
+native GIS packages, package-manager installs, or build-tool leakage into the
+runtime stage.
 
 Client probe scripts are versioned under `deploy/kind/probes/` and published into
 the cluster by `just kind-probe-scripts` as a `quackgis-probe-scripts` ConfigMap.
@@ -111,6 +171,48 @@ full local/CI recipe: it runs `kind-refresh-fast` and then `kind-probes`.
 `pg` for the DuckLake PostgreSQL catalog, and `s3` for local S3-compatible Parquet
 storage. The probe covers CREATE TABLE, text COPY, spatial read-back, compaction,
 and read-back after compaction against that storage profile.
+
+On the shared PostgreSQL catalog profile, QuackGIS refreshes DuckLake catalog
+metadata strongly for DDL/write/compaction statements and caches read-side
+refreshes for `QUACKGIS_SHARED_CATALOG_REFRESH_MS` milliseconds (default 1000).
+Set it to `0` to force the older refresh-before-every-read behavior during
+catalog-coherence debugging.
+
+`just kind-qps-smoke` scales `lake` to three pods, seeds a compacted
+LayoutBench-style aerial table in the PostgreSQL/S3 lake profile, and runs 16
+parallel pgwire readers issuing 240 selective spatial count queries across five
+window/predicate shapes. The gate asserts unchanged exact results, hidden-bbox
+pruning evidence, `EXPLAIN ANALYZE` file-group and bytes-scanned ceilings, at
+least two backend instances via `quackgis_instance_id()`, and prints QPS plus
+p50/p95/p99 latencies overall and per query shape. Tune `QPS_MAX_FILE_GROUPS`
+and `QPS_MAX_BYTES_SCANNED` only when intentionally changing layout scale or
+scan accounting.
+
+`just kind-qps-mtls-smoke` runs the same reader gate from the Linkerd-injected
+`mesh-client` deployment and asserts the local Linkerd proxy reports outbound
+TLS TCP opens/read bytes/write bytes to `lake` destination pods. This is the
+preferred observability evidence path when Linkerd is enabled. The QPS recipes
+set `QUACKGIS_SHARED_CATALOG_REFRESH_MS` on `lake` from
+`QPS_SHARED_CATALOG_REFRESH_MS` (default 60000) because they run a stable
+read-only phase after seeding. Static hidden-bbox spatial reads automatically run
+with `QUACKGIS_SELECTIVE_READ_TARGET_PARTITIONS` target partitions (default 1) in
+a per-query DataFusion session clone, avoiding many object-store range opens
+without rolling `lake` or slowing seed/compaction and broad scans. Set
+`QUACKGIS_SELECTIVE_READ_TARGET_PARTITIONS=0` to disable that automatic tuning.
+`QUACKGIS_TARGET_PARTITIONS` remains a global startup override; invalid values
+fail server startup instead of silently changing scan parallelism.
+
+`just kind-qps-deep-smoke` is the opt-in scale lever. Defaults seed 1.08M rows
+(`QPS_DEEP_FACTOR=10000`), run 32 reader connections and 640 queries across four
+`lake` pods, and require at least three backend instances plus Linkerd TCP/TLS
+metric deltas. Increase `QPS_DEEP_FACTOR`, `QPS_DEEP_WORKERS`, and
+`QPS_DEEP_QUERIES` for larger machines; `QPS_DEEP_DISK_BUDGET_GIB` defaults to
+1024 and the recipe prints/guards an estimated disk budget before running.
+
+`just kind-mtls-smoke` installs Linkerd with Helm, deploys Linkerd-injected
+`lake`, `pg`, `s3`, and `mesh-client` pods, runs storage plus TCP load-balancing
+probes from the injected client, and asserts Linkerd proxy metrics report TLS
+traffic. The default `LINKERD_IPTABLES_MODE=nft` matches Podman-backed Kind.
 
 The QGIS probe is a read-path gate. Current expected output includes:
 
@@ -133,6 +235,7 @@ after_insert ... 'inserted' ... 'Point (1 1)' ...
 after_update ... 'updated' ... 'Point (2 2)' ...
 after_delete ... 'updated' ... 'Point (2 2)' ...
 edit_ok True
+compaction_after_edit_ok True
 ```
 
 The OGR probe uses GDAL's PostgreSQL driver to read a WKB-backed table, append a
@@ -147,6 +250,8 @@ loaded_rows [('load-a', 'client', 'POINT(2 2)'), ('load-b', 'client', 'POINT(3 3
 load_feature_count 2
 load_names ['load-a', 'load-b']
 load_geometry_types ['Point', 'Point']
+ogr_keyless_rowids ['1', '2']
+ogr_keyless_compact_ok True
 ```
 
 The GeoServer probe uses official `docker.osgeo.org/geoserver:3.0.0`, supplies a
@@ -158,6 +263,8 @@ insert/update/delete. Current expected output includes:
 wfs_point_count 2
 wms_png_header 89504e470d0a1a0a
 wfst_transaction_ok True
+geoserver_keyless_wfs_point_count 2
+geoserver_keyless_update_ok True
 geoserver_probe_ok True
 ```
 
@@ -237,6 +344,105 @@ just kind-postgis-osm-down
 See [OSM_POSTGIS_PARITY.md](./OSM_POSTGIS_PARITY.md) for the long roadmap and
 copy/sync recipes.
 
+## Alpha scaled-storage profile
+
+The maintained Alpha profile runs QuackGIS as stateless pods over one shared
+DuckLake PostgreSQL metadata catalog and an S3-compatible object-store prefix
+(`s3s-fs` in Kind). It is the profile to use before claiming multi-process or
+object-storage behavior.
+
+```sh
+eval "$(mise activate bash)"
+just kind-lake-smoke           # PostgreSQL catalog + S3-compatible storage basics
+just kind-lake-multipod-smoke  # concurrent probes through multiple QuackGIS pods
+just kind-write-smoke          # parallel ingest plus snapshot conflict/retry evidence
+just kind-qps-smoke            # high-QPS selective spatial readers
+just kind-olap-smoke           # grouped OLAP fanout + pruning/recheck evidence
+```
+
+`just kind-alpha-smoke` runs the maintained Alpha gate bundle. Current expected
+evidence includes `storage_ok True`, `write_conflict conflict_observed=True`,
+`write_ok True`, `qps_ok True`, and `olap_ok True`. QPS and OLAP gates enforce
+bytes-scanned ceilings from `EXPLAIN ANALYZE` (`QPS_MAX_BYTES_SCANNED`,
+`OLAP_MAX_BYTES_SCANNED`) so pruning/pushdown regressions fail closed.
+
+Kind uses disposable local defaults (`postgres/postgres`, database `quackgis`,
+S3 access key `quackgis`). Override the `storage` Secret for any non-dev
+cluster; do not reuse the Kind credentials outside a trusted local workspace.
+
+### Alpha backup/restore runbook
+
+The PostgreSQL/S3 profile has two durability boundaries that must be treated as
+one backup set:
+
+1. the DuckLake metadata catalog in PostgreSQL; and
+2. the Parquet/object data under the configured object-store prefix.
+
+A PostgreSQL dump without the matching object prefix is not a restorable QuackGIS
+backup, and an object-prefix snapshot without the matching catalog can expose
+unreferenced or missing files. Until a coordinated backup primitive exists, use a
+quiesced backup window for any restore drill:
+
+1. Stop application writers or route them away from QuackGIS.
+2. Wait for in-flight `COPY`, DML, and `CALL quackgis_compact_table(...)` jobs to
+   finish; failed or cancelled writers should be investigated before backup.
+3. Back up the PostgreSQL catalog with the platform's normal PostgreSQL tooling.
+4. Snapshot or copy the exact object-store prefix used by `QUACKGIS_DATA_PATH`.
+5. Restore into an isolated catalog + object prefix, never directly over the live
+   prefix.
+6. Start one QuackGIS pod against the restored pair and run a read-only smoke:
+   table discovery, representative counts/bboxes, and a small spatial query.
+7. Only then point clients at the restored service.
+
+Kind's in-cluster PostgreSQL and `s3s-fs` deployments are smoke-test stand-ins,
+not backup tooling. Production backup/restore evidence must be collected against
+the external PostgreSQL and S3-compatible services that will actually hold the
+catalog and object prefix.
+
+### Failed-writer and object-prefix cleanup
+
+DuckLake commits table state through catalog snapshots. A writer that fails
+before publishing its snapshot can still leave temporary or unreferenced objects
+in the object-store prefix. Current Alpha guidance is conservative:
+
+- Do not manually delete objects from the live prefix while QuackGIS writers or
+  compaction jobs are running.
+- Prefer a dedicated prefix per environment/table group so inventory and cleanup
+  scope is small.
+- On failed writer cleanup, first quiesce writers, preserve the failed job logs,
+  and capture an object inventory. Quarantine suspected orphan objects outside the
+  live prefix before deleting them permanently.
+- Validate cleanup by restarting QuackGIS, refreshing catalog metadata, and
+  running the same representative counts/spatial reads used for backup restore.
+
+Automatic orphan detection/garbage collection is still future work. Treat any
+manual object cleanup as an operational change that needs a restore point.
+
+### Catalog refresh tuning
+
+On shared PostgreSQL catalog deployments, writes/DDL/compaction force a catalog
+refresh on the connection that performed the mutation. Read-only statements use
+`QUACKGIS_SHARED_CATALOG_REFRESH_MS` as a bounded staleness/cache interval for
+cross-pod visibility:
+
+| Setting | Use when | Trade-off |
+|---|---|---|
+| `0` | catalog-coherence debugging, demos immediately after writes | more catalog reads before every query |
+| `1000` (default) | mixed small workloads | fresh enough for interactive clients with low catalog overhead |
+| `60000+` | stable read-only QPS/OLAP phases after seeding | fewer catalog refreshes; other pods may not see new tables immediately |
+
+Tune it explicitly during probes:
+
+```sh
+kubectl -n quackgis set env deployment/lake QUACKGIS_SHARED_CATALOG_REFRESH_MS=0
+kubectl -n quackgis rollout status deployment/lake --timeout=180s
+```
+
+The QPS recipes intentionally raise this interval after the seed/compact phase so
+the benchmark measures data reads instead of catalog polling. If a client reports
+missing just-created tables across pods, temporarily set the interval to `0` and
+rerun the workflow before investigating deeper catalog bugs.
+
 ## CI and compatibility reports
 
 GitHub Actions uses `mise.toml` as the CI toolchain source of truth and calls the
@@ -250,6 +456,49 @@ same Justfile recipes as local development through `mise exec -- just ...`.
   fails explicitly if the rendered report contains a failed probe row.
 - The nightly compatibility run also executes the opt-in real OSM PostGIS parity
   probe; manual dispatch can enable it with the `run_osm` input.
+- `Storage smoke` runs `just kind-alpha-smoke` weekly, appends the generated
+  Kind compatibility/storage report to the job summary, and uploads Kind logs.
+  Manual dispatch can still run any single storage recipe, including deeper
+  QPS/mTLS variants, for focused triage.
+
+Every `kind-compat-report` artifact includes `metrics.json` with both probe
+metrics and GitHub run metadata (`github_sha`, workflow, run id, run URL, and
+storage recipe when applicable). The scheduled workflows also upload explicit
+metrics-only artifacts named with the source SHA:
+
+- `compatibility-metrics-<sha>-<run_id>`
+- `storage-metrics-kind-alpha-smoke-<sha>-<run_id>`
+
+Tag/main artifact builds write `release-evidence-<version>.json` next to the
+binary archive. That manifest records source SHA, binary SHA256, image tags, and
+the metrics artifact prefixes a release manager should attach to the release
+evidence record.
+
+Use `just metrics-trend path/to/artifact-dir` to flatten one or more downloaded
+`metrics.json` files into CSV for trend dashboards. The helper also supports
+`format=json` and `format=markdown` for release notes or manual inspection.
+
+## Logs and observability
+
+`QUACKGIS_LOG=info` emits one structured-ish line for every statement that enters
+the QuackGIS DuckLake hook:
+
+```text
+quackgis_query_start query_id=42 protocol=simple pid=123 user=postgres statement_kind=query
+```
+
+The `query_id` is process-local and monotonic; it is intended for correlating a
+client action with adjacent plan/scan/probe logs, not as a durable audit id.
+Statement text is intentionally not logged at info level because it can contain
+tenant data, object paths, or credentials in ad-hoc SQL. Read-only authorization
+denials emit a separate counter line:
+
+```text
+quackgis_write_denied user=quackgis_readonly statement_kind=create_table denied_total=1
+```
+
+Future M8 observability work should export these counters to metrics and add
+object-store/catalog refresh counters without requiring log scraping.
 
 ## Persistence model
 
@@ -261,6 +510,11 @@ The Kind StatefulSet mounts one `ducklake` PVC at `/var/lib/quackgis` containing
 This is suitable for single-pod restart/persistence smoke tests. Multi-server
 tests must move to a shared catalog/data backend (for example PostgreSQL catalog
 + object-store data) before scaling replicas.
+
+The lake Deployment in `deploy/kind/lake.yaml` is that shared backend profile:
+PostgreSQL stores DuckLake metadata, `s3s-fs` serves the object-store API, and
+QuackGIS pods are stateless readers/writers configured by `QUACKGIS_CATALOG_URL`,
+`QUACKGIS_DATA_PATH=s3://...`, and `QUACKGIS_S3_*`.
 
 ## Reference source checkouts
 

@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+import json
+import os
+import re
 import sys
 from pathlib import Path
 
@@ -11,11 +14,275 @@ from pathlib import Path
 CHECKS = [
     ("QGIS read/render/filter/identify", "qgis-probe.log", ["valid True", "filter_names ['one']", "identify_names ['one']", "render_ok True"]),
     ("QGIS edit/save", "qgis-edit-probe.log", ["edit_ok True"]),
-    ("GDAL/OGR load/read", "ogr-probe.log", ["feature_count 2", "loaded_rows", "load_feature_count 2"]),
-    ("GeoServer WFS/WMS/WFS-T", "geoserver-probe.log", ["wfs_point_count", "wms_png_header 89504e470d0a1a0a", "wfst_transaction_ok True", "geoserver_probe_ok True"]),
-    ("OSM PostGIS parity", "osm-postgis-parity.log", ["osm_postgis_to_quackgis_copy_ok True"]),
+    ("GDAL/OGR load/read", "ogr-probe.log", ["feature_count 2", "loaded_rows", "load_feature_count 2", "ogr_keyless_compact_ok True"]),
+    ("GeoServer WFS/WMS/WFS-T", "geoserver-probe.log", ["wfs_point_count", "wms_png_header 89504e470d0a1a0a", "wfst_transaction_ok True", "geoserver_keyless_update_ok True", "geoserver_probe_ok True"]),
+    ("OSM PostGIS/QGIS parity", "osm-postgis-parity.log", ["osm_postgis_to_quackgis_copy_ok True", "osm_qgis_open_ok True", "osm_qgis_render_ok True"]),
     ("Kind demo seed", "quackgis-demo.log", ["demo_ok True"]),
+    ("Lake PostgreSQL/S3 storage", "lake-probe.log", ["storage_ok True"]),
+    ("Lake multi-pod storage", "lake-multipod.log", ["storage_ok True"]),
+    ("Lake load-balanced service", "lb-probe.log", ["lb_ok True"]),
+    ("Lake read workload", "read-probe.log", ["read_ok True"]),
+    ("Lake QPS readers", "qps-probe.log", ["qps_ok True", "qps_scan", "max_bytes_scanned="]),
+    ("Lake writer conflict/retry", "write-verify.log", ["write_conflict", "conflict_observed=True", "write_ok True"]),
+    ("Lake OLAP fanout", "olap-probe.log", ["olap_ok True", "olap_scan", "max_bytes_scanned="]),
 ]
+
+
+def line_kv(line: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for key, value in re.findall(r"([A-Za-z_][A-Za-z0-9_]*)=([^\s]+)", line):
+        values[key] = value.strip("'")
+    return values
+
+
+def last_line(text: str, prefix: str) -> str | None:
+    matches = [line for line in text.splitlines() if line.startswith(prefix)]
+    return matches[-1] if matches else None
+
+
+def max_int_from_lines(text: str, prefix: str, key: str) -> int | None:
+    values = []
+    for line in text.splitlines():
+        if not line.startswith(prefix):
+            continue
+        raw = line_kv(line).get(key)
+        if raw and raw != "NA":
+            values.append(int(raw))
+    return max(values) if values else None
+
+
+def last_int_after_prefix(text: str, prefix: str) -> int | None:
+    line = last_line(text, prefix)
+    if not line:
+        return None
+    match = re.search(r"(-?\d+)\s*$", line)
+    return int(match.group(1)) if match else None
+
+
+def maybe_int(raw: str | None) -> int | None:
+    if not raw or raw == "NA":
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def maybe_float(raw: str | None) -> float | None:
+    if not raw or raw == "NA":
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def compact(values: dict[str, object | None]) -> dict[str, object]:
+    return {key: value for key, value in values.items() if value is not None}
+
+
+def env_value(name: str) -> str | None:
+    value = os.environ.get(name)
+    return value if value else None
+
+
+def run_metadata() -> dict[str, object]:
+    server_url = env_value("GITHUB_SERVER_URL") or "https://github.com"
+    repository = env_value("GITHUB_REPOSITORY")
+    run_id = env_value("GITHUB_RUN_ID")
+    run_url = f"{server_url}/{repository}/actions/runs/{run_id}" if repository and run_id else None
+    return compact(
+        {
+            "report_kind": env_value("QUACKGIS_REPORT_KIND"),
+            "storage_recipe": env_value("STORAGE_RECIPE"),
+            "github_repository": repository,
+            "github_workflow": env_value("GITHUB_WORKFLOW"),
+            "github_job": env_value("GITHUB_JOB"),
+            "github_run_id": run_id,
+            "github_run_attempt": env_value("GITHUB_RUN_ATTEMPT"),
+            "github_run_url": run_url,
+            "github_ref": env_value("GITHUB_REF"),
+            "github_ref_name": env_value("GITHUB_REF_NAME"),
+            "github_sha": env_value("GITHUB_SHA"),
+            "github_event_name": env_value("GITHUB_EVENT_NAME"),
+        }
+    )
+
+
+def metric_values(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    text = path.read_text(encoding="utf-8", errors="replace")
+    name = path.name
+
+    if name == "qps-probe.log":
+        result = line_kv(last_line(text, "qps_result ") or "")
+        config = line_kv(last_line(text, "qps_config ") or "")
+        return compact(
+            {
+                "qps": maybe_float(result.get("qps")),
+                "p95_ms": maybe_float(result.get("p95_ms")),
+                "queries": maybe_int(result.get("queries")),
+                "workers": maybe_int(result.get("workers")),
+                "seeded_rows": maybe_int(config.get("seeded_rows")),
+                "factor": maybe_int(config.get("factor")),
+                "max_scan_bytes": max_int_from_lines(text, "qps_scan ", "bytes_scanned"),
+                "max_scan_bytes_budget": maybe_int(config.get("max_bytes_scanned")),
+                "max_file_groups": max_int_from_lines(text, "qps_scan ", "file_groups"),
+                "max_file_groups_budget": maybe_int(config.get("max_file_groups")),
+            }
+        )
+
+    if name == "olap-probe.log":
+        result = line_kv(last_line(text, "olap_result ") or "")
+        config = line_kv(last_line(text, "olap_config ") or "")
+        scan = line_kv(last_line(text, "olap_scan ") or "")
+        recheck = line_kv(last_line(text, "olap_recheck ") or "")
+        return compact(
+            {
+                "qps": maybe_float(result.get("qps")),
+                "p95_ms": maybe_float(result.get("p95_ms")),
+                "queries": maybe_int(result.get("queries")),
+                "workers": maybe_int(result.get("workers")),
+                "seeded_rows": maybe_int(config.get("seeded_rows")),
+                "factor": maybe_int(config.get("factor")),
+                "bytes_scanned": maybe_int(scan.get("bytes_scanned")),
+                "bytes_scanned_budget": maybe_int(config.get("max_bytes_scanned")),
+                "groups": maybe_int(scan.get("groups")),
+                "candidate_groups": maybe_int(recheck.get("candidate_groups")),
+                "candidate_rows": maybe_int(recheck.get("candidate_rows")),
+            }
+        )
+
+    if name == "write-verify.log":
+        conflict = line_kv(last_line(text, "write_conflict ") or "")
+        verify = line_kv(last_line(text, "write_verify ") or "")
+        return compact(
+            {
+                "shared_rows": maybe_int(verify.get("shared_rows")),
+                "failed_commits": maybe_int(conflict.get("failed_commits")),
+                "retry_attempts": maybe_int(conflict.get("retry_attempts")),
+                "conflict_observed": conflict.get("conflict_observed") == "True"
+                if conflict.get("conflict_observed")
+                else None,
+            }
+        )
+
+    if name == "osm-postgis-parity.log":
+        return compact(
+            {
+                f"qgis_{label}_feature_count": last_int_after_prefix(
+                    text, f"qgis_osm_{label}_feature_count "
+                )
+                for label in ("points", "lines", "multipolygons")
+            }
+        )
+
+    if name == "read-probe.log":
+        result = line_kv(last_line(text, "read_result ") or "")
+        scan = line_kv(last_line(text, "read_scan ") or "")
+        return compact(
+            {
+                "qps": maybe_float(result.get("qps")),
+                "p95_ms": maybe_float(result.get("p95_ms")),
+                "bytes_scanned": maybe_int(scan.get("bytes_scanned")),
+            }
+        )
+
+    return {}
+
+
+def metric_summary(path: Path) -> str:
+    if not path.exists():
+        return ""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    name = path.name
+
+    if name == "qps-probe.log":
+        result = line_kv(last_line(text, "qps_result ") or "")
+        config = line_kv(last_line(text, "qps_config ") or "")
+        max_bytes = max_int_from_lines(text, "qps_scan ", "bytes_scanned")
+        max_groups = max_int_from_lines(text, "qps_scan ", "file_groups")
+        return "; ".join(
+            item
+            for item in [
+                f"qps={result.get('qps')}" if result.get("qps") else "",
+                f"p95_ms={result.get('p95_ms')}" if result.get("p95_ms") else "",
+                f"max_scan_bytes={max_bytes}/{config.get('max_bytes_scanned')}"
+                if max_bytes is not None and config.get("max_bytes_scanned")
+                else "",
+                f"max_file_groups={max_groups}/{config.get('max_file_groups')}"
+                if max_groups is not None and config.get("max_file_groups")
+                else "",
+            ]
+            if item
+        )
+
+    if name == "olap-probe.log":
+        result = line_kv(last_line(text, "olap_result ") or "")
+        config = line_kv(last_line(text, "olap_config ") or "")
+        scan = line_kv(last_line(text, "olap_scan ") or "")
+        return "; ".join(
+            item
+            for item in [
+                f"qps={result.get('qps')}" if result.get("qps") else "",
+                f"p95_ms={result.get('p95_ms')}" if result.get("p95_ms") else "",
+                f"bytes_scanned={scan.get('bytes_scanned')}/{config.get('max_bytes_scanned')}"
+                if scan.get("bytes_scanned") and config.get("max_bytes_scanned")
+                else "",
+                f"groups={scan.get('groups')}" if scan.get("groups") else "",
+            ]
+            if item
+        )
+
+    if name == "write-verify.log":
+        conflict = line_kv(last_line(text, "write_conflict ") or "")
+        verify = line_kv(last_line(text, "write_verify ") or "")
+        return "; ".join(
+            item
+            for item in [
+                f"shared_rows={verify.get('shared_rows')}" if verify.get("shared_rows") else "",
+                f"failed_commits={conflict.get('failed_commits')}" if conflict.get("failed_commits") else "",
+                f"retry_attempts={conflict.get('retry_attempts')}" if conflict.get("retry_attempts") else "",
+            ]
+            if item
+        )
+
+    if name == "osm-postgis-parity.log":
+        counts = {
+            label: last_int_after_prefix(text, f"qgis_osm_{label}_feature_count ")
+            for label in ("points", "lines", "multipolygons")
+        }
+        return "; ".join(
+            item
+            for item in [
+                f"qgis_points={counts['points']}" if counts["points"] is not None else "",
+                f"qgis_lines={counts['lines']}" if counts["lines"] is not None else "",
+                f"qgis_multipolygons={counts['multipolygons']}"
+                if counts["multipolygons"] is not None
+                else "",
+            ]
+            if item
+        )
+
+    if name == "read-probe.log":
+        result = line_kv(last_line(text, "read_result ") or "")
+        scan = line_kv(last_line(text, "read_scan ") or "")
+        return "; ".join(
+            item
+            for item in [
+                f"qps={result.get('qps')}" if result.get("qps") else "",
+                f"p95_ms={result.get('p95_ms')}" if result.get("p95_ms") else "",
+                f"bytes_scanned={scan.get('bytes_scanned')}" if scan.get("bytes_scanned") else "",
+            ]
+            if item
+        )
+
+    return ""
+
+
+def md_cell(value: str) -> str:
+    return value.replace("|", "\\|")
 
 
 def status_for(path: Path, needles: list[str]) -> str:
@@ -32,21 +299,25 @@ def status_for(path: Path, needles: list[str]) -> str:
 def render(out_dir: Path) -> str:
     rows = []
     for label, log_name, needles in CHECKS:
-        status = status_for(out_dir / log_name, needles)
+        log_path = out_dir / log_name
+        status = status_for(log_path, needles)
         icon = {"pass": "✅", "fail": "❌", "not run": "➖"}[status]
-        rows.append((label, f"{icon} {status}", log_name))
+        rows.append((label, f"{icon} {status}", log_name, metric_summary(log_path)))
 
-    passed = sum(1 for _, status, _ in rows if "pass" in status)
-    failed = sum(1 for _, status, _ in rows if "fail" in status)
+    passed = sum(1 for _, status, _, _ in rows if "pass" in status)
+    failed = sum(1 for _, status, _, _ in rows if "fail" in status)
     body = [
-        "# QuackGIS Kind compatibility report",
+        "# QuackGIS Kind compatibility/storage report",
         "",
         f"Summary: **{passed} passed**, **{failed} failed**, **{len(rows) - passed - failed} not run**.",
         "",
-        "| Check | Status | Log |",
-        "|---|---|---|",
+        "| Check | Status | Evidence | Log |",
+        "|---|---|---|---|",
     ]
-    body.extend(f"| {label} | {status} | `{log}` |" for label, status, log in rows)
+    body.extend(
+        f"| {label} | {status} | {md_cell(evidence)} | `{log}` |"
+        for label, status, log, evidence in rows
+    )
     body.extend(
         [
             "",
@@ -54,10 +325,39 @@ def render(out_dir: Path) -> str:
             "",
             "- `kubernetes.txt` — namespace resources and pod/job state",
             "- `quackgis.log` — QuackGIS server log",
+            "- `metrics.json` — machine-readable probe metrics for trend tracking",
             "",
         ]
     )
     return "\n".join(body)
+
+
+def metrics_report(out_dir: Path) -> dict[str, object]:
+    checks: dict[str, object] = {}
+    passed = 0
+    failed = 0
+    not_run = 0
+    for label, log_name, needles in CHECKS:
+        log_path = out_dir / log_name
+        status = status_for(log_path, needles)
+        if status == "pass":
+            passed += 1
+        elif status == "fail":
+            failed += 1
+        else:
+            not_run += 1
+        check_id = Path(log_name).stem.replace("-", "_")
+        checks[check_id] = {
+            "label": label,
+            "status": status,
+            "log": log_name,
+            "metrics": metric_values(log_path),
+        }
+    return {
+        "run": run_metadata(),
+        "summary": {"passed": passed, "failed": failed, "not_run": not_run},
+        "checks": checks,
+    }
 
 
 def main() -> int:
@@ -65,6 +365,10 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     report = render(out_dir)
     (out_dir / "README.md").write_text(report, encoding="utf-8")
+    (out_dir / "metrics.json").write_text(
+        json.dumps(metrics_report(out_dir), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     print(report)
     return 0
 

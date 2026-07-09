@@ -1,7 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //! CLI argument parsing for `quackgis-server`.
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum CliAuthMode {
+    /// Trust startup packets and do not request a password. Development only.
+    Trust,
+    /// Require PostgreSQL cleartext-password authentication for configured users.
+    Password,
+}
 
 /// QuackGIS server — PostGIS-compatible SQL over pgwire, backed by SedonaDB.
 #[derive(Debug, Clone, Parser)]
@@ -71,6 +79,30 @@ pub struct Cli {
     /// Optional TLS private key path (PKCS#8 PEM).
     #[arg(long, env = "QUACKGIS_TLS_KEY")]
     pub tls_key: Option<String>,
+
+    /// Pgwire authentication mode. `trust` is for local/dev only.
+    #[arg(long, env = "QUACKGIS_AUTH_MODE", value_enum, default_value_t = CliAuthMode::Trust)]
+    pub auth_mode: CliAuthMode,
+
+    /// Read/write login user for password auth mode.
+    #[arg(long, env = "QUACKGIS_READWRITE_USER", default_value = "postgres")]
+    pub readwrite_user: String,
+
+    /// Read/write login password; required when auth mode is `password`.
+    #[arg(long, env = "QUACKGIS_READWRITE_PASSWORD")]
+    pub readwrite_password: Option<String>,
+
+    /// Optional read-only login user for password auth mode.
+    #[arg(
+        long,
+        env = "QUACKGIS_READONLY_USER",
+        default_value = "quackgis_readonly"
+    )]
+    pub readonly_user: String,
+
+    /// Optional read-only login password. If unset, the read-only role is disabled.
+    #[arg(long, env = "QUACKGIS_READONLY_PASSWORD")]
+    pub readonly_password: Option<String>,
 
     /// Log filter (`env_logger` syntax). Falls back to the `RUST_LOG` env var.
     #[arg(long, env = "QUACKGIS_LOG", default_value = "info")]

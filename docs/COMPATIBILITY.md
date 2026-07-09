@@ -5,7 +5,8 @@ Current compatibility claims for the wire-adaptor architecture. See
 and [PROJECT_DIRECTION.md](./PROJECT_DIRECTION.md) for the focused product
 direction: platform/application developers, high-throughput spatial lakehouse
 queries, DuckDB-style columnar OLAP over spatial datasets, and PostGIS-compatible
-tools as the ecosystem interface. See
+tools as the ecosystem interface. See [COMPATIBILITY_MATRIX.md](./COMPATIBILITY_MATRIX.md)
+for probed client versions. See
 [ROADMAP.md](../ROADMAP.md) for milestone history and open hardening.
 `G#` references point to the upstream gap ledger in ROADMAP.md — capabilities
 missing upstream that we build in tracked fork branches.
@@ -30,7 +31,7 @@ missing upstream that we build in tracked fork branches.
 | Feature | Status |
 |---|---|
 | Simple + extended query protocol | ✅ upstream |
-| TLS, password auth, RBAC roles | ✅ upstream |
+| TLS, password auth, RBAC roles | TLS and cleartext-password startup are wired; coarse read/write vs read-only DuckLake write authorization is implemented. SCRAM and richer catalog privilege metadata remain M8 hardening. |
 | pg_catalog + information_schema emulation | ✅ upstream (datafusion-pg-catalog) |
 | Portals / fetch-size suspension | general `setFetchSize` suspension still deferred (G4); maintained GeoServer WFS/WMS smoke does not require it |
 | `DECLARE BINARY CURSOR` / `FETCH` | ✅ simple-query/libpq path; narrow PostgreSQL-driver extended cursor shim for OGR read; general extended-protocol FETCH still deferred (G3/G4) |
@@ -52,34 +53,39 @@ missing upstream that we build in tracked fork branches.
 - Per-row EWKB SRID tags are preserved by `ST_SetSRID`, `ST_GeomFromEWKT`,
   `ST_MakeEnvelope(..., srid)`, and `ST_Transform(..., srid)`; `ST_SRID`
   reads those tags and returns `0` for untagged WKB.
-- Function conformance tracked against a curated PostGIS regress subset
-  (secondary metric).
+- Function conformance is tracked by `just postgis-regress`, a starter curated
+  PostGIS regress subset that prints `postgis_regress_subset passed=<n>
+  total=<n> pass_rate=<x>` for scheduled trend artifacts. The subset is small by
+  design today and grows only for functions QuackGIS intentionally claims. The
+  `PostGIS regress subset` workflow runs it weekly/manual and uploads the raw log
+  plus `metrics.json` pass-rate evidence.
 
 ## Storage (DuckLake 1.0+ via datafusion-ducklake)
 
 | Capability | Status |
 |---|---|
 | Dev path: SQLite catalog + local Parquet files | ✅ validated in M1 tests |
-| Scaled profile: PostgreSQL catalog + S3/object-store Parquet | 🎯 Alpha requirement; not claimed by current local preview |
+| Scaled profile: PostgreSQL catalog + S3/object-store Parquet | ✅ Alpha Kind gate via `kind-lake-smoke`, `kind-lake-multipod-smoke`, `kind-write-smoke`, `kind-qps-smoke`, and `kind-olap-smoke`; not a production durability claim |
 | datafusion-ducklake main HEAD (DF54) | ✅ current integration target |
 | SQL writes into DuckLake from pgwire | ✅ CTAS, bare CREATE TABLE, INSERT SELECT, INSERT VALUES with column mapping, UPDATE, DELETE (single-table/full-table rewrite), PostgreSQL text `COPY FROM STDIN`, plus simple/extended `INSERT`/`UPDATE`/`DELETE ... RETURNING` for edit-client refresh |
-| PostgreSQL catalog writes | ⚠️ upstream path is experimental/non-spec; QuackGIS will extend/fork toward spec-compatible behavior (G6) |
+| PostgreSQL catalog writes | ⚠️ exercised by Alpha Kind gates; upstream path remains experimental/non-spec and QuackGIS still needs spec hardening (G6) |
 | UPDATE / DELETE | ✅ QuackGIS full-table rewrite semantics for single-table statements; native delete files still future optimization |
 | Spatial layout | ✅ WKB-first hidden `_qg_*` bbox/bucket/sort columns are automatically materialized on spatial writes and hidden from client metadata |
 | Spatial predicate pruning | ✅ Safe bbox rewrite for recognized single-table spatial predicates with exact SedonaDB recheck; unsupported predicates remain correct but may scan more |
-| Columnar OLAP fanout | 🎯 Alpha benchmark target: grouped spatial/attribute stats, primitive calculations, projection/filter/aggregate pushdown evidence, and candidate filtering before exact SedonaDB recheck |
+| Columnar OLAP fanout | ✅ Alpha smoke for grouped spatial/attribute stats, primitive calculations, pruning/aggregate evidence, and candidate filtering before exact SedonaDB recheck; larger benchmark variants remain future hardening |
 | Compaction | ✅ `CALL quackgis_compact_table('schema.table')` and alias `CALL quackgis_compact(...)` rewrite a table into layout order; currently whole-table, not bucket-local |
 | Snapshot time travel (SQL `AS OF`) | ❌ programmatic only (G8) |
 | Generic filter pushdown/pruning path | ✅ datafusion-ducklake declares inexact filter pushdown; QuackGIS adds spatial-layout rewrites above it |
 | DuckDB-inlined data reads | ❌ — avoid inlining when writing from DuckDB |
-| Object stores | local FS validated; S3/object-store support is an Alpha scaled-storage requirement |
+| Object stores | ✅ local FS validated; S3-compatible storage exercised in Kind with `s3s-fs`; production object-store soak remains future hardening |
 
 Interop target: QuackGIS storage changes should remain forward-compatible with
 official DuckLake 1.0+ and readable by reference DuckLake readers where
-practical. SQLite/local is the validated preview path. SQLite/local and
-PostgreSQL/S3 are both first-class storage profiles; Alpha makes the
-PostgreSQL/S3 profile real for multi-process readers/writers. Extending
-datafusion-ducklake for that target is explicitly in scope.
+practical. SQLite/local remains the simplest preview path. SQLite/local and
+PostgreSQL/S3 are both first-class storage profiles; the maintained Alpha Kind
+gates now exercise PostgreSQL/S3 for multi-pod readers, parallel writers,
+snapshot conflict/retry evidence, high-QPS selective reads, and grouped OLAP
+fanout. Extending datafusion-ducklake for that target is explicitly in scope.
 
 ## Known limitations (architecture)
 

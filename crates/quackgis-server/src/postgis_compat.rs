@@ -70,14 +70,24 @@ fn make_const_string_udf(name: &str, value: String) -> datafusion::logical_expr:
 }
 
 fn register_privilege_udfs(ctx: &SessionContext) -> DFResult<()> {
-    // QGIS checks column-level editability via PostgreSQL privilege helpers.
-    // QuackGIS has no RBAC yet, so the dev/read-write posture is allow-all.
-    ctx.register_udf(datafusion::logical_expr::create_udf(
+    // GIS clients check table/schema/database/column editability via PostgreSQL
+    // privilege helpers. QuackGIS has no RBAC yet, so the dev/read-write posture
+    // is allow-all for the common text-name overloads clients issue.
+    ctx.register_udf(make_allow_all_privilege_udf(
+        "has_table_privilege",
+        vec![DataType::Utf8, DataType::Utf8],
+    ));
+    ctx.register_udf(make_allow_all_privilege_udf(
+        "has_schema_privilege",
+        vec![DataType::Utf8, DataType::Utf8],
+    ));
+    ctx.register_udf(make_allow_all_privilege_udf(
+        "has_database_privilege",
+        vec![DataType::Utf8, DataType::Utf8],
+    ));
+    ctx.register_udf(make_allow_all_privilege_udf(
         "has_column_privilege",
         vec![DataType::Utf8, DataType::Utf8, DataType::Utf8],
-        DataType::Boolean,
-        Volatility::Stable,
-        Arc::new(|_| Ok(datafusion::scalar::ScalarValue::Boolean(Some(true)).into())),
     ));
     ctx.register_udf(datafusion::logical_expr::create_udf(
         "pg_has_role",
@@ -87,6 +97,19 @@ fn register_privilege_udfs(ctx: &SessionContext) -> DFResult<()> {
         Arc::new(|_| Ok(datafusion::scalar::ScalarValue::Boolean(Some(true)).into())),
     ));
     Ok(())
+}
+
+fn make_allow_all_privilege_udf(
+    name: &str,
+    arg_types: Vec<DataType>,
+) -> datafusion::logical_expr::ScalarUDF {
+    datafusion::logical_expr::create_udf(
+        name,
+        arg_types,
+        DataType::Boolean,
+        Volatility::Stable,
+        Arc::new(|_| Ok(datafusion::scalar::ScalarValue::Boolean(Some(true)).into())),
+    )
 }
 
 fn register_pg_serial_sequence_udf(ctx: &SessionContext) -> DFResult<()> {

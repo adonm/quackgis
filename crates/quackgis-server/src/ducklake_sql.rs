@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -41,6 +42,7 @@ use datafusion_postgres::pgwire::messages::response::TransactionStatus;
 use futures::{Sink, SinkExt};
 use tokio::sync::Mutex;
 
+use crate::auth::{AccessRole, AuthConfig};
 use crate::catalog_compat::SYNTHETIC_ROWID_COLUMN;
 use crate::context::{DUCKLAKE_CATALOG, StoragePaths};
 
@@ -61,12 +63,46 @@ use rewrites::{
 };
 
 static TRANSACTION_COUNTER: AtomicU64 = AtomicU64::new(1);
+static QUERY_COUNTER: AtomicU64 = AtomicU64::new(1);
+static WRITE_DENIED_COUNTER: AtomicU64 = AtomicU64::new(0);
 const DEFAULT_DUCKLAKE_ROW_GROUP_ROWS: usize = 512;
 const DUCKLAKE_ROW_GROUP_ROWS_ENV: &str = "QUACKGIS_DUCKLAKE_ROW_GROUP_ROWS";
+const DEFAULT_SHARED_CATALOG_REFRESH_MS: u64 = 1_000;
+const SHARED_CATALOG_REFRESH_MS_ENV: &str = "QUACKGIS_SHARED_CATALOG_REFRESH_MS";
+const DEFAULT_SELECTIVE_READ_TARGET_PARTITIONS: usize = 1;
+const SELECTIVE_READ_TARGET_PARTITIONS_ENV: &str = "QUACKGIS_SELECTIVE_READ_TARGET_PARTITIONS";
 
 #[derive(Debug, Clone)]
 pub struct DuckLakeSqlHook {
     paths: StoragePaths,
+    auth: AuthConfig,
+    shared_catalog_refresh: Arc<SharedCatalogRefreshState>,
+}
+
+#[derive(Debug)]
+struct SharedCatalogRefreshState {
+    min_interval: Duration,
+    last_refresh: Mutex<Option<Instant>>,
+}
+
+impl SharedCatalogRefreshState {
+    fn new(min_interval: Duration) -> Self {
+        Self {
+            min_interval,
+            last_refresh: Mutex::new(None),
+        }
+    }
+
+    fn from_env() -> Self {
+        Self::new(shared_catalog_refresh_interval())
+    }
+
+    fn refresh_is_recent(&self, now: Instant, last_refresh: Option<Instant>) -> bool {
+        last_refresh.is_some_and(|last| {
+            self.min_interval > Duration::ZERO
+                && now.saturating_duration_since(last) < self.min_interval
+        })
+    }
 }
 
 #[derive(Debug, Default)]
@@ -113,8 +149,16 @@ pub struct DuckLakeCopyHandler {
 
 impl DuckLakeCopyHandler {
     pub fn new(paths: StoragePaths, session_context: Arc<SessionContext>) -> Self {
+        Self::new_with_auth(paths, session_context, AuthConfig::trust())
+    }
+
+    pub fn new_with_auth(
+        paths: StoragePaths,
+        session_context: Arc<SessionContext>,
+        auth: AuthConfig,
+    ) -> Self {
         Self {
-            sql: DuckLakeSqlHook::new(paths),
+            sql: DuckLakeSqlHook::new_with_auth(paths, auth),
             session_context,
         }
     }
@@ -148,7 +192,48 @@ struct StagedTable {
 
 impl DuckLakeSqlHook {
     pub fn new(paths: StoragePaths) -> Self {
-        Self { paths }
+        Self::new_with_auth(paths, AuthConfig::trust())
+    }
+
+    pub fn new_with_auth(paths: StoragePaths, auth: AuthConfig) -> Self {
+        Self {
+            paths,
+            auth,
+            shared_catalog_refresh: Arc::new(SharedCatalogRefreshState::from_env()),
+        }
+    }
+
+    fn ensure_write_allowed<C>(&self, client: &C, statement: &Statement) -> PgWireResult<()>
+    where
+        C: ClientInfo + Send + Sync + ?Sized,
+    {
+        match self.auth.role_for_client(client) {
+            AccessRole::ReadWrite => Ok(()),
+            AccessRole::ReadOnly => {
+                let denied_total = WRITE_DENIED_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
+                log::warn!(
+                    "quackgis_write_denied user={} statement_kind={} denied_total={denied_total}",
+                    client_user(client),
+                    statement_kind(statement)
+                );
+                Err(user_error(anyhow!(
+                    "read-only QuackGIS role cannot execute write or maintenance statements"
+                )))
+            }
+        }
+    }
+}
+
+fn shared_catalog_refresh_interval() -> Duration {
+    match std::env::var(SHARED_CATALOG_REFRESH_MS_ENV) {
+        Ok(value) => match value.trim().parse::<u64>() {
+            Ok(ms) => Duration::from_millis(ms),
+            Err(_) => Duration::from_millis(DEFAULT_SHARED_CATALOG_REFRESH_MS),
+        },
+        Err(std::env::VarError::NotPresent) => {
+            Duration::from_millis(DEFAULT_SHARED_CATALOG_REFRESH_MS)
+        }
+        Err(_) => Duration::from_millis(DEFAULT_SHARED_CATALOG_REFRESH_MS),
     }
 }
 
@@ -216,11 +301,17 @@ impl QueryHook for DuckLakeSqlHook {
         {
             return Some(Err(err));
         }
+        log_query_start(client, "simple", statement);
+        if statement_requires_write(statement)
+            && let Err(err) = self.ensure_write_allowed(client, statement)
+        {
+            return Some(Err(err));
+        }
         if let Some(rewritten_query) =
             pruning::rewrite_spatial_pruning_query(statement, session_context).await
         {
             return Some(
-                collect_query_batches(session_context, &rewritten_query)
+                collect_selective_read_batches(session_context, &rewritten_query)
                     .await
                     .and_then(|batches| {
                         query_response_from_batches_with_format(batches, Format::UnifiedText)
@@ -302,11 +393,16 @@ impl QueryHook for DuckLakeSqlHook {
         &self,
         statement: &datafusion::sql::sqlparser::ast::Statement,
         session_context: &SessionContext,
-        _client: &(dyn datafusion_postgres::pgwire::api::ClientInfo + Send + Sync),
+        client: &(dyn datafusion_postgres::pgwire::api::ClientInfo + Send + Sync),
     ) -> Option<PgWireResult<LogicalPlan>> {
         if let Err(err) = self
             .refresh_shared_catalog(statement, session_context)
             .await
+        {
+            return Some(Err(err));
+        }
+        if statement_requires_write(statement)
+            && let Err(err) = self.ensure_write_allowed(client, statement)
         {
             return Some(Err(err));
         }
@@ -362,6 +458,25 @@ impl QueryHook for DuckLakeSqlHook {
             .await
         {
             return Some(Err(err));
+        }
+        log_query_start(client, "extended", statement);
+        if statement_requires_write(statement)
+            && let Err(err) = self.ensure_write_allowed(client, statement)
+        {
+            return Some(Err(err));
+        }
+        if param_values_empty(_params)
+            && let Some(rewritten_query) =
+                pruning::rewrite_spatial_pruning_query(statement, session_context).await
+        {
+            return Some(
+                collect_selective_read_batches(session_context, &rewritten_query)
+                    .await
+                    .and_then(|batches| {
+                        query_response_from_batches_with_format(batches, Format::UnifiedBinary)
+                    })
+                    .map(Response::Query),
+            );
         }
         // Route extended-protocol CTAS/INSERT too; clients differ in whether
         // they send DDL via simple or extended flow.
@@ -461,6 +576,66 @@ fn empty_logical_plan() -> LogicalPlan {
     })
 }
 
+fn log_query_start<C>(client: &C, protocol: &str, statement: &Statement) -> u64
+where
+    C: ClientInfo + ?Sized,
+{
+    let query_id = QUERY_COUNTER.fetch_add(1, Ordering::Relaxed);
+    log::info!(
+        "quackgis_query_start query_id={query_id} protocol={protocol} pid={} user={} statement_kind={}",
+        client.pid_and_secret_key().0,
+        client_user(client),
+        statement_kind(statement)
+    );
+    query_id
+}
+
+fn client_user<C>(client: &C) -> &str
+where
+    C: ClientInfo + ?Sized,
+{
+    client
+        .metadata()
+        .get("user")
+        .map(String::as_str)
+        .unwrap_or("unknown")
+}
+
+fn statement_kind(statement: &Statement) -> &'static str {
+    match statement {
+        Statement::Analyze { .. } => "analyze",
+        Statement::AlterTable(_) => "alter_table",
+        Statement::Call(_) => "call",
+        Statement::Commit { .. } => "commit",
+        Statement::Copy { .. } => "copy",
+        Statement::CreateTable(_) => "create_table",
+        Statement::Deallocate { .. } => "deallocate",
+        Statement::Delete(_) => "delete",
+        Statement::Explain { .. } => "explain",
+        Statement::Insert(_) => "insert",
+        Statement::Query(_) => "query",
+        Statement::Rollback { .. } => "rollback",
+        Statement::StartTransaction { .. } => "start_transaction",
+        Statement::Update { .. } => "update",
+        _ => "other",
+    }
+}
+
+fn statement_requires_write(statement: &Statement) -> bool {
+    match statement {
+        Statement::CreateTable(ct) => table_name_parts(&ct.name).is_some(),
+        Statement::Copy { .. } => copy_statement_parts(statement).is_some(),
+        Statement::Call(function) => is_compact_call(function),
+        Statement::Insert(insert) => {
+            insert.source.is_some() && insert_target_parts(&insert.table).is_some()
+        }
+        Statement::AlterTable(alter) => table_name_parts(&alter.name).is_some(),
+        Statement::Delete(delete) => delete_target_parts(delete).is_some(),
+        Statement::Update(update) => update_target_parts(&update.table).is_some(),
+        _ => false,
+    }
+}
+
 fn client_transaction_state<C>(client: &C) -> Arc<ClientTransactionState>
 where
     C: ClientInfo + Send + Sync + ?Sized,
@@ -477,6 +652,13 @@ where
     client
         .session_extensions()
         .get_or_insert_with(CopyInSessionState::default)
+}
+
+fn param_values_empty(params: &ParamValues) -> bool {
+    match params {
+        ParamValues::List(values) => values.is_empty(),
+        ParamValues::Map(values) => values.is_empty(),
+    }
 }
 
 fn configured_ducklake_table_writer(
@@ -532,6 +714,64 @@ async fn collect_query_batches(
         .collect()
         .await
         .map_err(|e| PgWireError::ApiError(Box::new(e)))
+}
+
+async fn collect_selective_read_batches(
+    session_context: &SessionContext,
+    query: &str,
+) -> PgWireResult<Vec<RecordBatch>> {
+    match configured_selective_read_target_partitions()? {
+        Some(target_partitions) => {
+            let tuned_context =
+                session_context_with_target_partitions(session_context, target_partitions);
+            collect_query_batches(&tuned_context, query).await
+        }
+        None => collect_query_batches(session_context, query).await,
+    }
+}
+
+fn session_context_with_target_partitions(
+    session_context: &SessionContext,
+    target_partitions: usize,
+) -> SessionContext {
+    // Keep scan parallelism tuning query-scoped. Mutating the shared
+    // SessionContext would leak selective-read settings into concurrent broad
+    // scans, writes, and compaction.
+    let mut state = session_context.state();
+    let config = state
+        .config()
+        .clone()
+        .with_target_partitions(target_partitions);
+    *state.config_mut() = config;
+    SessionContext::new_with_state(state)
+}
+
+fn configured_selective_read_target_partitions() -> PgWireResult<Option<usize>> {
+    match std::env::var(SELECTIVE_READ_TARGET_PARTITIONS_ENV) {
+        Ok(value) => parse_selective_read_target_partitions_value(&value).map_err(user_error),
+        Err(std::env::VarError::NotPresent) => Ok(Some(DEFAULT_SELECTIVE_READ_TARGET_PARTITIONS)),
+        Err(err) => Err(user_error(anyhow!(
+            "could not read {SELECTIVE_READ_TARGET_PARTITIONS_ENV}: {err}"
+        ))),
+    }
+}
+
+fn parse_selective_read_target_partitions_value(value: &str) -> Result<Option<usize>> {
+    let value = value.trim();
+    if value.is_empty() || value == "0" {
+        return Ok(None);
+    }
+
+    let target_partitions = value.parse::<usize>().map_err(|err| {
+        anyhow!(
+            "{SELECTIVE_READ_TARGET_PARTITIONS_ENV} must be a positive integer or 0 to disable automatic selective-read tuning: {err}"
+        )
+    })?;
+    if target_partitions == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(target_partitions))
+    }
 }
 
 async fn collect_normalized_query_batches(
@@ -823,7 +1063,8 @@ impl DuckLakeSqlHook {
         }
         self.cleanup_temp_tables(session_context, &temp_tables)?;
         if !active.staged_tables.is_empty() {
-            self.refresh_ducklake_catalog(session_context).await?;
+            self.refresh_ducklake_catalog_strong(session_context)
+                .await?;
         }
         Ok(())
     }
@@ -2093,13 +2334,48 @@ impl DuckLakeSqlHook {
         Ok(())
     }
 
+    async fn refresh_ducklake_catalog_for_read(
+        &self,
+        session_context: &SessionContext,
+    ) -> PgWireResult<()> {
+        let mut last_refresh = self.shared_catalog_refresh.last_refresh.lock().await;
+        if self
+            .shared_catalog_refresh
+            .refresh_is_recent(Instant::now(), *last_refresh)
+        {
+            return Ok(());
+        }
+
+        self.refresh_ducklake_catalog(session_context).await?;
+        *last_refresh = Some(Instant::now());
+        Ok(())
+    }
+
+    async fn refresh_ducklake_catalog_strong(
+        &self,
+        session_context: &SessionContext,
+    ) -> PgWireResult<()> {
+        let mut last_refresh = self.shared_catalog_refresh.last_refresh.lock().await;
+        self.refresh_ducklake_catalog(session_context).await?;
+        *last_refresh = Some(Instant::now());
+        Ok(())
+    }
+
     async fn refresh_shared_catalog(
         &self,
         statement: &datafusion::sql::sqlparser::ast::Statement,
         session_context: &SessionContext,
     ) -> PgWireResult<()> {
-        if self.paths.is_shared_catalog() && needs_shared_catalog_refresh(statement) {
-            self.refresh_ducklake_catalog(session_context).await?;
+        if !self.paths.is_shared_catalog() {
+            return Ok(());
+        }
+
+        if needs_strong_shared_catalog_refresh(statement) {
+            self.refresh_ducklake_catalog_strong(session_context)
+                .await?;
+        } else if is_read_statement(statement) {
+            self.refresh_ducklake_catalog_for_read(session_context)
+                .await?;
         }
         Ok(())
     }
@@ -2130,9 +2406,10 @@ fn is_read_statement(statement: &datafusion::sql::sqlparser::ast::Statement) -> 
     }
 }
 
-fn needs_shared_catalog_refresh(statement: &datafusion::sql::sqlparser::ast::Statement) -> bool {
-    is_read_statement(statement)
-        || ducklake_statement_parts(statement).is_some()
+fn needs_strong_shared_catalog_refresh(
+    statement: &datafusion::sql::sqlparser::ast::Statement,
+) -> bool {
+    ducklake_statement_parts(statement).is_some()
         || matches!(statement, datafusion::sql::sqlparser::ast::Statement::Call(function) if is_compact_call(function))
 }
 
@@ -2895,4 +3172,60 @@ fn user_error(err: anyhow::Error) -> PgWireError {
             err.to_string(),
         ),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_catalog_refresh_recency_honors_interval() {
+        let now = Instant::now();
+        let state = SharedCatalogRefreshState::new(Duration::from_secs(60));
+        let stale = now
+            .checked_sub(Duration::from_secs(61))
+            .expect("stale instant");
+
+        assert!(state.refresh_is_recent(now, Some(now)));
+        assert!(!state.refresh_is_recent(now, Some(stale)));
+        assert!(!state.refresh_is_recent(now, None));
+    }
+
+    #[test]
+    fn shared_catalog_refresh_zero_interval_forces_reads_to_refresh() {
+        let now = Instant::now();
+        let state = SharedCatalogRefreshState::new(Duration::ZERO);
+
+        assert!(!state.refresh_is_recent(now, Some(now)));
+    }
+
+    #[test]
+    fn selective_read_target_partitions_parser_accepts_positive_values() {
+        assert_eq!(
+            parse_selective_read_target_partitions_value("1").unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            parse_selective_read_target_partitions_value(" 4 ").unwrap(),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn selective_read_target_partitions_parser_disables_on_zero_or_empty() {
+        assert_eq!(
+            parse_selective_read_target_partitions_value("").unwrap(),
+            None
+        );
+        assert_eq!(
+            parse_selective_read_target_partitions_value(" 0 ").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn selective_read_target_partitions_parser_rejects_invalid_values() {
+        assert!(parse_selective_read_target_partitions_value("many").is_err());
+        assert!(parse_selective_read_target_partitions_value("-1").is_err());
+    }
 }

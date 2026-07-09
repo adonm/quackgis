@@ -11,6 +11,7 @@ use datafusion::arrow::array::{BinaryArray, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion_ducklake::DuckLakeTableWriter;
+use quackgis_server::auth::AuthConfig;
 use quackgis_server::context::StoragePaths;
 use tokio_postgres::NoTls;
 use tokio_postgres::types::Type;
@@ -117,6 +118,53 @@ async fn wire_spatial_queries_execute() {
     // Basic transaction control passes through (no-op transaction hook).
     client.simple_query("BEGIN").await.expect("BEGIN");
     client.simple_query("COMMIT").await.expect("COMMIT");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn password_auth_and_readonly_role_fail_closed() {
+    let auth = AuthConfig::password(
+        "postgres",
+        "readwrite-secret",
+        Some(("quackgis_readonly", "readonly-secret")),
+    )
+    .expect("auth config");
+    let server = ServerHandle::start_with_auth(auth).await;
+
+    let bad_login =
+        tokio_postgres::connect(&format!("{} password=wrong", server.conn_str()), NoTls).await;
+    assert!(bad_login.is_err(), "bad password unexpectedly connected");
+
+    let (writer, writer_connection) = tokio_postgres::connect(
+        &format!("{} password=readwrite-secret", server.conn_str()),
+        NoTls,
+    )
+    .await
+    .expect("readwrite login");
+    let _writer_conn = tokio::spawn(writer_connection);
+    writer
+        .simple_query("CREATE TABLE public.auth_rw_points (id INT, geom BINARY)")
+        .await
+        .expect("readwrite role can create DuckLake tables");
+
+    let readonly_conn = format!(
+        "host=127.0.0.1 port={} user=quackgis_readonly dbname=quackgis password=readonly-secret",
+        server.port()
+    );
+    let (readonly, readonly_connection) = tokio_postgres::connect(&readonly_conn, NoTls)
+        .await
+        .expect("readonly login");
+    let _readonly_conn = tokio::spawn(readonly_connection);
+    let count: i64 = readonly
+        .query_one("SELECT COUNT(*) FROM public.auth_rw_points", &[])
+        .await
+        .expect("readonly role can query")
+        .get(0);
+    assert_eq!(count, 0);
+
+    let denied = readonly
+        .simple_query("CREATE TABLE public.auth_ro_denied (id INT)")
+        .await;
+    assert!(denied.is_err(), "readonly role unexpectedly wrote");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -577,6 +625,13 @@ async fn postgis_metadata_surface_works() {
         .get(0);
     assert!(ver.starts_with("3.4."), "got {ver}");
 
+    let driver_ver: String = client
+        .query_one("SELECT postgis_version()", &[])
+        .await
+        .expect("postgis_version")
+        .get(0);
+    assert!(driver_ver.starts_with("3.4."), "got {driver_ver}");
+
     // current_setting — Martin startup queries server_version
     let sv: String = client
         .query_one("SELECT current_setting('server_version')", &[])
@@ -610,6 +665,31 @@ async fn postgis_metadata_surface_works() {
         .expect("Find_SRID metadata lookup")
         .get(0);
     assert_eq!(found_srid, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn privilege_metadata_surface_allows_common_text_helpers() {
+    let (_server, client, _conn) = connect().await;
+
+    let row = client
+        .query_one(
+            "SELECT \
+               has_database_privilege('quackgis', 'CONNECT'), \
+               has_schema_privilege('public', 'USAGE'), \
+               has_table_privilege('public.points', 'SELECT'), \
+               has_column_privilege('public.points', 'geom', 'UPDATE'), \
+               pg_has_role(0::int4, 'USAGE')",
+            &[],
+        )
+        .await
+        .expect("PostgreSQL privilege metadata helpers");
+
+    for idx in 0..5 {
+        assert!(
+            row.get::<_, bool>(idx),
+            "privilege helper {idx} returned false"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1448,6 +1528,81 @@ async fn qgis_edit_save_shape_dml_returning_roundtrips_rowid() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn keyless_rowid_survives_edit_delete_compaction_and_next_insert() {
+    let server = ServerHandle::start().await;
+    let (client, connection) = tokio_postgres::connect(&server.conn_str(), NoTls)
+        .await
+        .expect("connect");
+    let _conn = tokio::spawn(connection);
+
+    client
+        .batch_execute(
+            "CREATE TABLE public.keyless_compact_edit (name TEXT, geom BINARY);
+             INSERT INTO public.keyless_compact_edit (name, geom) VALUES
+               ('seed', X'010100000000000000000000000000000000000000'),
+               ('edit-me', X'0101000000000000000000f03f000000000000f03f');
+             UPDATE public.keyless_compact_edit
+             SET name = 'updated'
+             WHERE \"_quackgis_rowid\" = 2;
+             DELETE FROM public.keyless_compact_edit
+             WHERE \"_quackgis_rowid\" = 1;",
+        )
+        .await
+        .expect("seed and edit keyless compact table");
+
+    let before = client
+        .query(
+            "SELECT \"_quackgis_rowid\", name, ST_AsText(ST_GeomFromWKB(geom))
+             FROM public.keyless_compact_edit
+             ORDER BY \"_quackgis_rowid\"",
+            &[],
+        )
+        .await
+        .expect("select keyless rows before compact");
+    let before: Vec<(i64, String, String)> = before
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2)))
+        .collect();
+    assert_eq!(
+        before,
+        vec![(2, "updated".to_string(), "POINT(1 1)".to_string())]
+    );
+
+    client
+        .batch_execute("CALL quackgis_compact_table('public.keyless_compact_edit')")
+        .await
+        .expect("compact keyless table after edit/delete");
+
+    let after = client
+        .query(
+            "SELECT \"_quackgis_rowid\", name, ST_AsText(ST_GeomFromWKB(geom))
+             FROM public.keyless_compact_edit
+             ORDER BY \"_quackgis_rowid\"",
+            &[],
+        )
+        .await
+        .expect("select keyless rows after compact");
+    let after: Vec<(i64, String, String)> = after
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2)))
+        .collect();
+    assert_eq!(after, before);
+
+    let inserted = client
+        .query(
+            "INSERT INTO public.keyless_compact_edit (name, geom) VALUES
+               ('after-compact', X'010100000000000000000000400000000000000040')
+             RETURNING \"_quackgis_rowid\", name",
+            &[],
+        )
+        .await
+        .expect("insert after keyless compaction");
+    assert_eq!(inserted.len(), 1);
+    assert_eq!(inserted[0].get::<_, i64>(0), 3);
+    assert_eq!(inserted[0].get::<_, String>(1), "after-compact");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn qgis_edit_save_parameterized_insert_generates_rowid() {
     let (_server, client, _conn) = connect().await;
 
@@ -1829,6 +1984,93 @@ async fn ogr_normalized_bytea_type_probe_resolves_spatial_oids() {
             (90_002, "geography".to_string()),
         ]
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ogr_system_metadata_table_probe_is_not_synthesized() {
+    let (_server, client, _conn) = connect().await;
+
+    let rows = client
+        .query(
+            "SELECT c.oid FROM pg_class c \
+             JOIN pg_namespace n ON c.relnamespace=n.oid \
+             WHERE c.relname = 'metadata' AND n.nspname = 'ogr_system_tables'",
+            &[],
+        )
+        .await
+        .expect("OGR optional metadata table existence probe should not error");
+
+    assert!(
+        rows.is_empty(),
+        "QuackGIS should not synthesize an OID for absent OGR metadata tables"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ogr_system_metadata_privilege_probes_fail_closed() {
+    let (_server, client, _conn) = connect().await;
+
+    let row = client
+        .query_one(
+            "SELECT usesuper FROM pg_user WHERE usename = CURRENT_USER",
+            &[],
+        )
+        .await
+        .expect("OGR superuser probe should not fall through to catalog planning");
+    assert!(!row.get::<_, bool>("usesuper"));
+
+    let event_rows = client
+        .query(
+            "SELECT 1 FROM pg_event_trigger \
+             WHERE evtname = 'ogr_system_tables_event_trigger_for_metadata'",
+            &[],
+        )
+        .await
+        .expect("OGR metadata event-trigger probe should not error");
+    assert!(event_rows.is_empty());
+
+    let row = client
+        .query_one(
+            "SELECT has_table_privilege('ogr_system_tables.metadata', 'SELECT')",
+            &[],
+        )
+        .await
+        .expect("OGR metadata privilege probe should not error");
+    assert!(!row.get::<_, bool>("has_table_privilege"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ogr_system_metadata_read_and_bootstrap_are_noops() {
+    let (_server, client, _conn) = connect().await;
+
+    let rows = client
+        .query(
+            "SELECT metadata FROM ogr_system_tables.metadata \
+             WHERE schema_name = 'public' AND table_name = 'points'",
+            &[],
+        )
+        .await
+        .expect("OGR optional metadata read should return an empty result");
+    assert!(rows.is_empty());
+
+    client
+        .batch_execute(
+            "CREATE TABLE IF NOT EXISTS ogr_system_tables.metadata( \
+             id SERIAL, schema_name TEXT NOT NULL, table_name TEXT NOT NULL, \
+             metadata TEXT, UNIQUE(schema_name, table_name))",
+        )
+        .await
+        .expect("OGR optional metadata bootstrap should not trip SERIAL parsing");
+
+    let deleted = client
+        .execute(
+            "DELETE FROM ogr_system_tables.metadata \
+             WHERE schema_name = 'public' AND table_name = 'points'",
+            &[],
+        )
+        .await
+        .expect("OGR optional metadata delete should be a no-op");
+    assert_eq!(deleted, 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]

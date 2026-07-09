@@ -9,6 +9,7 @@ use datafusion::prelude::SessionContext;
 use datafusion_postgres::ServerOptions;
 use tokio::signal;
 
+use quackgis_server::auth::{AuthConfig, AuthMode};
 use quackgis_server::cli::Cli;
 
 #[tokio::main(flavor = "multi_thread")]
@@ -18,6 +19,28 @@ async fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(&cli.log))
         .write_style(env_logger::WriteStyle::Auto)
         .init();
+
+    if cli.tls_cert.is_some() != cli.tls_key.is_some() {
+        anyhow::bail!(
+            "--tls-cert and --tls-key must be specified together (got cert={}, key={})",
+            cli.tls_cert.is_some(),
+            cli.tls_key.is_some()
+        );
+    }
+    let auth = match cli.auth_mode {
+        quackgis_server::cli::CliAuthMode::Trust => AuthConfig::trust(),
+        quackgis_server::cli::CliAuthMode::Password => AuthConfig::password(
+            cli.readwrite_user.clone(),
+            cli.readwrite_password.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--readwrite-password/QUACKGIS_READWRITE_PASSWORD is required when --auth-mode=password"
+                )
+            })?,
+            cli.readonly_password
+                .clone()
+                .map(|password| (cli.readonly_user.clone(), password)),
+        )?,
+    };
 
     let s3 = quackgis_server::context::S3StorageOptions::new(
         cli.s3_endpoint.clone(),
@@ -53,25 +76,22 @@ async fn main() -> anyhow::Result<()> {
     } else {
         "no TLS (dev mode)"
     };
+    let auth_note = match auth.mode() {
+        AuthMode::Trust => "trust auth (dev mode)",
+        AuthMode::Password => "password auth",
+    };
     log::info!(
-        "quackgis-server listening on {}:{} ({tls_note}); spatial engine: SedonaDB; pg_catalog: on",
+        "quackgis-server listening on {}:{} ({tls_note}; {auth_note}); spatial engine: SedonaDB; pg_catalog: on",
         cli.host,
         cli.port
     );
-    if cli.tls_cert.is_some() != cli.tls_key.is_some() {
-        anyhow::bail!(
-            "--tls-cert and --tls-key must be specified together (got cert={}, key={})",
-            cli.tls_cert.is_some(),
-            cli.tls_key.is_some()
-        );
-    }
 
     // datafusion-postgres' `serve` runs forever; we race it against a shutdown
     // signal so Ctrl-C produces a clean exit. The server has no built-in
     // cancellation today — when the signal wins we just exit the process,
     // which closes the listener and drops in-flight connections.
     let server = tokio::spawn(async move {
-        quackgis_server::pgwire_server::serve(ctx, &opts, storage_paths).await
+        quackgis_server::pgwire_server::serve_with_auth(ctx, &opts, storage_paths, auth).await
     });
     let shutdown = tokio::spawn(async move {
         let _ = signal::ctrl_c().await;

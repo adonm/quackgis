@@ -44,6 +44,9 @@ spec:
       app: pg
   template:
     metadata:
+      annotations:
+        linkerd.io/inject: enabled
+        config.linkerd.io/opaque-ports: "5432"
       labels:
         app: pg
     spec:
@@ -109,6 +112,8 @@ spec:
       app: s3
   template:
     metadata:
+      annotations:
+        linkerd.io/inject: enabled
       labels:
         app: s3
     spec:
@@ -180,6 +185,9 @@ spec:
       app: lake
   template:
     metadata:
+      annotations:
+        linkerd.io/inject: enabled
+        config.linkerd.io/opaque-ports: "5434"
       labels:
         app: lake
     spec:

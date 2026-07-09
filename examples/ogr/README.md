@@ -9,6 +9,7 @@ just demo-local
 Inspect the demo layers:
 
 ```sh
+export PG_USE_POSTGIS=NO
 ogrinfo 'PG:host=127.0.0.1 port=5434 user=postgres dbname=quackgis' demo_points -so
 ogrinfo 'PG:host=127.0.0.1 port=5434 user=postgres dbname=quackgis' demo_polygons -so
 ```
@@ -16,6 +17,7 @@ ogrinfo 'PG:host=127.0.0.1 port=5434 user=postgres dbname=quackgis' demo_polygon
 Export demo points to GeoJSON:
 
 ```sh
+export PG_USE_POSTGIS=NO
 ogr2ogr -f GeoJSON .tmp/demo_points.geojson \
   'PG:host=127.0.0.1 port=5434 user=postgres dbname=quackgis' \
   demo_points

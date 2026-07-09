@@ -143,6 +143,7 @@ struct PruningMetric {
 struct ScanMetric {
     output_rows: Option<u64>,
     bytes_scanned: Option<u64>,
+    file_groups: Option<u64>,
     row_groups_total: Option<u64>,
     row_groups_matched: Option<u64>,
     files_ranges_total: Option<u64>,
@@ -164,9 +165,10 @@ impl ScanMetric {
 
     fn summary(&self) -> String {
         format!(
-            "output_rows={} bytes_scanned={} row_groups={}/{}/{} files_ranges={}/{}/{} pushdown_rows={}/{} hidden_bbox={} parquet_predicate={}",
+            "output_rows={} bytes_scanned={} file_groups={} row_groups={}/{}/{} files_ranges={}/{}/{} pushdown_rows={}/{} hidden_bbox={} parquet_predicate={}",
             fmt_opt(self.output_rows),
             fmt_opt(self.bytes_scanned),
+            fmt_opt(self.file_groups),
             fmt_opt(self.row_groups_total),
             fmt_opt(self.row_groups_matched),
             fmt_opt(self.row_groups_pruned()),
@@ -1271,6 +1273,7 @@ fn scan_metric_from_explain(plan: &str) -> ScanMetric {
     let mut metric = ScanMetric {
         output_rows: metric_value(plan, "output_rows"),
         bytes_scanned: metric_value(plan, "bytes_scanned"),
+        file_groups: file_group_count(plan),
         pushdown_rows_pruned: metric_value(plan, "pushdown_rows_pruned"),
         pushdown_rows_matched: metric_value(plan, "pushdown_rows_matched"),
         hidden_bbox_predicate: plan.contains("_qg_minx")
@@ -1295,6 +1298,11 @@ fn scan_metric_from_explain(plan: &str) -> ScanMetric {
 fn metric_value(plan: &str, metric_name: &str) -> Option<u64> {
     let needle = format!("{metric_name}=");
     let start = plan.find(&needle)? + needle.len();
+    parse_u64_prefix(&plan[start..])
+}
+
+fn file_group_count(plan: &str) -> Option<u64> {
+    let start = plan.find("file_groups={")? + "file_groups={".len();
     parse_u64_prefix(&plan[start..])
 }
 
@@ -1453,6 +1461,7 @@ mod tests {
 
         assert_eq!(metric.output_rows, Some(18));
         assert_eq!(metric.bytes_scanned, Some(12_345));
+        assert_eq!(metric.file_groups, Some(1));
         assert_eq!(metric.row_groups_total, Some(4));
         assert_eq!(metric.row_groups_matched, Some(2));
         assert_eq!(metric.row_groups_pruned(), Some(2));
@@ -1463,6 +1472,7 @@ mod tests {
         assert_eq!(metric.pushdown_rows_pruned, Some(12));
         assert!(metric.hidden_bbox_predicate);
         assert!(metric.parquet_predicate);
+        assert!(metric.summary().contains("file_groups=1"));
     }
 
     #[test]

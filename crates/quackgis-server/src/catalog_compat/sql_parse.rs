@@ -71,23 +71,111 @@ pub(super) fn count_positional_placeholders(sql: &str) -> usize {
     let mut anonymous_placeholders = 0_usize;
     let mut i = 0_usize;
     while i < bytes.len() {
-        if bytes[i] == b'$' && bytes.get(i + 1).is_some_and(u8::is_ascii_digit) {
-            i += 1;
-            let start = i;
-            while i < bytes.len() && bytes[i].is_ascii_digit() {
+        match bytes[i] {
+            b'\'' => i = skip_single_quoted(bytes, i + 1),
+            b'"' => i = skip_double_quoted(bytes, i + 1),
+            b'-' if bytes.get(i + 1) == Some(&b'-') => i = skip_line_comment(bytes, i + 2),
+            b'/' if bytes.get(i + 1) == Some(&b'*') => i = skip_block_comment(bytes, i + 2),
+            b'$' => {
+                if let Some(end) = dollar_quoted_literal_end(bytes, i) {
+                    i = end;
+                    continue;
+                }
+                if !bytes.get(i + 1).is_some_and(u8::is_ascii_digit) {
+                    i += 1;
+                    continue;
+                }
+
+                i += 1;
+                let start = i;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                if let Ok(idx) = sql[start..i].parse::<usize>() {
+                    max_placeholder = max_placeholder.max(idx);
+                }
+            }
+            b'?' => {
+                anonymous_placeholders += 1;
                 i += 1;
             }
-            if let Ok(idx) = sql[start..i].parse::<usize>() {
-                max_placeholder = max_placeholder.max(idx);
+            _ => i += 1,
+        }
+    }
+    max_placeholder.max(anonymous_placeholders)
+}
+
+fn skip_single_quoted(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            if bytes.get(i + 1) == Some(&b'\'') {
+                i += 2;
+            } else {
+                return i + 1;
             }
-        } else if bytes[i] == b'?' {
-            anonymous_placeholders += 1;
-            i += 1;
         } else {
             i += 1;
         }
     }
-    max_placeholder.max(anonymous_placeholders)
+    i
+}
+
+fn skip_double_quoted(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() {
+        if bytes[i] == b'"' {
+            if bytes.get(i + 1) == Some(&b'"') {
+                i += 2;
+            } else {
+                return i + 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    i
+}
+
+fn skip_line_comment(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() && bytes[i] != b'\n' {
+        i += 1;
+    }
+    i
+}
+
+fn skip_block_comment(bytes: &[u8], mut i: usize) -> usize {
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'*' && bytes[i + 1] == b'/' {
+            return i + 2;
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
+fn dollar_quoted_literal_end(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.get(start) != Some(&b'$') {
+        return None;
+    }
+    let mut tag_end = start + 1;
+    while tag_end < bytes.len() && bytes[tag_end] != b'$' {
+        if !bytes[tag_end].is_ascii_alphanumeric() && bytes[tag_end] != b'_' {
+            return None;
+        }
+        tag_end += 1;
+    }
+    if tag_end >= bytes.len() {
+        return None;
+    }
+
+    let delimiter = &bytes[start..=tag_end];
+    let mut i = tag_end + 1;
+    while i + delimiter.len() <= bytes.len() {
+        if bytes[i..].starts_with(delimiter) {
+            return Some(i + delimiter.len());
+        }
+        i += 1;
+    }
+    Some(bytes.len())
 }
 
 pub(super) fn parse_single_quoted_literal(sql: &str) -> Option<String> {
@@ -118,4 +206,39 @@ pub(super) fn parse_first_u32(s: &str) -> Option<u32> {
         .take_while(|ch| ch.is_ascii_digit())
         .collect::<String>();
     digits.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn count_placeholders_uses_highest_numbered_parameter() {
+        assert_eq!(count_positional_placeholders("SELECT $2, $10, $1"), 10);
+    }
+
+    #[test]
+    fn count_placeholders_counts_anonymous_parameters() {
+        assert_eq!(count_positional_placeholders("SELECT ? + ?"), 2);
+    }
+
+    #[test]
+    fn count_placeholders_ignores_literals_identifiers_and_comments() {
+        assert_eq!(
+            count_positional_placeholders(
+                "SELECT '$1 ? '' $2', \"$3?\" FROM t \
+                 -- ignored $4 ?\n\
+                 WHERE a = $2 AND b = ? /* ignored $5 ? */"
+            ),
+            2
+        );
+    }
+
+    #[test]
+    fn count_placeholders_ignores_dollar_quoted_literals() {
+        assert_eq!(
+            count_positional_placeholders("SELECT $$ $1 ? $$, $tag$ $2 ? $tag$ WHERE id = $3"),
+            3
+        );
+    }
 }

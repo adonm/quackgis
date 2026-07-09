@@ -97,9 +97,33 @@ may be used as DuckLake catalog metadata storage in the scaled profile.
    reference DuckLake readers where possible.
 
 7. **Client-driven compatibility.** The definition of done is scripted QGIS,
-   GeoServer, Martin, and OGR/`ogr2ogr` workflows passing against the server, not a
-   function-count. The compatibility promise is “common PostGIS GIS clients and
-   tools work without significant changes,” not “QuackGIS is PostgreSQL.”
+    GeoServer, Martin, and OGR/`ogr2ogr` workflows passing against the server, not a
+    function-count. The compatibility promise is “common PostGIS GIS clients and
+    tools work without significant changes,” not “QuackGIS is PostgreSQL.”
+
+## Lessons from the preview/Alpha gates
+
+1. **Exact recheck is the safety rail.** Hidden bbox/layout predicates are only a
+   prefilter. Every public spatial rewrite must preserve the original SedonaDB
+   predicate, and every new predicate shape needs an exact-vs-pruned test before
+   it is enabled. The scanner now ignores comments/strings and skips unsafe
+   top-level `OR` predicates because false pruning is worse than a slower scan.
+2. **Compatibility shims must be organized by catalog surface.** Early one-off
+   client branches worked, but the maintainable shape is `pg_class`,
+   `pg_attribute`, `pg_index`, `pg_type`, pgjdbc, OGR metadata, and cursor
+   surfaces with trace-shaped unit tests. New client gaps should first be reduced
+   to one of those surfaces.
+3. **COPY and transaction grouping are layout features.** They are not just ingest
+   conveniences. Bulk/grouped writes produce larger, better-ordered Parquet units
+   and much better pruning than fragmented autocommit inserts; compaction is the
+   repair path when clients cannot batch writes.
+4. **Object-store reads need explicit budgets.** The useful regression signal is
+   not only query success; QPS/OLAP probes now assert bytes scanned and file-group
+   ceilings from `EXPLAIN ANALYZE` and emit trendable metrics.
+5. **Cheap gates protect expensive gates.** Unit tests, static probe validation,
+   and report rendering checks catch drift before a Kind image build or external
+   storage run. Every new large/manual probe should have a small deterministic
+   companion gate.
 
 ## Geometry strategy: EWKB everywhere with a real type OID
 
@@ -178,6 +202,9 @@ and coordinate-epoch metadata.
   `format_type`, pg_type/pg_class/pg_attribute shape) are test fixtures; gaps
   are fixed in our datafusion-pg-catalog fork where general (gap ledger G2), and
   in QuackGIS's `CatalogCompatHook` where PostGIS/wire-boundary specific.
+- The hook is intentionally surface-oriented. Trace SQL should become focused
+  tests for the PostgreSQL surface it exercises before adding another client-name
+  special case.
 
 ## DuckLake spatial layout
 
@@ -192,6 +219,12 @@ The design deliberately avoids mutable GiST/R-tree side indexes. Parallel writer
 can write independent files and publish DuckLake snapshots. Current compaction is
 explicit and whole-table; the scaled direction is bucket-local compaction when
 small files accumulate.
+
+Layout is part of write strategy as much as read strategy: COPY and explicit
+transaction grouping let QuackGIS sort larger batches by hidden layout keys,
+whereas many tiny autocommit inserts create fragmented files that must later be
+compacted. Query gates therefore track file groups, row groups, and bytes scanned,
+not just result counts.
 
 See [DuckLake spatial-temporal layout](docs/DUCKLAKE_SPATIAL_LAYOUT.md) for the
 automatic partitioning/indexing direction, including huge aerial captures,
@@ -255,8 +288,10 @@ snapshot commit.
 
 1. **Client connections**: datafusion-postgres owns auth (password/RBAC) and
    TLS; startup fails closed without credentials configured.
-2. **Client SQL**: parsed by DataFusion's sqlparser; PostGIS-dialect rewrites
-   are explicit, deny-by-default (no string-level regex rewriting).
+2. **Client SQL**: parsed by DataFusion's sqlparser where possible; narrow
+   PostGIS/client rewrites use scanner-aware string handling, are explicit,
+   deny-by-default, and must preserve exact predicates unless they are pure
+   catalog/protocol shims.
 3. **Geometry**: WKB/EWKB validated at the wire boundary before entering
    SedonaDB; invalid input is a client error, never a panic.
 4. **Storage**: DuckLake catalog DB owns metadata transactions; object-store

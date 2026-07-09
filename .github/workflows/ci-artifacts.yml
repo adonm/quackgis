@@ -62,28 +62,10 @@ jobs:
           sha256sum "dist/${archive}" > "dist/${archive}.sha256"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
 
-      - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: quackgis-server-${{ steps.package.outputs.version }}-linux-x86_64
-          path: dist/*
-          if-no-files-found: error
-
       - name: Compute GHCR image name
         id: image
         shell: bash
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "${GITHUB_OUTPUT}"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Generate image metadata
         id: meta
@@ -95,6 +77,70 @@ jobs:
             type=ref,event=tag
             type=sha,prefix=sha-
             type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Render release evidence manifest
+        shell: bash
+        env:
+          VERSION: ${{ steps.package.outputs.version }}
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          dist = Path("dist")
+          version = os.environ["VERSION"]
+          binaries = []
+          for sha_file in sorted(dist.glob("*.sha256")):
+              digest, filename = sha_file.read_text(encoding="utf-8").strip().split(maxsplit=1)
+              binaries.append({"file": filename, "sha256": digest})
+
+          evidence = {
+              "version": version,
+              "source": {
+                  "repository": os.environ.get("GITHUB_REPOSITORY"),
+                  "ref": os.environ.get("GITHUB_REF"),
+                  "ref_name": os.environ.get("GITHUB_REF_NAME"),
+                  "sha": os.environ.get("GITHUB_SHA"),
+                  "workflow": os.environ.get("GITHUB_WORKFLOW"),
+                  "run_id": os.environ.get("GITHUB_RUN_ID"),
+                  "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
+              },
+              "release_artifacts": {
+                  "binaries": binaries,
+                  "image_tags": [tag for tag in os.environ.get("IMAGE_TAGS", "").splitlines() if tag],
+              },
+              "scheduled_evidence": {
+                  "compatibility_metrics_artifact_prefix": f"compatibility-metrics-{os.environ.get('GITHUB_SHA', '')}-",
+                  "storage_metrics_artifact_prefix": f"storage-metrics-kind-alpha-smoke-{os.environ.get('GITHUB_SHA', '')}-",
+                  "metrics_file": "metrics.json",
+              },
+          }
+          (dist / f"release-evidence-{version}.json").write_text(
+              json.dumps(evidence, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: quackgis-server-${{ steps.package.outputs.version }}-linux-x86_64
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Prepare runtime image context
         run: |
