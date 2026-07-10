@@ -20,12 +20,15 @@ affect catalog/data compatibility.
    `geometry_columns`, and compaction on the copied environment.
 6. A backend that works through QuackGIS is not called standard DuckLake-compatible
    until a reference implementation can open it or a tested export converts it.
+7. DuckDB's official DuckLake extension is the preferred named reference reader;
+   ADBC or the DuckDB CLI may drive the probe, but the evidence must record the
+   exact DuckDB and extension versions.
 
 ## Current behavior map
 
 | QuackGIS behavior | Current implementation | Upstream DuckLake direction | Interop/evidence gate | Migration trigger |
 |---|---|---|---|---|
-| SQLite/local profile | DuckLake single-catalog metadata in SQLite plus local Parquet; allocator columns differ from DuckDB's writer expectations | Spec-oriented local catalog/data path, not yet drop-in DuckDB-writable | `just check-fast`, `just preview-smoke`, persistence tests, future reference-reader/export gate | Keep as deterministic preview path and close allocator/export compatibility before stronger interop claims |
+| SQLite/local profile | DuckLake single-catalog metadata in SQLite plus local Parquet; allocator columns differ from DuckDB's writer expectations, and the first DuckDB v1.5.2 `ducklake:sqlite:` reference attach failed on missing `next_catalog_id`/`next_file_id` snapshot metadata | Spec-oriented local catalog/data path, not yet drop-in DuckDB-writable | `just check-fast`, `just preview-smoke`, persistence tests, `just duckdb-engine-probe`, `just duckdb-reference-evidence-check` | Keep as deterministic preview path and close allocator/export compatibility before stronger interop claims |
 | PostgreSQL/S3 profile | `datafusion-ducklake` PostgreSQL multicatalog metadata plus S3-compatible object data | Current schema is library-specific/non-spec; target official SQL catalog + object-store behavior and fewer PostgreSQL roundtrips | `just kind-alpha-smoke`, managed-service and reference-reader/export gates | Do not claim standard DuckLake interoperability until a reference reader opens it or a tested export/migration exists |
 | Spatial family storage | WKB/EWKB stays Parquet Binary; explicit SQL families persist as snapshot-versioned `ducklake_column.column_type` `geometry`/`geography` and validated Arrow field metadata; ordinary Binary stays `blob`; metadata-first discovery retains conventional-name fallback | DuckLake `GEOMETRY`; QuackGIS `geography` remains a local read/write family pending an upstream/reference-reader contract | `explicit_spatial_family_identity_survives_rewrites_and_restart`, vendor field/schema tests, `wire_spatial`, Martin/OGR/QGIS gates | Add durable subtype/SRID/dimensions and a tested old-blob migration only through an upstream-compatible mechanism |
 | Hidden spatial layout columns | QuackGIS-owned ordinary `_qg_*` bbox/time/space/Morton columns maintained on writes; current pruning is statistics-driven, not a published DuckLake partition index | DuckLake partitioning/statistics/Bloom/metadata pruning improvements | `layoutbench_sf0`, QPS/OLAP scan budgets, compaction scan tests | Prefer upstream pruning/statistics or true coarse partitions when exact recheck, catalog growth, and writer fanout remain safe |
@@ -37,6 +40,7 @@ affect catalog/data compatibility.
 | CDC row functions | Disabled after pgwire projection panic | Official change-data/log table functions or snapshot diffs | Disabled until safe projection test exists | Re-enable only after pgwire/Arrow projection is safe and row semantics are documented |
 | SQL time travel | Literal snapshot-id and RFC3339 timestamp `AS OF` plus named selector forms support the narrow simple one-table read path; ids are validated and timestamps resolve deterministically at-or-before | Protected snapshots and broader time-travel reads | `ducklake_snapshot_selector_reads_pinned_table` | Add retention against upstream snapshot APIs where possible |
 | Backup/restore | Local SQLite/filesystem oracle plus external/snapshot runbooks | Protected snapshots / snapshot retention | `ducklake_local_backup_restore_copy_roundtrip`, `docs/ALPHA_EXTERNAL_SERVICES.md`, `docs/SNAPSHOT_OPERATIONS.md` | Use protected snapshots when upstream exposes stable retention semantics |
+| DuckDB reference readability | DuckDB v1.5.2 CLI loads `spatial` + `ducklake`, passes a minimal WKB spatial smoke, passes a DuckDB-authored official DuckLake create/insert/update/delete/reopen/snapshot vertical slice, and the reference packet checker accepts the `duckdb-local-ducklake` profile; official `ducklake:sqlite:` attach still fails against the old QuackGIS preview SQLite catalog before table discovery | Official DuckDB `ducklake` extension and ADBC client path | `docs/DUCKDB_ADBC_EVALUATION.md`, `just duckdb-engine-probe`, `just duckdb-authority-probe`, `just duckdb-reference-evidence-check`, external Alpha catalog interoperability packet | Make DuckDB-authored storage the canonical path; keep old QuackGIS-written catalogs as preview artifacts or export sources only |
 | Branch/merge/staged imports | Not implemented | DuckLake branch/merge roadmap | future staged-import/edit-review probes | Prefer upstream branch/merge over QuackGIS-specific staging catalogs |
 | Materialized summaries | Not implemented beyond ordinary tables/queries | DuckLake materialized views / incremental maintenance | future tile/coverage/asset summary probes | Use upstream materialized views before bespoke refresh machinery |
 | Asset metadata | Ordinary sidecar tables with WKB `footprint`, URIs, scalar metadata | VARIANT/UDT/fixed-size-array support | `docs/MULTIMODAL_ASSETS.md`, footprint discovery tests | Move semi-structured metadata/calibration arrays to stable upstream types, not custom binary islands |
@@ -56,6 +60,13 @@ for a release, copy a representative catalog + object prefix and verify:
   generic Binary/blob or durable GEOMETRY family identity, and whether it rejects
   or understands QuackGIS `geography`;
 - failure behavior for QuackGIS-only metadata functions.
+
+The preferred reference implementation for this policy is DuckDB with the official
+DuckLake extension, driven either through the DuckDB CLI or ADBC. See
+[DUCKDB_ADBC_EVALUATION.md](./DUCKDB_ADBC_EVALUATION.md) for the staged proof
+ladder and evidence template. Until that probe passes, PostgreSQL/S3 remains a
+QuackGIS-specific Alpha backend and SQLite/local remains a deterministic local
+profile rather than a drop-in DuckDB-writable catalog.
 
 If a behavior is correct for QuackGIS but not yet safe for reference readers,
 release notes must say so and name the upstream feature that will close the gap.

@@ -1,10 +1,11 @@
 # Architecture
 
-QuackGIS is a PostGIS-compatible SQL and control plane for a Sedona-powered
-spatial lakehouse. A single Rust service exposes pgwire, plans and executes with
-DataFusion + SedonaDB, and persists tables through DuckLake catalog metadata plus
-Parquet files. PostgreSQL may hold DuckLake metadata in the scaled profile, but it
-is never the query engine or user-table store.
+QuackGIS is a PostGIS-compatible SQL and control plane for an open spatial
+lakehouse. The released target is a Rust pgwire service that keeps PostgreSQL and
+PostGIS compatibility at the edge while DuckDB owns query execution, spatial WKB
+operations, and official DuckLake writes. PostgreSQL may hold DuckLake metadata in
+the scaled profile, but it is never the user-table store or SQL compatibility
+surface.
 
 This document owns architecture, current implementation boundaries, and product
 invariants. Forward outcomes belong in [ROADMAP.md](./ROADMAP.md); implemented
@@ -16,15 +17,20 @@ linked compatibility/operations documents.
 The primary user is a platform or application team operating a shared spatial
 lake. QuackGIS should support many stateless readers, parallel ingest/edit jobs,
 selective spatial requests, broad columnar analytics, recoverable maintenance,
-and familiar GIS/API clients without copying the data into PostgreSQL or DuckDB.
+and familiar GIS/API clients without copying the data into PostgreSQL tables or a
+QuackGIS-private lake format.
 
-Three DataFusion-native dependencies provide the core engine:
+The current unreleased preview still contains the DataFusion/SedonaDB/
+`datafusion-ducklake` implementation. The active architecture pivot makes DuckDB
+the storage authority instead of trying to make a forked writer look like DuckDB
+after the fact:
 
 | Component | Role | QuackGIS posture |
 |---|---|---|
 | `datafusion-postgres` + `datafusion-pg-catalog` + `arrow-pg` | pgwire, parser/planner integration, PostgreSQL catalogs, parameter/result encoding, authentication, TLS | vendored fork because QuackGIS needs parser-boundary, catalog, cursor, and spatial type behavior |
-| Apache SedonaDB crates | exact spatial functions, geometry execution, CRS/projection support | pinned DF54-aligned fork; no QuackGIS kernel reimplementation |
-| `datafusion-ducklake` | DuckLake catalogs, Parquet scans/writes, snapshots, metadata writers | vendored fork for atomic mutation and positional-row semantics |
+| DuckDB + official `ducklake` + `spatial` extensions | canonical query/storage authority, DuckLake snapshot writer, WKB spatial execution, maintenance, reference readability | target backend; first proven out-of-process, then via ADBC/embedded integration only after semantics are stable |
+| Apache SedonaDB/DataFusion crates | current preview execution path and possible comparison oracle for spatial gaps | demote or retire once DuckDB-backed maintained workflows pass; keep only if a measured workload requires it |
+| `datafusion-ducklake` | current preview DuckLake writer and compatibility-failure oracle | not the future storage authority; avoid investing in migration of unreleased catalogs except as a tested export path |
 
 QuackGIS owns the integration policy: PostGIS aliases, compatibility surfaces,
 spatial layout, snapshot/time-travel routing, mutation/maintenance orchestration,
@@ -47,28 +53,30 @@ authorization, metrics, and release evidence. Every forked behavior is recorded 
 │ PostGIS/catalog surfaces · authorization · query-shape validation    │
 │ snapshot routing · spatial pruning · DML/compaction · metrics         │
 ├──────────────────────────────────────────────────────────────────────┤
-│ DataFusion + SedonaDB                                                │
-│ logical/physical planning · exact ST_* execution · OLAP expressions  │
+│ DuckDB engine boundary                                                │
+│ SQL/Arrow execution · spatial WKB predicates · DuckLake maintenance   │
 ├──────────────────────────────────────────────────────────────────────┤
-│ datafusion-ducklake                                                  │
-│ catalog providers · Parquet scan/write · snapshots · metadata commit │
+│ Official DuckLake                                                     │
+│ DuckDB-authored catalog metadata · Parquet/delete files · snapshots   │
 ├──────────────────────────────────────────────────────────────────────┤
 │ Storage profiles                                                     │
 │ SQLite catalog + local files │ PostgreSQL metadata + object storage  │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-The QuackGIS binary has no PostgreSQL server, DuckDB, C-extension ABI, or native
-GEOS/GDAL runtime requirement. Native client/test containers may still contain
-those tools.
+During the pivot, DuckDB is first run out-of-process so QuackGIS can iterate on
+storage semantics without committing the server process to a native ABI. The target
+may later use ADBC or embedded DuckDB, but only after the out-of-process path proves
+mutation visibility, crash behavior, and client compatibility.
 
 ## Architectural invariants
 
 1. **PostGIS compatibility is an edge contract.** It does not move PostgreSQL into
    the data plane.
-2. **SedonaDB decides exact spatial truth.** Hidden layout predicates are candidate
-   filters only.
-3. **DuckLake snapshot publication is the write boundary.** A mutation becomes
+2. **DuckDB decides exact spatial truth for maintained workloads.** Hidden layout
+   predicates are candidate filters only; SedonaDB remains a comparison oracle only
+   where DuckDB compatibility gaps are being measured.
+3. **Official DuckLake snapshot publication is the write boundary.** A mutation becomes
    visible once or not at all.
 4. **WKB/EWKB is the stable geometry interchange.** Richer in-memory/type metadata
    may evolve without changing durable bytes or maintained client encodings.
@@ -92,6 +100,14 @@ Both profiles should expose the same QuackGIS SQL semantics, but they do not yet
 carry the same external interoperability claim. The PostgreSQL backend must either
 converge on standard DuckLake behavior or gain an explicit export/migration path
 before 1.0. QuackGIS APIs must not expose private catalog table layouts.
+
+DuckDB/ADBC is no longer just a compatibility side path. The unreleased direction
+is DuckDB-authored official DuckLake storage. The first local evidence already
+showed that DuckDB's `spatial` + `ducklake` extensions load and execute a minimal
+WKB predicate, while QuackGIS-authored preview catalogs are not DuckDB-readable.
+That makes the fastest safe path a DuckDB storage-authority vertical slice rather
+than repairing unreleased `datafusion-ducklake` catalogs. See
+[docs/DUCKDB_ADBC_EVALUATION.md](./docs/DUCKDB_ADBC_EVALUATION.md).
 
 Object writes and catalog commits are intentionally separate phases. A process may
 prewrite a Parquet/delete object and fail before the metadata commit, leaving an
@@ -384,7 +400,8 @@ destabilize the simple-feature runtime. See
 ## Non-goals
 
 - Running PostgreSQL as the query engine or user-table store.
-- Embedding DuckDB.
+- Embedding DuckDB as a shortcut around pgwire, catalog, mutation, or
+  reference-reader evidence gates.
 - Acting as an OLTP application database or document database.
 - Full PostgreSQL SQL/extension compatibility.
 - PL/pgSQL, triggers, LISTEN/NOTIFY, or logical replication.

@@ -17,7 +17,7 @@ CHECKS = [
     ("GDAL/OGR load/read", "ogr-probe.log", ["feature_count 2", "loaded_rows", "load_feature_count 2", "ogr_keyless_compact_ok True"]),
     ("API client profile surfaces", "api-client-probe.log", ["api_client_psycopg_surface", "api_client_sqlalchemy_surface", "api_client_geopandas_surface", "api_client_pgfeatureserv_surface", "api_client_bi_surface", "api_client_mvt_surface", "api_client_probe_ok True"]),
     ("GeoServer WFS/WMS/WFS-T", "geoserver-probe.log", ["wfs_point_count", "wms_png_header 89504e470d0a1a0a", "wfst_transaction_ok True", "geoserver_keyless_update_ok True", "geoserver_probe_ok True"]),
-    ("OSM PostGIS/QGIS/MVT parity", "osm-postgis-parity.log", ["osm_postgis_to_quackgis_copy_ok True", "osm_mvt_ok True", "osm_qgis_open_ok True", "osm_qgis_render_ok True"]),
+    ("OSM PostGIS/QGIS/MVT parity", "osm-postgis-parity.log", ["osm_postgis_to_quackgis_copy_ok True", "osm_mvt_ok True", "osm_mvt_points_attribute_ok True", "osm_mvt_lines_attribute_ok True", "osm_mvt_multipolygons_attribute_ok True", "osm_qgis_open_ok True", "osm_qgis_render_ok True"]),
     ("Kind demo seed", "quackgis-demo.log", ["demo_ok True"]),
     ("Lake PostgreSQL/S3 storage", "lake-probe.log", ["storage_ok True"]),
     ("External profile storage", "external-lake-probe.log", ["storage_ok True", "native_delete_ok True", "native_update_ok True", "native_compact_ok True", "delete_files=2", "delete_snapshots=1", "appended_files=1", "retired_files=0", "metrics_ok True"]),
@@ -62,6 +62,18 @@ def last_int_after_prefix(text: str, prefix: str) -> int | None:
         return None
     match = re.search(r"(-?\d+)\s*$", line)
     return int(match.group(1)) if match else None
+
+
+def last_bool_after_prefix(text: str, prefix: str) -> bool | None:
+    line = last_line(text, prefix)
+    if not line:
+        return None
+    value = line.removeprefix(prefix).strip()
+    if value == "True":
+        return True
+    if value == "False":
+        return False
+    return None
 
 
 def maybe_int(raw: str | None) -> int | None:
@@ -177,19 +189,34 @@ def metric_values(path: Path) -> dict[str, object]:
 
     if name == "osm-postgis-parity.log":
         values = {
-            f"qgis_{label}_feature_count": last_int_after_prefix(
-                text, f"qgis_osm_{label}_feature_count "
-            )
-            for label in ("points", "lines", "multipolygons")
+            "osm_extract_bytes": last_int_after_prefix(text, "osm_extract_bytes "),
         }
-        values.update(
-            {
-                f"mvt_{label}_tile_bytes": last_int_after_prefix(
-                    text, f"osm_mvt_{label}_tile_bytes "
-                )
-                for label in ("points", "lines", "multipolygons")
-            }
-        )
+        for label in ("points", "lines", "multipolygons"):
+            values.update(
+                {
+                    f"postgis_{label}_named_count": last_int_after_prefix(
+                        text, f"postgis_osm_named_{label}_count "
+                    ),
+                    f"quackgis_{label}_named_count": last_int_after_prefix(
+                        text, f"quackgis_osm_named_{label}_count "
+                    ),
+                    f"postgis_{label}_geojson_count": last_int_after_prefix(
+                        text, f"postgis_osm_{label}_geojson_count "
+                    ),
+                    f"quackgis_{label}_geojson_count": last_int_after_prefix(
+                        text, f"quackgis_osm_{label}_geojson_count "
+                    ),
+                    f"qgis_{label}_feature_count": last_int_after_prefix(
+                        text, f"qgis_osm_{label}_feature_count "
+                    ),
+                    f"mvt_{label}_tile_bytes": last_int_after_prefix(
+                        text, f"osm_mvt_{label}_tile_bytes "
+                    ),
+                    f"mvt_{label}_attribute_ok": last_bool_after_prefix(
+                        text, f"osm_mvt_{label}_attribute_ok "
+                    ),
+                }
+            )
         return compact(values)
 
     if name == "read-probe.log":
@@ -322,6 +349,10 @@ def metric_summary(path: Path) -> str:
         )
 
     if name == "osm-postgis-parity.log":
+        named_counts = {
+            label: last_int_after_prefix(text, f"quackgis_osm_named_{label}_count ")
+            for label in ("points", "lines", "multipolygons")
+        }
         counts = {
             label: last_int_after_prefix(text, f"qgis_osm_{label}_feature_count ")
             for label in ("points", "lines", "multipolygons")
@@ -330,9 +361,22 @@ def metric_summary(path: Path) -> str:
             label: last_int_after_prefix(text, f"osm_mvt_{label}_tile_bytes ")
             for label in ("points", "lines", "multipolygons")
         }
+        mvt_attributes = {
+            label: last_bool_after_prefix(text, f"osm_mvt_{label}_attribute_ok ")
+            for label in ("points", "lines", "multipolygons")
+        }
         return "; ".join(
             item
             for item in [
+                f"quackgis_points={named_counts['points']}"
+                if named_counts["points"] is not None
+                else "",
+                f"quackgis_lines={named_counts['lines']}"
+                if named_counts["lines"] is not None
+                else "",
+                f"quackgis_multipolygons={named_counts['multipolygons']}"
+                if named_counts["multipolygons"] is not None
+                else "",
                 f"qgis_points={counts['points']}" if counts["points"] is not None else "",
                 f"qgis_lines={counts['lines']}" if counts["lines"] is not None else "",
                 f"qgis_multipolygons={counts['multipolygons']}"
@@ -346,6 +390,9 @@ def metric_summary(path: Path) -> str:
                 else "",
                 f"mvt_multipolygons_bytes={mvt_bytes['multipolygons']}"
                 if mvt_bytes["multipolygons"] is not None
+                else "",
+                "mvt_attributes=points,lines,multipolygons"
+                if all(mvt_attributes.values())
                 else "",
             ]
             if item

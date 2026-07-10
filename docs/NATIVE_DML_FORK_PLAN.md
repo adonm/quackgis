@@ -114,9 +114,9 @@ catalog-layout rules.
 
 1. Run the local before/after-commit process-kill matrix in Kind and managed-service
    profiles.
-2. Extend the dry-run orphan inventory into a restore-point-backed quarantine and
-   deletion flow, with proofs that live, scheduled, and history-referenced objects
-   cannot be removed.
+2. Promote the explicit offline orphan quarantine flow to Kind and managed
+   profiles, then add restore-point-backed permanent-deletion proof for live,
+   scheduled, and history-referenced objects.
 3. Batch explicit transactions through native mutations only if one visible
    snapshot, conflict behavior, `RETURNING`, and edit-client semantics remain
    equivalent to the staged fallback.
@@ -163,6 +163,10 @@ catalog-layout rules.
   from inventory and restart exposes the exact new state without replay. This is a
   local SQLite oracle, not generic mutation idempotency or Kind/managed-service
   evidence.
+- `orphan_inventory::quarantine_requires_explicit_apply_and_stays_outside_live_prefix`
+  proves the local quarantine operator path is opt-in, age-gated, refuses
+  destinations inside the live data prefix, copies candidates outside live data,
+  and leaves referenced DuckLake Parquet files in place.
 - Extend the same process-kill probes to Kind and managed-service profiles; no
   committed snapshot may expose partial deletes, duplicate update rows, or lost
   bucket-compaction rows. The drill ladder and evidence packet are documented in

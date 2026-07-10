@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! QuackGIS pgwire authentication and coarse role/write-policy configuration.
+//! QuackGIS pgwire authentication and coarse role/table-policy configuration.
 
 use std::{collections::HashMap, fmt};
 
@@ -30,13 +30,13 @@ pub struct WriteTarget {
 }
 
 #[derive(Clone, Default, PartialEq, Eq)]
-enum WritePolicy {
+enum TablePolicy {
     #[default]
     All,
     Only(Vec<WriteTarget>),
 }
 
-impl fmt::Debug for WritePolicy {
+impl fmt::Debug for TablePolicy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::All => f.write_str("All"),
@@ -45,7 +45,7 @@ impl fmt::Debug for WritePolicy {
     }
 }
 
-impl WritePolicy {
+impl TablePolicy {
     fn only(mut targets: Vec<WriteTarget>) -> Self {
         targets.sort();
         targets.dedup();
@@ -70,12 +70,16 @@ impl WritePolicy {
             Self::Only(targets) => Some(targets),
         }
     }
+
+    fn is_restricted(&self) -> bool {
+        matches!(self, Self::Only(_))
+    }
 }
 
 #[derive(Clone)]
 pub struct AuthUser {
     pub role: AccessRole,
-    write_policy: WritePolicy,
+    write_policy: TablePolicy,
     pub(crate) scram_salt: Vec<u8>,
     pub(crate) scram_salted_password: Vec<u8>,
 }
@@ -93,10 +97,10 @@ impl fmt::Debug for AuthUser {
 
 impl AuthUser {
     fn scram(password: &str, role: AccessRole) -> Self {
-        Self::scram_with_policy(password, role, WritePolicy::All)
+        Self::scram_with_policy(password, role, TablePolicy::All)
     }
 
-    fn scram_with_policy(password: &str, role: AccessRole, write_policy: WritePolicy) -> Self {
+    fn scram_with_policy(password: &str, role: AccessRole, write_policy: TablePolicy) -> Self {
         let scram_salt = random_nonce().into_bytes();
         let scram_salted_password = gen_salted_password(password, &scram_salt, SCRAM_ITERATIONS);
         Self {
@@ -121,7 +125,8 @@ impl AuthUser {
 pub struct AuthConfig {
     mode: AuthMode,
     users: HashMap<String, AuthUser>,
-    trust_write_policy: WritePolicy,
+    trust_write_policy: TablePolicy,
+    read_policy: TablePolicy,
 }
 
 impl Default for AuthConfig {
@@ -135,7 +140,8 @@ impl AuthConfig {
         Self {
             mode: AuthMode::Trust,
             users: HashMap::new(),
-            trust_write_policy: WritePolicy::All,
+            trust_write_policy: TablePolicy::All,
+            read_policy: TablePolicy::All,
         }
     }
 
@@ -172,12 +178,13 @@ impl AuthConfig {
         Ok(Self {
             mode: AuthMode::Password,
             users,
-            trust_write_policy: WritePolicy::All,
+            trust_write_policy: TablePolicy::All,
+            read_policy: TablePolicy::All,
         })
     }
 
     pub fn with_readwrite_allowlist(mut self, targets: Vec<WriteTarget>) -> Self {
-        let policy = WritePolicy::only(targets);
+        let policy = TablePolicy::only(targets);
         match self.mode {
             AuthMode::Trust => {
                 self.trust_write_policy = policy;
@@ -193,6 +200,11 @@ impl AuthConfig {
         self
     }
 
+    pub fn with_read_allowlist(mut self, targets: Vec<WriteTarget>) -> Self {
+        self.read_policy = TablePolicy::only(targets);
+        self
+    }
+
     pub fn mode(&self) -> AuthMode {
         self.mode
     }
@@ -203,6 +215,14 @@ impl AuthConfig {
 
     pub fn users(&self) -> impl Iterator<Item = (&str, &AuthUser)> {
         self.users.iter().map(|(name, user)| (name.as_str(), user))
+    }
+
+    pub fn read_targets(&self) -> Option<&[WriteTarget]> {
+        self.read_policy.allowed_targets()
+    }
+
+    pub fn read_policy_restricted(&self) -> bool {
+        self.read_policy.is_restricted()
     }
 
     pub fn role_for_user(&self, name: Option<&str>) -> AccessRole {
@@ -232,21 +252,37 @@ impl AuthConfig {
                 }),
         }
     }
+
+    pub fn allows_read(&self, name: Option<&str>, target: (&str, &str)) -> bool {
+        let known_identity = match self.mode {
+            AuthMode::Trust => true,
+            AuthMode::Password => name.is_some_and(|name| self.users.contains_key(name)),
+        };
+        known_identity && self.read_policy.allows(Some(target))
+    }
 }
 
 pub fn parse_write_allowlist(raw: &str) -> Result<Vec<WriteTarget>> {
+    parse_table_allowlist(raw, "write")
+}
+
+pub fn parse_read_allowlist(raw: &str) -> Result<Vec<WriteTarget>> {
+    parse_table_allowlist(raw, "read")
+}
+
+fn parse_table_allowlist(raw: &str, label: &str) -> Result<Vec<WriteTarget>> {
     let mut targets = Vec::new();
     for entry in raw.split(',') {
         let entry = entry.trim();
         if entry.is_empty() {
             return Err(anyhow!(
-                "write allowlist entries cannot be empty; use comma-separated table names"
+                "{label} allowlist entries cannot be empty; use comma-separated table names"
             ));
         }
-        targets.push(parse_write_target(entry)?);
+        targets.push(parse_table_target(entry, label)?);
     }
     if targets.is_empty() {
-        return Err(anyhow!("write allowlist cannot be empty"));
+        return Err(anyhow!("{label} allowlist cannot be empty"));
     }
     targets.sort();
     targets.dedup();
@@ -254,9 +290,13 @@ pub fn parse_write_allowlist(raw: &str) -> Result<Vec<WriteTarget>> {
 }
 
 pub fn parse_write_target(raw: &str) -> Result<WriteTarget> {
+    parse_table_target(raw, "write")
+}
+
+fn parse_table_target(raw: &str, label: &str) -> Result<WriteTarget> {
     let parts = raw
         .split('.')
-        .map(normalize_identifier_part)
+        .map(|part| normalize_identifier_part(part, label))
         .collect::<Result<Vec<_>>>()?;
     let table = match parts.as_slice() {
         [table] => table.clone(),
@@ -268,7 +308,7 @@ pub fn parse_write_target(raw: &str) -> Result<WriteTarget> {
         }
         _ => {
             return Err(anyhow!(
-                "write allowlist entry {raw:?} must be a DuckLake table name: table, public.table, main.table, or quackgis.main.table"
+                "{label} allowlist entry {raw:?} must be a DuckLake table name: table, public.table, main.table, or quackgis.main.table"
             ));
         }
     };
@@ -278,14 +318,14 @@ pub fn parse_write_target(raw: &str) -> Result<WriteTarget> {
     })
 }
 
-fn normalize_identifier_part(raw: &str) -> Result<String> {
+fn normalize_identifier_part(raw: &str, label: &str) -> Result<String> {
     let part = raw.trim().trim_matches('"');
     if part.is_empty() {
-        return Err(anyhow!("write allowlist identifiers cannot be empty"));
+        return Err(anyhow!("{label} allowlist identifiers cannot be empty"));
     }
     if part.chars().any(char::is_control) {
         return Err(anyhow!(
-            "write allowlist identifiers cannot contain control characters"
+            "{label} allowlist identifiers cannot contain control characters"
         ));
     }
     Ok(part.to_string())
@@ -352,5 +392,24 @@ mod tests {
         assert!(parse_write_allowlist("public.ok,").is_err());
         assert!(parse_write_allowlist("other_schema.table").is_err());
         assert!(parse_write_allowlist("catalog.other.table").is_err());
+    }
+
+    #[test]
+    fn read_allowlist_uses_same_normalized_ducklake_targets() {
+        let auth = AuthConfig::password(
+            "postgres",
+            "readwrite-secret",
+            Some(("reader", "reader-secret")),
+        )
+        .expect("auth config")
+        .with_read_allowlist(
+            parse_read_allowlist("allowed, public.other").expect("read allowlist parses"),
+        );
+
+        assert!(auth.read_policy_restricted());
+        assert!(auth.allows_read(Some("postgres"), ("main", "allowed")));
+        assert!(auth.allows_read(Some("reader"), ("main", "other")));
+        assert!(!auth.allows_read(Some("reader"), ("main", "denied")));
+        assert!(!auth.allows_read(Some("missing"), ("main", "allowed")));
     }
 }

@@ -111,6 +111,13 @@ pub struct Cli {
     #[arg(long, env = "QUACKGIS_WRITE_ALLOWLIST")]
     pub write_allowlist: Option<String>,
 
+    /// Optional comma-separated DuckLake table allowlist for reads. Entries may
+    /// be table, public.table, main.table, or quackgis.main.table. When set,
+    /// reads of other DuckLake tables and unfiltered catalog metadata surfaces
+    /// fail closed before catalog refresh.
+    #[arg(long, env = "QUACKGIS_READ_ALLOWLIST")]
+    pub read_allowlist: Option<String>,
+
     /// Log filter (`env_logger` syntax). Falls back to the `RUST_LOG` env var.
     #[arg(long, env = "QUACKGIS_LOG", default_value = "info")]
     pub log: String,
@@ -135,4 +142,19 @@ pub struct Cli {
     /// Print candidate paths. By default only the redaction-safe count is shown.
     #[arg(long, default_value_t = false, requires = "orphan_inventory")]
     pub orphan_show_paths: bool,
+
+    /// Optional offline quarantine destination for orphan candidates. Without
+    /// --orphan-quarantine-apply this only prints the copy/delete plan.
+    #[arg(
+        long,
+        env = "QUACKGIS_ORPHAN_QUARANTINE_PREFIX",
+        requires = "orphan_inventory"
+    )]
+    pub orphan_quarantine_prefix: Option<String>,
+
+    /// Apply the offline orphan quarantine plan: copy candidates outside the
+    /// live data prefix, then remove the original only if it is still reported
+    /// as an orphan immediately before deletion.
+    #[arg(long, default_value_t = false, requires = "orphan_quarantine_prefix")]
+    pub orphan_quarantine_apply: bool,
 }

@@ -53,8 +53,9 @@ The core job is:
 
 QuackGIS is not a smaller PostgreSQL, OLTP database, desktop GIS, map server, or
 universal spatial-format decoder. PostgreSQL is an interface and optional catalog
-store; DuckDB is not embedded; heavy assets remain in object storage behind
-queryable footprint/provenance indexes.
+store; DuckDB is the unreleased storage-authority target but not yet embedded in
+the current runtime; heavy assets remain in object storage behind queryable
+footprint/provenance indexes.
 
 Compatibility breadth is earned from maintained workflows. Storage-specific
 features are adopted from DuckLake when they preserve QuackGIS correctness and

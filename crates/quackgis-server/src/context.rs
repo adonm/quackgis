@@ -6,6 +6,8 @@
 //! This is the integration point of the four upstream pillars. Everything
 //! not owned by quackgis lives behind the calls in [`build_session_context`].
 
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, anyhow};
@@ -29,9 +31,10 @@ use datafusion_postgres::datafusion_pg_catalog::pg_catalog::context::{
     Grant, Permission, ResourceType, Role, User,
 };
 use datafusion_postgres::datafusion_pg_catalog::setup_pg_catalog;
-use object_store::ObjectStore;
 use object_store::aws::AmazonS3Builder;
 use object_store::local::LocalFileSystem;
+use object_store::path::Path as ObjectPath;
+use object_store::{ObjectStore, ObjectStoreExt};
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use tokio::sync::OnceCell;
 use url::Url;
@@ -52,6 +55,20 @@ const TARGET_PARTITIONS_ENV: &str = "QUACKGIS_TARGET_PARTITIONS";
 #[derive(Debug, Clone)]
 pub struct StoragePaths {
     profile: StorageProfile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrphanQuarantineEntry {
+    pub source: String,
+    pub quarantine: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrphanQuarantineReport {
+    pub dry_run: bool,
+    pub candidates: Vec<OrphanQuarantineEntry>,
+    pub copied_count: usize,
+    pub deleted_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -242,6 +259,109 @@ impl StoragePaths {
         }
     }
 
+    /// Quarantine old unreferenced Parquet candidates outside the live data
+    /// prefix. The default dry-run mode only returns the planned source ->
+    /// quarantine paths; apply mode copies first and deletes the source only
+    /// after rechecking that it is still an orphan candidate.
+    pub async fn quarantine_orphan_candidates_before(
+        &self,
+        cutoff: DateTime<Utc>,
+        quarantine_prefix: &str,
+        apply: bool,
+    ) -> Result<OrphanQuarantineReport> {
+        let quarantine_prefix = self.quarantine_prefix_key(quarantine_prefix)?;
+        let mut candidates = self.orphan_candidates_before(cutoff).await?;
+        candidates.sort();
+        let candidates = candidates
+            .into_iter()
+            .map(|source| {
+                let source_key = object_key_from_absolute_style(&source)?;
+                let quarantine_key = quarantine_destination_key(&quarantine_prefix, &source_key);
+                Ok(OrphanQuarantineEntry {
+                    source,
+                    quarantine: absolute_style_path(&quarantine_key),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        if !apply {
+            return Ok(OrphanQuarantineReport {
+                dry_run: true,
+                candidates,
+                copied_count: 0,
+                deleted_count: 0,
+            });
+        }
+
+        let object_store = self.object_store()?;
+        let expected: BTreeSet<_> = candidates
+            .iter()
+            .map(|entry| entry.source.clone())
+            .collect();
+        let fresh: BTreeSet<_> = self
+            .orphan_candidates_before(cutoff)
+            .await?
+            .into_iter()
+            .collect();
+        if expected != fresh {
+            return Err(anyhow!(
+                "refusing orphan quarantine because candidate set changed during preflight"
+            ));
+        }
+
+        let mut copied_count = 0;
+        let mut deleted_count = 0;
+        for entry in &candidates {
+            let source_key = object_key_from_absolute_style(&entry.source)?;
+            let quarantine_key = object_key_from_absolute_style(&entry.quarantine)?;
+            match object_store.head(&quarantine_key).await {
+                Ok(_) => {
+                    return Err(anyhow!(
+                        "refusing to overwrite existing quarantine object {}",
+                        entry.quarantine
+                    ));
+                }
+                Err(object_store::Error::NotFound { .. }) => {}
+                Err(error) => return Err(error).context("checking quarantine destination"),
+            }
+            self.ensure_local_parent_for_key(&quarantine_key)?;
+            object_store
+                .copy(&source_key, &quarantine_key)
+                .await
+                .with_context(|| {
+                    format!(
+                        "copy orphan candidate {} to quarantine {}",
+                        entry.source, entry.quarantine
+                    )
+                })?;
+            copied_count += 1;
+
+            let latest: BTreeSet<_> = self
+                .orphan_candidates_before(cutoff)
+                .await?
+                .into_iter()
+                .collect();
+            if !latest.contains(&entry.source) {
+                return Err(anyhow!(
+                    "refusing to remove {} because it is no longer an orphan candidate after copy",
+                    entry.source
+                ));
+            }
+            match object_store.delete(&source_key).await {
+                Ok(()) => deleted_count += 1,
+                Err(object_store::Error::NotFound { .. }) => {}
+                Err(error) => return Err(error).context("removing quarantined orphan source"),
+            }
+        }
+
+        Ok(OrphanQuarantineReport {
+            dry_run: false,
+            candidates,
+            copied_count,
+            deleted_count,
+        })
+    }
+
     pub async fn metadata_writer(&self) -> Result<Arc<dyn MetadataWriter>> {
         match &self.profile {
             StorageProfile::SqliteLocal {
@@ -362,6 +482,134 @@ impl StoragePaths {
         };
         Ok((bucket, s3))
     }
+
+    fn quarantine_prefix_key(&self, quarantine_prefix: &str) -> Result<String> {
+        let quarantine_prefix = quarantine_prefix.trim();
+        if quarantine_prefix.is_empty() {
+            return Err(anyhow!("orphan quarantine prefix cannot be empty"));
+        }
+
+        if self.data_path().to_ascii_lowercase().starts_with("s3://") {
+            let data_url = Url::parse(self.data_path())?;
+            let quarantine_url = Url::parse(quarantine_prefix).with_context(
+                || "S3-backed orphan quarantine prefixes must be s3://bucket/prefix URLs",
+            )?;
+            if quarantine_url.scheme() != "s3" {
+                return Err(anyhow!("S3-backed orphan quarantine prefix must use s3://"));
+            }
+            if quarantine_url.host_str() != data_url.host_str() {
+                return Err(anyhow!(
+                    "orphan quarantine prefix must use the same S3 bucket as the live data path"
+                ));
+            }
+            let data_key = trim_object_key(data_url.path());
+            let quarantine_key = trim_object_key(quarantine_url.path());
+            if quarantine_key.is_empty() {
+                return Err(anyhow!(
+                    "orphan quarantine prefix must include an object key prefix"
+                ));
+            }
+            reject_live_prefix(&data_key, &quarantine_key)?;
+            return Ok(quarantine_key);
+        }
+
+        let data_path = Path::new(self.data_path())
+            .canonicalize()
+            .with_context(|| format!("canonicalizing live data path {}", self.data_path()))?;
+        let quarantine_path = absolute_path_without_creating(quarantine_prefix)?;
+        if quarantine_path == data_path || quarantine_path.starts_with(&data_path) {
+            return Err(anyhow!(
+                "orphan quarantine prefix must be outside the live data path"
+            ));
+        }
+        let key = quarantine_path
+            .to_string_lossy()
+            .trim_start_matches('/')
+            .trim_end_matches('/')
+            .to_string();
+        if key.is_empty() {
+            return Err(anyhow!(
+                "orphan quarantine prefix cannot resolve to the filesystem root"
+            ));
+        }
+        Ok(key)
+    }
+
+    fn ensure_local_parent_for_key(&self, key: &ObjectPath) -> Result<()> {
+        if self.data_path().to_ascii_lowercase().starts_with("s3://") {
+            return Ok(());
+        }
+        let absolute_path = Path::new("/").join(key.as_ref());
+        if let Some(parent) = absolute_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating quarantine directory {}", parent.display()))?;
+        }
+        Ok(())
+    }
+}
+
+fn trim_object_key(value: &str) -> String {
+    value.trim_matches('/').to_string()
+}
+
+fn reject_live_prefix(data_key: &str, quarantine_key: &str) -> Result<()> {
+    if data_key.is_empty() {
+        return Err(anyhow!(
+            "refusing orphan quarantine for an S3 data path at the bucket root"
+        ));
+    }
+    if quarantine_key == data_key
+        || quarantine_key
+            .strip_prefix(data_key)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+    {
+        return Err(anyhow!(
+            "orphan quarantine prefix must be outside the live data path"
+        ));
+    }
+    Ok(())
+}
+
+fn absolute_path_without_creating(raw: &str) -> Result<PathBuf> {
+    let path = Path::new(raw);
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .with_context(|| "resolving current directory for quarantine prefix")?
+            .join(path)
+    };
+    let parent = candidate
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| anyhow!("invalid orphan quarantine prefix {raw:?}"))?;
+    let file_name = candidate
+        .file_name()
+        .ok_or_else(|| anyhow!("invalid orphan quarantine prefix {raw:?}"))?;
+    let abs_parent = parent
+        .canonicalize()
+        .with_context(|| format!("canonicalizing parent of quarantine prefix {raw}"))?;
+    Ok(abs_parent.join(file_name))
+}
+
+fn object_key_from_absolute_style(path: &str) -> Result<ObjectPath> {
+    let key = path.trim_start_matches('/');
+    if key.is_empty() {
+        return Err(anyhow!("object path cannot be empty"));
+    }
+    Ok(ObjectPath::from(key))
+}
+
+fn quarantine_destination_key(prefix_key: &str, source_key: &ObjectPath) -> ObjectPath {
+    ObjectPath::from(format!(
+        "{}/{}",
+        prefix_key.trim_end_matches('/'),
+        source_key.as_ref().trim_start_matches('/')
+    ))
+}
+
+fn absolute_style_path(key: &ObjectPath) -> String {
+    format!("/{key}")
 }
 
 async fn postgres_pool(catalog_url: &str, cell: &OnceCell<PgPool>) -> Result<PgPool> {

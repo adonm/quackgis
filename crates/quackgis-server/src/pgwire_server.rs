@@ -309,5 +309,8 @@ impl ErrorHandler for LoggingErrorHandler {
             .map(String::as_str)
             .unwrap_or("unknown");
         log::info!("quackgis_pgwire_error kind={kind} user={user}");
+        if kind == "auth_failure" {
+            crate::audit::log_auth_failure(user, kind);
+        }
     }
 }

@@ -6,6 +6,7 @@
 pub mod cli;
 pub mod context;
 
+pub mod audit;
 pub mod auth;
 pub mod catalog_compat;
 mod catalog_metrics;

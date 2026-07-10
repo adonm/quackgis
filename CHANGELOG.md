@@ -67,6 +67,38 @@ story, useful commit anchors, and lessons for contributors.
   duplicate, malformed, incorrect, inconsistent, or over-budget cold/direct/warm
   phases and emits trend/budget-compatible provider-call metrics without claiming
   wire-level roundtrips. Actual 100M and managed-service execution remain open.
+- Explicit offline orphan quarantine planning/apply for old unreferenced Parquet
+  candidates, with copy-before-remove, live-prefix rejection, destination overwrite
+  refusal, and a local test proving referenced DuckLake files stay in place.
+- Real OSM parity now checks SQL-MVT `name` attribute tokens and exports OSM row,
+  GeoJSON, QGIS, MVT byte, and MVT attribute fields into compatibility metrics.
+- External Alpha evidence manifests now require restore RPO/RTO fields,
+  failed-writer quarantine fields, and a migration implication for the current
+  non-standard PostgreSQL multicatalog interoperability result.
+- A copied multi-modal inventory evidence checker validates COG/raster plus
+  COPC/LAZ point-cloud promotion packets, non-secret URI policy, lifecycle,
+  restore, workload, and maintained vector-gate evidence before roadmap claims.
+- Documented a DuckDB/ADBC evaluation ladder and manifest checker that make
+  DuckDB's official DuckLake extension the preferred reference-reader gate before
+  any storage-writer or engine pivot.
+- Added `just duckdb-engine-probe`, an optional out-of-process DuckDB CLI smoke for
+  the DuckDB `spatial` and `ducklake` extensions before deeper engine-pivot work.
+- Added `just duckdb-authority-probe`, a DuckDB-authored official DuckLake vertical
+  slice covering WKB insert, update, delete, metadata, reopen, and snapshot checks.
+- Initial DuckDB evaluation evidence: DuckDB v1.5.2 passed the out-of-process
+  spatial/WKB + DuckLake extension smoke, but failed to attach the QuackGIS preview
+  SQLite DuckLake catalog through the documented `ducklake:sqlite:` URI because
+  DuckDB expects allocator metadata columns absent from the current
+  `datafusion-ducklake` writer path.
+- DuckDB-authored official DuckLake storage then passed the local authority slice:
+  create, WKB insert, update, delete, metadata inspection, reopen, WKB spatial
+  predicate, and snapshot listing.
+- DuckDB reference-reader packet validation now accepts the DuckDB-authored local
+  DuckLake profile so new positive interoperability claims do not depend on legacy
+  QuackGIS-written preview catalogs.
+- The first DuckDB-authored local DuckLake reference packet passed as
+  `duckdb_reference_readable` with attach, schema, read sample, spatial bytes,
+  mutation, metadata, and snapshot checks.
 
 ### Changed
 
@@ -96,7 +128,8 @@ story, useful commit anchors, and lessons for contributors.
 - Explicit transactions are intentionally single-table and do not provide general
   read-your-writes SELECT or multi-table atomicity.
 - Protected releases, CDC rows, object-level RBAC, managed-service failure drills,
-  and real multi-modal inventories remain roadmap work.
+  real multi-modal inventory execution, and permanent deletion after quarantine
+  remain roadmap work.
 
 ## Historical prototype eras
 

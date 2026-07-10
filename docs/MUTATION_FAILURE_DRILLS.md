@@ -20,6 +20,7 @@ needed before QuackGIS can claim production-grade native mutation hardening.
 | Bucket compaction | old bucket rows masked + replacement data file committed under one snapshot | `ducklake_compact_table_accepts_layout_bucket_scope` |
 | Bucket compaction failpoint before commit + retry | compacted data + delete objects prewritten, then injected abort before metadata commit; abort counter increments once; retry publishes compaction metadata without changing visible rows | `ducklake_native_compact_failpoint_before_commit_leaves_catalog_unchanged` |
 | Native process kill before/after commit | real subprocess is stopped at a filesystem barrier; before-commit prewrites exactly match offline orphan inventory and explicit retry reaches the intended state; after-commit generated paths remain referenced and restart exposes the committed state | six `process_kill_<operation>_<stage>_*` cases in `process_lifecycle` |
+| Local orphan quarantine | explicit offline plan/apply copies old unreferenced `.parquet` candidates outside the live prefix, rechecks before source removal, and refuses live-prefix quarantine destinations | `quarantine_requires_explicit_apply_and_stays_outside_live_prefix` in `orphan_inventory`; `just orphan-quarantine-plan` |
 | Full-table compaction | replacement table snapshot | `ducklake_compact_table_rewrites_without_changing_results` |
 
 ## Failure drill ladder
@@ -49,6 +50,7 @@ cargo test -p quackgis-server --test ducklake_persistence ducklake_native_update
 cargo test -p quackgis-server --test ducklake_persistence ducklake_native_compact_failpoint_before_commit_leaves_catalog_unchanged -- --nocapture
 cargo test -p quackgis-server --test process_lifecycle -- --nocapture
 just orphan-inventory min_age_seconds=3600 show_paths=false
+just orphan-quarantine-plan prefix=.tmp/orphan-quarantine min_age_seconds=3600 show_paths=false
 ```
 
 The orphan command is offline and **always dry-run**. It lists only unreferenced
@@ -59,11 +61,13 @@ missing catalog rather than creating one. PostgreSQL inventory is intentionally
 global across every catalog sharing the configured data path, matching the fork's
 cross-catalog reference set.
 
-This is operator visibility, not cleanup automation. The local process-kill matrix
-proves that real before-commit prewrites are found and backdated committed paths are
-spared. Quarantine/deletion stays disabled until the same live/scheduled/history
-reference protections are proven in local destructive drills, Kind, and external
-profiles.
+This is operator visibility plus an explicit quarantine primitive, not automatic
+vacuum. The local process-kill matrix proves that real before-commit prewrites are
+found and backdated committed paths are spared. Quarantine apply requires an
+operator-supplied prefix outside live data, copies before deleting, refuses
+overwrite, and rechecks each source immediately before removal. Permanent deletion
+from quarantine stays disabled until the same live/scheduled/history reference
+protections are proven in local destructive drills, Kind, and external profiles.
 
 The failpoint tests use in-process, one-shot native mutation failpoints at
 `delete:before_commit:<schema.table>`, `update:before_commit:<schema.table>`, and
@@ -119,11 +123,11 @@ platform retention policy.
 
 ## Future automation
 
-The in-process failpoints and local six-case process-kill matrix now cover both
-sides of `commit_table_mutation` for native `DELETE`, `UPDATE`, and bucket
-compaction. Promote the matrix to Kind PostgreSQL/s3s-fs and managed services, add
-restore-point-backed orphan quarantine/deletion proof, and validate reference
-readers before making production hardening claims. Explicit transaction batching
-and application-specific response-loss reconciliation also remain open. This
-runbook keeps those service drills comparable and prevents accidental production
-claims from local SQLite evidence.
+The in-process failpoints, local six-case process-kill matrix, and explicit local
+quarantine primitive now cover both sides of `commit_table_mutation` for native
+`DELETE`, `UPDATE`, and bucket compaction. Promote the matrix and quarantine proof
+to Kind PostgreSQL/s3s-fs and managed services, add restore-point-backed permanent
+deletion proof, and validate reference readers before making production hardening
+claims. Explicit transaction batching and application-specific response-loss
+reconciliation also remain open. This runbook keeps those service drills
+comparable and prevents accidental production claims from local SQLite evidence.

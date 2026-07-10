@@ -328,23 +328,38 @@ spec:
                           table = layer["quackgis_table"]
                           cur.execute(
                               f"""
-                              SELECT ST_AsMVT(
-                                  ST_AsMVTGeom(
-                                      wkb_geometry,
-                                      ST_MakeEnvelope(-180.0, -90.0, 180.0, 90.0, 4326),
-                                      4096,
-                                      64,
-                                      true
-                                  )
-                              )
-                              FROM public."{table}"
-                              WHERE wkb_geometry IS NOT NULL
+                              SELECT ST_AsMVT(tile, 'osm_{label}', 4096, 'geom')
+                              FROM (
+                                  SELECT ST_AsMVTGeom(
+                                             wkb_geometry,
+                                             ST_MakeEnvelope(-180.0, -90.0, 180.0, 90.0, 4326),
+                                             4096,
+                                             64,
+                                             true
+                                         ) AS geom,
+                                         name
+                                  FROM public."{table}"
+                                  WHERE wkb_geometry IS NOT NULL
+                                    AND name IS NOT NULL
+                                  ORDER BY id
+                              ) AS tile
                               """
                           )
                           tile = cur.fetchone()[0]
-                          tile_bytes = len(bytes(tile))
+                          tile_data = bytes(tile)
+                          tile_bytes = len(tile_data)
                           print(f"osm_mvt_{label}_tile_bytes", tile_bytes)
                           assert tile_bytes > 0, f"empty OSM MVT tile for {label}"
+                          cur.execute(
+                              f'SELECT name FROM public."{table}" WHERE name IS NOT NULL ORDER BY id LIMIT 1'
+                          )
+                          sample_name = cur.fetchone()[0]
+                          print(f"osm_mvt_{label}_attribute_name", sample_name)
+                          assert b"name" in tile_data, f"OSM MVT tile for {label} missing name key"
+                          assert sample_name.encode("utf-8") in tile_data, (
+                              f"OSM MVT tile for {label} missing sample name attribute {sample_name!r}"
+                          )
+                          print(f"osm_mvt_{label}_attribute_ok True")
                   finally:
                       cur.close()
                       conn.close()

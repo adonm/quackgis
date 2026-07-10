@@ -137,6 +137,7 @@ struct PrivilegeRole {
     name: String,
     role: AccessRole,
     write_targets: Option<Vec<WriteTarget>>,
+    read_targets: Option<Vec<WriteTarget>>,
 }
 
 fn make_privilege_udf(name: &str, object: PrivilegeObject, auth: &AuthConfig) -> ScalarUDF {
@@ -161,6 +162,7 @@ fn make_privilege_udf(name: &str, object: PrivilegeObject, auth: &AuthConfig) ->
             name: name.to_string(),
             role: user.role,
             write_targets: user.write_targets().map(<[_]>::to_vec),
+            read_targets: auth.read_targets().map(<[_]>::to_vec),
         })
         .collect::<Vec<_>>();
     roles.sort_by(|left, right| left.name.cmp(&right.name));
@@ -207,7 +209,7 @@ impl PrivilegeUdf {
         };
         Some(match role.role {
             AccessRole::ReadWrite => self.readwrite_allows(role, object_name, privilege),
-            AccessRole::ReadOnly => self.readonly_allows(privilege),
+            AccessRole::ReadOnly => self.readonly_allows(role, object_name, privilege),
         })
     }
 
@@ -225,7 +227,7 @@ impl PrivilegeUdf {
             .iter()
             .all(|permission| matches!(permission.as_str(), "SELECT" | "USAGE" | "CONNECT"))
         {
-            return true;
+            return self.read_allows(role, object_name, &permissions);
         }
         let Some(write_targets) = &role.write_targets else {
             return true;
@@ -238,7 +240,12 @@ impl PrivilegeUdf {
         }
     }
 
-    fn readonly_allows(&self, privilege: &str) -> bool {
+    fn readonly_allows(
+        &self,
+        role: &PrivilegeRole,
+        object_name: Option<&str>,
+        privilege: &str,
+    ) -> bool {
         if privilege.to_ascii_uppercase().contains("GRANT") {
             return false;
         }
@@ -247,11 +254,28 @@ impl PrivilegeUdf {
             return false;
         }
 
+        self.read_allows(role, object_name, &permissions)
+    }
+
+    fn read_allows(
+        &self,
+        role: &PrivilegeRole,
+        object_name: Option<&str>,
+        permissions: &[String],
+    ) -> bool {
         permissions.iter().all(|permission| match self.object {
             PrivilegeObject::Database => matches!(permission.as_str(), "CONNECT"),
             PrivilegeObject::Schema => matches!(permission.as_str(), "USAGE"),
             PrivilegeObject::Table | PrivilegeObject::Column => {
-                matches!(permission.as_str(), "SELECT")
+                if !matches!(permission.as_str(), "SELECT") {
+                    return false;
+                }
+                let Some(read_targets) = &role.read_targets else {
+                    return true;
+                };
+                object_name
+                    .and_then(|name| parse_write_target(name).ok())
+                    .is_some_and(|target| read_targets.iter().any(|allowed| allowed == &target))
             }
         })
     }

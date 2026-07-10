@@ -22,7 +22,8 @@ production claims:
 - benchmark profile/target/storage/hardware identity plus catalog provider-call
   and refresh budgets when benchmark artifacts emit them, including warm total,
   warm per-query maximum, cold-public, and direct-internal deltas;
-- real-data client feature counts when OSM parity artifacts are present;
+- real-data client row/GeoJSON/QGIS counts and MVT attribute-token evidence when
+  OSM parity artifacts are present;
 - curated PostGIS regress pass-rate when `postgis-regress.log` is bundled with
   the artifact.
 

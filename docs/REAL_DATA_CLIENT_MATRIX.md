@@ -11,11 +11,14 @@ This document defines the evidence contract before widening the expensive probes
 
 | Dataset | Layers | Clients exercised today | Evidence |
 |---|---|---|---|
-| Geofabrik Monaco OSM | `points`, `lines`, `multipolygons` sampled through OGR's standard OSM layers | OGR copy/read, QuackGIS SQL sample comparison, non-empty MVT SQL bytes, QGIS open/filter/render on copied layers | `just kind-osm-postgis-parity`, `docs/OSM_POSTGIS_PARITY.md` |
+| Geofabrik Monaco OSM | `points`, `lines`, `multipolygons` sampled through OGR's standard OSM layers | OGR copy/read, QuackGIS SQL sample comparison, MVT SQL bytes with real `name` attribute tokens, QGIS open/filter/render on copied layers | `just kind-osm-postgis-parity`, `docs/OSM_POSTGIS_PARITY.md` |
 
 Current status is **opt-in real-data evidence**, not broad OSM or real-data
 support. The default scheduled compatibility workflow runs the Monaco path because
 it is small enough for CI; larger extracts remain manual until budgets are stable.
+The compatibility report promotes OSM row-count, GeoJSON-count, QGIS-count,
+MVT-byte, and MVT-attribute-token fields into `metrics.json` so real-data client
+claims can be trended instead of inferred from raw logs.
 
 ## Matrix target
 
@@ -38,7 +41,7 @@ Every promoted real-data matrix row should name:
 | QGIS read/render/filter | provider opens; feature count is non-zero and matches sampled expectation; attribute filter returns deterministic names/ids; geometry iteration is non-empty; headless render writes an image |
 | GeoServer WFS/WMS | datastore publishes the copied layer; WFS GeoJSON count/attributes match sample; WMS returns a PNG; paging behavior is recorded when enabled |
 | GeoServer WFS-T/edit | insert/update/delete round-trips on a copied or derivative layer; `_quackgis_rowid` or declared primary key remains stable after compaction |
-| Martin/MVT | table discovery includes the layer; a representative tile is non-empty; important feature attributes survive into tile metadata when configured |
+| Martin/MVT | table discovery includes the layer; a representative tile is non-empty; important feature attributes survive into tile metadata when configured; SQL-MVT attribute token checks are only a companion gate until the real Martin binary runs over the copied layer |
 | SQL/OLAP | representative grouped counts/lengths/areas and candidate-narrowing queries emit row counts, file groups, bytes scanned, and p95/p99 where applicable |
 
 Python/API/BI-style clients follow the broader probe ladder in

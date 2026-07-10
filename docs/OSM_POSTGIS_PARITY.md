@@ -43,7 +43,7 @@ and compares the two systems. It covers:
   names, and printed counts.
 - count, stable id/`osm_id`, selected attributes, UTF-8 names, geometry type
   distribution, and bbox through SQL/GeoJSON;
-- non-empty MVT SQL bytes for each copied layer; and
+- non-empty MVT SQL bytes plus real `name` attribute tokens for each copied layer; and
 - QGIS provider validity, feature iteration/filtering, non-empty geometries, and
   a rendered image over the QuackGIS copies.
 
@@ -53,8 +53,8 @@ and compares the two systems. It covers:
   filters, iterates, and renders the copied QuackGIS layers.
 - Run GeoServer WFS/WMS/WFS-T on the copied OSM layers; generic GeoServer fixtures
   do not close this real-data row.
-- Run the real Martin binary and verify configured OSM attributes, not only SQL
-  MVT bytes/encoder dictionaries.
+- Run the real Martin binary and verify configured OSM attributes, not only the
+  SQL-MVT real-attribute token companion gate.
 - Keep geometry promotion, long `other_tags`, arbitrary appended columns, and
   UTF-8 text under real-data regression. The baseline verifies
   Monaco names such as `Quai des États-Unis` and `La Pêcherie U Luvassu`; later
@@ -75,7 +75,7 @@ For each copied OSM layer, open both the PostGIS source and QuackGIS copy with:
 | OGR | ✅ | ✅ | `ogrinfo`, GeoJSON export, count/bbox/type parity |
 | QGIS | stretch | ✅ | provider validity, feature iteration/filtering, and render smoke for QuackGIS copy; PostGIS side-by-side remains next |
 | GeoServer | ⏳ | ⏳ | generic datastore/WFS/WMS/WFS-T gates pass; copied OSM side-by-side is not yet part of this track |
-| Martin/MVT | ⏳ | SQL bytes only | non-empty MVT bytes for copied QuackGIS layers; real Martin binary attribute propagation remains next |
+| Martin/MVT | ⏳ | SQL attribute tokens | non-empty MVT bytes and `name` tokens for copied QuackGIS layers; real Martin binary attribute propagation remains next |
 
 This phase should produce an explicit compatibility report per layer following
 the real-data matrix contract rather than claiming broad OSM support from a
@@ -186,11 +186,15 @@ postgis_osm_named_points_count <n>
 quackgis_osm_named_points_count <n>
 postgis_osm_sql_sample [...]
 quackgis_osm_sql_sample [...]
+osm_mvt_points_attribute_ok True
+osm_mvt_lines_attribute_ok True
+osm_mvt_multipolygons_attribute_ok True
 osm_postgis_to_quackgis_copy_ok True
 ```
 
 This proves real OSM → PostGIS → QuackGIS copy/read parity for deterministic
 Point, LineString, and MultiPolygon-compatible samples across stable IDs, OSM
-IDs, UTF-8 names, geometry type distribution, and bbox. Remaining promotion widens
-the existing OGR/QGIS/SQL-MVT baseline to PostGIS-side QGIS, copied-layer
-GeoServer, real Martin attributes, larger extracts, and managed storage.
+IDs, UTF-8 names, geometry type distribution, bbox, and SQL-MVT `name` attribute
+tokens. Remaining promotion widens the existing OGR/QGIS/SQL-MVT baseline to
+PostGIS-side QGIS, copied-layer GeoServer, real Martin attributes, larger
+extracts, and managed storage.

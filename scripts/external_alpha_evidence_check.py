@@ -31,6 +31,11 @@ REQUIRED_DRILLS = (
 )
 VALID_STATUS = {"pass", "fail", "skip"}
 VALID_CLAIMS = {"external_wiring_smoke", "external_alpha_promotion"}
+VALID_INTEROP_RESULTS = {
+    "standard_ducklake_readable",
+    "quackgis_multicatalog_non_standard",
+    "not_tested",
+}
 SECRET_PATTERNS = (
     re.compile(r"(?i)(password|secret|access[_-]?key|token)=([^\s'\"]+)"),
     re.compile(r"(?i)postgres://[^:\s]+:[^@\s]+@"),
@@ -71,6 +76,12 @@ def require_int(value: Any, label: str, *, positive: bool = False) -> int:
     return parsed
 
 
+def optional_int(value: Any, label: str) -> int | None:
+    if value is None:
+        return None
+    return require_int(value, label)
+
+
 def load_json(path: Path, label: str) -> dict[str, Any]:
     try:
         return require_object(json.loads(path.read_text(encoding="utf-8")), label)
@@ -85,6 +96,40 @@ def assert_redacted(text: str, label: str) -> None:
             if "..." in matched or "redacted" in matched:
                 continue
             raise EvidenceError(f"{label} appears to contain an unredacted secret: {match.group(0)!r}")
+
+
+def validate_backup_restore_drill(detail: dict[str, Any]) -> dict[str, int]:
+    rpo_seconds = require_int(detail.get("rpo_seconds"), "drills.backup_restore.rpo_seconds")
+    rto_seconds = require_int(detail.get("rto_seconds"), "drills.backup_restore.rto_seconds")
+    require_string(detail.get("restored_catalog"), "drills.backup_restore.restored_catalog")
+    require_string(detail.get("restored_object_prefix"), "drills.backup_restore.restored_object_prefix")
+    require_string(detail.get("read_smoke_evidence"), "drills.backup_restore.read_smoke_evidence")
+    return {"rpo_seconds": rpo_seconds, "rto_seconds": rto_seconds}
+
+
+def validate_failed_writer_cleanup_drill(detail: dict[str, Any]) -> dict[str, int]:
+    candidates = require_int(
+        detail.get("orphan_candidates"), "drills.failed_writer_cleanup.orphan_candidates"
+    )
+    quarantined = require_int(
+        detail.get("quarantined_candidates"),
+        "drills.failed_writer_cleanup.quarantined_candidates",
+    )
+    deleted = optional_int(
+        detail.get("deleted_from_quarantine"),
+        "drills.failed_writer_cleanup.deleted_from_quarantine",
+    )
+    if quarantined > candidates:
+        raise EvidenceError(
+            "drills.failed_writer_cleanup.quarantined_candidates cannot exceed orphan_candidates"
+        )
+    if deleted is not None and deleted > quarantined:
+        raise EvidenceError(
+            "drills.failed_writer_cleanup.deleted_from_quarantine cannot exceed quarantined_candidates"
+        )
+    require_string(detail.get("quarantine_prefix"), "drills.failed_writer_cleanup.quarantine_prefix")
+    require_string(detail.get("representative_reads"), "drills.failed_writer_cleanup.representative_reads")
+    return {"orphan_candidates": candidates, "quarantined_candidates": quarantined}
 
 
 def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -113,6 +158,24 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     files = require_int(dataset.get("file_count"), "dataset.file_count")
     object_bytes = require_int(dataset.get("object_bytes"), "dataset.object_bytes", positive=True)
 
+    interop = require_object(manifest.get("catalog_interoperability"), "catalog_interoperability")
+    interop_result = require_string(interop.get("result"), "catalog_interoperability.result")
+    if interop_result not in VALID_INTEROP_RESULTS:
+        raise EvidenceError(
+            f"catalog_interoperability.result must be one of {sorted(VALID_INTEROP_RESULTS)}"
+        )
+    require_string(interop.get("standard_reader"), "catalog_interoperability.standard_reader")
+    require_string(interop.get("evidence"), "catalog_interoperability.evidence")
+    if claim == "external_alpha_promotion" and interop_result == "not_tested":
+        raise EvidenceError(
+            "external_alpha_promotion requires an explicit standard/non-standard catalog interoperability result"
+        )
+    if interop_result == "quackgis_multicatalog_non_standard":
+        require_string(
+            interop.get("migration_implication"),
+            "catalog_interoperability.migration_implication",
+        )
+
     commands = manifest.get("commands")
     if not isinstance(commands, list) or not commands:
         raise EvidenceError("commands must be a non-empty list")
@@ -121,12 +184,18 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
 
     drills = require_object(manifest.get("drills"), "drills")
     statuses: dict[str, str] = {}
+    backup_restore: dict[str, int] | None = None
+    failed_writer_cleanup: dict[str, int] | None = None
     for drill in REQUIRED_DRILLS:
         detail = require_object(drills.get(drill), f"drills.{drill}")
         status = require_string(detail.get("status"), f"drills.{drill}.status")
         if status not in VALID_STATUS:
             raise EvidenceError(f"drills.{drill}.status must be one of {sorted(VALID_STATUS)}")
         require_string(detail.get("evidence"), f"drills.{drill}.evidence")
+        if status == "pass" and drill == "backup_restore":
+            backup_restore = validate_backup_restore_drill(detail)
+        if status == "pass" and drill == "failed_writer_cleanup":
+            failed_writer_cleanup = validate_failed_writer_cleanup_drill(detail)
         statuses[drill] = status
     unknown = set(drills) - set(REQUIRED_DRILLS)
     if unknown:
@@ -147,7 +216,10 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         "rows": rows,
         "files": files,
         "object_bytes": object_bytes,
+        "catalog_interoperability": interop_result,
         "statuses": statuses,
+        "backup_restore": backup_restore,
+        "failed_writer_cleanup": failed_writer_cleanup,
     }
 
 
@@ -172,11 +244,29 @@ def render(summary: dict[str, Any]) -> str:
         f"Claim: `{summary['claim']}`",
         f"Source SHA: `{summary['source_sha']}`",
         f"Dataset: rows={summary['rows']} files={summary['files']} object_bytes={summary['object_bytes']}",
+        f"Catalog interoperability: `{summary['catalog_interoperability']}`",
         f"Drills: {passed} passed, {skipped} skipped, 0 failed",
         "",
-        "| Drill | Status |",
-        "|---|---|",
     ]
+    if summary.get("backup_restore"):
+        backup = summary["backup_restore"]
+        body.extend(
+            [
+                f"Backup/restore: RPO={backup['rpo_seconds']}s RTO={backup['rto_seconds']}s",
+                "",
+            ]
+        )
+    if summary.get("failed_writer_cleanup"):
+        cleanup = summary["failed_writer_cleanup"]
+        body.extend(
+            [
+                "Failed-writer cleanup: "
+                f"orphan_candidates={cleanup['orphan_candidates']} "
+                f"quarantined_candidates={cleanup['quarantined_candidates']}",
+                "",
+            ]
+        )
+    body.extend(["| Drill | Status |", "|---|---|"])
     body.extend(f"| `{drill}` | {status} |" for drill, status in summary["statuses"].items())
     body.append("")
     return "\n".join(body)

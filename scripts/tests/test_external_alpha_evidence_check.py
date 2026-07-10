@@ -26,7 +26,7 @@ DIGEST = "sha256:" + "b" * 64
 
 
 def manifest(claim: str = "external_alpha_promotion") -> dict[str, object]:
-    return {
+    packet = {
         "source_sha": SHA,
         "quackgis_image_digest": DIGEST,
         "claim": claim,
@@ -52,6 +52,12 @@ def manifest(claim: str = "external_alpha_promotion") -> dict[str, object]:
             "object_bytes": 1024,
             "object_prefix": "s3://bucket/quackgis-alpha/redacted",
         },
+        "catalog_interoperability": {
+            "result": "quackgis_multicatalog_non_standard",
+            "standard_reader": "ducklake-reference-smoke 2026-07",
+            "evidence": "interop/ducklake-reference-smoke.log",
+            "migration_implication": "export or migrate PostgreSQL multicatalog metadata before standard-reader claims",
+        },
         "commands": [
             "EXTERNAL_QUACKGIS_CATALOG_URL=postgres://user:<redacted>@db.example/quackgis just kind-external-alpha-smoke"
         ],
@@ -66,6 +72,25 @@ def manifest(claim: str = "external_alpha_promotion") -> dict[str, object]:
             "logs": ".tmp/compatibility/*.log",
         },
     }
+    packet["drills"]["backup_restore"].update(  # type: ignore[index]
+        {
+            "rpo_seconds": 30,
+            "rto_seconds": 120,
+            "restored_catalog": "postgres://restored-redacted/quackgis_alpha",
+            "restored_object_prefix": "s3://bucket/restored-alpha-redacted",
+            "read_smoke_evidence": "restore/read-smoke.log",
+        }
+    )
+    packet["drills"]["failed_writer_cleanup"].update(  # type: ignore[index]
+        {
+            "orphan_candidates": 2,
+            "quarantined_candidates": 2,
+            "deleted_from_quarantine": 0,
+            "quarantine_prefix": "s3://bucket/quarantine-redacted",
+            "representative_reads": "cleanup/representative-reads.log",
+        }
+    )
+    return packet
 
 
 def metrics() -> dict[str, object]:
@@ -87,6 +112,9 @@ class ExternalAlphaEvidenceCheckTests(unittest.TestCase):
         summary = CHECK.validate_manifest(manifest())
         CHECK.validate_metrics(metrics(), summary)
         self.assertEqual(summary["claim"], "external_alpha_promotion")
+        self.assertEqual(summary["catalog_interoperability"], "quackgis_multicatalog_non_standard")
+        self.assertEqual(summary["backup_restore"]["rpo_seconds"], 30)
+        self.assertEqual(summary["failed_writer_cleanup"]["quarantined_candidates"], 2)
         self.assertTrue(CHECK.render(summary).startswith("# External-service Alpha"))
 
     def test_skipped_drill_must_be_wiring_smoke(self) -> None:
@@ -112,6 +140,33 @@ class ExternalAlphaEvidenceCheckTests(unittest.TestCase):
         bad_metrics["checks"]["external_lake_probe"]["status"] = "fail"  # type: ignore[index]
         with self.assertRaises(CHECK.EvidenceError):
             CHECK.validate_metrics(bad_metrics, summary)
+
+    def test_alpha_promotion_requires_catalog_interop_result(self) -> None:
+        packet = manifest()
+        packet["catalog_interoperability"]["result"] = "not_tested"  # type: ignore[index]
+        with self.assertRaises(CHECK.EvidenceError):
+            CHECK.validate_manifest(packet)
+
+        packet["claim"] = "external_wiring_smoke"
+        packet["drills"]["backup_restore"]["status"] = "skip"  # type: ignore[index]
+        summary = CHECK.validate_manifest(packet)
+        self.assertEqual(summary["catalog_interoperability"], "not_tested")
+
+    def test_passed_restore_and_cleanup_drills_require_evidence_fields(self) -> None:
+        packet = manifest()
+        del packet["drills"]["backup_restore"]["rpo_seconds"]  # type: ignore[index]
+        with self.assertRaises(CHECK.EvidenceError):
+            CHECK.validate_manifest(packet)
+
+        packet = manifest()
+        packet["drills"]["failed_writer_cleanup"]["quarantined_candidates"] = 3  # type: ignore[index]
+        with self.assertRaises(CHECK.EvidenceError):
+            CHECK.validate_manifest(packet)
+
+        packet = manifest()
+        del packet["catalog_interoperability"]["migration_implication"]  # type: ignore[index]
+        with self.assertRaises(CHECK.EvidenceError):
+            CHECK.validate_manifest(packet)
 
     def test_cli_removes_stale_output_on_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

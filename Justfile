@@ -42,6 +42,7 @@ external_s3_access_key_id := env_var_or_default("EXTERNAL_QUACKGIS_S3_ACCESS_KEY
 external_s3_secret_access_key := env_var_or_default("EXTERNAL_QUACKGIS_S3_SECRET_ACCESS_KEY", "quackgis")
 external_s3_region := env_var_or_default("EXTERNAL_QUACKGIS_S3_REGION", "us-east-1")
 external_s3_allow_http := env_var_or_default("EXTERNAL_QUACKGIS_S3_ALLOW_HTTP", "true")
+duckdb_bin := env_var_or_default("DUCKDB_BIN", "duckdb")
 ref_datafusion_postgres_url := env_var_or_default("REF_DATAFUSION_POSTGRES_URL", "https://github.com/adonm/datafusion-postgres")
 ref_datafusion_postgres_branch := env_var_or_default("REF_DATAFUSION_POSTGRES_BRANCH", "quackgis/fixes")
 ref_datafusion_postgres_upstream_url := env_var_or_default("REF_DATAFUSION_POSTGRES_UPSTREAM_URL", "https://github.com/datafusion-contrib/datafusion-postgres")
@@ -236,6 +237,55 @@ test-fast:
 multimodal-inventory-local:
     cargo test -p quackgis-server --test multimodal_inventory -- --nocapture
 
+# Validate a copied COG/COPC/LAZ multi-modal inventory evidence manifest.
+multimodal-inventory-evidence-check manifest=".tmp/multimodal-inventory/manifest.json" out=".tmp/multimodal-inventory/README.md":
+    @set -eu; \
+    manifest_arg='{{manifest}}'; \
+    out_arg='{{out}}'; \
+    manifest_arg="${manifest_arg#manifest=}"; \
+    out_arg="${out_arg#out=}"; \
+    mkdir -p "$(dirname "${out_arg}")"; \
+    python3 scripts/multimodal_inventory_evidence_check.py --manifest "${manifest_arg}" --out "${out_arg}"
+
+# Validate a DuckDB/official-DuckLake reference-reader evidence manifest.
+duckdb-reference-evidence-check manifest=".tmp/duckdb-reference/manifest.json" out=".tmp/duckdb-reference/README.md":
+    @set -eu; \
+    manifest_arg='{{manifest}}'; \
+    out_arg='{{out}}'; \
+    manifest_arg="${manifest_arg#manifest=}"; \
+    out_arg="${out_arg#out=}"; \
+    mkdir -p "$(dirname "${out_arg}")"; \
+    python3 scripts/duckdb_reference_evidence_check.py --manifest "${manifest_arg}" --out "${out_arg}"
+
+# Run the out-of-process DuckDB spatial + DuckLake extension engine probe.
+duckdb-engine-probe out=".tmp/duckdb-engine/README.md" attach_sql="" duckdb_bin=duckdb_bin:
+    @set -eu; \
+    out_arg='{{out}}'; \
+    attach_arg='{{attach_sql}}'; \
+    duckdb_arg='{{duckdb_bin}}'; \
+    out_arg="${out_arg#out=}"; \
+    attach_arg="${attach_arg#attach_sql=}"; \
+    duckdb_arg="${duckdb_arg#duckdb_bin=}"; \
+    mkdir -p "$(dirname "${out_arg}")"; \
+    if [ -n "$attach_arg" ]; then \
+        python3 scripts/duckdb_engine_probe.py --duckdb-bin "$duckdb_arg" --out "$out_arg" --attach-sql "$attach_arg"; \
+    else \
+        python3 scripts/duckdb_engine_probe.py --duckdb-bin "$duckdb_arg" --out "$out_arg"; \
+    fi
+
+# Run the DuckDB-authored official DuckLake vertical-slice probe.
+duckdb-authority-probe workdir=".tmp/duckdb-authority" out=".tmp/duckdb-authority/README.md" manifest=".tmp/duckdb-authority/manifest.json" duckdb_bin=duckdb_bin:
+    @set -eu; \
+    workdir_arg='{{workdir}}'; \
+    out_arg='{{out}}'; \
+    manifest_arg='{{manifest}}'; \
+    duckdb_arg='{{duckdb_bin}}'; \
+    workdir_arg="${workdir_arg#workdir=}"; \
+    out_arg="${out_arg#out=}"; \
+    manifest_arg="${manifest_arg#manifest=}"; \
+    duckdb_arg="${duckdb_arg#duckdb_bin=}"; \
+    python3 scripts/duckdb_authority_probe.py --duckdb-bin "$duckdb_arg" --workdir "$workdir_arg" --out "$out_arg" --manifest "$manifest_arg"
+
 # Run the starter curated PostGIS function regress subset and print pass-rate evidence.
 postgis-regress:
     cargo test -p quackgis-server --test postgis_regress -- --nocapture
@@ -257,6 +307,11 @@ benchmark-profile-check:
     python3 scripts/tests/test_layoutbench_catalog_kind_probe.py
     python3 scripts/tests/test_layoutbench_catalog_report.py
     python3 scripts/tests/test_metrics_budget_check.py
+    python3 scripts/tests/test_duckdb_authority_probe.py
+    python3 scripts/tests/test_duckdb_engine_probe.py
+    python3 scripts/tests/test_duckdb_reference_evidence_check.py
+    python3 scripts/tests/test_multimodal_inventory_evidence_check.py
+    python3 scripts/tests/test_render_compat_report.py
     python3 scripts/tests/test_trend_metrics.py
 
 # Seed and run LayoutBench against an already-running local server.
@@ -308,6 +363,24 @@ orphan-inventory min_age_seconds="3600" show_paths="false":
     @extra=""; \
     if [ "{{show_paths}}" = "true" ]; then extra="--orphan-show-paths"; fi; \
     cargo run -p quackgis-server -- --catalog-path "{{catalog}}" --data-path "{{data}}" --orphan-inventory --orphan-min-age-seconds {{min_age_seconds}} $extra
+
+# Offline plan that maps old orphan candidates to a quarantine prefix outside live data.
+orphan-quarantine-plan prefix=".tmp/orphan-quarantine" min_age_seconds="3600" show_paths="false":
+    @extra=""; \
+    prefix_arg='{{prefix}}'; \
+    prefix_arg="${prefix_arg#prefix=}"; \
+    mkdir -p "$(dirname "$prefix_arg")"; \
+    if [ "{{show_paths}}" = "true" ]; then extra="--orphan-show-paths"; fi; \
+    cargo run -p quackgis-server -- --catalog-path "{{catalog}}" --data-path "{{data}}" --orphan-inventory --orphan-min-age-seconds {{min_age_seconds}} --orphan-quarantine-prefix "$prefix_arg" $extra
+
+# Offline apply of the quarantine plan: copy candidates outside live data, then remove still-orphaned sources.
+orphan-quarantine-apply prefix=".tmp/orphan-quarantine" min_age_seconds="3600" show_paths="false":
+    @extra=""; \
+    prefix_arg='{{prefix}}'; \
+    prefix_arg="${prefix_arg#prefix=}"; \
+    mkdir -p "$(dirname "$prefix_arg")"; \
+    if [ "{{show_paths}}" = "true" ]; then extra="--orphan-show-paths"; fi; \
+    cargo run -p quackgis-server -- --catalog-path "{{catalog}}" --data-path "{{data}}" --orphan-inventory --orphan-min-age-seconds {{min_age_seconds}} --orphan-quarantine-prefix "$prefix_arg" --orphan-quarantine-apply $extra
 
 # Connect with psql to a running dev server.
 psql:
@@ -523,11 +596,14 @@ kind-layoutbench-run-config:
 # Static pre-Kind validation for probe scripts and Kubernetes manifests.
 probe-static-check:
     mkdir -p .tmp/pycache
-    PYTHONPYCACHEPREFIX=.tmp/pycache python3 -m py_compile scripts/probe_static_check.py scripts/runtime_static_check.py scripts/trend_metrics.py scripts/metrics_budget_check.py scripts/layoutbench_catalog_report.py scripts/external_alpha_evidence_check.py deploy/kind/render_compat_report.py deploy/kind/check_linkerd_injected.py deploy/kind/probes/*.py
+    PYTHONPYCACHEPREFIX=.tmp/pycache python3 -m py_compile scripts/probe_static_check.py scripts/runtime_static_check.py scripts/trend_metrics.py scripts/metrics_budget_check.py scripts/layoutbench_catalog_report.py scripts/external_alpha_evidence_check.py scripts/duckdb_authority_probe.py scripts/duckdb_engine_probe.py scripts/duckdb_reference_evidence_check.py scripts/multimodal_inventory_evidence_check.py scripts/tests/test_duckdb_authority_probe.py scripts/tests/test_duckdb_engine_probe.py scripts/tests/test_duckdb_reference_evidence_check.py scripts/tests/test_multimodal_inventory_evidence_check.py scripts/tests/test_render_compat_report.py deploy/kind/render_compat_report.py deploy/kind/check_linkerd_injected.py deploy/kind/probes/*.py
     bash -n deploy/kind/probes/*.sh
     python3 scripts/probe_static_check.py deploy/kind
     python3 scripts/probe_static_check.py deploy/kubernetes
     python3 scripts/tests/test_external_alpha_evidence_check.py
+    python3 scripts/tests/test_duckdb_authority_probe.py
+    python3 scripts/tests/test_duckdb_engine_probe.py
+    python3 scripts/tests/test_duckdb_reference_evidence_check.py
 
 # Validate an external-service Alpha evidence manifest against collected metrics.
 external-alpha-evidence-check manifest=".tmp/external-alpha/manifest.json" metrics=".tmp/compatibility/metrics.json" out=".tmp/external-alpha/README.md":

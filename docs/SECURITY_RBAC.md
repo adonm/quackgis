@@ -2,8 +2,8 @@
 
 QuackGIS' current security surface is intentionally small: pgwire SCRAM password
 auth, optional pgwire TLS, a configured read/write user, an optional read-only
-user, an optional write-target allowlist for service identities, and fail-closed
-write authorization at the DuckLake SQL boundary. Full PostgreSQL RBAC is not
+user, optional read/write table allowlists for service identities, and fail-closed
+authorization at the DuckLake SQL boundary. Full PostgreSQL RBAC is not
 implemented.
 
 This document defines what must be true before widening the security claim.
@@ -14,12 +14,14 @@ This document defines what must be true before widening the security claim.
 |---|---|---|
 | Trust-mode local development | ✅ default preview | local smokes |
 | SCRAM-SHA-256 password auth | ✅ implemented | `password_auth_and_readonly_role_fail_closed` |
-| Read/write vs read-only roles | ✅ coarse role model | AST allowlist permits queries/session/read controls and denies all mutating or indeterminate statement variants before catalog refresh with SQLSTATE `42501`; denials increment `quackgis_write_denied_total` |
+| Read/write vs read-only roles | ✅ coarse role model | AST allowlist permits queries/session/read controls and denies all mutating or indeterminate statement variants before catalog refresh with SQLSTATE `42501`; denials increment `quackgis_write_denied_total` and emit redacted `quackgis_audit` authorization events |
 | Write service table allowlists | ✅ implemented for write-capable identities | `QUACKGIS_WRITE_ALLOWLIST` / `--write-allowlist` normalizes `table`, `public.table`, `main.table`, and `quackgis.main.table`; denied or indeterminate writes fail with SQLSTATE `42501`; `password_auth_write_allowlist_limits_readwrite_targets` |
+| Read service table allowlists | ✅ fail-closed table and metadata gate | `QUACKGIS_READ_ALLOWLIST` / `--read-allowlist` uses the same target normalization, denies non-allowlisted DuckLake reads, denies unfiltered `pg_catalog`/`information_schema` and DuckLake metadata UDTFs while restricted, reflects explicit-user SELECT privilege metadata, and increments `quackgis_read_denied_total`; `password_auth_read_allowlist_denies_tables_and_metadata` |
 | `pg_roles` and privilege helper metadata | ✅ compatibility surface | `wire_spatial` privilege/catalog tests |
 | pgwire TLS cert/key | ✅ configurable | ops docs and Kubernetes example |
 | Metrics endpoint | ✅ opt-in, no SQL/secrets | metrics tests, read-only denial counter test, and external profile scrape |
-| Read object/schema/table-level RBAC | ❌ not implemented | future trace-driven work |
+| Structured audit events | ✅ redacted key/value logs for auth failures, read/write authorization denials, and compaction maintenance success | `audit::tests::audit_rendering_is_key_value_and_sanitized` plus denial/maintenance call sites |
+| Full PostgreSQL-style object RBAC | ❌ not implemented | future trace-driven work |
 
 ## Trust boundaries
 
@@ -52,7 +54,7 @@ This document defines what must be true before widening the security claim.
 | Secret rotation | rolling pods pick up new catalog/object/pgwire secrets; old credentials no longer work |
 | TLS/mTLS enforcement | plaintext path is blocked by deployment/network policy when production profile requires TLS |
 | Catalog/object credential revoke | in-flight operations fail explicitly; no partial data claim without mutation drill evidence |
-| Unauthorized metadata/snapshot access | data, `pg_catalog`, metadata UDTFs, snapshot history, and maintenance diagnostics deny or filter the same object consistently |
+| Unauthorized metadata/snapshot access | with `QUACKGIS_READ_ALLOWLIST`, data reads of non-allowlisted tables plus unfiltered `pg_catalog`, `information_schema`, and DuckLake metadata UDTFs are denied with SQLSTATE `42501`; future filtered metadata views must preserve the same object decision |
 | Unauthorized protection/restore/cleanup | denied before catalog/object mutation and recorded as a redacted administrative denial |
 | Asset URI read | no signed URL, object credential, or unauthorized collection path is returned or logged |
 
@@ -70,9 +72,11 @@ order:
    deliberately reviewed;
 2. explicit service identities and schema/table allowlists for write-capable jobs
    are the first implemented object-level control (`QUACKGIS_WRITE_ALLOWLIST`);
-3. read allowlists when a client/API deployment requires tenant separation;
-4. `information_schema`/`pg_catalog`/DuckLake metadata filtered consistently with the data
-   authorization decision;
+3. read allowlists when a client/API deployment requires tenant separation; the
+   implemented first step is fail-closed table authorization plus denial of
+   unfiltered catalog metadata while the allowlist is restricted;
+4. filtered `information_schema`/`pg_catalog`/DuckLake metadata views that expose
+   only allowlisted objects without breaking maintained client traces;
 5. separate administrative capabilities for compaction, snapshot protection,
    restore, retention cleanup, and future CDC; and
 6. focused tests for every denied SQL shape: DDL, `COPY`, DML, compaction,
@@ -87,16 +91,19 @@ the same object decision used by ordinary table access.
 Current info logs record process-local query ids, protocol, pid, user, and
 statement kind. Pgwire errors record only a bounded error class and user rather
 than formatting the underlying error, which can contain SQL literals or storage
-paths. These lines intentionally omit SQL text and object paths. If audit logs are
-added later, they must be explicit opt-in, redacted by default, and covered by
-tests that prevent secrets/object-store credentials from appearing.
+paths. These lines intentionally omit SQL text and object paths.
 
-A production audit event should have a stable schema: event id/time, authenticated
-service identity, operation class, normalized schema/table or dataset id, outcome,
-reason code, snapshot before/after where applicable, and correlation id. It should
-record denied mutations, maintenance, protection/restore, retention cleanup, and
-administrative policy changes without recording SQL literals, WKB, signed asset
-URIs, passwords, tokens, or catalog/object credentials.
+QuackGIS also emits stable redacted `quackgis_audit` key/value lines for the
+implemented administrative/security boundaries: authentication failures,
+read/write authorization denials, and successful compaction maintenance. The
+schema includes event id, class, outcome, authenticated user, normalized target,
+reason/operation code, and small bounded fields such as statement kind or affected
+row count. The renderer sanitizes whitespace/control characters and does not
+accept SQL text, WKB, signed asset URIs, passwords, tokens, or catalog/object
+credentials.
+
+Future audit widening should add snapshot protection/restore, retention cleanup,
+and administrative policy changes behind the same redaction tests.
 
 ## Release claim rule
 

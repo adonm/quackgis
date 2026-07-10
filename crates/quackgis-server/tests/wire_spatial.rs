@@ -11,7 +11,7 @@ use datafusion::arrow::array::{BinaryArray, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion_ducklake::DuckLakeTableWriter;
-use quackgis_server::auth::{AuthConfig, parse_write_allowlist};
+use quackgis_server::auth::{AuthConfig, parse_read_allowlist, parse_write_allowlist};
 use quackgis_server::context::StoragePaths;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_postgres::NoTls;
@@ -516,6 +516,83 @@ async fn password_auth_write_allowlist_limits_readwrite_targets() {
         denied_after > denied_before + denied_writes.len() as u64,
         "write allowlist denials should increment metrics: before={denied_before} after={denied_after} denied_sql={}",
         denied_writes.len() + 1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn password_auth_read_allowlist_denies_tables_and_metadata() {
+    let auth = AuthConfig::password("postgres", "readwrite-secret", None::<(String, String)>)
+        .expect("auth config")
+        .with_read_allowlist(
+            parse_read_allowlist("public.auth_read_allowed").expect("read allowlist parses"),
+        );
+    let server = ServerHandle::start_with_auth(auth).await;
+    let (client, connection) = tokio_postgres::connect(
+        &format!("{} password=readwrite-secret", server.conn_str()),
+        NoTls,
+    )
+    .await
+    .expect("readwrite login");
+    let _conn = tokio::spawn(connection);
+
+    client
+        .batch_execute(
+            "CREATE TABLE public.auth_read_allowed (id INT, geom BINARY); \
+             INSERT INTO public.auth_read_allowed VALUES \
+             (1, X'010100000000000000000000000000000000000000'); \
+             CREATE TABLE public.auth_read_denied (id INT); \
+             INSERT INTO public.auth_read_denied VALUES (7);",
+        )
+        .await
+        .expect("seed read allowlist tables");
+
+    let allowed_count: i64 = client
+        .query_one("SELECT COUNT(*) FROM public.auth_read_allowed", &[])
+        .await
+        .expect("allowed table is readable")
+        .get(0);
+    assert_eq!(allowed_count, 1);
+
+    let privilege_metadata = client
+        .query_one(
+            "SELECT \
+               has_table_privilege('postgres', 'public.auth_read_allowed', 'SELECT'), \
+               has_table_privilege('postgres', 'public.auth_read_denied', 'SELECT'), \
+               has_column_privilege('postgres', 'public.auth_read_denied', 'id', 'SELECT')",
+            &[],
+        )
+        .await
+        .expect("privilege metadata reflects read allowlist");
+    assert!(privilege_metadata.get::<_, bool>(0));
+    assert!(!privilege_metadata.get::<_, bool>(1));
+    assert!(!privilege_metadata.get::<_, bool>(2));
+
+    let denied_before = quackgis_server::ducklake_sql::metrics_snapshot().reads_denied_total;
+    for (label, sql) in [
+        (
+            "denied table",
+            "SELECT COUNT(*) FROM public.auth_read_denied",
+        ),
+        ("pg_catalog", "SELECT COUNT(*) FROM pg_catalog.pg_class"),
+        (
+            "ducklake metadata",
+            "SELECT COUNT(*) FROM ducklake_table_info()",
+        ),
+    ] {
+        let denied = client
+            .simple_query(sql)
+            .await
+            .expect_err(&format!("read allowlist unexpectedly permitted {label}"));
+        assert_eq!(
+            denied.code(),
+            Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE),
+            "{label} must be denied by QuackGIS authorization: {denied}"
+        );
+    }
+    let denied_after = quackgis_server::ducklake_sql::metrics_snapshot().reads_denied_total;
+    assert!(
+        denied_after >= denied_before + 3,
+        "read denials should increment metrics: before={denied_before} after={denied_after}"
     );
 }
 

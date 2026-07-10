@@ -27,6 +27,9 @@ pub fn render_prometheus() -> String {
             "# HELP quackgis_write_denied_total Write or maintenance statements denied for read-only users.\n",
             "# TYPE quackgis_write_denied_total counter\n",
             "quackgis_write_denied_total {}\n",
+            "# HELP quackgis_read_denied_total Read statements denied by an explicit QuackGIS read allowlist.\n",
+            "# TYPE quackgis_read_denied_total counter\n",
+            "quackgis_read_denied_total {}\n",
             "# HELP quackgis_catalog_refresh_total DuckLake catalog refreshes registered in this process.\n",
             "# TYPE quackgis_catalog_refresh_total counter\n",
             "quackgis_catalog_refresh_total {}\n",
@@ -64,6 +67,7 @@ pub fn render_prometheus() -> String {
         metrics.queries_started_total,
         metrics.transaction_ids_allocated_total,
         metrics.writes_denied_total,
+        metrics.reads_denied_total,
         metrics.catalog_refresh_total,
         catalog_metrics::catalog_read_provider_calls_snapshot(),
         metrics.shared_catalog_read_refresh_total,
@@ -129,6 +133,7 @@ mod tests {
         let body = render_prometheus();
         assert!(body.contains("# TYPE quackgis_queries_started_total counter"));
         assert!(body.contains("quackgis_write_denied_total"));
+        assert!(body.contains("quackgis_read_denied_total"));
         assert!(body.contains("quackgis_catalog_refresh_total"));
         assert!(body.contains("# TYPE quackgis_catalog_read_provider_calls_total counter"));
         assert!(

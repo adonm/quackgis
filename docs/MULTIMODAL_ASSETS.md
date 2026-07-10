@@ -151,13 +151,24 @@ COG, COPC/LAZ, object-store, regional, restore, or format-decoding support. The
 first promoted real inventory still requires copied COG and COPC/LAZ collections
 through the remaining acceptance ladder.
 
+For copied-collection evidence packets, `just multimodal-inventory-evidence-check`
+validates a manifest before any roadmap promotion language is used. Promotion
+manifests must include the exact source SHA, storage profile, maintained vector
+gate evidence, one passing COG/raster collection, one passing COPC/LAZ point-cloud
+collection, non-secret stable object prefixes, row/object/byte counts, and
+checksum, CRS/epoch, footprint, lifecycle, restore, and workload evidence for each
+passing collection. Packets with skipped collections are accepted only as
+`multimodal_inventory_wiring`, not as promoted inventory evidence.
+
 ## Product acceptance ladder
 
 Each asset family advances independently:
 
 1. **Schema oracle:** deterministic footprint/layout/discovery checks (`sf0`).
 2. **Real inventory:** ingest a copied collection and validate identity, checksums,
-   CRS/epoch, footprint fidelity, missing/corrupt objects, and URI policy.
+   CRS/epoch, footprint fidelity, missing/corrupt objects, and URI policy. Use
+   `just multimodal-inventory-evidence-check` to fail closed on missing evidence
+   before writing promotion claims.
 3. **Workload gate:** coverage/gap, quality filter, change-candidate, provenance,
    and mixed vector/asset queries with exact-result and scan budgets.
 4. **Lifecycle gate:** replace/version/protect/release/restore an inventory while

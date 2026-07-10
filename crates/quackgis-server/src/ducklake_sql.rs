@@ -28,7 +28,7 @@ use datafusion::sql::sqlparser::ast::{
     AlterTable, AlterTableOperation, AssignmentTarget, ColumnDef, CopyLegacyOption, CopyOption,
     CopySource, CopyTarget, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident,
     ObjectName, ObjectNamePart, Query, SelectItem, SetExpr, Statement, TableFactor,
-    TableFunctionArgs, TableVersion, UnaryOperator, Value,
+    TableFunctionArgs, TableVersion, TableWithJoins, UnaryOperator, Value,
 };
 use datafusion_ducklake::{
     DeleteFileMutation, DuckLakeCatalog, DuckLakeTable, DuckLakeTableFile, DuckLakeTableWriter,
@@ -73,6 +73,7 @@ static TRANSACTION_COUNTER: AtomicU64 = AtomicU64::new(1);
 static QUERY_COUNTER: AtomicU64 = AtomicU64::new(1);
 static INTERNAL_CATALOG_COUNTER: AtomicU64 = AtomicU64::new(1);
 static WRITE_DENIED_COUNTER: AtomicU64 = AtomicU64::new(0);
+static READ_DENIED_COUNTER: AtomicU64 = AtomicU64::new(0);
 static CATALOG_REFRESH_COUNTER: AtomicU64 = AtomicU64::new(0);
 static SHARED_CATALOG_READ_REFRESH_COUNTER: AtomicU64 = AtomicU64::new(0);
 static SHARED_CATALOG_STRONG_REFRESH_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -658,7 +659,76 @@ impl DuckLakeSqlHook {
                 }
             },
         };
+        crate::audit::log_authorization_denied(
+            client_user(client),
+            statement_kind(statement),
+            &target_label,
+            match self.auth.role_for_client(client) {
+                AccessRole::ReadOnly => "read_only_role",
+                AccessRole::ReadWrite => "write_allowlist",
+            },
+        );
         Err(authorization_error(anyhow!("{message}")))
+    }
+
+    fn ensure_read_allowed<C>(&self, client: &C, statement: &Statement) -> PgWireResult<()>
+    where
+        C: ClientInfo + Send + Sync + ?Sized,
+    {
+        if !self.auth.read_policy_restricted() {
+            return Ok(());
+        }
+
+        let targets = read_targets_for_statement(statement);
+        if targets.sensitive_metadata {
+            return self.deny_read(
+                client,
+                statement,
+                "<metadata>",
+                "restricted read allowlist denies unfiltered catalog metadata surfaces",
+            );
+        }
+        for target in &targets.tables {
+            if !self.auth.allows_read(
+                client.metadata().get("user").map(String::as_str),
+                (target.schema.as_str(), target.table.as_str()),
+            ) {
+                return self.deny_read(
+                    client,
+                    statement,
+                    &format!("{}.{}", target.schema, target.table),
+                    "QuackGIS read allowlist does not permit this table",
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    fn deny_read<C>(
+        &self,
+        client: &C,
+        statement: &Statement,
+        target_label: &str,
+        reason: &str,
+    ) -> PgWireResult<()>
+    where
+        C: ClientInfo + Send + Sync + ?Sized,
+    {
+        let denied_total = READ_DENIED_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
+        log::warn!(
+            "quackgis_read_denied user={} statement_kind={} target={} denied_total={denied_total}",
+            client_user(client),
+            statement_kind(statement),
+            target_label,
+        );
+        crate::audit::log_authorization_denied(
+            client_user(client),
+            statement_kind(statement),
+            target_label,
+            "read_allowlist",
+        );
+        Err(authorization_error(anyhow!("{reason}: {target_label}")))
     }
 
     async fn snapshot_query_context(
@@ -788,6 +858,7 @@ pub struct DuckLakeSqlMetrics {
     pub queries_started_total: u64,
     pub transaction_ids_allocated_total: u64,
     pub writes_denied_total: u64,
+    pub reads_denied_total: u64,
     pub catalog_refresh_total: u64,
     pub shared_catalog_read_refresh_total: u64,
     pub shared_catalog_strong_refresh_total: u64,
@@ -807,6 +878,7 @@ pub fn metrics_snapshot() -> DuckLakeSqlMetrics {
             .load(Ordering::Relaxed)
             .saturating_sub(1),
         writes_denied_total: WRITE_DENIED_COUNTER.load(Ordering::Relaxed),
+        reads_denied_total: READ_DENIED_COUNTER.load(Ordering::Relaxed),
         catalog_refresh_total: CATALOG_REFRESH_COUNTER.load(Ordering::Relaxed),
         shared_catalog_read_refresh_total: SHARED_CATALOG_READ_REFRESH_COUNTER
             .load(Ordering::Relaxed),
@@ -901,6 +973,9 @@ impl QueryHook for DuckLakeSqlHook {
         if !statement_allowed_for_readonly(statement)
             && let Err(err) = self.ensure_write_allowed(client, statement)
         {
+            return Some(Err(err));
+        }
+        if let Err(err) = self.ensure_read_allowed(client, statement) {
             return Some(Err(err));
         }
         if let Err(err) = self
@@ -1022,6 +1097,9 @@ impl QueryHook for DuckLakeSqlHook {
         {
             return Some(Err(err));
         }
+        if let Err(err) = self.ensure_read_allowed(client, statement) {
+            return Some(Err(err));
+        }
         if let Err(err) = self
             .refresh_shared_catalog(statement, session_context)
             .await
@@ -1139,6 +1217,9 @@ impl QueryHook for DuckLakeSqlHook {
         if !statement_allowed_for_readonly(statement)
             && let Err(err) = self.ensure_write_allowed(client, statement)
         {
+            return Some(Err(err));
+        }
+        if let Err(err) = self.ensure_read_allowed(client, statement) {
             return Some(Err(err));
         }
         if let Err(err) = self
@@ -1718,6 +1799,158 @@ fn statement_allowed_for_readonly(statement: &Statement) -> bool {
         Statement::Copy { to, .. } => *to,
         _ => false,
     }
+}
+
+#[derive(Debug, Default, Clone)]
+struct ReadTargets {
+    tables: Vec<TableKey>,
+    sensitive_metadata: bool,
+}
+
+fn read_targets_for_statement(statement: &Statement) -> ReadTargets {
+    let mut targets = ReadTargets::default();
+    match statement {
+        Statement::Query(query) => collect_query_read_targets(query, &mut targets),
+        Statement::Explain { statement, .. } | Statement::Prepare { statement, .. } => {
+            targets = read_targets_for_statement(statement);
+        }
+        Statement::StartTransaction { statements, .. } => {
+            for statement in statements {
+                targets.extend(read_targets_for_statement(statement));
+            }
+        }
+        Statement::Copy {
+            source: CopySource::Table { table_name, .. },
+            to,
+            ..
+        } if *to => collect_object_name_read_target(table_name, &HashSet::new(), &mut targets),
+        _ => {}
+    }
+    targets.dedup();
+    targets
+}
+
+impl ReadTargets {
+    fn extend(&mut self, other: ReadTargets) {
+        self.tables.extend(other.tables);
+        self.sensitive_metadata |= other.sensitive_metadata;
+    }
+
+    fn dedup(&mut self) {
+        self.tables.sort_by(|left, right| {
+            left.schema
+                .cmp(&right.schema)
+                .then_with(|| left.table.cmp(&right.table))
+        });
+        self.tables.dedup();
+    }
+}
+
+fn collect_query_read_targets(query: &Query, targets: &mut ReadTargets) {
+    let mut cte_names = HashSet::new();
+    if let Some(with) = &query.with {
+        for cte in &with.cte_tables {
+            cte_names.insert(cte.alias.name.value.to_ascii_lowercase());
+            collect_query_read_targets(&cte.query, targets);
+        }
+    }
+    collect_set_expr_read_targets(query.body.as_ref(), &cte_names, targets);
+}
+
+fn collect_set_expr_read_targets(
+    expr: &SetExpr,
+    cte_names: &HashSet<String>,
+    targets: &mut ReadTargets,
+) {
+    match expr {
+        SetExpr::Select(select) => {
+            for table in &select.from {
+                collect_table_with_joins_read_targets(table, cte_names, targets);
+            }
+        }
+        SetExpr::Query(query) => collect_query_read_targets(query, targets),
+        SetExpr::SetOperation { left, right, .. } => {
+            collect_set_expr_read_targets(left, cte_names, targets);
+            collect_set_expr_read_targets(right, cte_names, targets);
+        }
+        _ => {}
+    }
+}
+
+fn collect_table_with_joins_read_targets(
+    table: &TableWithJoins,
+    cte_names: &HashSet<String>,
+    targets: &mut ReadTargets,
+) {
+    collect_table_factor_read_targets(&table.relation, cte_names, targets);
+    for join in &table.joins {
+        collect_table_factor_read_targets(&join.relation, cte_names, targets);
+    }
+}
+
+fn collect_table_factor_read_targets(
+    factor: &TableFactor,
+    cte_names: &HashSet<String>,
+    targets: &mut ReadTargets,
+) {
+    match factor {
+        TableFactor::Table { name, .. } => {
+            collect_object_name_read_target(name, cte_names, targets);
+        }
+        TableFactor::Function { name, .. } if is_sensitive_metadata_table_function(name) => {
+            targets.sensitive_metadata = true;
+        }
+        TableFactor::Derived { subquery, .. } => collect_query_read_targets(subquery, targets),
+        TableFactor::NestedJoin {
+            table_with_joins, ..
+        } => collect_table_with_joins_read_targets(table_with_joins, cte_names, targets),
+        _ => {}
+    }
+}
+
+fn collect_object_name_read_target(
+    name: &ObjectName,
+    cte_names: &HashSet<String>,
+    targets: &mut ReadTargets,
+) {
+    if object_name_is_cte(name, cte_names) {
+        return;
+    }
+    if object_name_is_catalog_metadata(name) || is_sensitive_metadata_table_function(name) {
+        targets.sensitive_metadata = true;
+        return;
+    }
+    if let Some((schema, table)) = table_name_parts(name) {
+        targets.tables.push(TableKey { schema, table });
+    }
+}
+
+fn object_name_is_cte(name: &ObjectName, cte_names: &HashSet<String>) -> bool {
+    matches!(
+        name.0.as_slice(),
+        [ObjectNamePart::Identifier(ident)] if cte_names.contains(&ident.value.to_ascii_lowercase())
+    )
+}
+
+fn object_name_is_catalog_metadata(name: &ObjectName) -> bool {
+    let Some(first) = name.0.first() else {
+        return false;
+    };
+    let first = first.to_string().trim_matches('"').to_ascii_lowercase();
+    matches!(first.as_str(), "pg_catalog" | "information_schema")
+}
+
+fn is_sensitive_metadata_table_function(name: &ObjectName) -> bool {
+    object_name_last(name).is_some_and(|name| {
+        matches!(
+            name.to_ascii_lowercase().as_str(),
+            "ducklake_snapshots"
+                | "ducklake_table_info"
+                | "ducklake_list_files"
+                | "ducklake_table_changes"
+                | "ducklake_table_deletions"
+        )
+    })
 }
 
 fn client_transaction_state<C>(client: &C) -> Arc<ClientTransactionState>
@@ -2758,6 +2991,13 @@ impl DuckLakeSqlHook {
             .compact_table(session_context, &target.schema, &target.table, target.scope)
             .await?;
         COMPACTION_COUNTER.fetch_add(1, Ordering::Relaxed);
+        crate::audit::log_maintenance(
+            client_user(client),
+            "compact_table",
+            &format!("{}.{}", target.schema, target.table),
+            crate::audit::AuditOutcome::Succeeded,
+            Some(rows),
+        );
         let tag = match target.scope {
             CompactScope::WholeTable => format!("COMPACT {rows}"),
             CompactScope::LayoutBucket { .. } => format!("COMPACT BUCKET {rows}"),
@@ -5000,6 +5240,33 @@ mod tests {
                 "expected mutating or indeterminate statement to be denied: {sql}"
             );
         }
+    }
+
+    #[test]
+    fn read_allowlist_target_extraction_handles_tables_ctes_and_metadata() {
+        let targets = read_targets_for_statement(&parse_statement(
+            "WITH local AS (SELECT * FROM public.allowed) \
+             SELECT * FROM local JOIN quackgis.main.other ON local.id = other.id",
+        ));
+        assert_eq!(
+            targets.tables,
+            vec![
+                TableKey {
+                    schema: "main".to_string(),
+                    table: "allowed".to_string(),
+                },
+                TableKey {
+                    schema: "main".to_string(),
+                    table: "other".to_string(),
+                },
+            ]
+        );
+        assert!(!targets.sensitive_metadata);
+
+        let metadata = read_targets_for_statement(&parse_statement(
+            "SELECT * FROM pg_catalog.pg_class UNION ALL SELECT * FROM ducklake_list_files()",
+        ));
+        assert!(metadata.sensitive_metadata);
     }
 
     #[test]

@@ -11,7 +11,7 @@ use datafusion_postgres::ServerOptions;
 use tokio::net::TcpListener;
 use tokio::signal;
 
-use quackgis_server::auth::{AuthConfig, AuthMode, parse_write_allowlist};
+use quackgis_server::auth::{AuthConfig, AuthMode, parse_read_allowlist, parse_write_allowlist};
 use quackgis_server::cli::Cli;
 
 #[tokio::main(flavor = "multi_thread")]
@@ -48,6 +48,9 @@ async fn main() -> anyhow::Result<()> {
     if let Some(raw_allowlist) = cli.write_allowlist.as_deref() {
         auth = auth.with_readwrite_allowlist(parse_write_allowlist(raw_allowlist)?);
     }
+    if let Some(raw_allowlist) = cli.read_allowlist.as_deref() {
+        auth = auth.with_read_allowlist(parse_read_allowlist(raw_allowlist)?);
+    }
 
     let s3 = quackgis_server::context::S3StorageOptions::new(
         cli.s3_endpoint.clone(),
@@ -78,15 +81,37 @@ async fn main() -> anyhow::Result<()> {
         let cutoff = Utc::now()
             .checked_sub_signed(Duration::seconds(age_seconds))
             .ok_or_else(|| anyhow::anyhow!("orphan inventory cutoff is out of range"))?;
-        let candidates = storage_paths.orphan_candidates_before(cutoff).await?;
-        println!(
-            "quackgis_orphan_inventory dry_run=true min_age_seconds={} candidates={}",
-            cli.orphan_min_age_seconds,
-            candidates.len()
-        );
-        if cli.orphan_show_paths {
-            for path in candidates {
-                println!("orphan_candidate path={path}");
+        if let Some(prefix) = cli.orphan_quarantine_prefix.as_deref() {
+            let report = storage_paths
+                .quarantine_orphan_candidates_before(cutoff, prefix, cli.orphan_quarantine_apply)
+                .await?;
+            println!(
+                "quackgis_orphan_quarantine dry_run={} min_age_seconds={} candidates={} copied={} deleted={}",
+                report.dry_run,
+                cli.orphan_min_age_seconds,
+                report.candidates.len(),
+                report.copied_count,
+                report.deleted_count
+            );
+            if cli.orphan_show_paths {
+                for entry in report.candidates {
+                    println!(
+                        "orphan_quarantine_candidate source={} quarantine={}",
+                        entry.source, entry.quarantine
+                    );
+                }
+            }
+        } else {
+            let candidates = storage_paths.orphan_candidates_before(cutoff).await?;
+            println!(
+                "quackgis_orphan_inventory dry_run=true min_age_seconds={} candidates={}",
+                cli.orphan_min_age_seconds,
+                candidates.len()
+            );
+            if cli.orphan_show_paths {
+                for path in candidates {
+                    println!("orphan_candidate path={path}");
+                }
             }
         }
         return Ok(());

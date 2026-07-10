@@ -65,7 +65,7 @@ inventory snapshot before/after mutation or cleanup drills.
 | 5. Credential rotation | rotate PostgreSQL and object-store credentials, roll QuackGIS pods, rerun storage smoke | old pods fail/roll cleanly, new pods pass smoke with no committed data loss |
 | 6. Catalog restart | restart/fail over PostgreSQL during a no-write window, then during retry-safe writes | reads recover; failed writes are explicit failures or safe retries, not partial commits |
 | 7. Object-store latency/throttling | provider throttle/latency controls or network policy equivalent | probes fail closed or stay within documented budgets; no silent wrong answers |
-| 8. Failed-writer cleanup | abort a COPY/DML/compaction job after object writes but before/around metadata commit, then inspect prefix | no partial catalog visibility; suspected orphans are quarantined only after restore point |
+| 8. Failed-writer cleanup | abort a COPY/DML/compaction job after object writes but before/around metadata commit, then inspect prefix; use the offline quarantine plan/apply shape against a restored or quiesced prefix | no partial catalog visibility; suspected orphans are copied outside live data and source removal is rechecked only after a restore point |
 | 9. Catalog refresh visibility | vary `QUACKGIS_SHARED_CATALOG_REFRESH_MS` and read from multiple pods after writes | documented staleness behavior matches `docs/OPERATIONS.md` |
 
 Use [MUTATION_FAILURE_DRILLS.md](./MUTATION_FAILURE_DRILLS.md) for the detailed
@@ -83,6 +83,17 @@ An external Alpha evidence packet is credible when it includes:
 - `.tmp/compatibility/README.md`, `metrics.json`, and `metrics-dashboard.md`;
 - explicit pass/fail notes for each failure drill above;
 - backup/restore proof from an isolated restored catalog + object prefix;
+- measured restore packet fields: `rpo_seconds`, `rto_seconds`, restored catalog,
+  restored object prefix, and read-smoke evidence when `backup_restore` passes;
+- failed-writer cleanup packet fields: orphan candidate count, quarantined count,
+  quarantine prefix, representative reads, and optional permanent deletion count
+  when `failed_writer_cleanup` passes;
+- explicit PostgreSQL catalog interoperability result: either
+  `standard_ducklake_readable` with the standard reader/version/evidence
+  (prefer DuckDB with the official DuckLake extension, via CLI or ADBC), or
+  `quackgis_multicatalog_non_standard` with the failing/unsupported reference
+  reader evidence and `migration_implication` export/migration note. When DuckDB
+  is the reader, validate the packet with `just duckdb-reference-evidence-check`;
 - known deviations from the Kind profile.
 
 Before promoting a run, write an external Alpha packet manifest and validate it
@@ -96,10 +107,14 @@ just external-alpha-evidence-check \
 ```
 
 The checker requires source SHA, image digest, provider/profile metadata,
-dataset/object counts, redacted commands, artifact paths, and one status/evidence
-entry for every drill in this runbook. A packet with any skipped drill must claim
-`external_wiring_smoke`; `external_alpha_promotion` is accepted only when every
-drill passes and the `external_lake_probe` metrics check passed for the same SHA.
+dataset/object counts, redacted commands, artifact paths, a
+`catalog_interoperability` result, one status/evidence entry for every drill in
+this runbook, restore RPO/RTO fields when backup/restore passes, and quarantine
+count/prefix/read evidence when failed-writer cleanup passes. A packet with any
+skipped drill must claim `external_wiring_smoke`; `external_alpha_promotion` is
+accepted only when every drill passes, the PostgreSQL catalog backend has an
+explicit standard/non-standard interoperability result and migration implication,
+and the `external_lake_probe` metrics check passed for the same SHA.
 
 If any drill is skipped, label the resulting evidence as an **external wiring
 smoke**, not as external-service Alpha promotion evidence.
@@ -112,6 +127,10 @@ smoke**, not as external-service Alpha promotion evidence.
 - Never delete suspected live-prefix orphans directly. Quarantine outside the live
   prefix after a restore point, rerun representative reads, and only then remove
   the quarantined objects under the platform team's retention policy.
+- `just orphan-quarantine-plan` and `just orphan-quarantine-apply` provide the
+  local operator shape. External runs must still quiesce writers and capture a
+  matched catalog/object restore point before applying the same shape to real
+  services.
 
 ## What remains future work
 

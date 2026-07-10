@@ -84,6 +84,31 @@ class TrendMetricsTests(unittest.TestCase):
         latest = TREND.latest_by_check(rows)
         self.assertEqual(latest[0]["github_run_id"], "10")
 
+    def test_osm_real_data_columns_survive_dashboard(self) -> None:
+        artifact = {
+            "run": {"report_kind": "compatibility", "github_sha": "abc123"},
+            "summary": {"passed": 1, "failed": 0, "not_run": 0},
+            "checks": {
+                "osm_postgis_parity": {
+                    "label": "OSM",
+                    "status": "pass",
+                    "metrics": {
+                        "quackgis_points_named_count": 50,
+                        "qgis_points_feature_count": 50,
+                        "mvt_points_tile_bytes": 1000,
+                        "mvt_points_attribute_ok": True,
+                    },
+                }
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "metrics.json"
+            path.write_text(json.dumps(artifact), encoding="utf-8")
+            rows = TREND.rows_for_metrics(path)
+        self.assertEqual(rows[0]["quackgis_points_named_count"], 50)
+        self.assertTrue(rows[0]["mvt_points_attribute_ok"])
+        self.assertIn("Client real-data counts", TREND.render_dashboard(rows))
+
 
 if __name__ == "__main__":
     unittest.main()

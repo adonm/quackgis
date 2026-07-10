@@ -15,17 +15,20 @@ design documents, and runbooks are prerequisites—not completion evidence.
 ## Mission
 
 **QuackGIS is the PostGIS-compatible SQL and control plane for an open spatial
-lakehouse.** One Rust pgwire service should let platform teams keep city,
-regional, and national spatial data in DuckLake/Parquet while serving familiar
-QGIS, GeoServer, Martin, GDAL/OGR, PostgreSQL-driver, API, and BI workflows through
-DataFusion + SedonaDB.
+lakehouse.** Because QuackGIS has not released, the roadmap now pivots directly to
+DuckDB as the query/storage authority and official DuckLake as the durable storage
+contract. The Rust pgwire service should let platform teams keep city, regional,
+and national spatial data in DuckLake/Parquet while familiar QGIS, GeoServer,
+Martin, GDAL/OGR, PostgreSQL-driver, API, and BI workflows connect through the
+QuackGIS compatibility edge.
 
 The goal is not a smaller PostgreSQL. It is a horizontally readable, operationally
 recoverable spatial data plane where:
 
 - object-store data feels like PostGIS to existing clients;
-- vectorized SQL performs selective spatial reads and broad spatial OLAP;
-- parallel ingest and edit writers publish coherent DuckLake snapshots;
+- DuckDB performs selective spatial reads, broad OLAP, and DuckLake writes through
+  upstream-maintained primitives;
+- parallel ingest and edit writers publish coherent official DuckLake snapshots;
 - datasets can be inspected, protected, released, restored, and upgraded;
 - raster, point-cloud, 3D, CAD/BIM, imagery, and reality-capture collections are
   queryable through trustworthy footprint, provenance, and sidecar indexes; and
@@ -66,10 +69,12 @@ trillion-class index/catalog limits without regressing simple-feature clients.
 ## Non-negotiable product invariants
 
 1. **PostGIS is the interface, not the engine.** PostgreSQL-compatible behavior is
-   implemented only where maintained workflows need it; DataFusion, SedonaDB, and
-   DuckLake remain the query/spatial/storage plane.
+   implemented only where maintained workflows need it; DuckDB + official DuckLake
+   become the canonical query/storage plane unless a measured workload forces a
+   narrower auxiliary engine.
 2. **Exact spatial results are authoritative.** Layout and candidate filters may
-   over-select but may never replace the original SedonaDB predicate.
+   over-select but may never replace the exact DuckDB spatial/PostGIS-compatible
+   predicate used for the maintained workload.
 3. **A mutation publishes once.** A SQL mutation or maintenance operation may
    prewrite orphan candidates, but partial catalog visibility is never acceptable.
 4. **Claims name their evidence ring.** Local, Kind, managed-service, real-data,
@@ -149,8 +154,9 @@ Deliver:
 - restore a matched catalog/object-prefix backup into isolation and record RPO/RTO;
 - inventory failed prewrites and prove cleanup/quarantine cannot delete live data;
 - record whether the PostgreSQL catalog backend is readable by a standard DuckLake
-  implementation. Its current library-specific multicatalog layout must be called
-  non-standard until that result changes; and
+  implementation. DuckDB with the official DuckLake extension is the preferred
+  named reference reader, driven through CLI or ADBC. The current library-specific
+  multicatalog layout must be called non-standard until that result changes; and
 - attach metrics, logs, configuration, and a provider/profile manifest to release
   evidence.
 
@@ -320,24 +326,31 @@ correctness regression.
 
 ## Immediate execution queue
 
-1. Run the first managed PostgreSQL/object-storage drill and publish its exact
-   standard/non-standard catalog interoperability result.
-2. Promote the existing SQL-surface probes into named client containers over one
+1. Complete the DuckDB storage-authority vertical slice and treat DuckDB-authored
+   official DuckLake as the canonical new storage path.
+2. Route the smallest pgwire/PostGIS workflow through DuckDB-backed storage:
+   `CREATE TABLE`, `COPY`, `SELECT`, `UPDATE`, `DELETE`, restart, and reference
+   readability.
+3. Run the first managed PostgreSQL/object-storage drill against the DuckDB-authored
+   path and publish its standard/non-standard catalog interoperability result.
+4. Promote the existing SQL-surface probes into named client containers over one
    copied city dataset, including real Martin attributes and GeoServer.
-3. Promote the deterministic local process-kill mutation matrix and its real
-   prewrite inventory evidence to Kind and managed services; add restore-point-
-   backed quarantine/deletion proof without claiming generic replay idempotency.
-4. Promote the implemented durable family-identity contract to PostgreSQL/S3 and
+5. Promote the deterministic local process-kill mutation matrix, real prewrite
+   inventory evidence, and explicit offline quarantine flow to Kind and managed
+   services; add restore-point-backed permanent-deletion proof without claiming
+   generic replay idempotency.
+6. Promote the implemented durable family-identity contract to PostgreSQL/S3 and
    reference-reader evidence; decide subtype/SRID/dimension and old-blob migration
    without changing WKB/EWKB or maintained client behavior.
-5. Execute `layoutbench-regional-r100m-v1` with the bounded Kind phase runner and
+7. Execute `layoutbench-regional-r100m-v1` with the bounded Kind phase runner and
    publish the first exact-process catalog provider-call measurements against its
    committed budgets; the process counter, snapshot-fresh 7-call execution path,
    profile/report contract, runner integration, and unambiguous naming gate are
    implemented, but wire-level roundtrips and 100M evidence remain open.
-6. Promote the implemented valid-raster/point-cloud local companion gate to copied
+8. Promote the implemented valid-raster/point-cloud local companion gate to copied
    COG and COPC/LAZ inventories with object-store URI lifecycle, restore, and
-   workload evidence before expanding asset families.
+   workload evidence packets that pass the copied-inventory manifest checker before
+   expanding asset families.
 
 ## Risk register
 
