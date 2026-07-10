@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -33,6 +35,30 @@ BUDGET_PAIRS = [
     ("native_update_appended_files", "native_update_appended_files_budget"),
     ("native_compact_appended_files", "native_compact_appended_files_budget"),
     ("native_mutation_aborts", "native_mutation_aborts_budget"),
+    ("catalog_roundtrips", "catalog_roundtrips_budget"),
+    ("catalog_read_roundtrips", "catalog_read_roundtrips_budget"),
+    (
+        "catalog_read_provider_calls",
+        "catalog_read_provider_calls_budget",
+    ),
+    (
+        "warm_public_catalog_read_provider_calls",
+        "warm_public_catalog_read_provider_calls_budget",
+    ),
+    (
+        "catalog_read_provider_calls_per_query_max",
+        "catalog_read_provider_calls_per_query_max_budget",
+    ),
+    (
+        "cold_public_catalog_read_provider_calls",
+        "cold_public_catalog_read_provider_calls_budget",
+    ),
+    (
+        "direct_internal_catalog_read_provider_calls",
+        "direct_internal_catalog_read_provider_calls_budget",
+    ),
+    ("catalog_write_roundtrips", "catalog_write_roundtrips_budget"),
+    ("catalog_refreshes", "catalog_refreshes_budget"),
 ]
 
 MINIMUM_BUDGET_PAIRS = [
@@ -53,16 +79,22 @@ def discover_metrics(paths: list[Path]) -> list[Path]:
     return sorted(dict.fromkeys(metrics))
 
 
-def number(value: Any) -> float | None:
+def number(value: Any) -> int | float | None:
     if isinstance(value, bool) or value is None or value == "":
         return None
-    if isinstance(value, (int, float)):
-        return float(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
     if isinstance(value, str):
+        text = value.strip()
+        if re.fullmatch(r"[+-]?\d+", text):
+            return int(text)
         try:
-            return float(value)
+            parsed = float(text)
         except ValueError:
             return None
+        return parsed if math.isfinite(parsed) else None
     return None
 
 
@@ -99,9 +131,14 @@ def check_metrics(
         for metric_key, budget_key in BUDGET_PAIRS:
             metric = number(metrics.get(metric_key))
             budget = number(metrics.get(budget_key))
-            if budget is None:
+            if budget_key not in metrics or metrics.get(budget_key) in (None, ""):
                 continue
             budget_assertions += 1
+            if budget is None:
+                errors.append(
+                    f"{path}: checks.{check_id}.{budget_key} is non-numeric or non-finite"
+                )
+                continue
             if metric is None:
                 errors.append(
                     f"{path}: checks.{check_id}.{budget_key} is set but {metric_key} is missing/non-numeric"
@@ -114,9 +151,14 @@ def check_metrics(
         for metric_key, budget_key in MINIMUM_BUDGET_PAIRS:
             metric = number(metrics.get(metric_key))
             budget = number(metrics.get(budget_key))
-            if budget is None:
+            if budget_key not in metrics or metrics.get(budget_key) in (None, ""):
                 continue
             budget_assertions += 1
+            if budget is None:
+                errors.append(
+                    f"{path}: checks.{check_id}.{budget_key} is non-numeric or non-finite"
+                )
+                continue
             if metric is None:
                 errors.append(
                     f"{path}: checks.{check_id}.{budget_key} is set but {metric_key} is missing/non-numeric"

@@ -18,7 +18,7 @@ endless local refinement to postpone them.
 | Local scale lever | `just kind-qps-deep-smoke` | tunable million-row-class generated QPS workload across multiple lake pods |
 | Layout/pruning on lake profile | `just kind-lake-layoutbench-smoke` | LayoutBench through PostgreSQL catalog + S3-compatible data path |
 | Real-data smoke | `just kind-osm-postgis-parity` | Monaco OSM via PostGIS reference into QuackGIS, OGR/QGIS copy/read/render assertions |
-| Benchmark artifacts | `Benchmark ladder` workflow, local `just metrics-dashboard`, and `just metrics-budget-check` | QPS/p95/p99, scan budgets, candidate narrowing, dashboard artifacts, and fail-closed budget checks |
+| Benchmark artifacts | `Benchmark ladder` workflow, `just kind-layoutbench-catalog-measure`, local `just metrics-dashboard`, and `just metrics-budget-check` | QPS/p95/p99, scan budgets, candidate narrowing, process-local catalog provider-call budgets, dashboard artifacts, and fail-closed budget checks |
 | API/client surface | `just api-client-local-smoke`, `just kind-api-client-probe` | psycopg-style params, SQLAlchemy/GeoPandas-style catalog/WKB reads, pg_featureserv-style bbox filters, BI aggregates, and MVT bytes before named client containers |
 | Local ops/static gates | `just check-fast`, `just probe-static-check`, `just runtime-static-check` | fast Rust correctness, manifest/probe validity, native-free runtime image |
 
@@ -37,6 +37,7 @@ just kind-mtls-smoke
 just kind-qps-mtls-smoke
 just kind-qps-deep-smoke
 just kind-lake-layoutbench-smoke
+just kind-layoutbench-catalog-measure   # after exact 100M seed, manual/long-running
 just kind-osm-postgis-parity
 just kind-compat-report
 just metrics-dashboard path=.tmp/compatibility out=.tmp/local-kind-linkerd-dashboard.md

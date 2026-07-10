@@ -16,7 +16,7 @@ use datafusion::logical_expr::{
 use datafusion::physical_plan::ColumnarValue;
 use datafusion::prelude::SessionContext;
 
-use crate::auth::{AccessRole, AuthConfig, AuthMode};
+use crate::auth::{AccessRole, AuthConfig, AuthMode, WriteTarget, parse_write_target};
 
 const POSTGIS_VERSION: &str = "3.4.0";
 const POSTGIS_VERSION_FULL: &str = "POSTGIS=\"3.4.0\" QUACKGIS";
@@ -31,7 +31,6 @@ pub fn register_postgis_compat(ctx: &SessionContext, auth: &AuthConfig) -> DFRes
     register_find_srid_udf(ctx)?;
     register_regexp_matches_udf(ctx)?;
     register_jsonb_object_agg(ctx)?;
-    register_geography_columns(ctx)?;
     register_spatial_ref_sys(ctx)?;
     Ok(())
 }
@@ -130,7 +129,14 @@ struct PrivilegeUdf {
     name: String,
     object: PrivilegeObject,
     password_mode: bool,
-    roles: Vec<(String, AccessRole)>,
+    roles: Vec<PrivilegeRole>,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct PrivilegeRole {
+    name: String,
+    role: AccessRole,
+    write_targets: Option<Vec<WriteTarget>>,
 }
 
 fn make_privilege_udf(name: &str, object: PrivilegeObject, auth: &AuthConfig) -> ScalarUDF {
@@ -151,9 +157,13 @@ fn make_privilege_udf(name: &str, object: PrivilegeObject, auth: &AuthConfig) ->
     };
     let mut roles = auth
         .users()
-        .map(|(name, user)| (name.to_string(), user.role))
+        .map(|(name, user)| PrivilegeRole {
+            name: name.to_string(),
+            role: user.role,
+            write_targets: user.write_targets().map(<[_]>::to_vec),
+        })
         .collect::<Vec<_>>();
-    roles.sort_by(|(left, _), (right, _)| left.cmp(right));
+    roles.sort_by(|left, right| left.name.cmp(&right.name));
     PrivilegeUdf {
         signature: Signature::one_of(signatures, Volatility::Stable),
         name: name.to_string(),
@@ -169,13 +179,18 @@ impl PrivilegeUdf {
         ScalarUDF::new_from_impl(self)
     }
 
-    fn role_for_explicit_user(&self, username: &str) -> Option<AccessRole> {
+    fn role_for_explicit_user(&self, username: &str) -> Option<&PrivilegeRole> {
         self.roles
             .iter()
-            .find_map(|(candidate, role)| (candidate == username).then_some(*role))
+            .find(|candidate| candidate.name == username)
     }
 
-    fn evaluate(&self, explicit_user: Option<&str>, privilege: Option<&str>) -> Option<bool> {
+    fn evaluate(
+        &self,
+        explicit_user: Option<&str>,
+        object_name: Option<&str>,
+        privilege: Option<&str>,
+    ) -> Option<bool> {
         let Some(privilege) = privilege else {
             return Some(false);
         };
@@ -190,21 +205,44 @@ impl PrivilegeUdf {
         let Some(role) = explicit_user.and_then(|user| self.role_for_explicit_user(user)) else {
             return Some(false);
         };
-        Some(match role {
-            AccessRole::ReadWrite => true,
+        Some(match role.role {
+            AccessRole::ReadWrite => self.readwrite_allows(role, object_name, privilege),
             AccessRole::ReadOnly => self.readonly_allows(privilege),
         })
+    }
+
+    fn readwrite_allows(
+        &self,
+        role: &PrivilegeRole,
+        object_name: Option<&str>,
+        privilege: &str,
+    ) -> bool {
+        let permissions = privilege_parts(privilege);
+        if permissions.is_empty() || permissions.iter().any(|permission| permission == "GRANT") {
+            return false;
+        }
+        if permissions
+            .iter()
+            .all(|permission| matches!(permission.as_str(), "SELECT" | "USAGE" | "CONNECT"))
+        {
+            return true;
+        }
+        let Some(write_targets) = &role.write_targets else {
+            return true;
+        };
+        match self.object {
+            PrivilegeObject::Table | PrivilegeObject::Column => object_name
+                .and_then(|name| parse_write_target(name).ok())
+                .is_some_and(|target| write_targets.iter().any(|allowed| allowed == &target)),
+            PrivilegeObject::Database | PrivilegeObject::Schema => false,
+        }
     }
 
     fn readonly_allows(&self, privilege: &str) -> bool {
         if privilege.to_ascii_uppercase().contains("GRANT") {
             return false;
         }
-        let permissions = privilege
-            .split(|ch: char| ch == ',' || ch.is_whitespace())
-            .filter(|part| !part.is_empty())
-            .map(str::to_ascii_uppercase)
-            .collect::<Vec<_>>();
+        let permissions = privilege_parts(privilege);
         if permissions.is_empty() {
             return false;
         }
@@ -217,6 +255,14 @@ impl PrivilegeUdf {
             }
         })
     }
+}
+
+fn privilege_parts(privilege: &str) -> Vec<String> {
+    privilege
+        .split(|ch: char| ch == ',' || ch.is_whitespace())
+        .filter(|part| !part.is_empty())
+        .map(str::to_ascii_uppercase)
+        .collect()
 }
 
 impl ScalarUDFImpl for PrivilegeUdf {
@@ -236,12 +282,14 @@ impl ScalarUDFImpl for PrivilegeUdf {
         let args = ColumnarValue::values_to_arrays(&args.args)?;
         let len = args.first().map(|arg| arg.len()).unwrap_or(1);
         let explicit_user_idx = explicit_user_index(self.object, args.len());
+        let object_idx = privilege_object_index(self.object, args.len());
         let privilege_idx = args.len().saturating_sub(1);
         let mut builder = BooleanArray::builder(len);
         for row in 0..len {
             let explicit_user = explicit_user_idx.and_then(|idx| string_at(&args[idx], row));
+            let object_name = object_idx.and_then(|idx| string_at(&args[idx], row));
             let privilege = string_at(&args[privilege_idx], row);
-            builder.append_option(self.evaluate(explicit_user, privilege));
+            builder.append_option(self.evaluate(explicit_user, object_name, privilege));
         }
         Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
@@ -253,6 +301,14 @@ fn explicit_user_index(object: PrivilegeObject, arg_count: usize) -> Option<usiz
         (PrivilegeObject::Database | PrivilegeObject::Schema | PrivilegeObject::Table, 3) => {
             Some(0)
         }
+        _ => None,
+    }
+}
+
+fn privilege_object_index(object: PrivilegeObject, arg_count: usize) -> Option<usize> {
+    match (object, arg_count) {
+        (PrivilegeObject::Column, 3) | (PrivilegeObject::Table, 2) => Some(0),
+        (PrivilegeObject::Column, 4) | (PrivilegeObject::Table, 3) => Some(1),
         _ => None,
     }
 }
@@ -625,10 +681,8 @@ pub fn geometry_columns_schema() -> SchemaRef {
     ]))
 }
 
-fn register_geography_columns(ctx: &SessionContext) -> DFResult<()> {
-    // Martin's discovery query UNIONs geometry_columns and geography_columns.
-    // QuackGIS currently exposes geometry only, but the table must exist.
-    let schema = Arc::new(Schema::new(vec![
+pub fn geography_columns_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
         Field::new("f_table_catalog", DataType::Utf8, true),
         Field::new("f_table_schema", DataType::Utf8, true),
         Field::new("f_table_name", DataType::Utf8, true),
@@ -636,21 +690,7 @@ fn register_geography_columns(ctx: &SessionContext) -> DFResult<()> {
         Field::new("coord_dimension", DataType::Int32, true),
         Field::new("srid", DataType::Int32, true),
         Field::new("type", DataType::Utf8, true),
-    ]));
-    let batch = RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(StringArray::from(Vec::<Option<&str>>::new())),
-            Arc::new(StringArray::from(Vec::<Option<&str>>::new())),
-            Arc::new(StringArray::from(Vec::<Option<&str>>::new())),
-            Arc::new(StringArray::from(Vec::<Option<&str>>::new())),
-            Arc::new(Int32Array::from(Vec::<Option<i32>>::new())),
-            Arc::new(Int32Array::from(Vec::<Option<i32>>::new())),
-            Arc::new(StringArray::from(Vec::<Option<&str>>::new())),
-        ],
-    )?;
-    ctx.register_batch("geography_columns", batch)?;
-    Ok(())
+    ]))
 }
 
 fn register_spatial_ref_sys(ctx: &SessionContext) -> DFResult<()> {

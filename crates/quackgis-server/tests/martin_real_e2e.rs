@@ -14,6 +14,12 @@ fn port_from_conn_str(s: &str) -> u16 {
         .unwrap()
 }
 
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
 async fn free_port() -> u16 {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -95,9 +101,10 @@ postgres:
       table: points
       srid: 3857
       geometry_column: geom
-      geometry_type: POINT
+      geometry_type: GEOMETRY
       bounds: [-180.0, -85.0511, 180.0, 85.0511]
-      properties: {{}}
+      properties:
+        name: text
 "#,
         ),
     )
@@ -186,4 +193,12 @@ postgres:
         panic!("no tile endpoint returned 200; stdout={stdout}; stderr={stderr}");
     };
     println!("tile path {path}, {} bytes", body.len());
+    for expected in [b"name".as_slice(), b"origin".as_slice()] {
+        assert!(
+            contains_bytes(&body, expected),
+            "real Martin tile missing configured attribute token {expected:?}; \
+             path={path}, bytes={}, stdout={stdout}, stderr={stderr}",
+            body.len()
+        );
+    }
 }

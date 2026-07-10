@@ -278,6 +278,8 @@ async fn layoutbench_sf0_oracle_counts_are_stable() {
         summary,
         "layoutbench_sf0 aerial=18 cad=12 assets=18 control=7"
     );
+    assert_parameterized_selective_prepare_observes_new_snapshot(&client).await;
+    assert_regular_prepare_observes_new_snapshot(&client).await;
 }
 
 async fn connect() -> (ServerHandle, tokio_postgres::Client) {
@@ -516,6 +518,80 @@ async fn assert_public_exact_query_is_rewritten(client: &tokio_postgres::Client)
         .get(0);
     assert_eq!(public_exact, internal_prefiltered);
     assert_eq!(simple_public_exact, internal_prefiltered);
+}
+
+async fn assert_parameterized_selective_prepare_observes_new_snapshot(
+    client: &tokio_postgres::Client,
+) {
+    let statement = client
+        .prepare(
+            "SELECT COUNT(*) FROM layoutbench_aerial_frames \
+             WHERE mission = $1 \
+               AND ST_Intersects(\
+                 ST_GeomFromWKB(geom), \
+                 ST_GeomFromWKB(ST_MakeEnvelope(0, 0, 500, 500, 3857)))",
+        )
+        .await
+        .expect("prepare parameterized selective query");
+    let mission = "prepared_snapshot_probe";
+    let before: i64 = client
+        .query_one(&statement, &[&mission])
+        .await
+        .expect("execute selective query before append")
+        .get(0);
+    assert_eq!(before, 0);
+
+    client
+        .batch_execute(&format!(
+            "INSERT INTO layoutbench_aerial_frames VALUES \
+             (999999, '{mission}', 1, 1, 1.0, 1.0, {}, 10.0, 10.0, 10.0, 10.0)",
+            point_wkb_sql(10.0, 10.0)
+        ))
+        .await
+        .expect("append row after selective prepare");
+
+    let after: i64 = client
+        .query_one(&statement, &[&mission])
+        .await
+        .expect("execute selective query after append")
+        .get(0);
+    assert_eq!(
+        after, 1,
+        "prepared query must replan against the new file set"
+    );
+}
+
+async fn assert_regular_prepare_observes_new_snapshot(client: &tokio_postgres::Client) {
+    let statement = client
+        .prepare("SELECT COUNT(*) FROM layoutbench_control_points WHERE id >= $1")
+        .await
+        .expect("prepare regular snapshot query");
+    let minimum_id = 999_999_i32;
+    let before: i64 = client
+        .query_one(&statement, &[&minimum_id])
+        .await
+        .expect("execute regular query before append")
+        .get(0);
+    assert_eq!(before, 0);
+
+    client
+        .batch_execute(&format!(
+            "INSERT INTO layoutbench_control_points VALUES \
+             ({minimum_id}, 'prepared_snapshot_probe', 2026.0, 1.0, 1.0, 1.0, 1.0, 0.1, {})",
+            point_wkb_sql(1.0, 1.0)
+        ))
+        .await
+        .expect("append row after regular prepare");
+
+    let after: i64 = client
+        .query_one(&statement, &[&minimum_id])
+        .await
+        .expect("execute regular query after append")
+        .get(0);
+    assert_eq!(
+        after, 1,
+        "prepared query must replan against the new file set"
+    );
 }
 
 async fn assert_alias_and_tile_query_is_rewritten(client: &tokio_postgres::Client) {

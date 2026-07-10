@@ -47,32 +47,40 @@ Status: 🟢 in sync · 🟡 local patches, upstreamable · 🔴 blocked.
   4. `912823e` — `::geometry`/`::geography` cast preprocessing to `::bytea`.
   5. `81a2b68` — `&&` (PGOverlap) operator rewrite to `st_overlaps_bbox`.
   6. `445f7cb` — `::jsonb` cast rewrite to `::varchar` for Martin discovery.
-  7. `7c73826` — shortcut Martin table-discovery query to `geometry_columns`
-     projection (avoids full pg_index/pg_opclass/jsonb machinery).
+  7. `7c73826` + local extension — shortcut Martin table discovery to a reduced
+     `geometry_columns`/`pg_attribute` projection that still returns JSONB
+     property names and PostgreSQL types (avoids pg_index/pg_opclass machinery
+     without dropping MVT attributes).
   8. `a42a948` — return NULL `relkind` in Martin discovery shortcut.
   9. `f027b2f` — map Arrow `Int8` to PostgreSQL internal `"char"` (OID 18)
      so `pg_class.relkind` decodes correctly via tokio-postgres.
   10. `b548ef3` — rewrite `PGOverlap` inside derived-table subqueries.
-  11. `98a65d4` — rewrite `ST_AsMVT(tile, ...)` record form to `ST_AsMVT(tile.geom)`.
-  12. `b81c65c` — encode Martin discovery `properties` (Utf8) as JSONB.
+  11. `98a65d4` + local extension — rewrite `ST_AsMVT(tile, ...)` record form to
+      scalar geometry/layer/extent arguments plus every non-geometry column from
+      the derived record projection, preserving configured MVT attributes.
+  12. `b81c65c` + local extension — encode Martin discovery `properties` across
+      Arrow Utf8/Utf8View/LargeUtf8 as JSONB.
   13. `67399c5` — shortcut Martin function-discovery query to empty result
       (QuackGIS has no tile-generating SQL functions).
   14. `25eab17` — rewrite Martin's `ST_TileEnvelope(..., margin => 0.015625)`
       named argument to positional, matching QuackGIS' margin overload.
-  15. `93f8273` — rewrite PostGIS fixture DDL before parsing:
-      `CREATE EXTENSION ...` and PL/pgSQL `DO $$ ... $$` blocks become no-ops;
-      `serial`/`bigserial` become `int`/`bigint`; `GEOMETRY(...)` and
-      `GEOGRAPHY(...)` column types become `BYTEA` for DataFusion DDL;
+   15. `93f8273` + local correction — rewrite PostGIS fixture DDL before parsing:
+       `CREATE EXTENSION ...` and PL/pgSQL `DO $$ ... $$` blocks become no-ops;
+       `serial`/`bigserial` become `int`/`bigint`; explicit `GEOMETRY(...)` and
+       `GEOGRAPHY(...)` declarations now survive to the QuackGIS DDL hook while
+       execution casts still lower to `bytea`;
       `CREATE INDEX`, `CLUSTER`, and `COMMENT ON` become no-ops; and
       `CREATE MATERIALIZED VIEW` is lowered to `CREATE VIEW`.
   16. `8958716` — sanitize pathological PostgreSQL quoted identifiers into
       deterministic safe quoted names before sqlparser sees fixture DDL. This
       closes the upstream Martin `SpacesAndQuotes.sql` fixture without changing
       the fixture input.
-  17. `2c35282` — advertise PostGIS-compatible `geometry`/`geography` type OIDs
-      for binary WKB columns whose name matches the spatial naming convention
-      (`geom`, `geometry`, `the_geom`, `wkb_geometry`, `wkb_geom`, `shape`,
-      `way` / `geog`, `geography`, `the_geog`), in both RowDescription
+   17. `2c35282` + local extension — advertise PostGIS-compatible
+       `geometry`/`geography` type OIDs from a centralized validated Arrow field
+       family annotation, then fall back for old binary catalogs to the spatial
+       naming convention (`geom`, `geometry`, `the_geom`, `wkb_geometry`,
+       `wkb_geom`, `shape`, `footprint`, `way` / `geog`, `geography`,
+       `the_geog`), in both RowDescription
       (`arrow-pg::datatypes::field_into_pg_type`) and `pg_attribute.atttypid`
       (`datafusion_field_to_pg_type`). Wire encoding is unchanged (raw WKB /
       hex-EWKB), so existing bytea clients are unaffected; QGIS/GeoServer now
@@ -91,6 +99,11 @@ Status: 🟢 in sync · 🟡 local patches, upstreamable · 🔴 blocked.
   20. local vendored patch — add a raw pre-parse `QueryHook::rewrite_sql` hook so
       QuackGIS can lower parser-level compatibility syntax (currently
       `AS OF SNAPSHOT <id>`) before the PostgreSQL dialect parser rejects it.
+  21. local vendored patch — add an opt-in
+      `QueryHook::replan_extended_query(...)` plan/context replacement before
+      default extended execution. QuackGIS uses it to refresh snapshot-scoped
+      DuckLake table providers while the default handler retains parameter
+      binding, result formats, result-schema checks, and statement timeouts.
 - **Remaining fork target:** extended-protocol `FETCH` RowDescription
   mismatch (`DataRow field count does not match`). Not blocking QGIS/libpq.
 - **Upstream plan:** split into small PRs after local soak: Arc recursion fix
@@ -110,6 +123,17 @@ Status: 🟢 in sync · 🟡 local patches, upstreamable · 🔴 blocked.
   `DuckLakeTableWriter::write_pending_data_file(...)`, plus oracles proving
   multi-file deletes, mixed delete+append/retire+append commits, pending-file
   visibility, and stale-conflict rollback.
+- **Spatial family patch:** field-aware writes persist recognized binary Arrow
+  metadata as DuckLake `geometry`/`geography`; reads restore that metadata from
+  snapshot-versioned `column_type`, including per-file rename schemas. This is a
+  family-only QuackGIS contract: subtype/SRID/dimensions, old-blob migration, and
+  geography reference-reader interoperability remain open.
+- **Schema-only lookup patch:** `DuckLakeSchema::table_schema(...)` performs the
+  snapshot-scoped table and structure lookups and builds the Arrow schema without
+  querying files. QuackGIS uses it for safe spatial-pruning preflight so the
+  scan-ready `SchemaProvider::table(...)` path remains unchanged while avoiding a
+  redundant catalog file request. This small API addition is an upstream PR
+  candidate after benchmark soak.
 - **Remaining fork targets:** structural file/partition pruning and any upstream API
   cleanup after QuackGIS native DML/compaction soak.
 

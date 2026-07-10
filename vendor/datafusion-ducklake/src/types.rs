@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::metadata_provider::DuckLakeTableColumn;
 use crate::{DuckLakeError, Result};
 use arrow::datatypes::{DataType, Field, IntervalUnit, Schema, TimeUnit};
+use arrow_pg::datatypes::{SpatialFamily, with_spatial_family_metadata};
 use parquet::file::metadata::ParquetMetaData;
 
 /// Convert a DuckLake type string to an Arrow DataType
@@ -69,7 +70,7 @@ pub fn ducklake_to_arrow_type(ducklake_type: &str) -> Result<DataType> {
 
         // Geometry types (stored as binary WKB format)
         "point" | "linestring" | "polygon" | "multipoint" | "multilinestring" | "multipolygon"
-        | "geometrycollection" | "linestring z" | "geometry" => Ok(DataType::Binary),
+        | "geometrycollection" | "linestring z" | "geometry" | "geography" => Ok(DataType::Binary),
 
         // Time with timezone - not directly supported, use string
         "timetz" | "time with time zone" => Ok(DataType::Utf8),
@@ -136,7 +137,7 @@ pub fn arrow_to_ducklake_type(arrow_type: &DataType) -> Result<String> {
         DataType::Utf8 | DataType::LargeUtf8 => Ok("varchar".to_string()),
 
         // Binary types
-        DataType::Binary | DataType::LargeBinary => Ok("blob".to_string()),
+        DataType::Binary | DataType::LargeBinary | DataType::BinaryView => Ok("blob".to_string()),
         DataType::FixedSizeBinary(16) => Ok("uuid".to_string()),
         DataType::FixedSizeBinary(_) => Ok("blob".to_string()),
 
@@ -314,6 +315,10 @@ fn parse_list_type(type_str: &str) -> Result<Option<DataType>> {
 ///
 /// Returns the canonical type string, or an error if the type is unrecognized.
 pub fn normalize_ducklake_type(ducklake_type: &str) -> Result<String> {
+    let normalized = ducklake_type.trim().to_ascii_lowercase();
+    if matches!(normalized.as_str(), "geometry" | "geography") {
+        return Ok(normalized);
+    }
     let arrow_type = ducklake_to_arrow_type(ducklake_type)?;
     arrow_to_ducklake_type(&arrow_type)
 }
@@ -334,6 +339,20 @@ pub fn normalize_ducklake_type(ducklake_type: &str) -> Result<String> {
 /// this set only bounds what a *promote* may write. Same-type returns `true`
 /// (a no-op); callers wanting strict change-detection use `types_equal_canonical`.
 pub fn is_promotable(from: &str, to: &str) -> bool {
+    let from_normalized = match normalize_ducklake_type(from) {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    let to_normalized = match normalize_ducklake_type(to) {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    if matches!(from_normalized.as_str(), "geometry" | "geography")
+        || matches!(to_normalized.as_str(), "geometry" | "geography")
+    {
+        return from_normalized == to_normalized;
+    }
+
     let from_arrow = match ducklake_to_arrow_type(from) {
         Ok(t) => t,
         Err(_) => return false,
@@ -452,7 +471,12 @@ pub fn build_arrow_schema(columns: &[DuckLakeTableColumn]) -> Result<Schema> {
         .iter()
         .map(|col| {
             let data_type = ducklake_to_arrow_type(&col.column_type)?;
-            Ok(Field::new(&col.column_name, data_type, col.is_nullable))
+            Ok(ducklake_column_field(
+                &col.column_name,
+                data_type,
+                col.is_nullable,
+                &col.column_type,
+            ))
         })
         .collect();
 
@@ -558,15 +582,30 @@ pub fn build_read_schema_with_field_id_mapping(
             // An absent column is materialised as a null array by the scan, so its
             // read field must be nullable; the catalog nullability is still
             // enforced on output by ColumnRenameExec.
-            Ok(Field::new(
+            Ok(ducklake_column_field(
                 read_name,
                 data_type,
                 col.is_nullable || is_absent,
+                &col.column_type,
             ))
         })
         .collect();
 
     Ok((Schema::new(fields?), name_mapping))
+}
+
+fn ducklake_column_field(
+    name: impl Into<String>,
+    data_type: DataType,
+    is_nullable: bool,
+    ducklake_type: &str,
+) -> Field {
+    let family = match ducklake_type.trim().to_ascii_lowercase().as_str() {
+        "geometry" => Some(SpatialFamily::Geometry),
+        "geography" => Some(SpatialFamily::Geography),
+        _ => None,
+    };
+    with_spatial_family_metadata(Field::new(name, data_type, is_nullable), family)
 }
 
 #[cfg(test)]
@@ -710,6 +749,10 @@ mod tests {
         );
         assert_eq!(ducklake_to_arrow_type("varchar").unwrap(), DataType::Utf8);
         assert_eq!(ducklake_to_arrow_type("blob").unwrap(), DataType::Binary);
+        assert_eq!(
+            ducklake_to_arrow_type("geography").unwrap(),
+            DataType::Binary
+        );
     }
 
     #[test]
@@ -883,6 +926,10 @@ mod tests {
         );
         assert_eq!(arrow_to_ducklake_type(&DataType::Utf8).unwrap(), "varchar");
         assert_eq!(arrow_to_ducklake_type(&DataType::Binary).unwrap(), "blob");
+        assert_eq!(
+            arrow_to_ducklake_type(&DataType::BinaryView).unwrap(),
+            "blob"
+        );
     }
 
     #[test]
@@ -1179,6 +1226,69 @@ mod tests {
             *schema.field(1).data_type(),
             DataType::List(Arc::new(Field::new("item", DataType::Utf8, true)))
         );
+    }
+
+    #[test]
+    fn test_build_schemas_restore_spatial_family_metadata() {
+        use arrow_pg::datatypes::{classify_spatial_field, explicit_spatial_family};
+
+        let columns = vec![
+            DuckLakeTableColumn {
+                column_id: 1,
+                column_name: "location".to_string(),
+                column_type: "geometry".to_string(),
+                is_nullable: true,
+            },
+            DuckLakeTableColumn {
+                column_id: 2,
+                column_name: "earth".to_string(),
+                column_type: "geography".to_string(),
+                is_nullable: true,
+            },
+            DuckLakeTableColumn {
+                column_id: 3,
+                column_name: "geom".to_string(),
+                column_type: "varchar".to_string(),
+                is_nullable: true,
+            },
+        ];
+
+        let schema = build_arrow_schema(&columns).unwrap();
+        assert_eq!(
+            explicit_spatial_family(schema.field(0)),
+            Some(SpatialFamily::Geometry)
+        );
+        assert_eq!(
+            explicit_spatial_family(schema.field(1)),
+            Some(SpatialFamily::Geography)
+        );
+        assert_eq!(classify_spatial_field(schema.field(2)), None);
+
+        let field_ids = HashMap::from([
+            (1, "old_location".to_string()),
+            (2, "earth".to_string()),
+            (3, "geom".to_string()),
+        ]);
+        let (read_schema, mapping) =
+            build_read_schema_with_field_id_mapping(&columns, &field_ids, None).unwrap();
+        assert_eq!(
+            explicit_spatial_family(read_schema.field(0)),
+            Some(SpatialFamily::Geometry)
+        );
+        assert_eq!(
+            explicit_spatial_family(read_schema.field(1)),
+            Some(SpatialFamily::Geography)
+        );
+        assert_eq!(mapping.get("old_location"), Some(&"location".to_string()));
+    }
+
+    #[test]
+    fn spatial_families_do_not_normalize_to_blob() {
+        assert_eq!(normalize_ducklake_type("GEOMETRY").unwrap(), "geometry");
+        assert_eq!(normalize_ducklake_type(" geography ").unwrap(), "geography");
+        assert!(!types_equal_canonical("geometry", "blob"));
+        assert!(!types_equal_canonical("geography", "geometry"));
+        assert!(!is_promotable("geometry", "blob"));
     }
 
     #[test]

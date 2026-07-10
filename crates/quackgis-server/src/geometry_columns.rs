@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Dynamic `geometry_columns` table provider.
+//! Dynamic `geometry_columns` and `geography_columns` table providers.
 //!
-//! Scans the DuckLake catalog at query time to discover Binary columns that
-//! hold WKB geometry data. This is how Martin, QGIS, and GeoServer discover
-//! spatial tables — PostGIS populates `geometry_columns` from type metadata,
-//! but since QuackGIS stores geometry as Binary (WKB), we use column-name
-//! conventions to detect geometry columns.
-//!
-//! Convention: columns named `geom`, `geometry`, `the_geom`, `wkb_geometry`,
-//! `wkb_geom`, `shape`, or `footprint` are treated as geometry columns. This
-//! covers common QGIS/GDAL naming plus asset-index sidecar tables.
+//! Scans the DuckLake catalog at query time to discover Binary WKB/EWKB fields.
+//! Validated family metadata wins; conventional names remain a migration
+//! fallback for catalogs written before durable family identity.
 
 use std::sync::Arc;
 
@@ -22,18 +16,7 @@ use datafusion::error::Result as DFResult;
 use datafusion::execution::session_state::SessionState;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
-
-/// Column names conventionally associated with WKB geometry data.
-const GEOMETRY_COLUMN_NAMES: &[&str] = &[
-    "geom",
-    "geometry",
-    "the_geom",
-    "wkb_geometry",
-    "wkb_geom",
-    "shape",
-    "footprint",
-    "way", // OpenStreetMap convention
-];
+use datafusion_postgres::arrow_pg::datatypes::{SpatialFamily, classify_spatial_field};
 
 /// Catalogs scanned by the provider. The DuckLake catalog `quackgis` is the
 /// authoritative spatial store. Its internal `main` schema is exposed as
@@ -43,17 +26,25 @@ const SCANNED_CATALOGS: &[&str] = &["quackgis"];
 #[derive(Debug)]
 pub struct GeometryColumnsProvider {
     schema: SchemaRef,
+    family: SpatialFamily,
 }
 
 impl GeometryColumnsProvider {
     pub fn new() -> Self {
         Self {
             schema: crate::postgis_compat::geometry_columns_schema(),
+            family: SpatialFamily::Geometry,
         }
     }
 
-    /// Scan all catalogs/schemas for tables with Binary columns matching the
-    /// geometry-name convention.
+    fn geography() -> Self {
+        Self {
+            schema: crate::postgis_compat::geography_columns_schema(),
+            family: SpatialFamily::Geography,
+        }
+    }
+
+    /// Scan all catalogs/schemas for fields in this provider's spatial family.
     async fn collect_rows(&self, session: &dyn Session) -> DFResult<RecordBatch> {
         let mut catalogs_arr: Vec<Option<String>> = Vec::new();
         let mut schemas_arr: Vec<Option<String>> = Vec::new();
@@ -88,11 +79,8 @@ impl GeometryColumnsProvider {
                     };
                     let table_schema = table.schema();
                     for field in table_schema.fields() {
-                        if !is_binary_type(field.data_type()) {
-                            continue;
-                        }
                         let col_name = field.name();
-                        if !is_geometry_column_name(col_name) {
+                        if classify_spatial_field(field) != Some(self.family) {
                             continue;
                         }
                         catalogs_arr.push(Some(catalog_name.to_string()));
@@ -107,7 +95,7 @@ impl GeometryColumnsProvider {
                         cols_arr.push(Some(col_name.clone()));
                         dims_arr.push(Some(2));
                         srids_arr.push(Some(0));
-                        types_arr.push(Some("GEOMETRY".to_string()));
+                        types_arr.push(Some(self.family.as_str().to_ascii_uppercase()));
                     }
                 }
             }
@@ -135,19 +123,6 @@ impl Default for GeometryColumnsProvider {
     }
 }
 
-fn is_binary_type(dt: &datafusion::arrow::datatypes::DataType) -> bool {
-    use datafusion::arrow::datatypes::DataType;
-    matches!(
-        dt,
-        DataType::Binary | DataType::LargeBinary | DataType::BinaryView
-    )
-}
-
-pub(crate) fn is_geometry_column_name(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    GEOMETRY_COLUMN_NAMES.contains(&lower.as_str())
-}
-
 #[async_trait::async_trait]
 impl TableProvider for GeometryColumnsProvider {
     fn schema(&self) -> SchemaRef {
@@ -171,10 +146,12 @@ impl TableProvider for GeometryColumnsProvider {
     }
 }
 
-/// Register the `geometry_columns` table on the given context. Must be called
+/// Register both spatial-family metadata tables. Must be called
 /// AFTER the DuckLake catalog is registered so `SCANNED_CATALOGS` resolves.
 pub fn register_geometry_columns(ctx: &SessionContext) -> DFResult<()> {
     let provider = Arc::new(GeometryColumnsProvider::new()) as Arc<dyn TableProvider>;
     ctx.register_table("geometry_columns", provider)?;
+    let provider = Arc::new(GeometryColumnsProvider::geography()) as Arc<dyn TableProvider>;
+    ctx.register_table("geography_columns", provider)?;
     Ok(())
 }

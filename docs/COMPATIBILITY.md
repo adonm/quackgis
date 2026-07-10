@@ -31,7 +31,7 @@ for probed client versions. See [ROADMAP.md](../ROADMAP.md) for forward outcomes
 | Feature | Status |
 |---|---|
 | Simple + extended query protocol | ✅ upstream |
-| TLS, password auth, RBAC roles | TLS and SCRAM-SHA-256 password startup are wired; coarse read/write vs read-only DuckLake write authorization, matching `pg_roles`, and explicit-user privilege helper metadata are implemented. Full object-level RBAC remains production hardening; see `docs/SECURITY_RBAC.md`. |
+| TLS, password auth, RBAC roles | TLS and SCRAM-SHA-256 password startup are wired; coarse read/write vs read-only authorization uses a structural fail-closed statement allowlist before catalog refresh and returns SQLSTATE `42501`; optional `QUACKGIS_WRITE_ALLOWLIST` restricts write-capable identities to normalized DuckLake table targets with matching explicit-user table/column privilege metadata. Read-side object RBAC remains production hardening; see `docs/SECURITY_RBAC.md`. |
 | pg_catalog + information_schema emulation | ✅ upstream (datafusion-pg-catalog) |
 | Portals / fetch-size suspension | general `setFetchSize` suspension is not implemented; maintained GeoServer WFS/WMS smoke does not require it; city-scale pgjdbc evidence is the decision gate |
 | `DECLARE BINARY CURSOR` / `FETCH` | ✅ simple-query/libpq path; narrow PostgreSQL-driver extended cursor shim for OGR read; general extended-protocol FETCH remains unsupported |
@@ -70,11 +70,12 @@ for probed client versions. See [ROADMAP.md](../ROADMAP.md) for forward outcomes
 | PostgreSQL catalog writes | ⚠️ exercised by Alpha Kind gates; current multicatalog schema is library-specific/non-spec and needs managed-service plus reference-reader/export evidence |
 | UPDATE / DELETE | ✅ Autocommit `DELETE` uses fork-backed atomic positional delete files; autocommit `UPDATE` stages replacement rows and commits delete+append metadata under one snapshot; `... RETURNING` preserves current result semantics. Explicit transactions still use staged rewrites. |
 | Spatial layout | ✅ WKB-first hidden `_qg_*` bbox/bucket/sort columns are automatically materialized on spatial writes and hidden from client metadata |
+| Durable spatial family identity | ✅ explicit SQL `GEOMETRY(...)` and `GEOGRAPHY(...)` remain physical Arrow/Parquet Binary WKB/EWKB, carry validated Arrow field metadata, and persist as snapshot-versioned DuckLake `column_type` `geometry`/`geography`; discovery and OIDs are metadata-first with conventional binary-name fallback for old catalogs |
 | Spatial predicate pruning | ✅ Safe bbox rewrite for recognized single-table spatial predicates, plus simple temporal `BETWEEN` bucket prefilters when a recognized time column exists; exact SedonaDB recheck remains authoritative and unsupported predicates remain correct but may scan more |
 | Columnar OLAP fanout | ✅ Alpha smoke for grouped spatial/attribute stats, primitive calculations, pruning/aggregate evidence, and candidate filtering before exact SedonaDB recheck; larger benchmark variants remain future hardening |
 | Compaction | ✅ `CALL quackgis_compact_table('schema.table')` and alias `CALL quackgis_compact(...)` rewrite a table into layout order; optional `(time_bucket, space_bucket)` uses native bucket-scoped delete+pending-append metadata when row-lineage planning succeeds, falling back to an atomic full-table replacement for unsupported shapes. Local tests report visible-file, scan-byte, and row-group deltas for fragmented appends |
 | DuckLake metadata table functions | ✅ `ducklake_snapshots()`, `ducklake_table_info()`, and `ducklake_list_files()` are exposed through pgwire for catalog inspection; CDC row table functions stay disabled until pgwire projection is safe |
-| Snapshot time travel | ✅ simple `AS OF SNAPSHOT <id>`, `public.table(snapshot => <id>)`, or `public.table(snapshot_id => <id>)` selector for one-table reads; positional/timestamp selectors, protected retention, rollback integration, and CDC remain future; see `docs/SNAPSHOT_OPERATIONS.md` |
+| Snapshot time travel | ✅ simple `AS OF SNAPSHOT <id>`, `AS OF TIMESTAMP '<RFC3339>'`, and named `snapshot`/`snapshot_id`/`snapshot_at` selectors for one-table reads; exact ids are validated and timestamps resolve at-or-before deterministically; positional selectors, protected retention, rollback integration, and CDC remain future; see `docs/SNAPSHOT_OPERATIONS.md` |
 | Generic filter pushdown/pruning path | ✅ datafusion-ducklake declares inexact filter pushdown; QuackGIS adds spatial-layout rewrites above it |
 | DuckDB-inlined data reads | ❌ — avoid inlining when writing from DuckDB |
 | Object stores | ✅ local FS validated; S3-compatible storage exercised in Kind with `s3s-fs`; production object-store soak remains future hardening |
@@ -114,4 +115,9 @@ managed-service and export/reference-reader proof remain release work.
   the core workload is large analytical spatial and columnar OLAP queries over
   DuckLake/Parquet.
 - Typmod enforcement (`geometry(Point, 4326)`) is metadata + EWKB-level, not
-  PG typmod machinery.
+  PG typmod machinery. The durable claim is family only: subtype, declared SRID,
+  and dimensions are not persisted or enforced, and metadata tables report generic
+  family, dimension 2, and SRID 0.
+- Existing conventionally named `blob` columns are discovered through fallback but
+  are not migrated in place. Geography reference-reader interoperability, generic
+  `pg_type`/typmod fidelity, and PostgreSQL/S3 external evidence remain open.

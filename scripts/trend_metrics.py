@@ -16,6 +16,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from benchmark_profile_check import parse_rfc3339  # noqa: E402
 
 METRIC_COLUMNS = [
     "qps",
@@ -25,6 +30,14 @@ METRIC_COLUMNS = [
     "workers",
     "seeded_rows",
     "factor",
+    "benchmark_profile",
+    "dataset_rows",
+    "storage_profile",
+    "hardware_profile",
+    "memory_bytes",
+    "free_disk_bytes",
+    "object_bytes",
+    "elapsed_seconds",
     "bytes_scanned",
     "max_scan_bytes",
     "max_scan_bytes_budget",
@@ -51,6 +64,26 @@ METRIC_COLUMNS = [
     "native_compact_appended_files",
     "native_compact_retired_files",
     "native_mutation_aborts",
+    "catalog_roundtrips",
+    "catalog_roundtrips_budget",
+    "catalog_read_roundtrips",
+    "catalog_read_roundtrips_budget",
+    "warm_public_queries",
+    "catalog_read_provider_calls",
+    "catalog_read_provider_calls_budget",
+    "warm_public_catalog_read_provider_calls",
+    "warm_public_catalog_read_provider_calls_budget",
+    "catalog_read_provider_calls_per_query_max",
+    "catalog_read_provider_calls_per_query_max_budget",
+    "cold_public_catalog_read_provider_calls",
+    "cold_public_catalog_read_provider_calls_budget",
+    "direct_internal_catalog_read_provider_calls",
+    "direct_internal_catalog_read_provider_calls_budget",
+    "catalog_provider_call_scope",
+    "catalog_write_roundtrips",
+    "catalog_write_roundtrips_budget",
+    "catalog_refreshes",
+    "catalog_refreshes_budget",
     "qgis_points_feature_count",
     "qgis_lines_feature_count",
     "qgis_multipolygons_feature_count",
@@ -73,6 +106,7 @@ BASE_COLUMNS = [
     "github_run_attempt",
     "github_sha",
     "github_ref_name",
+    "run_started_at",
     "check",
     "label",
     "status",
@@ -118,6 +152,7 @@ def rows_for_metrics(path: Path) -> list[dict[str, str | int | float | bool]]:
             "github_run_attempt": row_value(run.get("github_run_attempt")),
             "github_sha": row_value(run.get("github_sha")),
             "github_ref_name": row_value(run.get("github_ref_name")),
+            "run_started_at": row_value(run.get("run_started_at")),
             "check": check,
             "label": row_value(label),
             "status": row_value(status),
@@ -204,14 +239,31 @@ def run_label(row: dict[str, Any]) -> str:
     return str(row.get("source", ""))
 
 
-def sort_value(value: Any) -> tuple[int, str]:
+def sort_value(value: Any) -> tuple[int, int, str]:
     if value is None or value == "":
-        return (0, "")
-    return (1, str(value))
+        return (0, 0, "")
+    if isinstance(value, int) and not isinstance(value, bool):
+        return (2, value, "")
+    if isinstance(value, str) and value.isdigit():
+        return (2, int(value), "")
+    return (1, 0, str(value))
 
 
-def row_sort_key(row: dict[str, Any]) -> tuple[tuple[int, str], ...]:
+def timestamp_sort_value(value: Any) -> tuple[int, float, str]:
+    if not isinstance(value, str):
+        return (0, 0.0, "")
+    try:
+        parsed = parse_rfc3339(value)
+    except ValueError:
+        return (1, 0.0, value)
+    if parsed.tzinfo is None:
+        return (1, 0.0, value)
+    return (2, parsed.timestamp(), value)
+
+
+def row_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
     return (
+        timestamp_sort_value(row.get("run_started_at")),
         sort_value(row.get("github_run_id")),
         sort_value(row.get("github_run_attempt")),
         sort_value(row.get("github_sha")),
@@ -238,6 +290,27 @@ def scan_budget(row: dict[str, Any]) -> str:
     return ", ".join(values)
 
 
+def catalog_budget(row: dict[str, Any]) -> str:
+    values = []
+    for metric in (
+        "catalog_roundtrips",
+        "catalog_read_roundtrips",
+        "catalog_read_provider_calls",
+        "warm_public_catalog_read_provider_calls",
+        "catalog_read_provider_calls_per_query_max",
+        "cold_public_catalog_read_provider_calls",
+        "direct_internal_catalog_read_provider_calls",
+        "catalog_write_roundtrips",
+        "catalog_refreshes",
+    ):
+        budget = f"{metric}_budget"
+        if present(row, metric) or present(row, budget):
+            values.append(f"{metric}={row.get(metric, '')}/{row.get(budget, '')}")
+    if present(row, "catalog_provider_call_scope"):
+        values.append(f"provider_scope={row['catalog_provider_call_scope']}")
+    return ", ".join(values)
+
+
 def render_dashboard(rows: list[dict[str, Any]]) -> str:
     latest = latest_by_check(rows)
     sources = sorted({str(row.get("source", "")) for row in rows if row.get("source")})
@@ -248,14 +321,14 @@ def render_dashboard(rows: list[dict[str, Any]]) -> str:
         "",
         "This dashboard is intentionally plain Markdown so scheduled artifacts can be",
         "checked in for releases or attached unchanged to release evidence. It keeps the",
-        "roadmap signals visible in one place: QPS, p95/p99 latency, scan budgets,",
-        "candidate narrowing, native DML/compaction/abort counters, writer conflicts, and",
+        "roadmap signals visible in one place: profile identity, QPS, p95/p99 latency,",
+        "scan/catalog budgets, candidate narrowing, native DML/compaction/abort counters, writer conflicts, and",
         "PostGIS regress pass-rate when the artifact includes that log.",
         "",
         "## Latest row per check",
         "",
-        "| Check | Status | Run | SHA | QPS | p95 ms | p99 ms | Scan budgets | Candidate rows | Mutation/conflict counters | PostGIS pass-rate |",
-        "|---|---|---|---|---:|---:|---:|---|---:|---|---:|",
+        "| Check | Status | Run | SHA | Profile | Rows | QPS | p95 ms | p99 ms | Scan budgets | Catalog budgets | Candidate rows | Mutation/conflict counters | PostGIS pass-rate |",
+        "|---|---|---|---|---|---:|---:|---:|---:|---|---|---:|---|---:|",
     ]
     for row in latest:
         body.append(
@@ -266,10 +339,13 @@ def render_dashboard(rows: list[dict[str, Any]]) -> str:
                     str(row.get("status", "")),
                     run_label(row),
                     str(row.get("github_sha", ""))[:12],
+                    str(row.get("benchmark_profile", "")),
+                    str(row.get("dataset_rows", "")),
                     str(row.get("qps", "")),
                     str(row.get("p95_ms", "")),
                     str(row.get("p99_ms", "")),
                     scan_budget(row),
+                    catalog_budget(row),
                     str(row.get("candidate_rows", "")),
                     metric_list(
                         row,
@@ -297,6 +373,7 @@ def render_dashboard(rows: list[dict[str, Any]]) -> str:
             "|---|---|---|",
             f"| QPS + p95/p99 latency | `read_probe`, `qps_probe`, `olap_probe` | {sum(1 for row in latest if present(row, 'qps') or present(row, 'p95_ms') or present(row, 'p99_ms'))} check(s) |",
             f"| Scan-byte and file-group budgets | `qps_probe`, `olap_probe` | {sum(1 for row in latest if scan_budget(row))} check(s) |",
+            f"| Catalog provider-call, roundtrip, and refresh budgets | regional benchmark checks | {sum(1 for row in latest if catalog_budget(row))} check(s) |",
             f"| OLAP candidate narrowing | `olap_probe` | {sum(1 for row in latest if present(row, 'candidate_rows') or present(row, 'candidate_groups'))} check(s) |",
             f"| Writer conflict/retry | `write_verify` | {sum(1 for row in latest if present(row, 'failed_commits') or present(row, 'retry_attempts'))} check(s) |",
             f"| Native DML/compaction counters | `external_lake_probe` | {sum(1 for row in latest if present(row, 'native_delete_files') or present(row, 'native_compact_appended_files'))} check(s) |",

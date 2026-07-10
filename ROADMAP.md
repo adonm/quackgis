@@ -172,8 +172,8 @@ Deliver:
   server, and one BI client;
 - compare counts, bounds, filtered samples, edit results, and representative
   outputs against a PostGIS/reference oracle;
-- close geometry identity debt: durable geometry metadata must not rely solely on
-  column-name heuristics, or the release must explicitly constrain naming; and
+- carry the implemented explicit geometry/geography family identity through the
+  city matrix, then define subtype/SRID/dimension and old-blob migration policy;
 - probe pgjdbc fetch-size/portal suspension at realistic page sizes and either
   implement it or publish a measured client limit.
 
@@ -187,8 +187,9 @@ under process failure and concurrent writers.
 
 Deliver:
 
-- add process-kill tests before and after native DELETE, UPDATE, and bucket
-  compaction commit; prove retry semantics and orphan handling;
+- promote the local before/after-commit native DELETE, UPDATE, and bucket
+  compaction process-kill matrix to Kind and managed services; prove quarantine/
+  deletion safety and application-specific response-loss reconciliation;
 - run real edit traces across fragmented files and report write amplification,
   delete generations, compaction benefit, conflicts, and latency;
 - either batch explicit transactions through native mutation primitives or retain
@@ -211,8 +212,8 @@ network trust or source familiarity.
 
 Deliver:
 
-- introduce schema/table allowlists for write service identities, then read
-  isolation where real deployments require it;
+- promote implemented schema/table write allowlists through external service
+  identities, then add read isolation where real deployments require it;
 - filter `pg_catalog`, `information_schema`, metadata UDTFs, snapshot operations,
   and maintenance entrypoints consistently with authorization;
 - execute TLS/plaintext-denial, wrong-password, pgwire/catalog/object secret
@@ -259,8 +260,9 @@ Required release decision points:
 
 - PostgreSQL catalog storage is either standard DuckLake-compatible or plainly
   declared a QuackGIS-specific backend with tested export/migration;
-- geometry/geography identity has durable metadata and documented sentinel-OID
-  behavior across maintained clients;
+- geometry/geography family identity has durable metadata and documented sentinel-
+  OID behavior across maintained clients, with subtype/SRID/dimension, migration,
+  and geography reference-reader limits resolved or explicitly bounded;
 - upgrade and rollback are proven on copied catalog/object prefixes;
 - required local, Kind, managed-service, city, and regional gates pass for two
   consecutive release candidates;
@@ -311,9 +313,10 @@ partition/file counts, compaction and recovery bounds, cost, and the point where
 single catalog/prefix must shard. This is an evidence target, not a blanket promise
 that every trillion-row query is interactive.
 
-**Exit gate:** two scheduled `sf1b` runs and one manual `sf10tb` run publish
-catalog/object growth, query/maintenance/recovery budgets, cost, and a tested or
-simulated sharding decision with no correctness regression.
+**Exit gate:** two scheduled exact billion-row profile runs and one manual exact
+10TB-inventory profile run publish catalog/object growth, query/maintenance/
+recovery budgets, cost, and a tested or simulated sharding decision with no
+correctness regression.
 
 ## Immediate execution queue
 
@@ -321,14 +324,20 @@ simulated sharding decision with no correctness regression.
    standard/non-standard catalog interoperability result.
 2. Promote the existing SQL-surface probes into named client containers over one
    copied city dataset, including real Martin attributes and GeoServer.
-3. Add process-kill mutation tests and an operator-visible orphan inventory before
-   widening native-DML performance claims.
-4. Replace name-only geometry discovery with durable table/column metadata, while
-   preserving WKB/EWKB and maintained client behavior.
-5. Define the first 100M regional benchmark profile and catalog-roundtrip budget;
-   stop using ambiguous `sf1` names for materially different scales.
-6. Start one real raster/point-cloud inventory to validate sidecar identity, URI,
-   CRS/epoch, and provenance requirements before expanding schemas.
+3. Promote the deterministic local process-kill mutation matrix and its real
+   prewrite inventory evidence to Kind and managed services; add restore-point-
+   backed quarantine/deletion proof without claiming generic replay idempotency.
+4. Promote the implemented durable family-identity contract to PostgreSQL/S3 and
+   reference-reader evidence; decide subtype/SRID/dimension and old-blob migration
+   without changing WKB/EWKB or maintained client behavior.
+5. Execute `layoutbench-regional-r100m-v1` with the bounded Kind phase runner and
+   publish the first exact-process catalog provider-call measurements against its
+   committed budgets; the process counter, snapshot-fresh 7-call execution path,
+   profile/report contract, runner integration, and unambiguous naming gate are
+   implemented, but wire-level roundtrips and 100M evidence remain open.
+6. Promote the implemented valid-raster/point-cloud local companion gate to copied
+   COG and COPC/LAZ inventories with object-store URI lifecycle, restore, and
+   workload evidence before expanding asset families.
 
 ## Risk register
 
@@ -336,7 +345,7 @@ simulated sharding decision with no correctness regression.
 |---|---|---|
 | PostgreSQL catalog backend remains non-standard | Open-storage and reference-reader claims fail | make the 1.0 backend/export decision explicit; test migration rather than hiding divergence |
 | Young DuckLake APIs or fork drift | upgrades and maintenance semantics break | pin, test, record divergence, rebase at milestones, and migrate only behind equivalent gates |
-| Geometry identity remains heuristic | wrong OIDs/discovery for unconventionally named columns | add durable metadata and keep naming constraints explicit until migration |
+| Spatial identity exceeds the family metadata claim | wrong subtype/SRID/dimension or external-reader assumptions | keep the family-only boundary explicit; test migration and reference readers before widening it |
 | Object/catalog metadata dominates selective reads | high-QPS scale collapses despite Parquet pruning | budget roundtrips/listings/refresh and adopt upstream metadata improvements |
 | Positional DML conflicts with scan optimization | edit correctness or performance regresses | keep physical-position scans isolated, exact, and separately benchmarked |
 | Compatibility branches sprawl | fragile behavior across clients | classify by protocol/catalog surface and require trace fixtures |

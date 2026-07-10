@@ -29,9 +29,15 @@ For local, pgwire-level smoke/benchmark runs against an already-running server:
 ```sh
 just server
 just layoutbench-local sf0 3 generated insert
-just layoutbench-local sf1 5 generated copy
-just layoutbench-local sf1 3 shuffled insert true   # before/after compaction
+just layoutbench-local local-r22k8 5 generated copy
+just layoutbench-local local-r22k8 3 shuffled insert true   # before/after compaction
 just layoutbench-local-smoke
+just benchmark-profile-check                       # exact 100M contract, no load
+just kind-layoutbench-catalog-measure             # preseeded exact 100M catalog-call gate
+python3 scripts/layoutbench_catalog_report.py \
+  --profile benchmarks/profiles/layoutbench-regional-r100m-v1.json \
+  --log .tmp/layoutbench-regional/catalog.log \
+  --out .tmp/layoutbench-regional/metrics.json
 ```
 
 The local runner can vary ingest order (`generated`, `shuffled`, `layout`), load
@@ -42,6 +48,36 @@ method (`insert`, `copy`), transaction grouping, and query variants. It seeds
 Parquet pushdown rows, and whether the hidden `_qg_*` predicate reached the
 physical plan). The smoke recipe starts a temporary server and runs the sf0
 runner once.
+
+PostgreSQL/shared-catalog reads expose the process counter
+`quackgis_catalog_read_provider_calls_total`. One increment is one delegated
+`MetadataProvider` method, including an error. SQLite, writes, pool setup, pgwire,
+and object-store IO are unmetered. This boundary does not count physical PostgreSQL
+network roundtrips because SQLx connection and statement-cache behavior is below
+it. Take before/after samples from the exact process or pod; a load-balanced or
+aggregated scrape cannot be used for query deltas. Catalog refreshes remain a
+distinct counter.
+
+Each `layoutbench_catalog` phase record includes the serving process/pod id and
+raw counter start/end. The report rejects resets, mismatched deltas, impossible
+zero-call phases, invalid profile composition, and missing numeric run identity or
+RFC3339 start time before replacing an evidence artifact.
+
+The warm selective execution oracle is 3 schema-preflight calls plus 4 calls to
+build a fresh scan plan. Extended execution deliberately replans instead of using
+the parse-time plan so prepared statements observe new snapshots. Unit tests pin
+the 2-call schema-only table lookup and wrapper arithmetic. The report parser
+enforces the committed warm `7/query`, `1680/240`, cold `<=13`, direct `4`, and
+refresh `0` provider-call budgets. Exact phase deltas are not claimed locally
+because SQLite is intentionally unmetered; they remain a Kind PostgreSQL
+measurement. `just kind-layoutbench-catalog-measure` now owns the bounded Kind
+measurement path against a preseeded exact profile: it scales `lake` to one pod,
+enables the metrics endpoint, runs cold/direct/warm phases through one process,
+writes `.tmp/layoutbench-regional/catalog.log`, and renders the budgeted
+`.tmp/compatibility/metrics.json`. Use `just kind-layoutbench-catalog-seed` only
+with `LAYOUTBENCH_ALLOW_EXACT_R100M=true`, enough disk/time, and the committed
+profile; the actual 100M execution evidence remains open until those artifacts are
+published for a source SHA.
 
 For Alpha shared-storage evidence, use the Kind lake profile instead of the
 SQLite/local profile:
@@ -61,22 +97,24 @@ bytes-scanned ceilings (`QPS_MAX_BYTES_SCANNED`, `OLAP_MAX_BYTES_SCANNED`), and
 QPS also enforces a file-group ceiling (`QPS_MAX_FILE_GROUPS`). That turns the
 printed pruning metrics into enforced regression budgets.
 
-### Current `sf1` iteration notes (2026-07-08)
+### Current local-r22k8 iteration notes (2026-07-08)
 
-Current local `sf1` is deliberately moderate (`factor=100`: 10,800 aerial rows,
+The `layoutbench-local-r22k8-v1` profile is deliberately moderate (`factor=100`:
+10,800 aerial rows,
 9,600 CAD rows, 2,400 asset rows) so developer laptops can iterate quickly. It
-is not the future million-row nightly scale; it is a fast lever-finding loop.
+is not the regional scale contract; it is a fast lever-finding loop.
 
 Run shape:
 
 ```sh
 # Fresh temp catalog per case; default row-group cap is 512 rows.
 cargo run -p quackgis-server --example layoutbench -- \
-  --scale sf1 --query-iters 3 --load-method copy \
+  --scale local-r22k8 --query-iters 3 --load-method copy \
   --ingest-order generated --compare-variants
 ```
 
-Key measurements from `.tmp/layoutbench-sf1/current`:
+Key measurements from the legacy `.tmp/layoutbench-sf1/current` artifact (the
+active profile name is `layoutbench-local-r22k8-v1`):
 
 | Case | Seed time | Aerial avg | CAD avg | Assets avg | Row-group pruning |
 |---|---:|---:|---:|---:|---|
@@ -134,8 +172,9 @@ Architecture decisions from this pass:
   appends.
 - Subsequent gates implemented bucket-local compaction, Kind parallel-reader QPS,
   and grouped OLAP fanout. Those are now the baseline, not pending benchmark work.
-- Promote the same metrics to `sf10m`/`sf100m`, copied real data, and managed
-  services; add catalog-roundtrip, metadata-scan, conflict, and cost budgets.
+- Execute the committed `layoutbench-regional-r100m-v1` contract in Kind, then on
+  managed services and copied real data; add measured metadata-scan, conflict,
+  wire-roundtrip, and cost budgets beside its instrumented provider-call budget.
 
 The first implemented compaction surface is explicit and table-scoped:
 
@@ -145,7 +184,7 @@ CALL quackgis_compact_table('public.layoutbench_local_aerial_frames');
 
 It reads the DuckLake table, recomputes/projects hidden layout columns, sorts by
 the layout key, and rewrites one replacement snapshot. On the shuffled INSERT
-`sf1-local`
+`layoutbench-local-r22k8-v1`
 case it took about 0.52 s for all three benchmark tables and repaired the bad
 layout:
 
@@ -177,11 +216,11 @@ remain planned generator/benchmark work.
 | Scale | Purpose |
 |---|---|
 | `sf0` | CI oracle: implemented; small enough to compare prefiltered results against exact SedonaDB predicates |
-| `sf1-local` (runner argument `sf1`) | current fast local trend run: 22,800 mixed rows |
-| `sf10m` | city-scale client/pruning/compaction gate: 10M+ rows |
-| `sf100m` | routine regional benchmark: 100M+ rows |
-| `sf1b` | scheduled regional/national stress: 1B+ rows |
-| `sf10tb` | manual object/catalog stress: 10TB+ generated or copied inventory |
+| `layoutbench-local-r22k8-v1` (runner argument `local-r22k8`) | current fast local trend run: exactly 22,800 mixed rows |
+| future `layoutbench-city-r10m-*` | city-scale client/pruning/compaction gate: exact profile required |
+| `layoutbench-regional-r100m-v1` | defined routine regional contract: exactly 100M rows; execution pending |
+| future `layoutbench-stress-r1b-*` | scheduled regional/national stress: exact profile required |
+| future `layoutbench-inventory-b10tb-*` | manual object/catalog stress: exact profile required |
 
 Synthetic tables:
 

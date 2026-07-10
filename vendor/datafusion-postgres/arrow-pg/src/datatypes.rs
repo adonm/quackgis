@@ -48,6 +48,35 @@ const OID_COLUMN_NAMES: &[&str] = &[
 pub const GEOMETRY_OID: u32 = 90_001;
 pub const GEOGRAPHY_OID: u32 = 90_002;
 
+/// Arrow field metadata key carrying QuackGIS' durable spatial family.
+///
+/// The physical Arrow type remains binary WKB/EWKB. This metadata records only
+/// the SQL family (`geometry` or `geography`), not subtype, SRID, or dimensions.
+pub const SPATIAL_FAMILY_METADATA_KEY: &str = "quackgis.spatial_family";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpatialFamily {
+    Geometry,
+    Geography,
+}
+
+impl SpatialFamily {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Geometry => "geometry",
+            Self::Geography => "geography",
+        }
+    }
+
+    fn from_metadata(value: &str) -> Option<Self> {
+        match value {
+            "geometry" => Some(Self::Geometry),
+            "geography" => Some(Self::Geography),
+            _ => None,
+        }
+    }
+}
+
 /// Column names treated as WKB-encoded PostGIS geometry/geography by
 /// convention when the Arrow type is binary. Mirrors the names used by QGIS,
 /// GDAL, and typical `CREATE TABLE` statements.
@@ -58,6 +87,7 @@ const GEOMETRY_COLUMN_NAMES: &[&str] = &[
     "wkb_geometry",
     "wkb_geom",
     "shape",
+    "footprint",
     "way", // OpenStreetMap convention
 ];
 
@@ -73,6 +103,52 @@ pub fn is_geometry_column_name(name: &str) -> bool {
 pub fn is_geography_column_name(name: &str) -> bool {
     let lower = name.to_lowercase();
     GEOGRAPHY_COLUMN_NAMES.contains(&lower.as_str())
+}
+
+/// Return a validated explicit family annotation.
+///
+/// Metadata on non-binary fields and unknown metadata values is ignored.
+pub fn explicit_spatial_family(field: &Field) -> Option<SpatialFamily> {
+    if !is_binary_arrow_type(field.data_type()) {
+        return None;
+    }
+    field
+        .metadata()
+        .get(SPATIAL_FAMILY_METADATA_KEY)
+        .and_then(|value| SpatialFamily::from_metadata(value))
+}
+
+/// Classify a spatial field, preferring validated metadata over legacy names.
+/// Only Binary, LargeBinary, and BinaryView physical fields qualify.
+pub fn classify_spatial_field(field: &Field) -> Option<SpatialFamily> {
+    if !is_binary_arrow_type(field.data_type()) {
+        return None;
+    }
+    explicit_spatial_family(field).or_else(|| {
+        if is_geometry_column_name(field.name()) {
+            Some(SpatialFamily::Geometry)
+        } else if is_geography_column_name(field.name()) {
+            Some(SpatialFamily::Geography)
+        } else {
+            None
+        }
+    })
+}
+
+/// Set or clear the recognized spatial-family key while preserving other field
+/// metadata. A family is only written for a binary physical field.
+pub fn with_spatial_family_metadata(field: Field, family: Option<SpatialFamily>) -> Field {
+    let mut metadata = field.metadata().clone();
+    metadata.remove(SPATIAL_FAMILY_METADATA_KEY);
+    if is_binary_arrow_type(field.data_type())
+        && let Some(family) = family
+    {
+        metadata.insert(
+            SPATIAL_FAMILY_METADATA_KEY.to_string(),
+            family.as_str().to_string(),
+        );
+    }
+    field.with_metadata(metadata)
 }
 
 fn is_oid_column_name(name: &str) -> bool {
@@ -237,17 +313,16 @@ pub fn field_into_pg_type(field: &Arc<Field>) -> PgWireResult<Type> {
         return Ok(Type::CHAR);
     }
 
-    // PostGIS-compat: binary columns whose name matches the geometry/geography
-    // convention are advertised with a dedicated type OID (instead of bytea)
+    // PostGIS-compat: explicitly annotated binary fields, followed by legacy
+    // conventional names, are advertised with a dedicated type OID (not bytea)
     // so clients like QGIS/GeoServer recognise them as spatial columns. The
     // wire encoding is unchanged: arrow-pg still writes the raw WKB bytes
     // (binary format) or hex-EWKB (text format), both of which are
     // wire-compatible with PostGIS geometry transport.
-    if is_binary_arrow_type(arrow_type) && is_geometry_column_name(field.name()) {
-        return Ok(geometry_pg_type());
-    }
-    if is_binary_arrow_type(arrow_type) && is_geography_column_name(field.name()) {
-        return Ok(geography_pg_type());
+    match classify_spatial_field(field) {
+        Some(SpatialFamily::Geometry) => return Ok(geometry_pg_type()),
+        Some(SpatialFamily::Geography) => return Ok(geography_pg_type()),
+        None => {}
     }
 
     match field.extension_type_name() {
@@ -279,7 +354,12 @@ pub fn field_into_pg_type(field: &Arc<Field>) -> PgWireResult<Type> {
         #[cfg(feature = "postgis")]
         Some(geoarrow_schema::WkbType::NAME) => Ok(Type::TEXT),
 
-        _ if field.name() == "properties" && matches!(arrow_type, DataType::Utf8) => {
+        _ if field.name() == "properties"
+            && matches!(
+                arrow_type,
+                DataType::Utf8 | DataType::Utf8View | DataType::LargeUtf8
+            ) =>
+        {
             Ok(Type::JSONB)
         }
         _ => into_pg_type(arrow_type),
@@ -342,5 +422,58 @@ mod tests {
         let field = Arc::new(Field::new("payload", DataType::Binary, true));
         let ty = field_into_pg_type(&field).expect("payload field type");
         assert_eq!(ty.oid(), Type::BYTEA.oid());
+    }
+
+    #[test]
+    fn explicit_family_wins_over_conventional_name() {
+        let field = with_spatial_family_metadata(
+            Field::new("geom", DataType::Binary, true),
+            Some(SpatialFamily::Geography),
+        );
+        assert_eq!(
+            classify_spatial_field(&field),
+            Some(SpatialFamily::Geography)
+        );
+        let ty = field_into_pg_type(&Arc::new(field)).expect("explicit geography field type");
+        assert_eq!(ty.oid(), GEOGRAPHY_OID);
+    }
+
+    #[test]
+    fn unconventional_explicit_geometry_and_footprint_fallback_classify() {
+        let location = with_spatial_family_metadata(
+            Field::new("location", DataType::LargeBinary, true),
+            Some(SpatialFamily::Geometry),
+        );
+        assert_eq!(
+            classify_spatial_field(&location),
+            Some(SpatialFamily::Geometry)
+        );
+        assert_eq!(
+            classify_spatial_field(&Field::new("footprint", DataType::BinaryView, true)),
+            Some(SpatialFamily::Geometry)
+        );
+    }
+
+    #[test]
+    fn non_binary_geom_and_invalid_metadata_are_not_explicit_spatial_fields() {
+        let text_geom = Field::new("geom", DataType::Utf8, true);
+        assert_eq!(classify_spatial_field(&text_geom), None);
+
+        let invalid = Field::new("payload", DataType::Binary, true).with_metadata(
+            [(SPATIAL_FAMILY_METADATA_KEY.to_string(), "point".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(explicit_spatial_family(&invalid), None);
+        assert_eq!(classify_spatial_field(&invalid), None);
+    }
+
+    #[test]
+    fn properties_string_variants_advertise_jsonb() {
+        for data_type in [DataType::Utf8, DataType::Utf8View, DataType::LargeUtf8] {
+            let field = Arc::new(Field::new("properties", data_type, true));
+            let ty = field_into_pg_type(&field).expect("properties field type");
+            assert_eq!(ty, Type::JSONB);
+        }
     }
 }

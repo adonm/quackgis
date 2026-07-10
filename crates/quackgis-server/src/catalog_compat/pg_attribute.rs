@@ -3,8 +3,9 @@
 
 use std::sync::Arc;
 
-use datafusion::arrow::datatypes::DataType;
+use datafusion::arrow::datatypes::{DataType, Field};
 use datafusion::prelude::SessionContext;
+use datafusion_postgres::arrow_pg::datatypes::{SpatialFamily, classify_spatial_field};
 use datafusion_postgres::pgwire::api::Type;
 use datafusion_postgres::pgwire::api::results::{
     DataRowEncoder, FieldFormat, FieldInfo, QueryResponse,
@@ -155,15 +156,20 @@ async fn schema_ogr_attribute_rows(
             .iter()
             .filter(|field| !crate::ducklake_sql::layout::is_layout_column(field.name()))
             .map(|field| {
-                let (typname, attlen, format_type) = ogr_type_for_arrow_field(field.data_type());
+                let (typname, attlen, format_type) = ogr_type_for_arrow_field(field);
                 ogr_attribute_row(field.name(), typname, attlen, format_type)
             })
             .collect(),
     )
 }
 
-fn ogr_type_for_arrow_field(data_type: &DataType) -> (&'static str, i16, &'static str) {
-    match data_type {
+fn ogr_type_for_arrow_field(field: &Field) -> (&'static str, i16, &'static str) {
+    match classify_spatial_field(field) {
+        Some(SpatialFamily::Geometry) => return ("geometry", -1, "geometry"),
+        Some(SpatialFamily::Geography) => return ("geography", -1, "geography"),
+        None => {}
+    }
+    match field.data_type() {
         DataType::Boolean => ("bool", 1, "boolean"),
         DataType::Int16 => ("int2", 2, "smallint"),
         DataType::Int32 => ("int4", 4, "integer"),

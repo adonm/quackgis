@@ -8,6 +8,7 @@ pub mod context;
 
 pub mod auth;
 pub mod catalog_compat;
+mod catalog_metrics;
 pub mod ducklake_sql;
 pub mod geometry_columns;
 pub mod metrics;

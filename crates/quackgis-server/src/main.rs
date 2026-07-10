@@ -4,13 +4,14 @@
 
 use std::sync::Arc;
 
+use chrono::{Duration, Utc};
 use clap::Parser;
 use datafusion::prelude::SessionContext;
 use datafusion_postgres::ServerOptions;
 use tokio::net::TcpListener;
 use tokio::signal;
 
-use quackgis_server::auth::{AuthConfig, AuthMode};
+use quackgis_server::auth::{AuthConfig, AuthMode, parse_write_allowlist};
 use quackgis_server::cli::Cli;
 
 #[tokio::main(flavor = "multi_thread")]
@@ -21,6 +22,8 @@ async fn main() -> anyhow::Result<()> {
         .write_style(env_logger::WriteStyle::Auto)
         .init();
 
+    quackgis_server::ducklake_sql::configure_native_mutation_barrier_from_env()?;
+
     if cli.tls_cert.is_some() != cli.tls_key.is_some() {
         anyhow::bail!(
             "--tls-cert and --tls-key must be specified together (got cert={}, key={})",
@@ -28,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
             cli.tls_key.is_some()
         );
     }
-    let auth = match cli.auth_mode {
+    let mut auth = match cli.auth_mode {
         quackgis_server::cli::CliAuthMode::Trust => AuthConfig::trust(),
         quackgis_server::cli::CliAuthMode::Password => AuthConfig::password(
             cli.readwrite_user.clone(),
@@ -42,6 +45,9 @@ async fn main() -> anyhow::Result<()> {
                 .map(|password| (cli.readonly_user.clone(), password)),
         )?,
     };
+    if let Some(raw_allowlist) = cli.write_allowlist.as_deref() {
+        auth = auth.with_readwrite_allowlist(parse_write_allowlist(raw_allowlist)?);
+    }
 
     let s3 = quackgis_server::context::S3StorageOptions::new(
         cli.s3_endpoint.clone(),
@@ -63,6 +69,28 @@ async fn main() -> anyhow::Result<()> {
         }
         quackgis_server::context::StoragePaths::new(&cli.catalog_path, &cli.data_path)?
     };
+    if cli.orphan_inventory {
+        if cli.orphan_min_age_seconds == 0 {
+            anyhow::bail!("--orphan-min-age-seconds must be greater than zero");
+        }
+        let age_seconds = i64::try_from(cli.orphan_min_age_seconds)
+            .map_err(|_| anyhow::anyhow!("--orphan-min-age-seconds is too large"))?;
+        let cutoff = Utc::now()
+            .checked_sub_signed(Duration::seconds(age_seconds))
+            .ok_or_else(|| anyhow::anyhow!("orphan inventory cutoff is out of range"))?;
+        let candidates = storage_paths.orphan_candidates_before(cutoff).await?;
+        println!(
+            "quackgis_orphan_inventory dry_run=true min_age_seconds={} candidates={}",
+            cli.orphan_min_age_seconds,
+            candidates.len()
+        );
+        if cli.orphan_show_paths {
+            for path in candidates {
+                println!("orphan_candidate path={path}");
+            }
+        }
+        return Ok(());
+    }
     let ctx: Arc<SessionContext> =
         quackgis_server::context::build_session_context_with_storage_and_auth(
             storage_paths.clone(),
@@ -76,13 +104,17 @@ async fn main() -> anyhow::Result<()> {
         .with_tls_cert_path(cli.tls_cert.clone())
         .with_tls_key_path(cli.tls_key.clone());
 
-    if let Some(metrics_port) = cli.metrics_port {
+    let metrics_task = if let Some(metrics_port) = cli.metrics_port {
         let metrics_addr = format!("{}:{metrics_port}", cli.metrics_host);
         let listener = TcpListener::bind(&metrics_addr).await?;
         let local_addr = listener.local_addr()?;
         log::info!("quackgis metrics endpoint listening on http://{local_addr}/metrics");
-        tokio::spawn(quackgis_server::metrics::serve_listener(listener));
-    }
+        Some(tokio::spawn(quackgis_server::metrics::serve_listener(
+            listener,
+        )))
+    } else {
+        None
+    };
 
     let tls_note = if cli.tls_cert.is_some() {
         "TLS enabled"
@@ -99,26 +131,46 @@ async fn main() -> anyhow::Result<()> {
         cli.port
     );
 
-    // datafusion-postgres' `serve` runs forever; we race it against a shutdown
-    // signal so Ctrl-C produces a clean exit. The server has no built-in
+    // datafusion-postgres' `serve` runs forever; race it against a shutdown
+    // signal so Ctrl-C/SIGTERM produces a deterministic exit. The server has no built-in
     // cancellation today — when the signal wins we just exit the process,
     // which closes the listener and drops in-flight connections.
-    let server = tokio::spawn(async move {
+    let mut server = tokio::spawn(async move {
         quackgis_server::pgwire_server::serve_with_auth(ctx, &opts, storage_paths, auth).await
     });
-    let shutdown = tokio::spawn(async move {
-        let _ = signal::ctrl_c().await;
-        log::info!("ctrl-c received, exiting");
-    });
 
-    tokio::select! {
-        _ = server => {
-            log::error!("server task exited unexpectedly");
+    let outcome = tokio::select! {
+        result = &mut server => {
+            match result {
+                Ok(result) => result.map_err(anyhow::Error::from),
+                Err(err) => Err(anyhow::Error::from(err)),
+            }
         }
-        _ = shutdown => {
-            // Ctrl-C path: process exit closes the listener.
+        signal = shutdown_signal() => {
+            signal?;
+            log::info!("shutdown signal received, exiting");
+            server.abort();
+            let _ = server.await;
+            Ok(())
+        }
+    };
+    if let Some(task) = metrics_task {
+        task.abort();
+    }
+    outcome
+}
+
+async fn shutdown_signal() -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut terminate = signal::unix::signal(signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = signal::ctrl_c() => result.map_err(anyhow::Error::from),
+            _ = terminate.recv() => Ok(()),
         }
     }
-
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        signal::ctrl_c().await.map_err(anyhow::Error::from)
+    }
 }

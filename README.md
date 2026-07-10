@@ -164,7 +164,11 @@ just test-fast                 # non-ignored QuackGIS regression loop only
 just check                     # fmt + clippy + tests
 just check-fast                # fmt + clippy + focused regression loop
 just layoutbench-sf0           # layout/pruning correctness oracle
+just benchmark-profile-check   # validate exact 100M profile and catalog budgets
+just kind-layoutbench-catalog-measure # manual preseeded exact 100M catalog-call budget gate
 just layoutbench-local-smoke   # temp-server layoutbench smoke
+just multimodal-inventory-local # raster/point-cloud sidecar artifact oracle
+just orphan-inventory          # offline dry-run old prewrite inventory
 just postgis-regress           # starter curated PostGIS function regress subset
 just postgis-conformance-summary # static fixture coverage summary
 just runtime-static-check      # guard single-binary native-free runtime image
@@ -191,6 +195,7 @@ just kind-qps-smoke            # high-QPS spatial readers over the shared lake p
 just kind-olap-smoke           # grouped OLAP fanout + pruning/recheck evidence
 just kind-alpha-smoke          # maintained Alpha scaled-storage gate bundle
 just kind-osm-postgis-parity   # opt-in real OSM PostGIS -> QuackGIS parity
+just external-alpha-evidence-check # validate redacted external Alpha packet manifest
 just metrics-trend path=.tmp/compatibility # flatten metrics.json artifacts to CSV
 just metrics-dashboard path=.tmp/compatibility # render release-ready Markdown trends
 QUACKGIS_METRICS_PORT=9187 just server # optional Prometheus /metrics endpoint

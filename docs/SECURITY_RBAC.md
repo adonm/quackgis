@@ -2,8 +2,9 @@
 
 QuackGIS' current security surface is intentionally small: pgwire SCRAM password
 auth, optional pgwire TLS, a configured read/write user, an optional read-only
-user, and fail-closed write authorization at the DuckLake SQL boundary. Full
-PostgreSQL RBAC is not implemented.
+user, an optional write-target allowlist for service identities, and fail-closed
+write authorization at the DuckLake SQL boundary. Full PostgreSQL RBAC is not
+implemented.
 
 This document defines what must be true before widening the security claim.
 
@@ -13,11 +14,12 @@ This document defines what must be true before widening the security claim.
 |---|---|---|
 | Trust-mode local development | ✅ default preview | local smokes |
 | SCRAM-SHA-256 password auth | ✅ implemented | `password_auth_and_readonly_role_fail_closed` |
-| Read/write vs read-only roles | ✅ coarse role model | read-only writes fail closed; recognized DDL/DML/maintenance denials increment `quackgis_write_denied_total` in wire tests |
+| Read/write vs read-only roles | ✅ coarse role model | AST allowlist permits queries/session/read controls and denies all mutating or indeterminate statement variants before catalog refresh with SQLSTATE `42501`; denials increment `quackgis_write_denied_total` |
+| Write service table allowlists | ✅ implemented for write-capable identities | `QUACKGIS_WRITE_ALLOWLIST` / `--write-allowlist` normalizes `table`, `public.table`, `main.table`, and `quackgis.main.table`; denied or indeterminate writes fail with SQLSTATE `42501`; `password_auth_write_allowlist_limits_readwrite_targets` |
 | `pg_roles` and privilege helper metadata | ✅ compatibility surface | `wire_spatial` privilege/catalog tests |
 | pgwire TLS cert/key | ✅ configurable | ops docs and Kubernetes example |
 | Metrics endpoint | ✅ opt-in, no SQL/secrets | metrics tests, read-only denial counter test, and external profile scrape |
-| Object/schema/table-level RBAC | ❌ not implemented | future trace-driven work |
+| Read object/schema/table-level RBAC | ❌ not implemented | future trace-driven work |
 
 ## Trust boundaries
 
@@ -45,7 +47,8 @@ This document defines what must be true before widening the security claim.
 | Missing read/write password in password mode | server fails closed at startup |
 | Missing TLS cert or key half | server fails closed at startup |
 | Wrong password | connection denied; no fallback to trust mode |
-| Read-only CREATE/COPY/DML/compaction | denied before DuckLake mutation; recognized DDL/DML/maintenance denials increment `quackgis_write_denied_total` |
+| Read-only CREATE/COPY/DML/compaction | denied with SQLSTATE `42501` before catalog refresh or DuckLake mutation; DDL/DML/maintenance/unknown-call denials increment `quackgis_write_denied_total` |
+| Write allowlist denial | non-allowlisted DuckLake `CREATE TABLE`/`COPY FROM STDIN`/DML/`ALTER TABLE`/compaction targets and indeterminate write statements are denied before planning; explicit-user `has_table_privilege`/`has_column_privilege` write metadata matches the allowlist |
 | Secret rotation | rolling pods pick up new catalog/object/pgwire secrets; old credentials no longer work |
 | TLS/mTLS enforcement | plaintext path is blocked by deployment/network policy when production profile requires TLS |
 | Catalog/object credential revoke | in-flight operations fail explicitly; no partial data claim without mutation drill evidence |
@@ -62,8 +65,11 @@ Do not emulate PostgreSQL's full privilege system speculatively. Add object-leve
 authorization only when a real admin/client workflow requires it. The preferred
 order:
 
-1. deny-by-default write authorization remains at the DuckLake SQL hook;
-2. explicit service identities and schema/table allowlists for write-capable jobs;
+1. deny-by-default write authorization remains at the DuckLake SQL hook; the
+   read-only allowlist must classify new parser statement variants as denied until
+   deliberately reviewed;
+2. explicit service identities and schema/table allowlists for write-capable jobs
+   are the first implemented object-level control (`QUACKGIS_WRITE_ALLOWLIST`);
 3. read allowlists when a client/API deployment requires tenant separation;
 4. `information_schema`/`pg_catalog`/DuckLake metadata filtered consistently with the data
    authorization decision;
@@ -79,8 +85,10 @@ the same object decision used by ordinary table access.
 ## Logging and audit posture
 
 Current info logs record process-local query ids, protocol, pid, user, and
-statement kind. They intentionally omit SQL text and object paths. If audit logs
-are added later, they must be explicit opt-in, redacted by default, and covered by
+statement kind. Pgwire errors record only a bounded error class and user rather
+than formatting the underlying error, which can contain SQL literals or storage
+paths. These lines intentionally omit SQL text and object paths. If audit logs are
+added later, they must be explicit opt-in, redacted by default, and covered by
 tests that prevent secrets/object-store credentials from appearing.
 
 A production audit event should have a stable schema: event id/time, authenticated

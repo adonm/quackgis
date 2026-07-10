@@ -104,6 +104,13 @@ pub struct Cli {
     #[arg(long, env = "QUACKGIS_READONLY_PASSWORD")]
     pub readonly_password: Option<String>,
 
+    /// Optional comma-separated DuckLake table allowlist for write-capable
+    /// identities. Entries may be table, public.table, main.table, or
+    /// quackgis.main.table. When set, indeterminate write/maintenance statements
+    /// are denied before planning.
+    #[arg(long, env = "QUACKGIS_WRITE_ALLOWLIST")]
+    pub write_allowlist: Option<String>,
+
     /// Log filter (`env_logger` syntax). Falls back to the `RUST_LOG` env var.
     #[arg(long, env = "QUACKGIS_LOG", default_value = "info")]
     pub log: String,
@@ -115,4 +122,17 @@ pub struct Cli {
     /// Optional Prometheus metrics endpoint port. Disabled when unset.
     #[arg(long, env = "QUACKGIS_METRICS_PORT")]
     pub metrics_port: Option<u16>,
+
+    /// Inventory unreferenced Parquet candidates and exit. This is always a dry
+    /// run; no catalog rows or objects are deleted.
+    #[arg(long, default_value_t = false)]
+    pub orphan_inventory: bool,
+
+    /// Ignore unreferenced files newer than this age. Must be greater than zero.
+    #[arg(long, default_value_t = 3600, requires = "orphan_inventory")]
+    pub orphan_min_age_seconds: u64,
+
+    /// Print candidate paths. By default only the redaction-safe count is shown.
+    #[arg(long, default_value_t = false, requires = "orphan_inventory")]
+    pub orphan_show_paths: bool,
 }

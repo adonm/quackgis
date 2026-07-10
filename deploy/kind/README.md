@@ -92,6 +92,17 @@ execution evidence, a bytes-scanned ceiling, and exact SedonaDB recheck of
 candidate groups. `just kind-alpha-smoke` bundles the maintained lake storage,
 multi-pod, writer, QPS, and OLAP gates.
 
+`just kind-layoutbench-catalog-measure` is the manual catalog-metering runner for
+`layoutbench-regional-r100m-v1`. It expects the exact 100M profile tables to be
+present in the `lake` PostgreSQL/S3 profile, scales `lake` to one pod, restarts it
+to reset process-local counters, measures cold public, direct internal, and 240
+warm public selective queries via `/metrics`, and renders
+`.tmp/compatibility/metrics.json` with `scripts/layoutbench_catalog_report.py`.
+The paired `just kind-layoutbench-catalog-seed` streams the exact profile in
+500,000-row COPY batches and refuses to run unless
+`LAYOUTBENCH_ALLOW_EXACT_R100M=true` and `LAYOUTBENCH_MAX_ROWS>=100000000` are
+set; run it only on hosts with enough disk and time.
+
 `just kind-build-image` builds `quackgis-server` locally first and copies only
 the release binary into a runtime image, so normal Cargo caches are reused. Use
 `just kind-build-image-fast` / `just kind-refresh-fast` for manual probe triage;

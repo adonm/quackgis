@@ -686,7 +686,7 @@ fn arrow_schema_to_column_defs(schema: &Schema) -> Result<Vec<ColumnDef>> {
     schema
         .fields()
         .iter()
-        .map(|field| ColumnDef::from_arrow(field.name(), field.data_type(), field.is_nullable()))
+        .map(|field| ColumnDef::from_arrow_field(field))
         .collect()
 }
 

@@ -145,6 +145,53 @@ impl ServerHandle {
         )
         .expect("storage paths")
     }
+
+    /// Restart the pgwire server and rebuild its SessionContext against the
+    /// same on-disk catalog and data directory.
+    #[allow(dead_code)]
+    pub async fn restart(&mut self) {
+        self._serve.abort();
+        let paths = self.storage_paths();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind restart listener");
+        let port = listener.local_addr().expect("restart local_addr").port();
+        drop(listener);
+
+        let ctx = build_session_context_with_storage_and_auth(paths.clone(), &AuthConfig::trust())
+            .await
+            .expect("restart context builds");
+        let ctx_for_server = Arc::clone(&ctx);
+        let opts = ServerOptions::new()
+            .with_host("127.0.0.1".to_string())
+            .with_port(port);
+        let serve = tokio::spawn(async move {
+            let _ = quackgis_server::pgwire_server::serve_with_auth(
+                ctx_for_server,
+                &opts,
+                paths,
+                AuthConfig::trust(),
+            )
+            .await;
+        });
+
+        self.port = port;
+        self._ctx = ctx;
+        self._serve = serve;
+        for _ in 0..50 {
+            if tokio::net::TcpStream::connect((self.host.as_str(), self.port))
+                .await
+                .is_ok()
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!(
+            "restarted quackgis-server did not come up on {}:{}",
+            self.host, self.port
+        );
+    }
 }
 
 impl Drop for ServerHandle {

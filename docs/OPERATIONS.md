@@ -47,13 +47,16 @@ The default local server listens on `127.0.0.1:5434` and uses:
 | `QUACKGIS_AUTH_MODE` | `trust` | `trust` dev mode or `password` pgwire password mode |
 | `QUACKGIS_READWRITE_USER` / `QUACKGIS_READWRITE_PASSWORD` | `postgres` / unset | read/write login; password required in password mode |
 | `QUACKGIS_READONLY_USER` / `QUACKGIS_READONLY_PASSWORD` | `quackgis_readonly` / unset | optional read-only login in password mode |
+| `QUACKGIS_WRITE_ALLOWLIST` | unset | optional comma-separated DuckLake table allowlist for write-capable identities (`table`, `public.table`, `main.table`, or `quackgis.main.table`) |
 | `QUACKGIS_METRICS_HOST` / `QUACKGIS_METRICS_PORT` | `127.0.0.1` / unset | optional Prometheus `/metrics` bind; disabled when port is unset |
 | `QUACKGIS_LOG` | `info` | Rust log filter |
 
 Dev auth is intentionally minimal: connect as user `postgres` to database
 `quackgis` with no password in `trust` mode. Password mode uses SCRAM-SHA-256
-and coarse read/write vs read-only roles; platform deployments still need TLS,
-secret management, and catalog/object-store credential controls.
+and coarse read/write vs read-only roles. `QUACKGIS_WRITE_ALLOWLIST` can further
+restrict write-capable service identities to named DuckLake tables; platform
+deployments still need TLS, secret management, and catalog/object-store credential
+controls.
 
 ## Security profile
 
@@ -64,9 +67,13 @@ set `QUACKGIS_READWRITE_PASSWORD`, and optionally enable a read-only login with
 `QUACKGIS_READONLY_PASSWORD`. Read-only users can run SQL reads but fail closed
 on DuckLake write and maintenance statements such as `CREATE TABLE`, `COPY FROM
 STDIN`, DML, and compaction. PostgreSQL `pg_roles` and explicit-user privilege
-helpers reflect configured read/write vs read-only users; current-user privilege
-helper forms remain compatibility-oriented because the DuckLake write hook is the
-authoritative authorization boundary.
+helpers reflect configured read/write vs read-only users. If
+`QUACKGIS_WRITE_ALLOWLIST` is set, write-capable users can mutate only the named
+DuckLake tables; indeterminate write/maintenance statements are denied before
+planning and explicit-user table/column privilege helpers report write privilege
+only for allowlisted targets. Current-user privilege helper forms remain
+compatibility-oriented because the DuckLake write hook is the authoritative
+authorization boundary.
 
 Transport TLS is available with matching certificate/key configuration:
 
@@ -436,15 +443,20 @@ quiesced backup window for any restore drill:
 5. Restore into an isolated catalog + object prefix, never directly over the live
    prefix.
 6. Start one QuackGIS pod against the restored pair and run a read-only smoke:
-   table discovery, representative counts/bboxes, and a small spatial query.
+   confirm the recorded release snapshot is the restored head, confirm snapshots
+   created after the backup are absent, then check table discovery, representative
+   counts/bboxes, one `AS OF SNAPSHOT` read, file references, and a small spatial
+   query.
 7. Only then point clients at the restored service.
 
 Kind's in-cluster PostgreSQL and `s3s-fs` deployments are smoke-test stand-ins,
 not backup tooling. Production backup/restore evidence must be collected against
 the external PostgreSQL and S3-compatible services that will actually hold the
 catalog and object prefix. The fast local gate includes a SQLite/filesystem
-copy-restore oracle for the shape of a matched catalog+data backup set; it is not
-a substitute for external-service restore drills.
+rollback oracle (`ducklake_local_rollback_to_matched_backup_restores_prior_head`)
+that advances the source after copying a matched catalog+data backup and validates
+the isolated prior head. It is not a substitute for external-service restore
+drills.
 
 ### Failed-writer and object-prefix cleanup
 
@@ -517,10 +529,10 @@ same Justfile recipes as local development through `mise exec -- just ...`.
   remain smoke evidence, not production durability evidence.
 - Native DML and compaction crash/retry/orphan drills should follow
   [MUTATION_FAILURE_DRILLS.md](./MUTATION_FAILURE_DRILLS.md); successful ordinary
-  DML tests alone are not production failure-mode evidence. The local native
-  `DELETE`/`UPDATE`/bucket-compaction before-commit failpoint tests are the first
-  automated crash-boundary oracles; service-level kill/retry drills remain
-  promotion work.
+  DML tests alone are not production failure-mode evidence. Local failpoints and
+  real-process `SIGKILL` barriers cover native `DELETE`, `UPDATE`, and explicit
+  bucket compaction before and after commit. Kind and managed-service promotion,
+  quarantine/deletion, and response-loss reconciliation remain open.
 - Snapshot-id SQL `AS OF`, rollback, protected snapshot, and CDC exposure policy
   is documented in [SNAPSHOT_OPERATIONS.md](./SNAPSHOT_OPERATIONS.md).
 
@@ -566,10 +578,16 @@ denials emit a separate counter line:
 quackgis_write_denied user=quackgis_readonly statement_kind=create_table denied_total=1
 ```
 
-Current observability includes process-local catalog refresh counters,
-snapshot-pinned read success/error counters, native DML/compaction mutation
-counters, and native mutation abort counters without requiring log scraping.
-Object-store IO and writer-conflict counters remain future work.
+Current observability includes process-local catalog refresh and PostgreSQL
+catalog-read-provider-call counters, snapshot-pinned read success/error counters,
+native DML/compaction mutation counters, and native mutation abort counters
+without requiring log scraping. Object-store IO, catalog write roundtrips, and
+writer-conflict counters remain future work.
+
+Pgwire failures emit only a bounded class (`auth_failure`, `user_error`,
+`api_error`, or `protocol_error`) and authenticated user. The server does not put
+the formatted underlying error into info logs because provider errors can contain
+object paths or connection details.
 
 For process-local scrape evidence, set `QUACKGIS_METRICS_PORT` (and optionally
 `QUACKGIS_METRICS_HOST`, default `127.0.0.1`) to expose a small Prometheus text
@@ -582,11 +600,62 @@ curl http://127.0.0.1:9187/metrics
 
 The endpoint is disabled by default and currently exports only safe process
 counters: pgwire hook statements started, transaction staging ids allocated,
-read-only write denials, DuckLake catalog refreshes, shared-catalog read/strong
-refreshes, snapshot-pinned read successes/errors, native delete/update/
-bucket-compaction mutations, native mutation aborts before catalog commit, and
-successful compaction calls. It intentionally does not expose SQL text,
-object-store paths, usernames, or secrets.
+read-only write denials, DuckLake catalog refreshes, PostgreSQL catalog read
+provider calls, shared-catalog read/strong refreshes, snapshot-pinned read
+successes/errors, native delete/update/bucket-compaction mutations, native
+mutation aborts before catalog commit, and successful compaction calls. It
+intentionally does not expose SQL text, object-store paths, usernames, or secrets.
+
+`quackgis_catalog_read_provider_calls_total` increments once immediately before
+every delegated PostgreSQL/shared `MetadataProvider` call, including errors. It
+excludes SQLite, writes, pool/catalog setup, pgwire, and object-store operations.
+The metric is cumulative only within one process lifetime. It does not measure
+physical PostgreSQL network roundtrips: SQLx connection and prepared-statement
+behavior is below the wrapper boundary. For benchmark deltas, address the exact
+metrics endpoint for the pgwire backend that served the query, scrape before and
+after, and reject pod changes or counter resets. A Service-level sum is useful for
+fleet load but not a single-query delta. `quackgis_catalog_refresh_total` counts
+logical catalog registrations separately.
+
+Regional evidence records the exact serving process/pod id beside each raw
+counter start/end pair. `scripts/layoutbench_catalog_report.py` verifies the
+non-resetting delta and preserves those raw measurements in `metrics.json`.
+
+The binary handles both interactive Ctrl-C and Kubernetes/systemd `SIGTERM`, stops
+the pgwire and optional metrics tasks, and exits successfully after a handled
+signal. Unexpected pgwire task/bind failures propagate as a non-zero process exit.
+`process_lifecycle` verifies bind-failure propagation, SIGTERM, reopening the same
+local catalog, and real-process `SIGKILL` at both native mutation commit boundaries.
+The current pgwire dependency still has no connection-drain API, so signal handling
+closes in-flight connections rather than promising graceful query drain.
+
+### Offline orphan inventory
+
+Failed object prewrites can leave unreferenced Parquet candidates before a
+DuckLake metadata commit. Inventory them with the server stopped (or against a
+copied catalog/prefix):
+
+```sh
+just orphan-inventory min_age_seconds=3600 show_paths=false
+# trusted detailed inspection only:
+just orphan-inventory min_age_seconds=86400 show_paths=true
+```
+
+The command always performs a dry run and exits instead of starting pgwire. A
+strict positive age excludes recent/in-flight files. By default output contains
+only `dry_run`, cutoff age, and candidate count; paths require explicit opt-in.
+Only unreferenced `.parquet` objects are candidates—live data/delete files and
+scheduled-deletion references are subtracted by the DuckLake maintenance API.
+SQLite refuses a missing catalog. PostgreSQL/S3 scans the shared data path and
+uses references from every multicatalog catalog, so operators must treat its
+scope as global. No destructive cleanup CLI is currently exposed.
+
+The local native-mutation process tests invoke this same offline command after
+`SIGKILL`. They backdate only files generated by the blocked mutation so the
+positive age cutoff remains active. Before commit, reported paths must exactly
+equal those prewrites. After commit, equally old generated paths must remain absent
+because the successful snapshot references them. This proves the local inventory
+connection, not quarantine/deletion safety on Kind or managed storage.
 
 ## Persistence model
 

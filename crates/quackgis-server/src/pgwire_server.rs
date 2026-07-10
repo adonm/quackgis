@@ -292,10 +292,22 @@ impl NoopStartupHandler for SimpleStartupHandler {
 struct LoggingErrorHandler;
 
 impl ErrorHandler for LoggingErrorHandler {
-    fn on_error<C>(&self, _client: &C, error: &mut datafusion_postgres::pgwire::error::PgWireError)
+    fn on_error<C>(&self, client: &C, error: &mut datafusion_postgres::pgwire::error::PgWireError)
     where
         C: ClientInfo,
     {
-        log::info!("Sending error: {error}");
+        let kind = match error {
+            datafusion_postgres::pgwire::error::PgWireError::InvalidPassword(_)
+            | datafusion_postgres::pgwire::error::PgWireError::UserNameRequired => "auth_failure",
+            datafusion_postgres::pgwire::error::PgWireError::UserError(_) => "user_error",
+            datafusion_postgres::pgwire::error::PgWireError::ApiError(_) => "api_error",
+            _ => "protocol_error",
+        };
+        let user = client
+            .metadata()
+            .get("user")
+            .map(String::as_str)
+            .unwrap_or("unknown");
+        log::info!("quackgis_pgwire_error kind={kind} user={user}");
     }
 }

@@ -15,6 +15,7 @@ name: Benchmark ladder
           - kind-olap-smoke
           - kind-qps-deep-smoke
           - kind-lake-layoutbench-smoke
+          - kind-layoutbench-catalog-measure
       qps_deep_factor:
         description: Optional QPS_DEEP_FACTOR for kind-qps-deep-smoke
         required: false
@@ -63,7 +64,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mise exec -- just kind-compat-report || true
+          if [ "$STORAGE_RECIPE" = "kind-layoutbench-catalog-measure" ]; then
+            printf 'kind-layoutbench-catalog-measure writes .tmp/compatibility/metrics.json directly; skipping generic Kind report.\n'
+          else
+            mise exec -- just kind-compat-report || true
+          fi
 
       - name: Render benchmark dashboard
         if: always()
@@ -105,6 +110,7 @@ jobs:
             case "$STORAGE_RECIPE" in
               kind-qps-smoke) args+=(--require-check qps_probe) ;;
               kind-olap-smoke) args+=(--require-check olap_probe) ;;
+              kind-layoutbench-catalog-measure) args+=(--require-check layoutbench_catalog) ;;
             esac
             mise exec -- python3 scripts/metrics_budget_check.py "${args[@]}" .tmp/compatibility
           elif [ -f .tmp/compatibility/README.md ] && grep -q '❌ fail' .tmp/compatibility/README.md; then

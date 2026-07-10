@@ -28,8 +28,45 @@ story, useful commit anchors, and lessons for contributors.
   mTLS visibility, conflict/retry, native mutation metadata, and metrics reports.
 - SCRAM password mode, optional TLS, coarse read-only/read-write authorization,
   safe metrics, backup/restore oracles, and operations/security runbooks.
+- Fail-closed structural read-only statement authorization with PostgreSQL
+  insufficient-privilege errors, bounded pgwire error logging, and Ctrl-C/SIGTERM
+  process lifecycle tests.
+- A machine-validated `layoutbench-regional-r100m-v1` contract with exact table/
+  batch arithmetic, bounded generation, catalog provider-call/refresh budgets, and
+  required evidence metadata; the local runner rejects ambiguous `sf1` naming.
+- Valid tiny raster (ASCII Grid/PRJ) and point-cloud (PLY) fixtures with a pinned
+  sidecar manifest and pgwire tests for checksum/header bounds, CRS/epoch/
+  provenance, URI policy, exact pruning, and asset-version lifecycle.
+- Offline, dry-run-only orphan inventory with a mandatory age cutoff, redacted
+  count-only default, explicit path opt-in, missing-catalog refusal, and
+  cross-catalog PostgreSQL reference semantics.
+- Private filesystem barriers and six Unix subprocess `SIGKILL` tests around native
+  delete/update/bucket-compaction commit: before-commit prewrites exactly match the
+  real offline orphan inventory, while after-commit paths remain referenced and
+  restart exposes the committed state without blind replay.
 - Snapshot metadata inspection and narrow single-table time travel through named
-  selectors and `AS OF SNAPSHOT <id>` preprocessing.
+  selectors, exact snapshot-id validation, and snapshot-id/RFC3339 timestamp
+  `AS OF` preprocessing and resolution.
+- Matched-backup rollback validation that records a release snapshot, advances the
+  source, and verifies the isolated prior head, current rows, simple-protocol
+  `AS OF`, and referenced files.
+- Real Martin binary opt-in coverage for configured MVT attribute propagation on
+  the deterministic synthetic layer, including catalog property discovery and
+  record-form `ST_AsMVT` attribute expansion.
+- Durable explicit geometry/geography family identity: SQL declarations remain
+  Binary WKB/EWKB, carry validated Arrow field metadata, persist as snapshot-
+  versioned DuckLake `column_type`, and drive live metadata/OID surfaces across
+  rewrites and restart without classifying `geom TEXT` as spatial.
+- Process-local PostgreSQL catalog read-provider-call instrumentation with safe
+  Prometheus export, success/error fake-provider tests, and schema-only pruning
+  preflight that keeps snapshot-fresh extended execution at 7 provider calls.
+  Extended prepared statements now replan before parameter binding, including
+  selective reads with unrelated bind parameters, so appends after prepare are
+  visible instead of retaining the parse-time file set.
+- A profile-bound `layoutbench_catalog` report generator that rejects missing,
+  duplicate, malformed, incorrect, inconsistent, or over-budget cold/direct/warm
+  phases and emits trend/budget-compatible provider-call metrics without claiming
+  wire-level roundtrips. Actual 100M and managed-service execution remain open.
 
 ### Changed
 
@@ -51,13 +88,15 @@ story, useful commit anchors, and lessons for contributors.
   reference-reader or tested export/migration evidence exists.
 - SQLite is deterministic and spec-oriented but not yet a drop-in DuckDB-writable
   catalog.
-- Geometry discovery still relies partly on conventional column names and
-  sentinel OIDs; durable DuckLake geometry identity remains forward work.
+- Explicit geometry/geography family identity is durable, while conventional
+  binary names remain fallback for old `blob` catalogs. Subtype/SRID/dimensions,
+  old-blob migration, geography reference-reader interop, generic pg_type/typmod,
+  and external PostgreSQL/S3 evidence remain forward work.
 - General extended-protocol portal/fetch-size suspension is not implemented.
 - Explicit transactions are intentionally single-table and do not provide general
   read-your-writes SELECT or multi-table atomicity.
-- Timestamp time travel, protected releases, CDC rows, object-level RBAC, managed-
-  service failure drills, and real multi-modal inventories remain roadmap work.
+- Protected releases, CDC rows, object-level RBAC, managed-service failure drills,
+  and real multi-modal inventories remain roadmap work.
 
 ## Historical prototype eras
 

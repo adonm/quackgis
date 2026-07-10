@@ -112,10 +112,11 @@ catalog-layout rules.
 
 ## Remaining work
 
-1. Extend pre-commit failpoints to process-kill tests before and after catalog
-   publication, then run the same matrix in Kind and managed-service profiles.
-2. Expose an operator-safe orphan inventory/quarantine/cleanup flow for prewritten
-   objects, with proofs that live snapshot objects cannot be removed.
+1. Run the local before/after-commit process-kill matrix in Kind and managed-service
+   profiles.
+2. Extend the dry-run orphan inventory into a restore-point-backed quarantine and
+   deletion flow, with proofs that live, scheduled, and history-referenced objects
+   cannot be removed.
 3. Batch explicit transactions through native mutations only if one visible
    snapshot, conflict behavior, `RETURNING`, and edit-client semantics remain
    equivalent to the staged fallback.
@@ -153,10 +154,18 @@ catalog-layout rules.
   `ducklake_native_compact_failpoint_before_commit_leaves_catalog_unchanged`
   inject aborts after native object prewrites and before `commit_table_mutation`,
   proving no catalog data-file/delete-file rows become visible for those
-  boundaries. Extend the same crash/retry probes to process-kill/retry, Kind, and
-  managed-service profiles; no committed snapshot may expose partial deletes, duplicate
-  update rows, or lost bucket-compaction rows. The drill ladder and evidence packet
-  are documented in
+  boundaries.
+- Six Unix `process_lifecycle` cases kill the actual server at private filesystem
+  barriers before and after commit for native `DELETE`, `UPDATE`, and explicit
+  bucket compaction. Before commit, the generated Parquet set exactly equals the
+  age-gated offline inventory, restart exposes old rows, and an explicit retry
+  reaches the intended state. After commit, backdated generated paths are absent
+  from inventory and restart exposes the exact new state without replay. This is a
+  local SQLite oracle, not generic mutation idempotency or Kind/managed-service
+  evidence.
+- Extend the same process-kill probes to Kind and managed-service profiles; no
+  committed snapshot may expose partial deletes, duplicate update rows, or lost
+  bucket-compaction rows. The drill ladder and evidence packet are documented in
   `docs/MUTATION_FAILURE_DRILLS.md`.
 - Prove `RETURNING`, QGIS keyless `_quackgis_rowid`, GeoServer WFS-T, and OGR
   edit traces still match the current rewrite semantics.

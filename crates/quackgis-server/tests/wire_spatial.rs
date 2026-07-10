@@ -11,7 +11,7 @@ use datafusion::arrow::array::{BinaryArray, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion_ducklake::DuckLakeTableWriter;
-use quackgis_server::auth::AuthConfig;
+use quackgis_server::auth::{AuthConfig, parse_write_allowlist};
 use quackgis_server::context::StoragePaths;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_postgres::NoTls;
@@ -327,6 +327,16 @@ async fn password_auth_and_readonly_role_fail_closed() {
         .expect("readonly role can query")
         .get(0);
     assert_eq!(count, 1);
+    readonly
+        .batch_execute(
+            "SET application_name = 'quackgis-readonly-probe';
+             SHOW application_name;
+             BEGIN;
+             EXPLAIN SELECT * FROM public.auth_rw_points;
+             ROLLBACK;",
+        )
+        .await
+        .expect("read-only role can use safe session, transaction, and explain surfaces");
 
     let denied_before = quackgis_server::ducklake_sql::metrics_snapshot().writes_denied_total;
     let denied_writes = [
@@ -345,29 +355,52 @@ async fn password_auth_and_readonly_role_fail_closed() {
         ),
         ("delete", "DELETE FROM public.auth_rw_points WHERE id = 1"),
         ("drop", "DROP TABLE public.auth_rw_points"),
+        ("truncate", "TRUNCATE TABLE public.auth_rw_points"),
+        (
+            "alter table",
+            "ALTER TABLE public.auth_rw_points ADD COLUMN denied TEXT",
+        ),
+        (
+            "create view",
+            "CREATE VIEW public.auth_ro_view AS SELECT * FROM public.auth_rw_points",
+        ),
+        ("create schema", "CREATE SCHEMA auth_ro_schema"),
+        ("analyze", "ANALYZE public.auth_rw_points"),
+        (
+            "explain delete",
+            "EXPLAIN DELETE FROM public.auth_rw_points WHERE id = 1",
+        ),
+        (
+            "unknown call",
+            "CALL future_admin_operation('public.auth_rw_points')",
+        ),
         (
             "compact",
             "CALL quackgis_compact_table('public.auth_rw_points')",
         ),
     ];
     for (label, sql) in denied_writes {
-        let denied = readonly.simple_query(sql).await;
-        assert!(
-            denied.is_err(),
+        let denied = readonly.simple_query(sql).await.expect_err(&format!(
             "readonly role unexpectedly executed {label}: {sql}"
+        ));
+        assert_eq!(
+            denied.code(),
+            Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE),
+            "{label} must be denied by QuackGIS authorization, not an incidental planner error: {denied}"
         );
     }
 
     let copy_denied = readonly
         .simple_query("COPY public.auth_rw_points FROM STDIN")
         .await;
-    assert!(
-        copy_denied.is_err(),
-        "readonly role unexpectedly entered COPY FROM STDIN"
+    let copy_denied = copy_denied.expect_err("readonly role unexpectedly entered COPY FROM STDIN");
+    assert_eq!(
+        copy_denied.code(),
+        Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
     );
     let denied_after = quackgis_server::ducklake_sql::metrics_snapshot().writes_denied_total;
     assert!(
-        denied_after >= denied_before + denied_writes.len() as u64,
+        denied_after > denied_before + denied_writes.len() as u64,
         "read-only denied writes should increment metrics: before={denied_before} after={denied_after} denied_sql={}",
         denied_writes.len()
     );
@@ -378,6 +411,112 @@ async fn password_auth_and_readonly_role_fail_closed() {
         .expect("readwrite role can verify readonly denials")
         .get(0);
     assert_eq!(count_after_denials, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn password_auth_write_allowlist_limits_readwrite_targets() {
+    let auth = AuthConfig::password("postgres", "readwrite-secret", None::<(String, String)>)
+        .expect("auth config")
+        .with_readwrite_allowlist(
+            parse_write_allowlist("public.auth_write_allowed").expect("allowlist parses"),
+        );
+    let server = ServerHandle::start_with_auth(auth).await;
+    let (writer, writer_connection) = tokio_postgres::connect(
+        &format!("{} password=readwrite-secret", server.conn_str()),
+        NoTls,
+    )
+    .await
+    .expect("readwrite login");
+    let _writer_conn = tokio::spawn(writer_connection);
+
+    writer
+        .simple_query("CREATE TABLE public.auth_write_allowed (id INT, geom BINARY)")
+        .await
+        .expect("allowlisted table can be created");
+    writer
+        .simple_query(
+            "INSERT INTO auth_write_allowed VALUES \
+             (1, X'010100000000000000000000000000000000000000')",
+        )
+        .await
+        .expect("allowlisted bare target can be inserted");
+    writer
+        .simple_query(
+            "UPDATE quackgis.main.auth_write_allowed SET id = 2 WHERE id = 1; \
+             DELETE FROM main.auth_write_allowed WHERE id = 2",
+        )
+        .await
+        .expect("equivalent normalized target names stay allowed");
+
+    let privilege_metadata = writer
+        .query_one(
+            "SELECT \
+               has_table_privilege('postgres', 'public.auth_write_allowed', 'UPDATE'), \
+               has_table_privilege('postgres', 'public.auth_write_denied', 'UPDATE'), \
+               has_table_privilege('postgres', 'public.auth_write_denied', 'SELECT'), \
+               has_column_privilege('postgres', 'public.auth_write_denied', 'geom', 'UPDATE')",
+            &[],
+        )
+        .await
+        .expect("privilege metadata reflects write allowlist");
+    assert!(privilege_metadata.get::<_, bool>(0));
+    assert!(!privilege_metadata.get::<_, bool>(1));
+    assert!(privilege_metadata.get::<_, bool>(2));
+    assert!(!privilege_metadata.get::<_, bool>(3));
+
+    let denied_before = quackgis_server::ducklake_sql::metrics_snapshot().writes_denied_total;
+    let denied_writes = [
+        (
+            "create denied table",
+            "CREATE TABLE public.auth_write_denied (id INT)",
+        ),
+        (
+            "insert denied table",
+            "INSERT INTO public.auth_write_denied VALUES (1)",
+        ),
+        (
+            "update denied table",
+            "UPDATE public.auth_write_denied SET id = 2 WHERE id = 1",
+        ),
+        (
+            "delete denied table",
+            "DELETE FROM public.auth_write_denied WHERE id = 1",
+        ),
+        (
+            "alter denied table",
+            "ALTER TABLE public.auth_write_denied ADD COLUMN note TEXT",
+        ),
+        (
+            "indeterminate schema write",
+            "CREATE SCHEMA auth_write_other_schema",
+        ),
+    ];
+    for (label, sql) in denied_writes {
+        let denied = writer
+            .simple_query(sql)
+            .await
+            .expect_err(&format!("allowlist unexpectedly permitted {label}: {sql}"));
+        assert_eq!(
+            denied.code(),
+            Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE),
+            "{label} must be denied by QuackGIS authorization: {denied}"
+        );
+    }
+
+    let copy_denied = writer
+        .simple_query("COPY public.auth_write_denied FROM STDIN")
+        .await
+        .expect_err("allowlist unexpectedly entered COPY for denied target");
+    assert_eq!(
+        copy_denied.code(),
+        Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
+    );
+    let denied_after = quackgis_server::ducklake_sql::metrics_snapshot().writes_denied_total;
+    assert!(
+        denied_after > denied_before + denied_writes.len() as u64,
+        "write allowlist denials should increment metrics: before={denied_before} after={denied_after} denied_sql={}",
+        denied_writes.len() + 1
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -933,7 +1072,10 @@ async fn catalog_misc_surface_shims_return_expected_shapes() {
         tokio_postgres::SimpleQueryMessage::Row(row) => row.get("typname"),
         _ => None,
     });
-    assert_eq!(typname, Some("geometry"));
+    assert_eq!(
+        typname, None,
+        "a bare geom name must not synthesize geometry without a table field"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2520,7 +2662,7 @@ async fn ogr_column_listing_query_is_schema_derived_for_appended_fields() {
         cols,
         vec![
             ("id".to_string(), "int4".to_string()),
-            ("wkb_geometry".to_string(), "bytea".to_string()),
+            ("wkb_geometry".to_string(), "geometry".to_string()),
             ("name".to_string(), "text".to_string()),
             ("osm_id".to_string(), "text".to_string()),
         ]

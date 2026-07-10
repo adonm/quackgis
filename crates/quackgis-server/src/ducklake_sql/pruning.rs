@@ -8,8 +8,10 @@
 use std::sync::LazyLock;
 
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use datafusion::error::Result as DataFusionResult;
 use datafusion::prelude::SessionContext;
 use datafusion::sql::sqlparser::ast::Statement;
+use datafusion_ducklake::DuckLakeSchema;
 use regex::Regex;
 
 use crate::context::DUCKLAKE_CATALOG;
@@ -34,22 +36,24 @@ struct Envelope {
     maxy: f64,
 }
 
-pub(super) async fn rewrite_spatial_pruning_query(
+pub(super) fn rewrite_spatial_pruning_query(
     statement: &Statement,
     session_context: &SessionContext,
-) -> Option<String> {
+) -> DataFusionResult<Option<String>> {
     if !is_rewritable_statement(statement) {
-        return None;
+        return Ok(None);
     }
 
     let sql = statement.to_string();
     let sql_lower = sql.to_ascii_lowercase();
     if sql_lower.contains("_qg_") || sql_lower.contains(" union ") || !sql_lower.contains(" where ")
     {
-        return None;
+        return Ok(None);
     }
 
-    let envelope = extract_envelope(&sql)?;
+    let Some(envelope) = extract_envelope(&sql) else {
+        return Ok(None);
+    };
     for target in rewrite_targets(&sql) {
         if projection_has_wildcard_for_target(&sql, &target)
             || target_has_same_level_join(&sql, &target)
@@ -57,7 +61,9 @@ pub(super) async fn rewrite_spatial_pruning_query(
         {
             continue;
         }
-        let table_schema = ducklake_table_schema(session_context, &target.table).await?;
+        let Some(table_schema) = ducklake_table_schema(session_context, &target.table)? else {
+            continue;
+        };
         if !has_layout_columns(table_schema.as_ref())
             || !mentions_spatial_predicate(&sql, table_schema.as_ref())
         {
@@ -72,10 +78,10 @@ pub(super) async fn rewrite_spatial_pruning_query(
         }
         let pruning_predicate = prefilters.join(" AND ");
         if let Some(rewritten) = inject_bbox_predicate(&sql, &target, &pruning_predicate) {
-            return Some(rewritten);
+            return Ok(Some(rewritten));
         }
     }
-    None
+    Ok(None)
 }
 
 fn is_rewritable_statement(statement: &Statement) -> bool {
@@ -86,14 +92,20 @@ fn is_rewritable_statement(statement: &Statement) -> bool {
     }
 }
 
-async fn ducklake_table_schema(
+fn ducklake_table_schema(
     session_context: &SessionContext,
     table: &str,
-) -> Option<datafusion::arrow::datatypes::SchemaRef> {
-    let catalog = session_context.catalog(DUCKLAKE_CATALOG)?;
-    let schema = catalog.schema("main")?;
-    let table = schema.table(table).await.ok().flatten()?;
-    Some(table.schema())
+) -> DataFusionResult<Option<datafusion::arrow::datatypes::SchemaRef>> {
+    let Some(catalog) = session_context.catalog(DUCKLAKE_CATALOG) else {
+        return Ok(None);
+    };
+    let Some(schema) = catalog.schema("main") else {
+        return Ok(None);
+    };
+    let Some(schema) = schema.downcast_ref::<DuckLakeSchema>() else {
+        return Ok(None);
+    };
+    schema.table_schema(table)
 }
 
 fn has_layout_columns(schema: &Schema) -> bool {
@@ -116,8 +128,8 @@ fn mentions_spatial_predicate(sql: &str, schema: &Schema) -> bool {
         if layout::is_layout_column(field.name()) {
             return false;
         }
-        (crate::geometry_columns::is_geometry_column_name(field.name())
-            || field.name().eq_ignore_ascii_case("footprint"))
+        datafusion_postgres::arrow_pg::datatypes::classify_spatial_field(field)
+            == Some(datafusion_postgres::arrow_pg::datatypes::SpatialFamily::Geometry)
             && mentions_column(&sql_lower, field.name())
     })
 }

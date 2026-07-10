@@ -19,6 +19,9 @@ production claims:
 - OLAP candidate-group/candidate-row narrowing;
 - writer conflict/retry counts;
 - native DML, compaction, and abort counters;
+- benchmark profile/target/storage/hardware identity plus catalog provider-call
+  and refresh budgets when benchmark artifacts emit them, including warm total,
+  warm per-query maximum, cold-public, and direct-internal deltas;
 - real-data client feature counts when OSM parity artifacts are present;
 - curated PostGIS regress pass-rate when `postgis-regress.log` is bundled with
   the artifact.
@@ -47,3 +50,9 @@ pass release checks. See
 [RELEASE_EVIDENCE.md](./RELEASE_EVIDENCE.md) for the release attachment policy.
 Minimum gates use `*_min` keys; the PostGIS regress artifact emits a 57-case
 minimum and `postgis_pass_rate_min=1.0` so conformance regressions fail closed.
+Catalog metrics follow the same rule: setting roundtrip, provider-call, or refresh
+budgets without numeric measurements is a gate failure.
+`catalog_provider_call_scope=postgresql_metadata_provider_methods` identifies the
+instrumentation boundary and is not evidence of physical wire roundtrips or write
+accounting. Dashboard rows preserve that scope and the phase values. Provider-call
+deltas are process/pod-local and must not combine different backend scrapes.

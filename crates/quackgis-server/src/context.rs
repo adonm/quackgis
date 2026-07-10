@@ -9,9 +9,13 @@
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, anyhow};
+use chrono::{DateTime, Utc};
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::prelude::{SessionConfig, SessionContext};
+use datafusion_ducklake::maintenance::{
+    CleanupCriteria, delete_orphaned_files_multicatalog, delete_orphaned_files_sqlite,
+};
 use datafusion_ducklake::{
     DuckLakeCatalog, MetadataProvider, MetadataWriter, MulticatalogManager, MulticatalogProvider,
     PostgresMetadataWriter, SqliteMetadataProvider, SqliteMetadataWriter,
@@ -33,6 +37,7 @@ use tokio::sync::OnceCell;
 use url::Url;
 
 use crate::auth::{AccessRole, AuthConfig, AuthMode};
+use crate::catalog_metrics::MeteredMetadataProvider;
 
 /// Default name of the DuckLake catalog as seen by clients. Persisted tables
 /// live under `quackgis.main.<table>`. The default catalog for unqualified
@@ -186,6 +191,57 @@ impl StoragePaths {
         matches!(self.profile, StorageProfile::Postgres { .. })
     }
 
+    /// Inventory old unreferenced Parquet candidates without deleting anything.
+    ///
+    /// The cutoff is mandatory at the operator boundary so in-flight prewrites
+    /// newer than it are excluded. PostgreSQL multicatalog inventory is global to
+    /// the shared data path and subtracts references from every catalog.
+    pub async fn orphan_candidates_before(&self, cutoff: DateTime<Utc>) -> Result<Vec<String>> {
+        let object_store = self.object_store()?;
+        match &self.profile {
+            StorageProfile::SqliteLocal { catalog_conn, .. } => {
+                let catalog_path = catalog_conn
+                    .strip_prefix("sqlite:")
+                    .and_then(|value| value.split('?').next())
+                    .ok_or_else(|| anyhow!("invalid SQLite catalog connection string"))?;
+                if !std::path::Path::new(catalog_path).is_file() {
+                    return Err(anyhow!(
+                        "refusing orphan inventory because SQLite catalog does not exist: {catalog_path}"
+                    ));
+                }
+                let writer = SqliteMetadataWriter::new(catalog_conn)
+                    .await
+                    .map_err(|e| anyhow!("open SQLite catalog for orphan inventory: {e}"))?;
+                delete_orphaned_files_sqlite(
+                    &writer,
+                    object_store,
+                    CleanupCriteria::OlderThan(cutoff),
+                    true,
+                )
+                .await
+                .map_err(|e| anyhow!("inventory SQLite orphan candidates: {e}"))
+            }
+            StorageProfile::Postgres { catalog_url, .. } => {
+                // Do not initialize schemas or create a catalog in an inventory
+                // operation. Missing maintenance metadata must fail closed.
+                let pool = PgPoolOptions::new()
+                    .max_connections(2)
+                    .connect(catalog_url)
+                    .await
+                    .with_context(|| "connecting to PostgreSQL for orphan inventory")?;
+                let manager = MulticatalogManager::new(pool);
+                delete_orphaned_files_multicatalog(
+                    &manager,
+                    object_store,
+                    CleanupCriteria::OlderThan(cutoff),
+                    true,
+                )
+                .await
+                .map_err(|e| anyhow!("inventory multicatalog orphan candidates: {e}"))
+            }
+        }
+    }
+
     pub async fn metadata_writer(&self) -> Result<Arc<dyn MetadataWriter>> {
         match &self.profile {
             StorageProfile::SqliteLocal {
@@ -241,7 +297,7 @@ impl StoragePaths {
                 let provider = MulticatalogProvider::with_pool_and_id(pool, catalog_id)
                     .await
                     .map_err(|e| anyhow!("MulticatalogProvider: {e}"))?;
-                Ok(Arc::new(provider))
+                Ok(Arc::new(MeteredMetadataProvider::new(Arc::new(provider))))
             }
         }
     }
@@ -250,17 +306,29 @@ impl StoragePaths {
         &self,
     ) -> Result<(Arc<dyn MetadataProvider>, Arc<dyn MetadataWriter>)> {
         let writer = self.metadata_writer().await?;
-        let initial_snapshot = writer
-            .create_snapshot()
-            .map_err(|e| anyhow!("create_snapshot: {e}"))?;
+        let provider = self.metadata_provider().await?;
 
         // Pre-create the `main` schema so SQL like `quackgis.main.<table>` can
-        // resolve at plan time before any CREATE TABLE has run.
-        let _ = writer
-            .get_or_create_schema("main", None, initial_snapshot)
-            .map_err(|e| anyhow!("get_or_create_schema(main): {e}"))?;
+        // resolve at plan time before any CREATE TABLE has run. Reopening an
+        // initialized catalog must be read-only: manufacturing a bare snapshot
+        // on every process start pollutes history and weakens retention evidence.
+        let current_snapshot = provider
+            .get_current_snapshot()
+            .map_err(|e| anyhow!("get_current_snapshot: {e}"))?;
+        let main_exists = current_snapshot > 0
+            && provider
+                .get_schema_by_name("main", current_snapshot)
+                .map_err(|e| anyhow!("get_schema_by_name(main): {e}"))?
+                .is_some();
+        if !main_exists {
+            let initial_snapshot = writer
+                .create_snapshot()
+                .map_err(|e| anyhow!("create_snapshot: {e}"))?;
+            let _ = writer
+                .get_or_create_schema("main", None, initial_snapshot)
+                .map_err(|e| anyhow!("get_or_create_schema(main): {e}"))?;
+        }
 
-        let provider = self.metadata_provider().await?;
         Ok((provider, writer))
     }
 

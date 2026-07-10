@@ -19,7 +19,6 @@ pub(super) enum CatalogSurface {
     PgInheritsRelname,
     PgInheritsCount,
     PgAttributeColumnListing,
-    GeographyColumnsProbe,
     PgDescriptionRegclass,
     PgIndexPrimaryKeyProbe,
     PgIndexKeyColumn,
@@ -29,7 +28,6 @@ pub(super) enum CatalogSurface {
     PgClassRelkindRegclass,
     PgAttributeRegclassIdentity,
     PgAttributeRegclassName,
-    PgAttributeGeomTypeName,
 }
 
 pub(super) fn classify_catalog_surface(sql: &str) -> Option<CatalogSurface> {
@@ -115,13 +113,6 @@ pub(super) fn classify_catalog_surface(sql: &str) -> Option<CatalogSurface> {
     {
         return Some(CatalogSurface::PgAttributeColumnListing);
     }
-    if sql.contains("from geography_columns")
-        && sql.contains("type")
-        && sql.contains("coord_dimension")
-        && sql.contains("srid")
-    {
-        return Some(CatalogSurface::GeographyColumnsProbe);
-    }
     if sql.contains("pg_description")
         && sql.contains("description")
         && (sql.contains("classoid") || sql.contains("pg_class"))
@@ -164,13 +155,6 @@ pub(super) fn classify_catalog_surface(sql: &str) -> Option<CatalogSurface> {
     }
     if sql.contains("pg_attribute") && sql.contains("regclass") && sql.contains("attname") {
         return Some(CatalogSurface::PgAttributeRegclassName);
-    }
-    if sql.contains("pg_attribute")
-        && sql.contains("pg_type")
-        && sql.contains("t.typname")
-        && sql.contains("a.attname = 'geom'")
-    {
-        return Some(CatalogSurface::PgAttributeGeomTypeName);
     }
     None
 }
@@ -321,10 +305,13 @@ mod tests {
             "SELECT attname FROM pg_attribute WHERE attrelid = 'public.points'::regclass",
             CatalogSurface::PgAttributeRegclassName,
         );
-        assert_surface(
-            "SELECT t.typname FROM pg_attribute a JOIN pg_type t ON a.atttypid = t.oid \
-             WHERE a.attname = 'geom'",
-            CatalogSurface::PgAttributeGeomTypeName,
+        assert_eq!(
+            classify_catalog_surface(
+                "select t.typname from pg_attribute a join pg_type t on a.atttypid = t.oid \
+                 where a.attname = 'geom'"
+            ),
+            None,
+            "a column name alone must not force a geometry type"
         );
     }
 

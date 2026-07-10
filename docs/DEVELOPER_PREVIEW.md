@@ -112,7 +112,8 @@ cargo run -p quackgis-server --example developer_preview -- --host 127.0.0.1 --p
 
 ## Performance levers proven so far
 
-Current local LayoutBench `sf1-local` (runner argument `sf1`, `factor=100`) shows:
+Current local LayoutBench `layoutbench-local-r22k8-v1` (runner argument
+`local-r22k8`, `factor=100`) shows:
 
 - COPY seed is about 18× faster than batched INSERT VALUES at this scale.
 - Transaction/COPY grouping gives better layout than many autocommit INSERTs.
@@ -126,10 +127,11 @@ Reproduce the main local checks:
 ```sh
 mise exec -- just layoutbench-sf0
 mise exec -- just layoutbench-local-smoke
+mise exec -- just benchmark-profile-check
 
 # Against an already-running server:
-mise exec -- just layoutbench-local sf1 3 generated copy
-mise exec -- just layoutbench-local sf1 3 shuffled insert true
+mise exec -- just layoutbench-local local-r22k8 3 generated copy
+mise exec -- just layoutbench-local local-r22k8 3 shuffled insert true
 ```
 
 ## Known limitations

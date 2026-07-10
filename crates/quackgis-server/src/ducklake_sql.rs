@@ -6,12 +6,14 @@
 //! the `quackgis.main.<table>` catalog path.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
+use chrono::{DateTime, NaiveDateTime, Utc};
 use datafusion::arrow::array::{
     Array, ArrayRef, BinaryArray, BinaryViewArray, BooleanArray, Float64Array, Int32Array,
     Int64Array, NullArray, StringArray, StringViewArray, UInt64Array, new_null_array,
@@ -32,8 +34,11 @@ use datafusion_ducklake::{
     DeleteFileMutation, DuckLakeCatalog, DuckLakeTable, DuckLakeTableFile, DuckLakeTableWriter,
     MetadataWriter, TableMutation, TableWriteSession, WriteMode,
 };
-use datafusion_postgres::arrow_pg::datatypes::{arrow_schema_to_pg_fields, encode_recordbatch};
-use datafusion_postgres::hooks::{HookClient, QueryHook};
+use datafusion_postgres::arrow_pg::datatypes::{
+    SpatialFamily, arrow_schema_to_pg_fields, classify_spatial_field, encode_recordbatch,
+    explicit_spatial_family, with_spatial_family_metadata,
+};
+use datafusion_postgres::hooks::{ExtendedQueryPlan, HookClient, QueryHook};
 use datafusion_postgres::pgwire::api::portal::Format;
 use datafusion_postgres::pgwire::api::results::{CopyResponse, QueryResponse, Response, Tag};
 use datafusion_postgres::pgwire::api::{ClientInfo, PgWireConnectionState};
@@ -66,6 +71,7 @@ use rewrites::{
 
 static TRANSACTION_COUNTER: AtomicU64 = AtomicU64::new(1);
 static QUERY_COUNTER: AtomicU64 = AtomicU64::new(1);
+static INTERNAL_CATALOG_COUNTER: AtomicU64 = AtomicU64::new(1);
 static WRITE_DENIED_COUNTER: AtomicU64 = AtomicU64::new(0);
 static CATALOG_REFRESH_COUNTER: AtomicU64 = AtomicU64::new(0);
 static SHARED_CATALOG_READ_REFRESH_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -79,12 +85,16 @@ static NATIVE_MUTATION_ABORT_COUNTER: AtomicU64 = AtomicU64::new(0);
 static COMPACTION_COUNTER: AtomicU64 = AtomicU64::new(0);
 static NATIVE_MUTATION_FAILPOINT: OnceLock<StdMutex<Option<NativeMutationFailpoint>>> =
     OnceLock::new();
+static NATIVE_MUTATION_BARRIER: OnceLock<Option<NativeMutationBarrier>> = OnceLock::new();
 const DEFAULT_DUCKLAKE_ROW_GROUP_ROWS: usize = 512;
 const DUCKLAKE_ROW_GROUP_ROWS_ENV: &str = "QUACKGIS_DUCKLAKE_ROW_GROUP_ROWS";
 const DEFAULT_SHARED_CATALOG_REFRESH_MS: u64 = 1_000;
 const SHARED_CATALOG_REFRESH_MS_ENV: &str = "QUACKGIS_SHARED_CATALOG_REFRESH_MS";
 const DEFAULT_SELECTIVE_READ_TARGET_PARTITIONS: usize = 1;
 const SELECTIVE_READ_TARGET_PARTITIONS_ENV: &str = "QUACKGIS_SELECTIVE_READ_TARGET_PARTITIONS";
+const NATIVE_MUTATION_BARRIER_ENV: &str = "QUACKGIS_TEST_NATIVE_MUTATION_BARRIER";
+const NATIVE_MUTATION_BARRIER_READY_ENV: &str = "QUACKGIS_TEST_NATIVE_MUTATION_BARRIER_READY";
+const NATIVE_MUTATION_BARRIER_RELEASE_ENV: &str = "QUACKGIS_TEST_NATIVE_MUTATION_BARRIER_RELEASE";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NativeMutationKind {
@@ -108,7 +118,7 @@ impl NativeMutationKind {
             value if value.eq_ignore_ascii_case("update") => Ok(Self::Update),
             value if value.eq_ignore_ascii_case("compact") => Ok(Self::Compact),
             _ => Err(anyhow!(
-                "unsupported native mutation failpoint operation {value:?}; expected delete, update, or compact"
+                "unsupported native mutation operation {value:?}; expected delete, update, or compact"
             )),
         }
     }
@@ -117,20 +127,23 @@ impl NativeMutationKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NativeMutationStage {
     BeforeCommit,
+    AfterCommit,
 }
 
 impl NativeMutationStage {
     fn as_str(self) -> &'static str {
         match self {
             Self::BeforeCommit => "before_commit",
+            Self::AfterCommit => "after_commit",
         }
     }
 
     fn parse(value: &str) -> Result<Self> {
         match value {
             value if value.eq_ignore_ascii_case("before_commit") => Ok(Self::BeforeCommit),
+            value if value.eq_ignore_ascii_case("after_commit") => Ok(Self::AfterCommit),
             _ => Err(anyhow!(
-                "unsupported native mutation failpoint stage {value:?}; expected before_commit"
+                "unsupported native mutation stage {value:?}; expected before_commit or after_commit"
             )),
         }
     }
@@ -154,6 +167,11 @@ impl NativeMutationFailpoint {
         }
         let kind = NativeMutationKind::parse(parts[0].trim())?;
         let stage = NativeMutationStage::parse(parts[1].trim())?;
+        if stage != NativeMutationStage::BeforeCommit {
+            return Err(anyhow!(
+                "native mutation failpoint supports only the before_commit stage"
+            ));
+        }
         let (schema, table) = if let Some(target) = parts.get(2) {
             parse_failpoint_target(target.trim())?
         } else {
@@ -185,6 +203,198 @@ impl NativeMutationFailpoint {
                 .as_deref()
                 .is_none_or(|expected| expected.eq_ignore_ascii_case(table))
     }
+}
+
+#[derive(Debug, Clone)]
+struct NativeMutationBarrier {
+    kind: NativeMutationKind,
+    stage: NativeMutationStage,
+    schema: Option<String>,
+    table: Option<String>,
+    ready_path: PathBuf,
+    release_path: PathBuf,
+}
+
+impl NativeMutationBarrier {
+    fn from_env() -> Result<Option<Self>> {
+        let spec = std::env::var_os(NATIVE_MUTATION_BARRIER_ENV);
+        let ready_path = std::env::var_os(NATIVE_MUTATION_BARRIER_READY_ENV);
+        let release_path = std::env::var_os(NATIVE_MUTATION_BARRIER_RELEASE_ENV);
+        let configured = [spec.is_some(), ready_path.is_some(), release_path.is_some()];
+        if configured.iter().all(|configured| !configured) {
+            return Ok(None);
+        }
+        if !configured.iter().all(|configured| *configured) {
+            return Err(anyhow!(
+                "{NATIVE_MUTATION_BARRIER_ENV}, {NATIVE_MUTATION_BARRIER_READY_ENV}, and {NATIVE_MUTATION_BARRIER_RELEASE_ENV} must be set together"
+            ));
+        }
+
+        let spec = spec
+            .expect("checked above")
+            .into_string()
+            .map_err(|_| anyhow!("{NATIVE_MUTATION_BARRIER_ENV} must be valid UTF-8"))?;
+        let parts = spec.split(':').collect::<Vec<_>>();
+        if !(2..=3).contains(&parts.len()) {
+            return Err(anyhow!(
+                "native mutation barrier must be operation:stage[:schema.table], got {spec:?}"
+            ));
+        }
+        let kind = NativeMutationKind::parse(parts[0].trim())?;
+        let stage = NativeMutationStage::parse(parts[1].trim())?;
+        let (schema, table) = if let Some(target) = parts.get(2) {
+            let target = target.trim();
+            let target_parts = target.split('.').collect::<Vec<_>>();
+            match target_parts.as_slice() {
+                [schema, table] if !schema.is_empty() && !table.is_empty() => {
+                    (Some((*schema).to_string()), Some((*table).to_string()))
+                }
+                _ => {
+                    return Err(anyhow!(
+                        "native mutation barrier target must be schema.table, got {target:?}"
+                    ));
+                }
+            }
+        } else {
+            (None, None)
+        };
+
+        let ready_path = PathBuf::from(ready_path.expect("checked above"));
+        let release_path = PathBuf::from(release_path.expect("checked above"));
+        if ready_path.as_os_str().is_empty() || release_path.as_os_str().is_empty() {
+            return Err(anyhow!(
+                "native mutation barrier marker paths cannot be empty"
+            ));
+        }
+        if ready_path == release_path {
+            return Err(anyhow!(
+                "native mutation barrier ready and release paths must be different"
+            ));
+        }
+        for (name, path) in [
+            (NATIVE_MUTATION_BARRIER_READY_ENV, &ready_path),
+            (NATIVE_MUTATION_BARRIER_RELEASE_ENV, &release_path),
+        ] {
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| std::path::Path::new("."));
+            if !parent.is_dir() {
+                return Err(anyhow!(
+                    "{name} parent directory does not exist: {}",
+                    parent.display()
+                ));
+            }
+            if path.exists() {
+                return Err(anyhow!(
+                    "refusing stale native mutation barrier marker at {}",
+                    path.display()
+                ));
+            }
+        }
+
+        Ok(Some(Self {
+            kind,
+            stage,
+            schema,
+            table,
+            ready_path,
+            release_path,
+        }))
+    }
+
+    fn matches(
+        &self,
+        kind: NativeMutationKind,
+        stage: NativeMutationStage,
+        schema: &str,
+        table: &str,
+    ) -> bool {
+        self.kind == kind
+            && self.stage == stage
+            && self
+                .schema
+                .as_deref()
+                .is_none_or(|expected| expected.eq_ignore_ascii_case(schema))
+            && self
+                .table
+                .as_deref()
+                .is_none_or(|expected| expected.eq_ignore_ascii_case(table))
+    }
+}
+
+/// Configure the private cross-process native-mutation test barrier once.
+///
+/// This is intentionally environment-only and has no public CLI surface.
+#[doc(hidden)]
+pub fn configure_native_mutation_barrier_from_env() -> Result<()> {
+    let barrier = NativeMutationBarrier::from_env()?;
+    NATIVE_MUTATION_BARRIER
+        .set(barrier)
+        .map_err(|_| anyhow!("native mutation barrier was configured more than once"))
+}
+
+async fn maybe_wait_at_native_mutation_barrier(
+    kind: NativeMutationKind,
+    stage: NativeMutationStage,
+    schema: &str,
+    table: &str,
+) -> PgWireResult<()> {
+    let Some(barrier) = NATIVE_MUTATION_BARRIER
+        .get()
+        .and_then(|barrier| barrier.as_ref())
+        .filter(|barrier| barrier.matches(kind, stage, schema, table))
+    else {
+        return Ok(());
+    };
+
+    // create_new publishes the empty ready marker atomically after all object
+    // prewrites (or the metadata commit) preceding this barrier have completed.
+    tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&barrier.ready_path)
+        .await
+        .map_err(|err| {
+            user_error(anyhow!(
+                "create native mutation barrier ready marker {}: {err}",
+                barrier.ready_path.display()
+            ))
+        })?;
+
+    loop {
+        match tokio::fs::metadata(&barrier.release_path).await {
+            Ok(_) => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(err) => {
+                return Err(user_error(anyhow!(
+                    "read native mutation barrier release marker {}: {err}",
+                    barrier.release_path.display()
+                )));
+            }
+        }
+    }
+}
+
+async fn commit_native_mutation(
+    writer: &dyn MetadataWriter,
+    kind: NativeMutationKind,
+    table_id: i64,
+    schema: &str,
+    table: &str,
+    base_snapshot: i64,
+    mutation: &TableMutation,
+) -> PgWireResult<()> {
+    maybe_wait_at_native_mutation_barrier(kind, NativeMutationStage::BeforeCommit, schema, table)
+        .await?;
+    maybe_fail_native_mutation(kind, NativeMutationStage::BeforeCommit, schema, table)?;
+    writer
+        .commit_table_mutation(table_id, schema, table, base_snapshot, mutation)
+        .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+    maybe_wait_at_native_mutation_barrier(kind, NativeMutationStage::AfterCommit, schema, table)
+        .await
 }
 
 /// Install a one-shot native mutation failpoint for tests and local failure drills.
@@ -383,9 +593,15 @@ struct NativeRowPlan {
 
 struct SnapshotQueryRewrite {
     sql: String,
-    snapshot_id: i64,
+    selector: SnapshotSelector,
     schema: String,
     table: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SnapshotSelector {
+    Id(i64),
+    Timestamp(DateTime<Utc>),
 }
 
 impl DuckLakeSqlHook {
@@ -405,20 +621,44 @@ impl DuckLakeSqlHook {
     where
         C: ClientInfo + Send + Sync + ?Sized,
     {
-        match self.auth.role_for_client(client) {
-            AccessRole::ReadWrite => Ok(()),
-            AccessRole::ReadOnly => {
-                let denied_total = WRITE_DENIED_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
-                log::warn!(
-                    "quackgis_write_denied user={} statement_kind={} denied_total={denied_total}",
-                    client_user(client),
-                    statement_kind(statement)
-                );
-                Err(user_error(anyhow!(
-                    "read-only QuackGIS role cannot execute write or maintenance statements"
-                )))
-            }
+        let target = write_target_for_statement(statement)?;
+        let target_ref = target
+            .as_ref()
+            .map(|(schema, table)| (schema.as_str(), table.as_str()));
+        if self.auth.allows_write(
+            client.metadata().get("user").map(String::as_str),
+            target_ref,
+        ) {
+            return Ok(());
         }
+
+        let denied_total = WRITE_DENIED_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
+        let target_label = target
+            .as_ref()
+            .map(|(schema, table)| format!("{schema}.{table}"))
+            .unwrap_or_else(|| "<indeterminate>".to_string());
+        log::warn!(
+            "quackgis_write_denied user={} statement_kind={} target={} denied_total={denied_total}",
+            client_user(client),
+            statement_kind(statement),
+            target_label,
+        );
+        let message = match self.auth.role_for_client(client) {
+            AccessRole::ReadOnly => {
+                "read-only QuackGIS role cannot execute write or maintenance statements"
+                    .to_string()
+            }
+            AccessRole::ReadWrite => match target {
+                Some((schema, table)) => format!(
+                    "QuackGIS write allowlist does not permit writes to {schema}.{table}"
+                ),
+                None => {
+                    "QuackGIS write allowlist cannot authorize an indeterminate write or maintenance statement"
+                        .to_string()
+                }
+            },
+        };
+        Err(authorization_error(anyhow!("{message}")))
     }
 
     async fn snapshot_query_context(
@@ -426,9 +666,15 @@ impl DuckLakeSqlHook {
         statement: &Statement,
         session_context: &SessionContext,
     ) -> PgWireResult<Option<(SessionContext, String)>> {
+        let Statement::Query(query) = statement else {
+            return Ok(None);
+        };
+        if query_snapshot_selector_count(query) == 0 {
+            return Ok(None);
+        }
         let catalog_name = format!(
             "__quackgis_snapshot_{}",
-            QUERY_COUNTER.fetch_add(1, Ordering::Relaxed)
+            INTERNAL_CATALOG_COUNTER.fetch_add(1, Ordering::Relaxed)
         );
         let rewrite = match snapshot_query_rewrite(statement, &catalog_name) {
             Ok(Some(rewrite)) => rewrite,
@@ -444,28 +690,29 @@ impl DuckLakeSqlHook {
                 .metadata_provider()
                 .await
                 .map_err(storage_api_error)?;
+            let snapshot_id = resolve_snapshot_selector(provider.as_ref(), &rewrite.selector)?;
             let schema_meta = provider
-                .get_schema_by_name(&rewrite.schema, rewrite.snapshot_id)
+                .get_schema_by_name(&rewrite.schema, snapshot_id)
                 .map_err(|e| PgWireError::ApiError(Box::new(e)))?
                 .ok_or_else(|| {
                     user_error(anyhow!(
                         "schema {} was not visible at DuckLake snapshot {}",
                         rewrite.schema,
-                        rewrite.snapshot_id
+                        snapshot_id
                     ))
                 })?;
             provider
-                .get_table_by_name(schema_meta.schema_id, &rewrite.table, rewrite.snapshot_id)
+                .get_table_by_name(schema_meta.schema_id, &rewrite.table, snapshot_id)
                 .map_err(|e| PgWireError::ApiError(Box::new(e)))?
                 .ok_or_else(|| {
                     user_error(anyhow!(
                         "table {}.{} was not visible at DuckLake snapshot {}",
                         rewrite.schema,
                         rewrite.table,
-                        rewrite.snapshot_id
+                        snapshot_id
                     ))
                 })?;
-            let ducklake = DuckLakeCatalog::with_snapshot(provider, rewrite.snapshot_id)
+            let ducklake = DuckLakeCatalog::with_snapshot(provider, snapshot_id)
                 .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
             let snapshot_context = SessionContext::new_with_state(session_context.state());
             snapshot_context.register_catalog(&catalog_name, Arc::new(ducklake));
@@ -483,6 +730,57 @@ impl DuckLakeSqlHook {
             }
         }
     }
+}
+
+fn resolve_snapshot_selector(
+    provider: &dyn datafusion_ducklake::MetadataProvider,
+    selector: &SnapshotSelector,
+) -> PgWireResult<i64> {
+    let snapshots = provider
+        .list_snapshots()
+        .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+    match selector {
+        SnapshotSelector::Id(requested) => snapshots
+            .iter()
+            .any(|snapshot| snapshot.snapshot_id == *requested)
+            .then_some(*requested)
+            .ok_or_else(|| user_error(anyhow!("DuckLake snapshot {requested} does not exist"))),
+        SnapshotSelector::Timestamp(target) => {
+            let mut resolved = None;
+            for snapshot in snapshots {
+                let raw = snapshot.timestamp.as_deref().ok_or_else(|| {
+                    user_error(anyhow!(
+                        "DuckLake snapshot {} has no timestamp",
+                        snapshot.snapshot_id
+                    ))
+                })?;
+                let timestamp = parse_catalog_snapshot_timestamp(raw).map_err(user_error)?;
+                if timestamp <= *target
+                    && resolved.as_ref().is_none_or(|(best_time, best_id)| {
+                        timestamp > *best_time
+                            || (timestamp == *best_time && snapshot.snapshot_id > *best_id)
+                    })
+                {
+                    resolved = Some((timestamp, snapshot.snapshot_id));
+                }
+            }
+            resolved.map(|(_, id)| id).ok_or_else(|| {
+                user_error(anyhow!(
+                    "no DuckLake snapshot exists at or before {}",
+                    target.to_rfc3339()
+                ))
+            })
+        }
+    }
+}
+
+fn parse_catalog_snapshot_timestamp(raw: &str) -> Result<DateTime<Utc>> {
+    if let Ok(timestamp) = DateTime::parse_from_rfc3339(raw) {
+        return Ok(timestamp.with_timezone(&Utc));
+    }
+    NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f")
+        .map(|timestamp| timestamp.and_utc())
+        .map_err(|e| anyhow!("invalid DuckLake snapshot timestamp {raw:?}: {e}"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -599,15 +897,15 @@ impl QueryHook for DuckLakeSqlHook {
         session_context: &SessionContext,
         client: &mut dyn HookClient,
     ) -> Option<PgWireResult<Response>> {
-        if let Err(err) = self
-            .refresh_shared_catalog(statement, session_context)
-            .await
+        log_query_start(client, "simple", statement);
+        if !statement_allowed_for_readonly(statement)
+            && let Err(err) = self.ensure_write_allowed(client, statement)
         {
             return Some(Err(err));
         }
-        log_query_start(client, "simple", statement);
-        if statement_requires_write(statement)
-            && let Err(err) = self.ensure_write_allowed(client, statement)
+        if let Err(err) = self
+            .refresh_shared_catalog(statement, session_context)
+            .await
         {
             return Some(Err(err));
         }
@@ -628,9 +926,12 @@ impl QueryHook for DuckLakeSqlHook {
             Ok(None) => {}
             Err(err) => return Some(Err(err)),
         }
-        if let Some(rewritten_query) =
-            pruning::rewrite_spatial_pruning_query(statement, session_context).await
-        {
+        let rewritten_query =
+            match pruning::rewrite_spatial_pruning_query(statement, session_context) {
+                Ok(rewritten_query) => rewritten_query,
+                Err(err) => return Some(Err(PgWireError::ApiError(Box::new(err)))),
+            };
+        if let Some(rewritten_query) = rewritten_query {
             return Some(
                 collect_selective_read_batches(session_context, &rewritten_query)
                     .await
@@ -716,14 +1017,14 @@ impl QueryHook for DuckLakeSqlHook {
         session_context: &SessionContext,
         client: &(dyn datafusion_postgres::pgwire::api::ClientInfo + Send + Sync),
     ) -> Option<PgWireResult<LogicalPlan>> {
-        if let Err(err) = self
-            .refresh_shared_catalog(statement, session_context)
-            .await
+        if !statement_allowed_for_readonly(statement)
+            && let Err(err) = self.ensure_write_allowed(client, statement)
         {
             return Some(Err(err));
         }
-        if statement_requires_write(statement)
-            && let Err(err) = self.ensure_write_allowed(client, statement)
+        if let Err(err) = self
+            .refresh_shared_catalog(statement, session_context)
+            .await
         {
             return Some(Err(err));
         }
@@ -768,9 +1069,12 @@ impl QueryHook for DuckLakeSqlHook {
         if ducklake_statement_parts(statement).is_some() {
             return Some(Ok(empty_logical_plan()));
         }
-        if let Some(rewritten_query) =
-            pruning::rewrite_spatial_pruning_query(statement, session_context).await
-        {
+        let rewritten_query =
+            match pruning::rewrite_spatial_pruning_query(statement, session_context) {
+                Ok(rewritten_query) => rewritten_query,
+                Err(err) => return Some(Err(PgWireError::ApiError(Box::new(err)))),
+            };
+        if let Some(rewritten_query) = rewritten_query {
             return Some(
                 session_context
                     .sql(&rewritten_query)
@@ -785,23 +1089,61 @@ impl QueryHook for DuckLakeSqlHook {
         None
     }
 
+    async fn replan_extended_query(
+        &self,
+        statement: &datafusion::sql::sqlparser::ast::Statement,
+        _logical_plan: &LogicalPlan,
+        session_context: &SessionContext,
+    ) -> Option<PgWireResult<ExtendedQueryPlan>> {
+        if !is_read_statement(statement) {
+            return None;
+        }
+        let rewritten_query =
+            match pruning::rewrite_spatial_pruning_query(statement, session_context) {
+                Ok(rewritten_query) => rewritten_query,
+                Err(err) => return Some(Err(PgWireError::ApiError(Box::new(err)))),
+            };
+        let execution_context = if rewritten_query.is_some() {
+            match configured_selective_read_target_partitions() {
+                Ok(Some(target_partitions)) => {
+                    session_context_with_target_partitions(session_context, target_partitions)
+                }
+                Ok(None) => session_context.clone(),
+                Err(err) => return Some(Err(err)),
+            }
+        } else {
+            session_context.clone()
+        };
+        let query = rewritten_query.unwrap_or_else(|| statement.to_string());
+        Some(
+            execution_context
+                .sql(&query)
+                .await
+                .map(|dataframe| ExtendedQueryPlan {
+                    logical_plan: dataframe.into_unoptimized_plan(),
+                    session_context: execution_context,
+                })
+                .map_err(|err| PgWireError::ApiError(Box::new(err))),
+        )
+    }
+
     async fn handle_extended_query(
         &self,
         statement: &datafusion::sql::sqlparser::ast::Statement,
         _logical_plan: &LogicalPlan,
-        _params: &ParamValues,
+        params: &ParamValues,
         session_context: &SessionContext,
         client: &mut dyn HookClient,
     ) -> Option<PgWireResult<Response>> {
-        if let Err(err) = self
-            .refresh_shared_catalog(statement, session_context)
-            .await
+        log_query_start(client, "extended", statement);
+        if !statement_allowed_for_readonly(statement)
+            && let Err(err) = self.ensure_write_allowed(client, statement)
         {
             return Some(Err(err));
         }
-        log_query_start(client, "extended", statement);
-        if statement_requires_write(statement)
-            && let Err(err) = self.ensure_write_allowed(client, statement)
+        if let Err(err) = self
+            .refresh_shared_catalog(statement, session_context)
+            .await
         {
             return Some(Err(err));
         }
@@ -821,19 +1163,6 @@ impl QueryHook for DuckLakeSqlHook {
             }
             Ok(None) => {}
             Err(err) => return Some(Err(err)),
-        }
-        if param_values_empty(_params)
-            && let Some(rewritten_query) =
-                pruning::rewrite_spatial_pruning_query(statement, session_context).await
-        {
-            return Some(
-                collect_selective_read_batches(session_context, &rewritten_query)
-                    .await
-                    .and_then(|batches| {
-                        query_response_from_batches_with_format(batches, Format::UnifiedBinary)
-                    })
-                    .map(Response::Query),
-            );
         }
         // Route extended-protocol CTAS/INSERT too; clients differ in whether
         // they send DDL via simple or extended flow.
@@ -879,7 +1208,7 @@ impl QueryHook for DuckLakeSqlHook {
                         insert,
                         session_context,
                         Format::UnifiedBinary,
-                        Some(_params),
+                        Some(params),
                         client,
                     )
                     .await,
@@ -901,7 +1230,7 @@ impl QueryHook for DuckLakeSqlHook {
                         delete,
                         session_context,
                         Format::UnifiedBinary,
-                        Some(_params),
+                        Some(params),
                         client,
                     )
                     .await,
@@ -914,7 +1243,7 @@ impl QueryHook for DuckLakeSqlHook {
                     self.handle_update(
                         update,
                         Format::UnifiedBinary,
-                        Some(_params),
+                        Some(params),
                         session_context,
                         client,
                     )
@@ -954,10 +1283,10 @@ fn snapshot_query_rewrite(
     let Statement::Query(query) = &mut statement else {
         unreachable!("checked above")
     };
-    let (schema, table, snapshot_id) = rewrite_single_table_snapshot_query(query, catalog_name)?;
+    let (schema, table, selector) = rewrite_single_table_snapshot_query(query, catalog_name)?;
     Ok(Some(SnapshotQueryRewrite {
         sql: statement.to_string(),
-        snapshot_id,
+        selector,
         schema,
         table,
     }))
@@ -966,7 +1295,7 @@ fn snapshot_query_rewrite(
 fn rewrite_single_table_snapshot_query(
     query: &mut Query,
     catalog_name: &str,
-) -> PgWireResult<(String, String, i64)> {
+) -> PgWireResult<(String, String, SnapshotSelector)> {
     let SetExpr::Select(select) = query.body.as_mut() else {
         return Err(user_error(anyhow!(
             "DuckLake snapshot reads currently support only simple SELECT statements"
@@ -996,9 +1325,9 @@ fn rewrite_single_table_snapshot_query(
                         "DuckLake snapshot reads accept only one snapshot selector per table"
                     )));
                 }
-                let snapshot_id = snapshot_id_from_function_args(function_args, false)?;
+                let selector = snapshot_selector_from_function_args(function_args, false)?;
                 *name = snapshot_catalog_table_name(catalog_name, &schema, &table_name);
-                return Ok((schema, table_name, snapshot_id));
+                return Ok((schema, table_name, selector));
             }
             let (schema, table_name) = snapshot_table_name_parts(name)
                 .or_else(|| {
@@ -1011,17 +1340,17 @@ fn rewrite_single_table_snapshot_query(
                         "DuckLake snapshot reads require a QuackGIS DuckLake table with snapshot => <id>"
                     ))
                 })?;
-            let snapshot_id = if let Some(table_version) = version.take() {
-                snapshot_id_from_table_version(&table_version)?
+            let selector = if let Some(table_version) = version.take() {
+                SnapshotSelector::Id(snapshot_id_from_table_version(&table_version)?)
             } else if let Some(table_args) = args.take() {
-                snapshot_id_from_table_args(&table_args)?
+                snapshot_selector_from_table_args(&table_args)?
             } else {
                 return Err(user_error(anyhow!(
                     "internal error: snapshot rewrite missing table snapshot selector"
                 )));
             };
             *name = snapshot_catalog_table_name(catalog_name, &schema, &table_name);
-            Ok((schema, table_name, snapshot_id))
+            Ok((schema, table_name, selector))
         }
         TableFactor::Function {
             lateral,
@@ -1040,7 +1369,7 @@ fn rewrite_single_table_snapshot_query(
                     "DuckLake snapshot reads require a schema-qualified QuackGIS DuckLake table"
                 ))
             })?;
-            let snapshot_id = snapshot_id_from_function_args(args, false)?;
+            let selector = snapshot_selector_from_function_args(args, false)?;
             let alias = alias.take();
             table.relation = TableFactor::Table {
                 name: snapshot_catalog_table_name(catalog_name, &schema, &table_name),
@@ -1054,7 +1383,7 @@ fn rewrite_single_table_snapshot_query(
                 sample: None,
                 index_hints: vec![],
             };
-            Ok((schema, table_name, snapshot_id))
+            Ok((schema, table_name, selector))
         }
         _ => Err(user_error(anyhow!(
             "DuckLake snapshot reads currently support only named DuckLake tables"
@@ -1132,8 +1461,8 @@ fn snapshot_id_from_table_version(version: &TableVersion) -> PgWireResult<i64> {
     }
 }
 
-fn snapshot_id_from_table_args(args: &TableFunctionArgs) -> PgWireResult<i64> {
-    snapshot_id_from_function_args(&args.args, args.settings.is_some())
+fn snapshot_selector_from_table_args(args: &TableFunctionArgs) -> PgWireResult<SnapshotSelector> {
+    snapshot_selector_from_function_args(&args.args, args.settings.is_some())
 }
 
 fn snapshot_table_args_have_named_selector(args: &TableFunctionArgs) -> bool {
@@ -1147,11 +1476,13 @@ fn function_arg_is_snapshot_selector(arg: &FunctionArg) -> bool {
         FunctionArg::Named { name, .. } => {
             name.value.eq_ignore_ascii_case("snapshot")
                 || name.value.eq_ignore_ascii_case("snapshot_id")
+                || name.value.eq_ignore_ascii_case("snapshot_at")
         }
         FunctionArg::ExprNamed { name, .. } => match name {
             Expr::Identifier(ident) => {
                 ident.value.eq_ignore_ascii_case("snapshot")
                     || ident.value.eq_ignore_ascii_case("snapshot_id")
+                    || ident.value.eq_ignore_ascii_case("snapshot_at")
             }
             _ => false,
         },
@@ -1159,20 +1490,24 @@ fn function_arg_is_snapshot_selector(arg: &FunctionArg) -> bool {
     }
 }
 
-fn snapshot_id_from_function_args(args: &[FunctionArg], has_settings: bool) -> PgWireResult<i64> {
+fn snapshot_selector_from_function_args(
+    args: &[FunctionArg],
+    has_settings: bool,
+) -> PgWireResult<SnapshotSelector> {
     if has_settings || args.len() != 1 {
         return Err(user_error(anyhow!(
-            "DuckLake snapshot table reads use exactly one snapshot id argument: public.table(<snapshot_id>)"
+            "DuckLake snapshot table reads use exactly one named selector: snapshot, snapshot_id, or snapshot_at"
         )));
     }
     match &args[0] {
-        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => snapshot_id_from_expr(expr),
         FunctionArg::Named { name, arg, .. }
             if name.value.eq_ignore_ascii_case("snapshot")
                 || name.value.eq_ignore_ascii_case("snapshot_id") =>
         {
             match arg {
-                FunctionArgExpr::Expr(expr) => snapshot_id_from_expr(expr),
+                FunctionArgExpr::Expr(expr) => {
+                    snapshot_id_from_expr(expr).map(SnapshotSelector::Id)
+                }
                 _ => Err(user_error(anyhow!(
                     "DuckLake snapshot id must be an expression"
                 ))),
@@ -1186,16 +1521,44 @@ fn snapshot_id_from_function_args(args: &[FunctionArg], has_settings: bool) -> P
             || ident.value.eq_ignore_ascii_case("snapshot_id") =>
         {
             match arg {
-                FunctionArgExpr::Expr(expr) => snapshot_id_from_expr(expr),
+                FunctionArgExpr::Expr(expr) => {
+                    snapshot_id_from_expr(expr).map(SnapshotSelector::Id)
+                }
                 _ => Err(user_error(anyhow!(
                     "DuckLake snapshot id must be an expression"
                 ))),
             }
         }
+        FunctionArg::Named { name, arg, .. } if name.value.eq_ignore_ascii_case("snapshot_at") => {
+            snapshot_timestamp_from_function_arg(arg).map(SnapshotSelector::Timestamp)
+        }
+        FunctionArg::ExprNamed {
+            name: Expr::Identifier(ident),
+            arg,
+            ..
+        } if ident.value.eq_ignore_ascii_case("snapshot_at") => {
+            snapshot_timestamp_from_function_arg(arg).map(SnapshotSelector::Timestamp)
+        }
         _ => Err(user_error(anyhow!(
-            "DuckLake snapshot table reads use public.table(<snapshot_id>) or public.table(snapshot => <snapshot_id>)"
+            "DuckLake snapshot table reads use public.table(snapshot => <id>), public.table(snapshot_id => <id>), or public.table(snapshot_at => '<RFC3339>')"
         ))),
     }
+}
+
+fn snapshot_timestamp_from_function_arg(arg: &FunctionArgExpr) -> PgWireResult<DateTime<Utc>> {
+    let FunctionArgExpr::Expr(Expr::Value(value)) = arg else {
+        return Err(user_error(anyhow!(
+            "DuckLake snapshot timestamp must be a literal RFC3339 string"
+        )));
+    };
+    let Value::SingleQuotedString(raw) = &value.value else {
+        return Err(user_error(anyhow!(
+            "DuckLake snapshot timestamp must be a literal RFC3339 string"
+        )));
+    };
+    DateTime::parse_from_rfc3339(raw)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .map_err(|e| user_error(anyhow!("invalid DuckLake snapshot timestamp {raw:?}: {e}")))
 }
 
 fn snapshot_id_from_expr(expr: &Expr) -> PgWireResult<i64> {
@@ -1311,30 +1674,48 @@ fn statement_kind(statement: &Statement) -> &'static str {
         Statement::Call(_) => "call",
         Statement::Commit { .. } => "commit",
         Statement::Copy { .. } => "copy",
+        Statement::CreateSchema { .. } => "create_schema",
         Statement::CreateTable(_) => "create_table",
+        Statement::CreateView(_) => "create_view",
         Statement::Deallocate { .. } => "deallocate",
         Statement::Delete(_) => "delete",
         Statement::Explain { .. } => "explain",
         Statement::Insert(_) => "insert",
         Statement::Query(_) => "query",
         Statement::Rollback { .. } => "rollback",
+        Statement::Set(_) => "set",
+        Statement::ShowStatus { .. } | Statement::ShowVariable { .. } => "show",
         Statement::StartTransaction { .. } => "start_transaction",
+        Statement::Truncate(_) => "truncate",
         Statement::Update { .. } => "update",
+        Statement::Drop { .. } => "drop",
         _ => "other",
     }
 }
 
-fn statement_requires_write(statement: &Statement) -> bool {
+/// Read-only identities use an allowlist so newly parsed statement variants do
+/// not silently gain privileges when sqlparser/DataFusion adds support.
+fn statement_allowed_for_readonly(statement: &Statement) -> bool {
     match statement {
-        Statement::CreateTable(ct) => table_name_parts(&ct.name).is_some(),
-        Statement::Copy { .. } => copy_statement_parts(statement).is_some(),
-        Statement::Call(function) => is_compact_call(function),
-        Statement::Insert(insert) => {
-            insert.source.is_some() && insert_target_parts(&insert.table).is_some()
+        Statement::Query(_)
+        | Statement::Set(_)
+        | Statement::ShowVariable { .. }
+        | Statement::ShowStatus { .. }
+        | Statement::Deallocate { .. }
+        | Statement::Declare { .. }
+        | Statement::Close { .. }
+        | Statement::Discard { .. }
+        | Statement::ExplainTable { .. }
+        | Statement::Commit { .. }
+        | Statement::Rollback { .. } => true,
+        Statement::StartTransaction { statements, .. } => {
+            statements.iter().all(statement_allowed_for_readonly)
         }
-        Statement::AlterTable(alter) => table_name_parts(&alter.name).is_some(),
-        Statement::Delete(delete) => delete_target_parts(delete).is_some(),
-        Statement::Update(update) => update_target_parts(&update.table).is_some(),
+        Statement::Explain { statement, .. } | Statement::Prepare { statement, .. } => {
+            statement_allowed_for_readonly(statement)
+        }
+        Statement::Fetch { into, .. } => into.is_none(),
+        Statement::Copy { to, .. } => *to,
         _ => false,
     }
 }
@@ -1355,13 +1736,6 @@ where
     client
         .session_extensions()
         .get_or_insert_with(CopyInSessionState::default)
-}
-
-fn param_values_empty(params: &ParamValues) -> bool {
-    match params {
-        ParamValues::List(values) => values.is_empty(),
-        ParamValues::Map(values) => values.is_empty(),
-    }
 }
 
 fn configured_ducklake_table_writer(
@@ -1570,6 +1944,19 @@ fn ducklake_statement_parts(statement: &Statement) -> Option<(String, String)> {
         }
         datafusion::sql::sqlparser::ast::Statement::Copy { .. } => copy_statement_parts(statement),
         _ => None,
+    }
+}
+
+fn write_target_for_statement(statement: &Statement) -> PgWireResult<Option<(String, String)>> {
+    if let Some((schema, table)) = ducklake_statement_parts(statement) {
+        return Ok(Some((schema, table)));
+    }
+    match statement {
+        Statement::Call(function) if is_compact_call(function) => {
+            let target = compact_call_parts(function)?;
+            Ok(Some((target.schema, target.table)))
+        }
+        _ => Ok(None),
     }
 }
 
@@ -2048,6 +2435,8 @@ impl DuckLakeSqlHook {
             None
         };
         let (new_batches, rows) = collect_normalized_query_batches(session_context, &query).await?;
+        let new_batches = align_spatial_metadata_to_schema(new_batches, target_schema.as_ref())
+            .map_err(user_error)?;
         let combined =
             Self::append_staged_batches(&staged.batches, new_batches).map_err(user_error)?;
         self.replace_staged_batches(session_context, staged, combined)?;
@@ -2098,6 +2487,13 @@ impl DuckLakeSqlHook {
         let query = format!("SELECT * FROM {table_ref} WHERE {where_clause}");
         let (batches, remaining) =
             collect_normalized_query_batches(session_context, &query).await?;
+        let target_schema = staged
+            .batches
+            .first()
+            .map(|batch| batch.schema())
+            .ok_or_else(|| user_error(anyhow!("staged table must have a schema")))?;
+        let batches = align_spatial_metadata_to_schema(batches, target_schema.as_ref())
+            .map_err(user_error)?;
         self.replace_staged_batches(session_context, staged, batches)?;
         if let Some(batches) = returning_batches {
             return query_response_from_batches_with_format(batches, result_format)
@@ -2186,6 +2582,8 @@ impl DuckLakeSqlHook {
             None
         };
         let (batches, rows) = collect_normalized_query_batches(session_context, &query).await?;
+        let batches =
+            align_spatial_metadata_to_schema(batches, schema_ref.as_ref()).map_err(user_error)?;
         self.replace_staged_batches(session_context, staged, batches)?;
         if let Some(batches) = returning_batches {
             return query_response_from_batches_with_format(batches, result_format)
@@ -2488,6 +2886,9 @@ impl DuckLakeSqlHook {
         let replacement_batches =
             normalize_batches_for_ducklake(replacement_batches).map_err(user_error)?;
         let replacement_batches =
+            align_spatial_metadata_to_schema(replacement_batches, schema_ref.as_ref())
+                .map_err(user_error)?;
+        let replacement_batches =
             layout::project_batches(replacement_batches).map_err(user_error)?;
         let replacement_batches =
             layout::sort_batches_by_layout(replacement_batches).map_err(user_error)?;
@@ -2503,15 +2904,16 @@ impl DuckLakeSqlHook {
         let mutation = self
             .add_native_delete_files_to_mutation(&mut plan, schema, table, &table_writer, mutation)
             .await?;
-        maybe_fail_native_mutation(
+        commit_native_mutation(
+            writer.as_ref(),
             NativeMutationKind::Compact,
-            NativeMutationStage::BeforeCommit,
+            plan.table_id,
             schema,
             table,
-        )?;
-        writer
-            .commit_table_mutation(plan.table_id, schema, table, plan.snapshot_id, &mutation)
-            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            plan.snapshot_id,
+            &mutation,
+        )
+        .await?;
         NATIVE_COMPACT_MUTATION_COUNTER.fetch_add(1, Ordering::Relaxed);
         Ok(Some(plan.affected_count))
     }
@@ -2982,7 +3384,7 @@ impl DuckLakeSqlHook {
         let rowid_context = SessionContext::new_with_state(session_context.state());
         let catalog_name = format!(
             "__quackgis_native_{purpose}_{}",
-            QUERY_COUNTER.fetch_add(1, Ordering::Relaxed)
+            INTERNAL_CATALOG_COUNTER.fetch_add(1, Ordering::Relaxed)
         );
         rowid_context.register_catalog(&catalog_name, Arc::new(rowid_catalog));
         let rowid_table_ref = format!(
@@ -3146,15 +3548,16 @@ impl DuckLakeSqlHook {
         if mutation.is_empty() {
             return Ok(Some(0));
         }
-        maybe_fail_native_mutation(
+        commit_native_mutation(
+            writer.as_ref(),
             NativeMutationKind::Delete,
-            NativeMutationStage::BeforeCommit,
+            plan.table_id,
             schema,
             table,
-        )?;
-        writer
-            .commit_table_mutation(plan.table_id, schema, table, plan.snapshot_id, &mutation)
-            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            plan.snapshot_id,
+            &mutation,
+        )
+        .await?;
         NATIVE_DELETE_MUTATION_COUNTER.fetch_add(1, Ordering::Relaxed);
         Ok(Some(plan.affected_count))
     }
@@ -3211,6 +3614,12 @@ impl DuckLakeSqlHook {
         }
         let updated_batches =
             normalize_batches_for_ducklake(updated_batches).map_err(user_error)?;
+        let target_schema = self
+            .table_schema(session_context, &ducklake_table_ref(schema, table))
+            .await?;
+        let updated_batches =
+            align_spatial_metadata_to_schema(updated_batches, target_schema.as_ref())
+                .map_err(user_error)?;
         let updated_batches = layout::project_batches(updated_batches).map_err(user_error)?;
         let updated_batches =
             layout::sort_batches_by_layout(updated_batches).map_err(user_error)?;
@@ -3226,15 +3635,16 @@ impl DuckLakeSqlHook {
         let mutation = self
             .add_native_delete_files_to_mutation(&mut plan, schema, table, &table_writer, mutation)
             .await?;
-        maybe_fail_native_mutation(
+        commit_native_mutation(
+            writer.as_ref(),
             NativeMutationKind::Update,
-            NativeMutationStage::BeforeCommit,
+            plan.table_id,
             schema,
             table,
-        )?;
-        writer
-            .commit_table_mutation(plan.table_id, schema, table, plan.snapshot_id, &mutation)
-            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            plan.snapshot_id,
+            &mutation,
+        )
+        .await?;
         NATIVE_UPDATE_MUTATION_COUNTER.fetch_add(1, Ordering::Relaxed);
         Ok(Some(plan.affected_count))
     }
@@ -3398,6 +3808,14 @@ impl DuckLakeSqlHook {
             )));
         }
 
+        let mut target_fields = schema_ref
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect::<Vec<_>>();
+        target_fields.push(new_field.clone());
+        let target_schema = Schema::new_with_metadata(target_fields, schema_ref.metadata().clone());
+
         let mut select_items = schema_ref
             .fields()
             .iter()
@@ -3418,14 +3836,19 @@ impl DuckLakeSqlHook {
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         let mut batches = normalize_batches_for_ducklake(batches).map_err(user_error)?;
         if batches.is_empty() {
-            let mut fields = schema_ref
-                .fields()
-                .iter()
-                .map(|field| field.as_ref().clone())
-                .collect::<Vec<_>>();
-            fields.push(new_field);
-            batches.push(empty_batch_for_fields(fields).map_err(user_error)?);
+            batches.push(
+                empty_batch_for_fields(
+                    target_schema
+                        .fields()
+                        .iter()
+                        .map(|field| field.as_ref().clone())
+                        .collect(),
+                )
+                .map_err(user_error)?,
+            );
         }
+        let batches =
+            align_spatial_metadata_to_schema(batches, &target_schema).map_err(user_error)?;
         self.write_batches(schema, table, &batches, WriteDisposition::Replace)
             .await?;
         self.refresh_ducklake_catalog(session_context).await?;
@@ -3517,6 +3940,10 @@ impl DuckLakeSqlHook {
         table: &str,
         disposition: WriteDisposition,
     ) -> PgWireResult<usize> {
+        let target_schema = self
+            .table_schema(session_context, &ducklake_table_ref(schema, table))
+            .await
+            .ok();
         let batches = session_context
             .sql(query)
             .await
@@ -3537,7 +3964,11 @@ impl DuckLakeSqlHook {
                 .collect::<Vec<_>>();
             batches.push(empty_batch_for_fields(fields).map_err(user_error)?);
         }
-        let batches = normalize_batches_for_ducklake(batches).map_err(user_error)?;
+        let mut batches = normalize_batches_for_ducklake(batches).map_err(user_error)?;
+        if let Some(target_schema) = target_schema {
+            batches = align_spatial_metadata_to_schema(batches, target_schema.as_ref())
+                .map_err(user_error)?;
+        }
         let batches = if add_rowid {
             prepend_synthetic_rowid_to_batches(batches).map_err(user_error)?
         } else {
@@ -4212,6 +4643,35 @@ fn normalize_batches_for_ducklake(batches: Vec<RecordBatch>) -> Result<Vec<Recor
         .collect()
 }
 
+fn align_spatial_metadata_to_schema(
+    batches: Vec<RecordBatch>,
+    target_schema: &Schema,
+) -> Result<Vec<RecordBatch>> {
+    batches
+        .into_iter()
+        .map(|batch| {
+            let fields = batch
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| {
+                    let family = target_schema
+                        .field_with_name(field.name())
+                        .ok()
+                        .and_then(explicit_spatial_family);
+                    Arc::new(with_spatial_family_metadata(field.as_ref().clone(), family))
+                })
+                .collect::<Vec<_>>();
+            let schema = Arc::new(Schema::new_with_metadata(
+                fields,
+                batch.schema().metadata().clone(),
+            ));
+            RecordBatch::try_new(schema, batch.columns().to_vec())
+                .map_err(|e| anyhow!("aligning spatial field metadata: {e}"))
+        })
+        .collect()
+}
+
 fn normalize_batch_for_ducklake(batch: RecordBatch) -> Result<RecordBatch> {
     let fields = batch.schema().fields().iter().cloned().collect::<Vec<_>>();
     let mut changed = false;
@@ -4229,11 +4689,10 @@ fn normalize_batch_for_ducklake(batch: RecordBatch) -> Result<RecordBatch> {
                     .map(|i| if a.is_null(i) { None } else { Some(a.value(i)) })
                     .collect();
                 arrays.push(Arc::new(StringArray::from(vals)));
-                new_fields.push(Arc::new(Field::new(
-                    field.name(),
-                    DataType::Utf8,
-                    field.is_nullable(),
-                )));
+                new_fields.push(Arc::new(
+                    Field::new(field.name(), DataType::Utf8, field.is_nullable())
+                        .with_metadata(field.metadata().clone()),
+                ));
                 changed = true;
             }
             DataType::BinaryView => {
@@ -4245,11 +4704,10 @@ fn normalize_batch_for_ducklake(batch: RecordBatch) -> Result<RecordBatch> {
                     .map(|i| if a.is_null(i) { None } else { Some(a.value(i)) })
                     .collect();
                 arrays.push(Arc::new(BinaryArray::from(vals)));
-                new_fields.push(Arc::new(Field::new(
-                    field.name(),
-                    DataType::Binary,
-                    field.is_nullable(),
-                )));
+                new_fields.push(Arc::new(
+                    Field::new(field.name(), DataType::Binary, field.is_nullable())
+                        .with_metadata(field.metadata().clone()),
+                ));
                 changed = true;
             }
             _ => {
@@ -4263,8 +4721,14 @@ fn normalize_batch_for_ducklake(batch: RecordBatch) -> Result<RecordBatch> {
         return Ok(batch);
     }
 
-    RecordBatch::try_new(Arc::new(Schema::new(new_fields)), arrays)
-        .map_err(|e| anyhow!("normalizing RecordBatch for DuckLake: {e}"))
+    RecordBatch::try_new(
+        Arc::new(Schema::new_with_metadata(
+            new_fields,
+            batch.schema().metadata().clone(),
+        )),
+        arrays,
+    )
+    .map_err(|e| anyhow!("normalizing RecordBatch for DuckLake: {e}"))
 }
 
 fn add_null_column_to_batches(
@@ -4281,7 +4745,7 @@ fn add_null_column_to_batches(
         .map(|field| field.as_ref().clone())
         .collect::<Vec<_>>();
     fields.push(new_field.clone());
-    let output_schema = Arc::new(Schema::new(fields));
+    let output_schema = Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()));
     batches
         .iter()
         .map(|batch| {
@@ -4316,7 +4780,7 @@ fn needs_synthetic_rowid_for_schema(schema: &Schema) -> bool {
 fn needs_synthetic_rowid_for_fields(fields: &[Field]) -> bool {
     let has_spatial_column = fields
         .iter()
-        .any(|field| crate::geometry_columns::is_geometry_column_name(field.name()));
+        .any(|field| classify_spatial_field(field) == Some(SpatialFamily::Geometry));
     let has_id = fields
         .iter()
         .any(|field| field.name().eq_ignore_ascii_case("id"));
@@ -4345,14 +4809,24 @@ fn prepend_synthetic_rowid_to_batches(batches: Vec<RecordBatch>) -> Result<Vec<R
             );
             let mut arrays: Vec<ArrayRef> = vec![Arc::new(Int64Array::from(rowids))];
             arrays.extend(batch.columns().iter().cloned());
-            RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)
-                .map_err(|e| anyhow!("adding synthetic row id: {e}"))
+            RecordBatch::try_new(
+                Arc::new(Schema::new_with_metadata(
+                    fields,
+                    batch.schema().metadata().clone(),
+                )),
+                arrays,
+            )
+            .map_err(|e| anyhow!("adding synthetic row id: {e}"))
         })
         .collect()
 }
 
 fn sql_type_to_arrow_field(col: &ColumnDef) -> Result<Field> {
     use datafusion::sql::sqlparser::ast::DataType as SqlType;
+    let spatial_family = match &col.data_type {
+        SqlType::Custom(name, _) => spatial_type_family(name),
+        _ => None,
+    };
     let dt = match &col.data_type {
         SqlType::Int(_)
         | SqlType::Int4(_)
@@ -4381,7 +4855,7 @@ fn sql_type_to_arrow_field(col: &ColumnDef) -> Result<Field> {
         | SqlType::Varbinary(_)
         | SqlType::Blob(_)
         | SqlType::Bytes(_) => DataType::Binary,
-        SqlType::Custom(name, _) if is_spatial_type_name(name) => DataType::Binary,
+        SqlType::Custom(_, _) if spatial_family.is_some() => DataType::Binary,
         SqlType::Custom(name, _) if custom_type_name(name).eq_ignore_ascii_case("serial") => {
             DataType::Int32
         }
@@ -4395,7 +4869,10 @@ fn sql_type_to_arrow_field(col: &ColumnDef) -> Result<Field> {
             ));
         }
     };
-    Ok(Field::new(ident_name(&col.name), dt, true))
+    Ok(with_spatial_family_metadata(
+        Field::new(ident_name(&col.name), dt, true),
+        spatial_family,
+    ))
 }
 
 fn ident_name(ident: &datafusion::sql::sqlparser::ast::Ident) -> String {
@@ -4435,9 +4912,15 @@ fn empty_batch_for_fields(fields: Vec<Field>) -> Result<RecordBatch> {
         .map_err(|e| anyhow!("creating empty RecordBatch: {e}"))
 }
 
-fn is_spatial_type_name(name: &ObjectName) -> bool {
+fn spatial_type_family(name: &ObjectName) -> Option<SpatialFamily> {
     let ty = custom_type_name(name);
-    ty.eq_ignore_ascii_case("geometry") || ty.eq_ignore_ascii_case("geography")
+    if ty.eq_ignore_ascii_case("geometry") {
+        Some(SpatialFamily::Geometry)
+    } else if ty.eq_ignore_ascii_case("geography") {
+        Some(SpatialFamily::Geography)
+    } else {
+        None
+    }
 }
 
 fn custom_type_name(name: &ObjectName) -> String {
@@ -4457,9 +4940,67 @@ fn user_error(err: anyhow::Error) -> PgWireError {
     ))
 }
 
+fn authorization_error(err: anyhow::Error) -> PgWireError {
+    PgWireError::UserError(Box::new(
+        datafusion_postgres::pgwire::error::ErrorInfo::new(
+            "ERROR".to_string(),
+            "42501".to_string(),
+            err.to_string(),
+        ),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use datafusion::sql::sqlparser::dialect::PostgreSqlDialect;
+    use datafusion::sql::sqlparser::parser::Parser;
+
+    fn parse_statement(sql: &str) -> Statement {
+        Parser::parse_sql(&PostgreSqlDialect {}, sql)
+            .expect("statement parses")
+            .pop()
+            .expect("one statement")
+    }
+
+    #[test]
+    fn readonly_statement_policy_is_structural_and_fail_closed() {
+        for sql in [
+            "SELECT 1",
+            "EXPLAIN SELECT 1",
+            "SET application_name = 'qgis'",
+            "SHOW application_name",
+            "BEGIN",
+            "ROLLBACK",
+            "PREPARE q AS SELECT 1",
+        ] {
+            assert!(
+                statement_allowed_for_readonly(&parse_statement(sql)),
+                "expected read-only statement to be allowed: {sql}"
+            );
+        }
+
+        for sql in [
+            "CREATE TABLE public.t (id INT)",
+            "CREATE VIEW public.v AS SELECT 1",
+            "CREATE SCHEMA private",
+            "INSERT INTO public.t VALUES (1)",
+            "UPDATE public.t SET id = 2",
+            "DELETE FROM public.t",
+            "DROP TABLE public.t",
+            "TRUNCATE public.t",
+            "ANALYZE public.t",
+            "CALL quackgis_compact_table('public.t')",
+            "EXPLAIN DELETE FROM public.t",
+            "PREPARE q AS DELETE FROM public.t",
+            "EXECUTE q",
+        ] {
+            assert!(
+                !statement_allowed_for_readonly(&parse_statement(sql)),
+                "expected mutating or indeterminate statement to be denied: {sql}"
+            );
+        }
+    }
 
     #[test]
     fn shared_catalog_refresh_recency_honors_interval() {
@@ -4510,5 +5051,42 @@ mod tests {
     fn selective_read_target_partitions_parser_rejects_invalid_values() {
         assert!(parse_selective_read_target_partitions_value("many").is_err());
         assert!(parse_selective_read_target_partitions_value("-1").is_err());
+    }
+
+    #[test]
+    fn binary_view_normalization_preserves_spatial_family_metadata() {
+        let field = with_spatial_family_metadata(
+            Field::new("location", DataType::BinaryView, true),
+            Some(SpatialFamily::Geometry),
+        );
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![field])),
+            vec![Arc::new(BinaryViewArray::from_iter_values([
+                b"wkb".as_slice()
+            ]))],
+        )
+        .unwrap();
+
+        let normalized = normalize_batch_for_ducklake(batch).unwrap();
+        assert_eq!(normalized.schema().field(0).data_type(), &DataType::Binary);
+        assert_eq!(
+            explicit_spatial_family(normalized.schema().field(0)),
+            Some(SpatialFamily::Geometry)
+        );
+    }
+
+    #[test]
+    fn synthetic_rowid_uses_explicit_geometry_but_not_geography() {
+        let location = with_spatial_family_metadata(
+            Field::new("location", DataType::Binary, true),
+            Some(SpatialFamily::Geometry),
+        );
+        let earth = with_spatial_family_metadata(
+            Field::new("earth", DataType::Binary, true),
+            Some(SpatialFamily::Geography),
+        );
+
+        assert!(needs_synthetic_rowid_for_fields(&[location]));
+        assert!(!needs_synthetic_rowid_for_fields(&[earth]));
     }
 }

@@ -172,6 +172,9 @@ spec:
     - name: pgwire
       port: 5434
       targetPort: pgwire
+    - name: metrics
+      port: 9187
+      targetPort: metrics
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -203,9 +206,15 @@ spec:
           ports:
             - name: pgwire
               containerPort: 5434
+            - name: metrics
+              containerPort: 9187
           env:
             - name: QUACKGIS_LOG
               value: info
+            - name: QUACKGIS_METRICS_HOST
+              value: 0.0.0.0
+            - name: QUACKGIS_METRICS_PORT
+              value: "9187"
             - name: QUACKGIS_INSTANCE_ID
               valueFrom:
                 fieldRef:

@@ -12,6 +12,7 @@ use datafusion::arrow::util::display::array_value_to_string;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::prelude::SessionContext;
 use datafusion::sql::sqlparser::ast::Statement;
+use datafusion_postgres::arrow_pg::datatypes::is_geometry_column_name;
 use datafusion_postgres::pgwire::api::Type;
 use datafusion_postgres::pgwire::api::results::{
     DataRowEncoder, FieldFormat, FieldInfo, QueryResponse, Response, Tag,
@@ -250,7 +251,7 @@ fn cursor_field_specs(columns: &[CursorColumn]) -> Vec<CursorFieldSpec> {
 }
 
 fn cursor_field_kind(name: &str) -> CursorFieldKind {
-    if crate::geometry_columns::is_geometry_column_name(name) {
+    if is_geometry_column_name(name) {
         CursorFieldKind::BinaryHexText
     } else if name.eq_ignore_ascii_case("id") {
         CursorFieldKind::Int32

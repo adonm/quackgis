@@ -1,0 +1,75 @@
+{
+  "profile_version": 1,
+  "profile_id": "layoutbench-regional-r100m-v1",
+  "status": "definition_only",
+  "execution_required": true,
+  "target_rows": 100000000,
+  "generator": {
+    "id": "regional-grid-v2",
+    "seed": 20260710,
+    "bounds_m": {
+      "min_x": 0,
+      "min_y": 0,
+      "max_x": 400000,
+      "max_y": 250000
+    },
+    "time_range": {
+      "start": "2021-01-01T00:00:00Z",
+      "end": "2026-01-01T00:00:00Z"
+    }
+  },
+  "tables": [
+    {
+      "id": "aerial_frames",
+      "rows": 47368476,
+      "copy_batch_rows": 500000,
+      "expected_batches": 95
+    },
+    {
+      "id": "cad_objects",
+      "rows": 42105220,
+      "copy_batch_rows": 500000,
+      "expected_batches": 85
+    },
+    {
+      "id": "asset_footprints",
+      "rows": 10526304,
+      "copy_batch_rows": 500000,
+      "expected_batches": 22
+    }
+  ],
+  "storage": {
+    "profile": "postgresql-s3-compatible",
+    "row_group_rows": 524288,
+    "compaction_during_load": false
+  },
+  "measurement": {
+    "warm_public_selective_queries": 240,
+    "required_result_oracles": [
+      "table_counts",
+      "dataset_bounds",
+      "exact_vs_pruned_counts",
+      "file_counts",
+      "row_group_counts"
+    ]
+  },
+  "budgets": {
+    "warm_public_catalog_provider_calls_per_query_max": 7,
+    "warm_public_catalog_provider_calls_total_max": 1680,
+    "measured_phase_catalog_refreshes_max": 0,
+    "cold_public_catalog_provider_calls_max": 13,
+    "direct_internal_catalog_provider_calls_max": 4
+  },
+  "required_run_metadata": [
+    "source_sha",
+    "storage_profile",
+    "hardware_profile",
+    "memory_bytes",
+    "free_disk_bytes",
+    "object_bytes",
+    "elapsed_seconds",
+    "github_run_id",
+    "github_run_attempt",
+    "run_started_at"
+  ]
+}

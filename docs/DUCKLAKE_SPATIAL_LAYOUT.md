@@ -221,18 +221,18 @@ gets correct SedonaDB results.
 
 ## LayoutBench validation dataset
 
-Use a deterministic synthetic suite named **LayoutBench** for validation. It
-should be generated from a seed and scale factor so CI, developer machines, and
-nightly stress runs exercise the same distributions at different sizes.
+Use a deterministic synthetic suite named **LayoutBench** for validation. Named
+profiles encode exact rows/bytes so CI, developer machines, and manual stress runs
+do not attach different meanings to generic scale-factor labels.
 
 | Scale | Purpose | Approximate size |
 |---|---|---:|
 | `sf0` | CI smoke and exact-result oracle; implemented as `just layoutbench-sf0` | 252 rows today, grows as oracle cases are added |
-| `sf1-local` (runner argument `sf1`) | fast local behavior/trend run currently used by the pgwire runner | 22,800 rows today |
-| `sf10m` | city-scale client/pruning/compaction gate | 10M+ rows |
-| `sf100m` | routine regional benchmark | 100M+ rows |
-| `sf1b` | scheduled regional/national stress | 1B+ rows |
-| `sf10tb` | manual object/catalog stress | 10TB+ generated or copied inventory |
+| `layoutbench-local-r22k8-v1` (`local-r22k8`) | fast local behavior/trend run used by the pgwire runner | exactly 22,800 rows |
+| future `layoutbench-city-r10m-*` | city-scale client/pruning/compaction gate | exact profile required |
+| `layoutbench-regional-r100m-v1` | routine regional contract with catalog budgets | exactly 100,000,000 rows; execution pending |
+| future `layoutbench-stress-r1b-*` | scheduled regional/national stress | exact profile required |
+| future `layoutbench-inventory-b10tb-*` | manual object/catalog stress | exact profile required |
 
 The suite should create these tables:
 
@@ -330,10 +330,11 @@ For explicit transactions, keep the current single-table snapshot boundary:
 staged writes compute the same hidden columns, then publish one final DuckLake
 snapshot at commit.
 
-## Bulk ingest and `sf1-local` findings
+## Bulk ingest and local-r22k8 findings
 
-The first pgwire `sf1-local` iteration uses a moderate local scale (`factor=100`,
-22,800 rows total) to expose levers quickly before moving to nightly-sized data.
+The first pgwire `layoutbench-local-r22k8-v1` iteration uses a moderate local
+scale (`factor=100`, 22,800 rows total) to expose levers quickly before moving to
+regional data.
 The results are in `benchmarks/BENCHMARKS.md`; the architecture implications are:
 
 1. **COPY is the bulk ingest path.** Batched INSERT VALUES took about 16 s to seed
@@ -411,7 +412,7 @@ Target policy work, not current SQL surface:
 
 1. Replace geometry-name heuristics with durable type/layout metadata while
    preserving WKB/EWKB and maintained client behavior.
-2. Define byte/row-count file and row-group policies from `sf10m`/`sf100m`
+2. Validate byte/row-count file and row-group policies from the explicit 10M/100M
    evidence rather than the current small local row cap.
 3. Add structural file/partition statistics and catalog-roundtrip metrics before
    introducing true DuckLake coarse partitions.

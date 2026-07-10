@@ -400,7 +400,7 @@ pub(super) async fn columns_response(
                 if !like_filter_matches(column_filter, field.name()) {
                     continue;
                 }
-                let type_info = pg_type::for_arrow_field(field.name(), field.data_type());
+                let type_info = pg_type::for_arrow_field(field);
                 rows.push(PgJdbcColumnRow {
                     schema: "public".to_string(),
                     table: table_name.clone(),

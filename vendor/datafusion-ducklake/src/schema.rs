@@ -3,19 +3,19 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use datafusion::arrow::datatypes::{Schema, SchemaRef};
 use datafusion::catalog::{SchemaProvider, TableProvider};
 use datafusion::datasource::object_store::ObjectStoreUrl;
-use datafusion::error::Result as DataFusionResult;
+use datafusion::error::{DataFusionError, Result as DataFusionResult};
 
 use crate::metadata_provider::MetadataProvider;
 use crate::path_resolver::resolve_path;
+use crate::row_id::rowid_field;
 use crate::table::DuckLakeTable;
+use crate::types::build_arrow_schema;
 
 #[cfg(feature = "write")]
 use crate::metadata_writer::{ColumnDef, MetadataWriter, WriteMode, validate_name};
-#[cfg(feature = "write")]
-use datafusion::error::DataFusionError;
-
 /// Validate table name to prevent path traversal attacks and reject
 /// empty, control-character, or overlength names.
 ///
@@ -92,6 +92,31 @@ impl DuckLakeSchema {
     pub fn with_row_lineage(mut self, enabled: bool) -> Self {
         self.row_lineage = enabled;
         self
+    }
+
+    /// Look up a table and build its snapshot-scoped Arrow schema without
+    /// loading file metadata. This is intended for schema-only preflight checks;
+    /// callers that need a scan-ready provider must use [`SchemaProvider::table`].
+    pub fn table_schema(&self, name: &str) -> DataFusionResult<Option<SchemaRef>> {
+        let Some(table) = self
+            .provider
+            .get_table_by_name(self.schema_id, name, self.snapshot_id)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?
+        else {
+            return Ok(None);
+        };
+        let columns = self
+            .provider
+            .get_table_structure(table.table_id, self.snapshot_id)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let mut schema =
+            build_arrow_schema(&columns).map_err(|e| DataFusionError::External(Box::new(e)))?;
+        if self.row_lineage {
+            let mut fields = schema.fields().iter().cloned().collect::<Vec<_>>();
+            fields.push(Arc::new(rowid_field()));
+            schema = Schema::new(fields);
+        }
+        Ok(Some(Arc::new(schema)))
     }
 
     /// Configure this schema for write operations.
@@ -200,7 +225,7 @@ impl SchemaProvider for DuckLakeSchema {
             .fields()
             .iter()
             .map(|field| {
-                ColumnDef::from_arrow(field.name(), field.data_type(), field.is_nullable())
+                ColumnDef::from_arrow_field(field)
                     .map_err(|e| DataFusionError::External(Box::new(e)))
             })
             .collect::<DataFusionResult<Vec<_>>>()?;

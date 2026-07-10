@@ -129,8 +129,27 @@ aerial frame, CAD object, generic asset, and control-point tables, verifies hidd
 layout values against sidecar bbox metadata, and proves bbox-prefiltered queries
 return the same counts as exact SedonaDB predicates.
 
-This is schema/discovery evidence only; it is not support for the underlying asset
-formats.
+`just multimodal-inventory-local` adds a real-artifact companion gate using a
+valid ESRI ASCII Grid/PRJ raster and valid ASCII PLY point cloud under
+`tests/data/multimodal/`. `inventory-v1.json` pins their bytes, SHA-256, bounds,
+CRS/epoch, vertical datum, transform provenance, quality, lifecycle, and stable
+non-secret source URIs. The test:
+
+1. parses raster and point-cloud headers/records without adding a server decoder;
+2. recomputes checksum, byte size, XY/Z bounds, and validates the CRS sidecar;
+3. detects a missing path and in-memory one-byte corruption;
+4. rejects signed/credential-bearing source URIs at the fixture-import boundary;
+5. writes full sidecar inventory rows through pgwire and verifies
+   `geometry_columns` plus hidden footprint bounds;
+6. proves exact-vs-hidden-bbox-pruned raster results and point-cloud quality/
+   provenance filtering; and
+7. supersedes one source-object version while retaining stable logical asset
+   identity and both lifecycle rows.
+
+This advances the deterministic gate beyond schema-only evidence, but it is not
+COG, COPC/LAZ, object-store, regional, restore, or format-decoding support. The
+first promoted real inventory still requires copied COG and COPC/LAZ collections
+through the remaining acceptance ladder.
 
 ## Product acceptance ladder
 

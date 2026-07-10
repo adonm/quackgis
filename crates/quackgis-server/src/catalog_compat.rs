@@ -9,8 +9,6 @@
 //! server surfaces; test names record the client trace that motivated each
 //! query shape.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use datafusion::common::ParamValues;
 use datafusion::logical_expr::LogicalPlan;
@@ -19,9 +17,7 @@ use datafusion::sql::sqlparser::ast::Statement;
 use datafusion_postgres::hooks::{HookClient, QueryHook};
 use datafusion_postgres::pgwire::api::ClientInfo;
 use datafusion_postgres::pgwire::api::Type;
-use datafusion_postgres::pgwire::api::results::{
-    FieldFormat, FieldInfo, QueryResponse, Response, Tag,
-};
+use datafusion_postgres::pgwire::api::results::{FieldFormat, Response, Tag};
 use datafusion_postgres::pgwire::error::{PgWireError, PgWireResult};
 
 mod cursors;
@@ -263,9 +259,6 @@ async fn catalog_query_response(
                 .await
                 .map(Response::Query),
         ),
-        CatalogSurface::GeographyColumnsProbe => {
-            Some(geography_columns_probe_response().map(Response::Query))
-        }
         CatalogSurface::PgDescriptionRegclass => {
             Some(empty_response("description", Type::VARCHAR).map(Response::Query))
         }
@@ -292,9 +285,6 @@ async fn catalog_query_response(
         }
         CatalogSurface::PgAttributeRegclassName => {
             Some(empty_response("attname", Type::VARCHAR).map(Response::Query))
-        }
-        CatalogSurface::PgAttributeGeomTypeName => {
-            Some(single_text_row("typname", "geometry").map(Response::Query))
         }
     }
 }
@@ -371,32 +361,4 @@ fn ogr_system_metadata_command_tag(sql: &str) -> &'static str {
     } else {
         "CREATE FUNCTION"
     }
-}
-
-fn geography_columns_probe_response() -> PgWireResult<QueryResponse> {
-    let fields = vec![
-        FieldInfo::new(
-            "type".to_string(),
-            None,
-            None,
-            Type::VARCHAR,
-            FieldFormat::Text,
-        ),
-        FieldInfo::new(
-            "coord_dimension".to_string(),
-            None,
-            None,
-            Type::INT4,
-            FieldFormat::Text,
-        ),
-        FieldInfo::new(
-            "srid".to_string(),
-            None,
-            None,
-            Type::INT4,
-            FieldFormat::Text,
-        ),
-    ];
-    let row_stream = futures::stream::empty();
-    Ok(QueryResponse::new(Arc::new(fields), Box::pin(row_stream)))
 }

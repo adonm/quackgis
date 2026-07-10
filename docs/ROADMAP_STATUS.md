@@ -15,19 +15,19 @@ refinement must not postpone the first external evidence run indefinitely.
 |---|---|---|
 | Trend dashboards and release evidence | `just metrics-dashboard`; `just metrics-budget-check`; scheduled workflows upload dashboards; `docs/RELEASE_EVIDENCE.md` defines release packet | attach selected scheduled/manual artifacts to real releases with required budget assertions |
 | Local Kind+Linkerd Alpha | `docs/LOCAL_KIND_LINKERD_FOCUS.md` defines the maximum local execution ladder, scale knobs, and claim boundaries | make full-ladder artifacts routine and budgeted |
-| External PostgreSQL/S3 Alpha | `docs/ALPHA_EXTERNAL_SERVICES.md` defines credential rotation, restart, throttling, backup/restore, cleanup, and refresh drills | run against real platform-managed PostgreSQL/S3 services and publish artifacts |
-| Benchmark ladder | `docs/ANALYTICS_BENCHMARKS.md`; manual `Benchmark ladder` workflow; QPS/OLAP/compaction metrics already emitted | run `sf10m`, `sf100m`, `sf1b`, real-data, managed-service, and release-budget scale ladders |
-| Real-data client matrix | `docs/REAL_DATA_CLIENT_MATRIX.md`; OSM Monaco opt-in baseline now includes OGR copy/read, SQL sample parity, MVT SQL bytes, and QGIS open/filter/render; MVT encoder and SQL/client probes have key/value tag coverage | add GeoServer and real Martin binary/OSM attribute side-by-side, then wider OSM/Overture-derived layers |
+| External PostgreSQL/S3 Alpha | `docs/ALPHA_EXTERNAL_SERVICES.md` defines credential rotation, restart, throttling, backup/restore, cleanup, and refresh drills; `just external-alpha-evidence-check` validates redacted packet manifests against collected metrics so wiring smokes cannot be mislabeled as Alpha promotion | run against real platform-managed PostgreSQL/S3 services and publish artifacts |
+| Benchmark ladder | `docs/ANALYTICS_BENCHMARKS.md`; manual `Benchmark ladder` workflow; QPS/OLAP/compaction metrics; validated `layoutbench-regional-r100m-v1` defines exactly 100M rows and 202 load batches; PostgreSQL metadata-provider calls are process-metered; snapshot-fresh extended execution has a 7-call local oracle; the bounded Kind runner seeds/measures the exact profile and the profile-bound parser enforces warm/cold/direct/refresh budgets | execute the 100M, billion-row, real-data, managed-service, and release-budget ladders; physical read/write roundtrip instrumentation remains open |
+| Real-data client matrix | `docs/REAL_DATA_CLIENT_MATRIX.md`; OSM Monaco opt-in baseline includes OGR copy/read, SQL sample parity, MVT SQL bytes, and QGIS open/filter/render; MVT encoder/SQL probes have key/value tags and the real Martin binary opt-in proves configured attributes on a synthetic layer | add GeoServer and real Martin binary/OSM attribute side-by-side, then wider OSM/Overture-derived layers |
 | API/client expansion | `docs/API_CLIENT_PROBES.md`; `just api-client-local-smoke` is in `just ci`; `just kind-api-client-probe` is in `just kind-compatibility` and compatibility metrics for pgwire/catalog/WKB/bbox/BI/MVT profile surfaces, including MVT attribute tags | promote to named psycopg, SQLAlchemy/GeoPandas, pg_featureserv, MVT, and BI client probes over real dependencies/data |
 | PostGIS conformance | `docs/POSTGIS_CONFORMANCE.md`; `just postgis-regress`; `just postgis-conformance-summary` | promote broader fixture families through pgwire/client traces |
-| Native mutation safety | local native DML/compaction tests; before-commit native delete/update/compaction failpoint tests now also retry the same mutation after the one-shot fault and assert `quackgis_native_mutation_aborts_total`; `docs/MUTATION_FAILURE_DRILLS.md` | extend crash/retry/orphan drills to process kill/retry, Kind/managed-service storage, transaction batching, and reference-reader interop |
+| Native mutation safety | local native DML/compaction tests; before-commit failpoint retry oracles and abort metric; six real-process `SIGKILL` cases cover delete/update/explicit bucket compaction before and after commit, prove exact prewrite-to-inventory equality before commit, committed-path exclusion after commit, restart state, and explicit before-commit retry; offline `--orphan-inventory` remains age-gated and dry-run only; `docs/MUTATION_FAILURE_DRILLS.md` | extend the process matrix to Kind/managed-service storage, transaction batching, cleanup/quarantine/deletion, response-loss reconciliation, and reference-reader interop |
 | DuckLake alignment | SQLite/local is the spec-oriented single-catalog path but is not yet drop-in DuckDB-writable; `docs/DUCKLAKE_ALIGNMENT.md` records that the current PostgreSQL multicatalog backend is library-specific/non-spec | reference-reader/export gates for both profiles plus a blocking 1.0 PostgreSQL migration decision |
-| Geometry identity | WKB/EWKB bytes and sentinel OIDs work for maintained clients; conventional column names drive current discovery | add durable DuckLake geometry/type metadata and prove unconventionally named columns/reference readers without regressing wire behavior |
+| Spatial family identity | Explicit SQL geometry/geography persist as Binary WKB/EWKB plus validated Arrow metadata and snapshot-versioned DuckLake `column_type`; dynamic metadata tables, RowDescription, `pg_attribute`, and pgjdbc are metadata-first; an unconventional-name UPDATE/compaction/restart pgwire test proves OIDs and no `geom TEXT` false positive; old conventional Binary remains compatible | durable subtype/SRID/dimensions, old-blob migration, geography reference-reader interoperability, generic pg_type/typmod fidelity, and PostgreSQL/S3 external evidence |
 | Spatial layout | ordinary hidden bbox/time/space/Morton columns, statistics-based pruning, exact recheck, and native bucket compaction are implemented | real-data scale, structural partition/file stats, catalog budgets, and only then possible true coarse DuckLake partitions |
 | Pgwire protocol boundary | raw pre-parse rewrites, parsed hooks, type/catalog encoding, dedicated COPY, and maintained cursor paths are covered | realistic pgjdbc fetch-size/portal suspension evidence and structural replacement of remaining SQL-text classifiers |
-| Snapshot/time travel | `docs/SNAPSHOT_OPERATIONS.md`; `AS OF SNAPSHOT <id>` and named table selectors, count/extent parity, metadata UDTFs, and snapshot success/error counters | implement positional/timestamp resolution, protected retention, rollback integration, and safe CDC row UDTFs |
-| Security/RBAC | SCRAM/read-only/TLS docs and tests; recognized read-only write denials increment `quackgis_write_denied_total`; `docs/SECURITY_RBAC.md` defines hardening probes and RBAC target | execute external secret/TLS failure drills and implement object-level RBAC only from traces |
-| Multi-modal assets | `docs/MULTIMODAL_ASSETS.md`; footprint discovery and LayoutBench schema coverage | validate raster/point-cloud/3D/CAD/BIM inventories on real data and benchmark asset queries |
+| Snapshot/time travel | `docs/SNAPSHOT_OPERATIONS.md`; literal snapshot-id and RFC3339 timestamp `AS OF` plus named selectors, exact-id validation, deterministic timestamp resolution, count/extent parity, metadata UDTFs, no-op catalog reopen, counters, and a matched-backup local rollback oracle that validates a prior head after source advancement | run rollback against managed services; implement protected retention, live release switching, and safe CDC row UDTFs |
+| Security/RBAC | SCRAM/read-only/TLS docs and tests; a structural read-only allowlist denies DDL/DML/maintenance/indeterminate statements before catalog refresh with SQLSTATE `42501`; write-capable service identities can be restricted with normalized DuckLake table allowlists and matching explicit-user privilege metadata; bounded error logs and denial metrics are covered; `docs/SECURITY_RBAC.md` defines the RBAC target | execute external secret/TLS failure drills, add read-side object filtering only from traces, and split future administrative permissions |
+| Multi-modal assets | `docs/MULTIMODAL_ASSETS.md`; footprint discovery/LayoutBench schema coverage plus `multimodal-inventory-local` validates real tiny ASCII Grid/PRJ and PLY artifacts, checksums/header bounds, full CRS/epoch/provenance/lifecycle sidecars, URI policy, exact/pruned queries, and version supersession | promote copied COG and COPC/LAZ collections through object-store lifecycle/restore/scale gates, then validate 3D/CAD/BIM families |
 
 ## Current hard blockers for production claims
 
@@ -36,16 +36,21 @@ refinement must not postpone the first external evidence run indefinitely.
 - Larger real-data matrices require copied datasets and external client systems.
 - The PostgreSQL DuckLake backend is a non-spec multicatalog layout until a
   reference-reader or tested export/migration gate proves a stronger claim.
-- Durable geometry identity is incomplete: current catalog discovery still relies
-  on conventional column names and sentinel wire OIDs.
-- Native mutation crash/failure injection has local native `DELETE`/`UPDATE`/bucket
-  compaction before-commit and one-shot retry oracles, but process-kill, orphan
-  cleanup, Kind, and external-service drills are not automated.
-- Timestamp-based SQL time travel, protected snapshots, branch/merge, materialized
-  views, and CDC row UDTFs depend on implementation work and/or upstream-stable
-  APIs.
+- Spatial family identity is durable for explicit SQL declarations, but subtype,
+  SRID, dimensions, existing-blob migration, geography reference-reader behavior,
+  generic PostgreSQL type fidelity, and external-profile evidence remain open.
+- Native mutation crash/failure injection has local failpoint and real-process
+  before/after-commit coverage for native `DELETE`/`UPDATE`/bucket compaction plus
+  actual prewrite inventory evidence, but cleanup/quarantine/deletion, generic
+  response-loss replay, Kind, and external-service drills are not automated.
+- Protected snapshots, live release switching, branch/merge, materialized views,
+  and CDC row UDTFs depend on implementation work and/or upstream-stable APIs;
+  managed-service rollback execution remains open beyond the local prior-head
+  restore oracle.
 - CDC row table functions stay disabled until pgwire/Arrow projection is safe.
-- Object/schema/table RBAC remains trace-driven future work.
+- Write-side schema/table allowlists are implemented for service identities; read
+  filtering, metadata filtering, and separate administrative permissions remain
+  trace-driven future work.
 
 ## Maintenance rule
 

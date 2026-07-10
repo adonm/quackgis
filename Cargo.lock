@@ -1351,6 +1351,7 @@ name = "datafusion-ducklake"
 version = "0.3.1"
 dependencies = [
  "arrow",
+ "arrow-pg",
  "async-trait",
  "chrono",
  "datafusion",
@@ -3823,6 +3824,7 @@ dependencies = [
  "arrow-ord",
  "arrow-select",
  "async-trait",
+ "chrono",
  "clap",
  "datafusion",
  "datafusion-ducklake",
@@ -3832,6 +3834,7 @@ dependencies = [
  "env_logger",
  "futures",
  "geo-traits",
+ "libc",
  "log",
  "object_store",
  "proj-core",
@@ -3842,6 +3845,9 @@ dependencies = [
  "sedona-geo",
  "sedona-geometry",
  "sedona-proj",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "sqlx",
  "tempfile",
  "tokio",

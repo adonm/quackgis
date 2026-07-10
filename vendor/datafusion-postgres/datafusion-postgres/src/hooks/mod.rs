@@ -19,6 +19,17 @@ use pgwire::messages::PgWireBackendMessage;
 
 use crate::hooks::cursor::DfStatement;
 
+/// A query-hook replacement for the prepared plan and execution context.
+///
+/// Hooks can use this to refresh snapshot-scoped table providers at execute
+/// time while leaving parameter binding, result formatting, schema checks, and
+/// statement timeouts in the default extended-query handler.
+#[derive(Clone)]
+pub struct ExtendedQueryPlan {
+    pub logical_plan: LogicalPlan,
+    pub session_context: SessionContext,
+}
+
 #[async_trait]
 pub trait HookClient: ClientInfo + Send + Sync {
     fn portal_store(&self) -> &MemPortalStore<DfStatement>;
@@ -80,4 +91,15 @@ pub trait QueryHook: Send + Sync {
         session_context: &SessionContext,
         client: &mut dyn HookClient,
     ) -> Option<PgWireResult<Response>>;
+
+    /// Optionally replace a prepared plan immediately before default execution.
+    /// Returning `None` preserves the parse-time plan.
+    async fn replan_extended_query(
+        &self,
+        _statement: &Statement,
+        _logical_plan: &LogicalPlan,
+        _session_context: &SessionContext,
+    ) -> Option<PgWireResult<ExtendedQueryPlan>> {
+        None
+    }
 }

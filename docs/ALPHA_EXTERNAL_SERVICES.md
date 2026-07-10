@@ -85,6 +85,22 @@ An external Alpha evidence packet is credible when it includes:
 - backup/restore proof from an isolated restored catalog + object prefix;
 - known deviations from the Kind profile.
 
+Before promoting a run, write an external Alpha packet manifest and validate it
+against the collected metrics artifact:
+
+```sh
+just external-alpha-evidence-check \
+  manifest=.tmp/external-alpha/manifest.json \
+  metrics=.tmp/compatibility/metrics.json \
+  out=.tmp/external-alpha/README.md
+```
+
+The checker requires source SHA, image digest, provider/profile metadata,
+dataset/object counts, redacted commands, artifact paths, and one status/evidence
+entry for every drill in this runbook. A packet with any skipped drill must claim
+`external_wiring_smoke`; `external_alpha_promotion` is accepted only when every
+drill passes and the `external_lake_probe` metrics check passed for the same SHA.
+
 If any drill is skipped, label the resulting evidence as an **external wiring
 smoke**, not as external-service Alpha promotion evidence.
 

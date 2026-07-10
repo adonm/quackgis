@@ -18,6 +18,7 @@ use datafusion::execution::session_state::SessionState;
 use datafusion::logical_expr::{Expr, LogicalPlanBuilder, TableProviderFilterPushDown, TableType};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
+use datafusion_postgres::arrow_pg::datatypes::{SpatialFamily, classify_spatial_field};
 
 use crate::catalog_compat::SYNTHETIC_ROWID_COLUMN;
 use crate::context::DUCKLAKE_CATALOG;
@@ -214,7 +215,7 @@ fn has_spatial_column(schema: &Schema) -> bool {
     schema
         .fields()
         .iter()
-        .any(|field| crate::geometry_columns::is_geometry_column_name(field.name()))
+        .any(|field| classify_spatial_field(field) == Some(SpatialFamily::Geometry))
 }
 
 fn has_field(schema: &Schema, name: &str) -> bool {

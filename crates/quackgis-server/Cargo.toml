@@ -49,6 +49,7 @@ futures = "0.3"
 proj-wkt = { workspace = true }
 proj-core = { workspace = true }
 regex = { workspace = true }
+chrono = { workspace = true }
 rust_decimal = "1.42"
 
 [dev-dependencies]
@@ -56,3 +57,7 @@ rust_decimal = "1.42"
 tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
 # Each wire test runs against its own fresh DuckLake catalog in a tempdir.
 tempfile = { workspace = true }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"

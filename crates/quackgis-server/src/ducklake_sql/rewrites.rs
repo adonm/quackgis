@@ -6,6 +6,8 @@ use std::sync::LazyLock;
 use datafusion::sql::sqlparser::dialect::PostgreSqlDialect;
 use datafusion::sql::sqlparser::tokenizer::{Token, Tokenizer};
 
+/// Lower the supported `AS OF SNAPSHOT` and `AS OF TIMESTAMP` grammar fragments
+/// to named table selectors before the PostgreSQL dialect parser runs.
 pub(super) fn rewrite_as_of_snapshot_selectors(sql: &str) -> Option<String> {
     let dialect = PostgreSqlDialect {};
     let tokens = Tokenizer::new(&dialect, sql)
@@ -25,11 +27,19 @@ pub(super) fn rewrite_as_of_snapshot_selectors(sql: &str) -> Option<String> {
         let as_idx = code_tokens[as_pos];
         if !token_word_eq(&tokens[as_idx], "as")
             || !token_word_eq(&tokens[code_tokens[as_pos + 1]], "of")
-            || !token_word_eq(&tokens[code_tokens[as_pos + 2]], "snapshot")
         {
             pos += 1;
             continue;
         }
+
+        let selector_kind = if token_word_eq(&tokens[code_tokens[as_pos + 2]], "snapshot") {
+            "snapshot"
+        } else if token_word_eq(&tokens[code_tokens[as_pos + 2]], "timestamp") {
+            "snapshot_at"
+        } else {
+            pos += 1;
+            continue;
+        };
 
         let Some((table_start_pos, table_end_pos)) =
             preceding_table_name(&tokens, &code_tokens, as_pos)
@@ -38,7 +48,7 @@ pub(super) fn rewrite_as_of_snapshot_selectors(sql: &str) -> Option<String> {
             continue;
         };
         let Some((snapshot_start_pos, snapshot_end_pos)) =
-            snapshot_integer_literal(&tokens, &code_tokens, as_pos + 3)
+            snapshot_selector_literal(&tokens, &code_tokens, as_pos + 3, selector_kind)
         else {
             pos += 1;
             continue;
@@ -54,6 +64,7 @@ pub(super) fn rewrite_as_of_snapshot_selectors(sql: &str) -> Option<String> {
             code_tokens[table_end_pos],
             code_tokens[snapshot_start_pos],
             code_tokens[snapshot_end_pos],
+            selector_kind,
         ));
         pos = snapshot_end_pos + 1;
     }
@@ -64,16 +75,32 @@ pub(super) fn rewrite_as_of_snapshot_selectors(sql: &str) -> Option<String> {
 
     let mut out = String::with_capacity(sql.len());
     let mut cursor = 0;
-    for (table_start, table_end, snapshot_start, snapshot_end) in replacements {
+    for (table_start, table_end, snapshot_start, snapshot_end, selector_kind) in replacements {
         append_sql_tokens(&mut out, &tokens[cursor..table_start]);
         append_sql_tokens(&mut out, &tokens[table_start..=table_end]);
-        out.push_str("(snapshot => ");
+        out.push('(');
+        out.push_str(selector_kind);
+        out.push_str(" => ");
         append_sql_tokens(&mut out, &tokens[snapshot_start..=snapshot_end]);
         out.push(')');
         cursor = snapshot_end + 1;
     }
     append_sql_tokens(&mut out, &tokens[cursor..]);
     Some(out)
+}
+
+fn snapshot_selector_literal(
+    tokens: &[Token],
+    code_tokens: &[usize],
+    start_pos: usize,
+    selector_kind: &str,
+) -> Option<(usize, usize)> {
+    if selector_kind == "snapshot" {
+        snapshot_integer_literal(tokens, code_tokens, start_pos)
+    } else {
+        let token = tokens.get(*code_tokens.get(start_pos)?)?;
+        matches!(token, Token::SingleQuotedString(_)).then_some((start_pos, start_pos))
+    }
 }
 
 fn preceding_table_name(
@@ -475,8 +502,18 @@ mod tests {
     }
 
     #[test]
-    fn leaves_unsupported_as_of_timestamp_for_parser_error() {
+    fn rewrites_as_of_timestamp_table_selector() {
         let sql = "SELECT id FROM public.assets AS OF TIMESTAMP '2026-07-09T12:00:00Z'";
+
+        assert_eq!(
+            rewrite_as_of_snapshot_selectors(sql).as_deref(),
+            Some("SELECT id FROM public.assets(snapshot_at => '2026-07-09T12:00:00Z')")
+        );
+    }
+
+    #[test]
+    fn leaves_non_literal_as_of_timestamp_for_parser_error() {
+        let sql = "SELECT id FROM public.assets AS OF TIMESTAMP now()";
 
         assert_eq!(rewrite_as_of_snapshot_selectors(sql), None);
     }

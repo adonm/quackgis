@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
 use datafusion::prelude::SessionContext;
+use datafusion_postgres::arrow_pg::datatypes::{SpatialFamily, classify_spatial_field};
 use datafusion_postgres::pgwire::api::Type;
 use datafusion_postgres::pgwire::api::results::{FieldFormat, FieldInfo, QueryResponse};
 use datafusion_postgres::pgwire::error::PgWireResult;
@@ -153,7 +154,7 @@ async fn table_key_column(
     schema
         .fields()
         .iter()
-        .any(|field| crate::geometry_columns::is_geometry_column_name(field.name()))
+        .any(|field| classify_spatial_field(field) == Some(SpatialFamily::Geometry))
         .then_some((SYNTHETIC_ROWID_COLUMN.to_string(), 1))
 }
 

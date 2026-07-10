@@ -45,7 +45,8 @@ pub enum WriteMode {
     Append,
 }
 use crate::types::{arrow_to_ducklake_type, ducklake_to_arrow_type};
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, Field};
+use arrow_pg::datatypes::explicit_spatial_family;
 
 /// Column definition for creating or updating a table's schema.
 ///
@@ -118,6 +119,25 @@ impl ColumnDef {
             name,
             ducklake_type,
             is_nullable,
+        })
+    }
+
+    /// Create a column definition from an Arrow field.
+    ///
+    /// A validated spatial-family annotation on a binary field is persisted as
+    /// DuckLake `geometry`/`geography`. Unrecognized metadata and conventional
+    /// names alone retain the ordinary physical-type mapping (`blob`).
+    pub fn from_arrow_field(field: &Field) -> Result<Self> {
+        let name = field.name().clone();
+        validate_name(&name, "Column")?;
+        let ducklake_type = match explicit_spatial_family(field) {
+            Some(family) => family.as_str().to_string(),
+            None => arrow_to_ducklake_type(field.data_type())?,
+        };
+        Ok(Self {
+            name,
+            ducklake_type,
+            is_nullable: field.is_nullable(),
         })
     }
 }
@@ -782,6 +802,41 @@ mod tests {
         assert_eq!(col.name, "id");
         assert_eq!(col.ducklake_type, "int64");
         assert!(!col.is_nullable);
+    }
+
+    #[test]
+    fn test_column_def_from_arrow_field_preserves_only_explicit_spatial_family() {
+        use arrow_pg::datatypes::{SpatialFamily, with_spatial_family_metadata};
+
+        let location = with_spatial_family_metadata(
+            Field::new("location", DataType::Binary, true),
+            Some(SpatialFamily::Geometry),
+        );
+        let conventional = Field::new("geom", DataType::Binary, true);
+        let invalid = Field::new("payload", DataType::Binary, true).with_metadata(
+            [("quackgis.spatial_family".to_string(), "point".to_string())]
+                .into_iter()
+                .collect(),
+        );
+
+        assert_eq!(
+            ColumnDef::from_arrow_field(&location)
+                .unwrap()
+                .ducklake_type(),
+            "geometry"
+        );
+        assert_eq!(
+            ColumnDef::from_arrow_field(&conventional)
+                .unwrap()
+                .ducklake_type(),
+            "blob"
+        );
+        assert_eq!(
+            ColumnDef::from_arrow_field(&invalid)
+                .unwrap()
+                .ducklake_type(),
+            "blob"
+        );
     }
 
     #[test]

@@ -33,7 +33,7 @@ struct Config {
 #[derive(Debug, Clone, Copy)]
 enum Scale {
     Sf0,
-    Sf1,
+    LocalR22k8,
     Factor(usize),
 }
 
@@ -43,7 +43,7 @@ impl Scale {
             Scale::Sf0 => 1,
             // Deliberately moderate: enough rows for local planner/IO smoke
             // without requiring a workstation-sized benchmark run.
-            Scale::Sf1 => 100,
+            Scale::LocalR22k8 => 100,
             Scale::Factor(factor) => factor.max(1),
         }
     }
@@ -51,7 +51,7 @@ impl Scale {
     fn label(self) -> String {
         match self {
             Scale::Sf0 => "sf0".to_string(),
-            Scale::Sf1 => "sf1".to_string(),
+            Scale::LocalR22k8 => "layoutbench-local-r22k8-v1".to_string(),
             Scale::Factor(factor) => format!("sf{factor}x"),
         }
     }
@@ -380,9 +380,14 @@ impl Config {
 fn parse_scale(value: &str) -> Result<Scale> {
     match value.to_ascii_lowercase().as_str() {
         "sf0" => Ok(Scale::Sf0),
-        "sf1" => Ok(Scale::Sf1),
+        "local-r22k8" | "layoutbench-local-r22k8-v1" => Ok(Scale::LocalR22k8),
+        "sf1" => bail!(
+            "ambiguous --scale 'sf1' was retired; use local-r22k8 for the 22,800-row local profile"
+        ),
         other => other.parse::<usize>().map(Scale::Factor).with_context(|| {
-            format!("unsupported --scale {value:?}; use sf0, sf1, or an integer factor")
+            format!(
+                "unsupported --scale {value:?}; use sf0, local-r22k8, or an explicit integer factor"
+            )
         }),
     }
 }
@@ -407,7 +412,7 @@ fn parse_load_method(value: &str) -> Result<LoadMethod> {
 fn print_help() {
     println!(
         "Usage: cargo run -p quackgis-server --example layoutbench -- \
-         [--host HOST] [--port PORT] [--scale sf0|sf1|N] [--factor N] \
+         [--host HOST] [--port PORT] [--scale sf0|local-r22k8|N] [--factor N] \
          [--prefix NAME] [--query-iters N] [--ingest-order generated|shuffled|layout] \
          [--load-method insert|copy] \
          [--transactional-load] [--compare-variants] [--compact-and-rerun] \

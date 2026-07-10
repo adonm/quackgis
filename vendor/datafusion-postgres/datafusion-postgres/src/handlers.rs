@@ -4,6 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::common::ParamValues;
+use datafusion::error::DataFusionError;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::prelude::*;
 use datafusion::sql::parser::Statement;
@@ -24,10 +25,10 @@ use pgwire::error::{PgWireError, PgWireResult};
 use pgwire::messages::PgWireBackendMessage;
 use pgwire::types::format::FormatOptions;
 
-use crate::hooks::QueryHook;
 use crate::hooks::cursor::CursorStatementHook;
 use crate::hooks::set_show::SetShowHook;
 use crate::hooks::transactions::TransactionStatementHook;
+use crate::hooks::{ExtendedQueryPlan, QueryHook};
 use crate::{client, planner};
 use arrow_pg::datatypes::df;
 use arrow_pg::datatypes::{arrow_schema_to_pg_fields, into_pg_type};
@@ -270,12 +271,8 @@ impl ExtendedQueryHandler for DfSessionService {
     {
         let query = &portal.statement.statement.0;
         log::debug!("Received execute extended query: {query}");
-        // Check query hooks first
-        if !self.query_hooks.is_empty()
-            && let (_, Some((statement, plan))) = &portal.statement.statement
-        {
-            // TODO: in the case where query hooks all return None, we do the param handling again later.
-            let param_types = planner::get_inferred_parameter_types(plan)
+        if let (_, Some((statement, prepared_plan))) = &portal.statement.statement {
+            let param_types = planner::get_inferred_parameter_types(prepared_plan)
                 .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 
             let param_values: ParamValues =
@@ -285,7 +282,7 @@ impl ExtendedQueryHandler for DfSessionService {
                 if let Some(result) = hook
                     .handle_extended_query(
                         statement,
-                        plan,
+                        prepared_plan,
                         &param_values,
                         &self.session_context,
                         client,
@@ -295,64 +292,67 @@ impl ExtendedQueryHandler for DfSessionService {
                     return result;
                 }
             }
-        }
 
-        if let (_, Some((statement, plan))) = &portal.statement.statement {
-            let param_types = planner::get_inferred_parameter_types(plan)
-                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-
-            let param_values =
-                df::deserialize_parameters(portal, &ordered_param_types(&param_types))?;
-
-            let plan = plan
-                .clone()
+            let mut execute_plan = ExtendedQueryPlan {
+                logical_plan: prepared_plan.clone(),
+                session_context: self.session_context.as_ref().clone(),
+            };
+            for hook in &self.query_hooks {
+                if let Some(result) = hook
+                    .replan_extended_query(statement, prepared_plan, &self.session_context)
+                    .await
+                {
+                    execute_plan = result?;
+                    break;
+                }
+            }
+            if execute_plan.logical_plan.schema() != prepared_plan.schema() {
+                return Err(PgWireError::ApiError(Box::new(DataFusionError::Plan(
+                    "cached plan must not change result type".to_string(),
+                ))));
+            }
+            let plan = execute_plan
+                .logical_plan
                 .replace_params_with_values(&param_values)
                 .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-            let optimised = self
+            let optimised = execute_plan
                 .session_context
                 .state()
                 .optimize(&plan)
                 .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-
-            let dataframe = {
-                let timeout = client::get_statement_timeout(client);
-                if let Some(timeout_duration) = timeout {
-                    tokio::time::timeout(
-                        timeout_duration,
-                        self.session_context.execute_logical_plan(optimised),
-                    )
+            let dataframe = match client::get_statement_timeout(client) {
+                Some(timeout_duration) => tokio::time::timeout(
+                    timeout_duration,
+                    execute_plan.session_context.execute_logical_plan(optimised),
+                )
+                .await
+                .map_err(|_| {
+                    PgWireError::UserError(Box::new(pgwire::error::ErrorInfo::new(
+                        "ERROR".to_string(),
+                        "57014".to_string(),
+                        "canceling statement due to statement timeout".to_string(),
+                    )))
+                })?
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?,
+                None => execute_plan
+                    .session_context
+                    .execute_logical_plan(optimised)
                     .await
-                    .map_err(|_| {
-                        PgWireError::UserError(Box::new(pgwire::error::ErrorInfo::new(
-                            "ERROR".to_string(),
-                            "57014".to_string(), // query_canceled error code
-                            "canceling statement due to statement timeout".to_string(),
-                        )))
-                    })?
-                    .map_err(|e| PgWireError::ApiError(Box::new(e)))?
-                } else {
-                    self.session_context
-                        .execute_logical_plan(optimised)
-                        .await
-                        .map_err(|e| PgWireError::ApiError(Box::new(e)))?
-                }
+                    .map_err(|e| PgWireError::ApiError(Box::new(e)))?,
             };
 
             if matches!(statement, sqlparser::ast::Statement::Insert(_)) {
-                let resp = map_rows_affected_for_insert(&dataframe).await?;
-
-                Ok(resp)
+                map_rows_affected_for_insert(&dataframe).await
             } else {
-                // For non-INSERT queries, return a regular Query response
                 let format_options =
                     Arc::new(FormatOptions::from_client_metadata(client.metadata()));
-                let resp = df::encode_dataframe(
+                let response = df::encode_dataframe(
                     dataframe,
                     &portal.result_column_format,
                     Some(format_options),
                 )
                 .await?;
-                Ok(Response::Query(resp))
+                Ok(Response::Query(response))
             }
         } else {
             Ok(Response::EmptyQuery)
@@ -555,16 +555,51 @@ fn preprocess_quackgis_sql(sql: &str) -> String {
     if is_martin_available_tables_query(&sql) {
         return r#"
 SELECT
-    f_table_schema AS schema,
-    f_table_name AS name,
-    f_geometry_column AS geom,
-    srid,
-    type,
+    gc.f_table_schema AS schema,
+    gc.f_table_name AS name,
+    gc.spatial_column AS geom,
+    gc.srid,
+    gc.type,
     CAST(NULL AS TINYINT) AS relkind,
     CAST(FALSE AS BOOLEAN) AS geom_idx,
     CAST(NULL AS VARCHAR) AS description,
-    '{}' AS properties
-FROM geometry_columns
+    CAST(
+        COALESCE(
+            CONCAT(
+                '{',
+                STRING_AGG(
+                    CONCAT('"', attr.attname, '":"', tp.typname, '"'),
+                    ','
+                ),
+                '}'
+            ),
+            '{}'
+        ) AS VARCHAR
+    ) AS properties
+FROM (
+    SELECT f_table_schema, f_table_name, f_geometry_column AS spatial_column, srid, type
+    FROM geometry_columns
+    UNION ALL
+    SELECT f_table_schema, f_table_name, f_geography_column AS spatial_column, srid, type
+    FROM geography_columns
+) AS gc
+LEFT JOIN pg_catalog.pg_namespace AS ns
+    ON gc.f_table_schema = ns.nspname
+LEFT JOIN pg_catalog.pg_class AS cls
+    ON ns.oid = cls.relnamespace AND gc.f_table_name = cls.relname
+LEFT JOIN pg_catalog.pg_attribute AS attr
+    ON cls.oid = attr.attrelid
+    AND attr.attnum > 0
+    AND NOT attr.attisdropped
+    AND attr.attname != gc.spatial_column
+LEFT JOIN pg_catalog.pg_type AS tp
+    ON attr.atttypid = tp.oid
+GROUP BY
+    gc.f_table_schema,
+    gc.f_table_name,
+    gc.spatial_column,
+    gc.srid,
+    gc.type
 "#
         .to_string();
     }
@@ -611,7 +646,9 @@ fn is_martin_available_functions_query(sql: &str) -> bool {
 /// - `COMMENT ON ...` → no-op
 /// - `CREATE MATERIALIZED VIEW ...` → `CREATE VIEW ...`
 /// - `serial` / `bigserial` column types → `int` / `bigint`
-/// - `GEOMETRY(type, srid)` / `geography(type, srid)` column types → `BYTEA`
+///
+/// Geometry/geography column declarations are intentionally left intact for a
+/// QuackGIS DDL hook to annotate before lowering to physical Arrow Binary.
 fn rewrite_postgis_ddl(sql: &str) -> String {
     use regex::Regex;
     use std::sync::OnceLock;
@@ -622,7 +659,6 @@ fn rewrite_postgis_ddl(sql: &str) -> String {
     static CLUSTER_RE: OnceLock<Regex> = OnceLock::new();
     static COMMENT_ON_RE: OnceLock<Regex> = OnceLock::new();
     static CREATE_MATERIALIZED_VIEW_RE: OnceLock<Regex> = OnceLock::new();
-    static GEOMETRY_TYPE_RE: OnceLock<Regex> = OnceLock::new();
     static SERIAL_RE: OnceLock<Regex> = OnceLock::new();
 
     let create_ext = CREATE_EXT_RE.get_or_init(|| {
@@ -639,10 +675,6 @@ fn rewrite_postgis_ddl(sql: &str) -> String {
         COMMENT_ON_RE.get_or_init(|| Regex::new(r"(?is)\bCOMMENT\s+ON\s+.*?;").unwrap());
     let create_materialized_view = CREATE_MATERIALIZED_VIEW_RE
         .get_or_init(|| Regex::new(r"(?i)\bCREATE\s+MATERIALIZED\s+VIEW\b").unwrap());
-    let geom_type = GEOMETRY_TYPE_RE.get_or_init(|| {
-        Regex::new(r"(?i)\bGEOMETRY\s*\([^)]*\)|\bGEOMETRY\b|\bGEOGRAPHY\s*\([^)]*\)|\bGEOGRAPHY\b")
-            .unwrap()
-    });
     let serial = SERIAL_RE.get_or_init(|| Regex::new(r"(?i)\bbigserial\b|\bserial\b").unwrap());
 
     let sql = create_ext.replace_all(&sql, "SELECT 1 WHERE FALSE;");
@@ -651,7 +683,6 @@ fn rewrite_postgis_ddl(sql: &str) -> String {
     let sql = cluster.replace_all(&sql, "SELECT 1 WHERE FALSE;");
     let sql = comment_on.replace_all(&sql, "SELECT 1 WHERE FALSE;");
     let sql = create_materialized_view.replace_all(&sql, "CREATE VIEW");
-    let sql = geom_type.replace_all(&sql, "BYTEA");
     let sql = serial.replace_all(&sql, |caps: &regex::Captures| {
         let matched = caps[0].to_lowercase();
         if matched == "bigserial" {
@@ -759,16 +790,16 @@ mod tests {
             "serial should be replaced: {result}"
         );
         assert!(
-            result.contains("BYTEA"),
-            "GEOMETRY should be replaced: {result}"
+            result.contains("GEOMETRY"),
+            "GEOMETRY should survive: {result}"
         );
         assert!(
             !result.to_lowercase().contains("serial"),
             "no serial should remain: {result}"
         );
         assert!(
-            !result.to_lowercase().contains("geometry"),
-            "no geometry type should remain: {result}"
+            result.contains("4326"),
+            "geometry modifiers should survive: {result}"
         );
     }
 
@@ -800,10 +831,17 @@ mod tests {
     fn test_rewrite_postgis_ddl_handles_geography_type() {
         let sql = "CREATE TABLE t (geom geography(Point, 4326))";
         let result = rewrite_postgis_ddl(sql);
-        assert!(
-            result.contains("BYTEA"),
-            "geography should be replaced: {result}"
-        );
+        assert_eq!(result, sql);
+    }
+
+    #[test]
+    fn test_preprocess_preserves_spatial_declarations_but_lowers_casts() {
+        let sql = "CREATE TABLE t (location GEOMETRY(Point,4326), earth GEOGRAPHY(Point,4326)); SELECT location::geometry, earth::geography FROM t";
+        let result = preprocess_quackgis_sql(sql);
+        assert!(result.contains("location GEOMETRY(Point,4326)"));
+        assert!(result.contains("earth GEOGRAPHY(Point,4326)"));
+        assert!(result.contains("location::bytea"));
+        assert!(result.contains("earth::bytea"));
     }
 
     #[test]
@@ -1249,6 +1287,7 @@ fn rewrite_pg_overlap_set_expr(expr: &mut sqlparser::ast::SetExpr) {
             if let Some(selection) = select.selection.as_mut() {
                 rewrite_pg_overlap_expr(selection);
             }
+            rewrite_postgis_st_asmvt_record_select(select);
             for expr in select.projection.iter_mut() {
                 rewrite_pg_overlap_select_item(expr);
             }
@@ -1258,6 +1297,123 @@ fn rewrite_pg_overlap_set_expr(expr: &mut sqlparser::ast::SetExpr) {
         }
         _ => {}
     }
+}
+
+/// Expand Martin's PostgreSQL record-form `ST_AsMVT(tile, ..., 'geom')` into
+/// QuackGIS's scalar aggregate arguments. The derived table projection is the
+/// authoritative record shape, so non-geometry columns become MVT attributes
+/// instead of being silently discarded by the geometry-only fallback.
+fn rewrite_postgis_st_asmvt_record_select(select: &mut sqlparser::ast::Select) {
+    let Some((record_alias, projected_columns)) = martin_record_projection(select) else {
+        return;
+    };
+
+    for item in &mut select.projection {
+        let expr = match item {
+            sqlparser::ast::SelectItem::ExprWithAlias { expr, .. }
+            | sqlparser::ast::SelectItem::UnnamedExpr(expr) => expr,
+            _ => continue,
+        };
+        let sqlparser::ast::Expr::Function(func) = expr else {
+            continue;
+        };
+        let Some(name) = func.name.0.last() else {
+            continue;
+        };
+        if !name.to_string().eq_ignore_ascii_case("st_asmvt") {
+            continue;
+        }
+        let sqlparser::ast::FunctionArguments::List(list) = &mut func.args else {
+            continue;
+        };
+        if list.args.len() < 4 {
+            continue;
+        }
+        let matches_alias = matches!(
+            &list.args[0],
+            sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Expr(
+                sqlparser::ast::Expr::Identifier(ident)
+            )) if ident.value.eq_ignore_ascii_case(&record_alias)
+        );
+        if !matches_alias {
+            continue;
+        }
+        let geom_col = match &list.args[3] {
+            sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Expr(
+                sqlparser::ast::Expr::Value(value),
+            )) => match &value.value {
+                sqlparser::ast::Value::SingleQuotedString(value)
+                | sqlparser::ast::Value::DoubleQuotedString(value) => value.clone(),
+                _ => continue,
+            },
+            _ => continue,
+        };
+        if !projected_columns
+            .iter()
+            .any(|column| column.eq_ignore_ascii_case(&geom_col))
+        {
+            continue;
+        }
+
+        let layer_name = list.args[1].clone();
+        let extent = list.args[2].clone();
+        let mut expanded = vec![
+            qualified_function_arg(&record_alias, &geom_col),
+            layer_name,
+            extent,
+        ];
+        expanded.extend(
+            projected_columns
+                .iter()
+                .filter(|column| !column.eq_ignore_ascii_case(&geom_col))
+                .map(|column| qualified_function_arg(&record_alias, column)),
+        );
+        list.args = expanded;
+    }
+}
+
+fn martin_record_projection(select: &sqlparser::ast::Select) -> Option<(String, Vec<String>)> {
+    let [from] = select.from.as_slice() else {
+        return None;
+    };
+    if !from.joins.is_empty() {
+        return None;
+    }
+    let sqlparser::ast::TableFactor::Derived {
+        subquery,
+        alias: Some(alias),
+        ..
+    } = &from.relation
+    else {
+        return None;
+    };
+    let sqlparser::ast::SetExpr::Select(derived) = subquery.body.as_ref() else {
+        return None;
+    };
+    let mut columns = Vec::with_capacity(derived.projection.len());
+    for item in &derived.projection {
+        let name = match item {
+            sqlparser::ast::SelectItem::ExprWithAlias { alias, .. } => alias.value.clone(),
+            sqlparser::ast::SelectItem::UnnamedExpr(sqlparser::ast::Expr::Identifier(ident)) => {
+                ident.value.clone()
+            }
+            sqlparser::ast::SelectItem::UnnamedExpr(sqlparser::ast::Expr::CompoundIdentifier(
+                idents,
+            )) => idents.last()?.value.clone(),
+            _ => return None,
+        };
+        columns.push(name);
+    }
+    Some((alias.name.value.clone(), columns))
+}
+
+fn qualified_function_arg(record_alias: &str, column: &str) -> sqlparser::ast::FunctionArg {
+    sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Expr(
+        sqlparser::ast::Expr::CompoundIdentifier(vec![
+            sqlparser::ast::Ident::new(record_alias),
+            sqlparser::ast::Ident::new(column),
+        ]),
+    ))
 }
 
 fn rewrite_pg_overlap_table_with_joins(table: &mut sqlparser::ast::TableWithJoins) {

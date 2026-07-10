@@ -16,6 +16,7 @@ use datafusion::arrow::array::{
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion_postgres::arrow_pg::datatypes::{SpatialFamily, classify_spatial_field};
 use sedona_geometry::bounds::wkb_bounds_xy;
 use sedona_geometry::interval::IntervalTrait;
 
@@ -95,7 +96,7 @@ pub(super) fn ensure_columns_for_spatial_batches(
         .map(|field| field.as_ref().clone())
         .collect::<Vec<_>>();
     fields.extend(missing.iter().cloned());
-    let output_schema = Arc::new(Schema::new(fields));
+    let output_schema = Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()));
 
     batches
         .into_iter()
@@ -237,15 +238,10 @@ fn schema_has_layout_columns(schema: &Schema) -> bool {
 }
 
 fn geometry_column_index(schema: &Schema) -> Option<usize> {
-    schema.fields().iter().position(|field| {
-        is_binary_like(field.data_type())
-            && (crate::geometry_columns::is_geometry_column_name(field.name())
-                || field.name().eq_ignore_ascii_case("footprint"))
-    })
-}
-
-fn is_binary_like(data_type: &DataType) -> bool {
-    matches!(data_type, DataType::Binary | DataType::BinaryView)
+    schema
+        .fields()
+        .iter()
+        .position(|field| classify_spatial_field(field) == Some(SpatialFamily::Geometry))
 }
 
 fn time_column(schema: &Schema) -> Option<TimeColumn> {

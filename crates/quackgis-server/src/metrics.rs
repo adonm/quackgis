@@ -10,7 +10,7 @@ use std::io;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::ducklake_sql;
+use crate::{catalog_metrics, ducklake_sql};
 
 const METRICS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 
@@ -30,6 +30,9 @@ pub fn render_prometheus() -> String {
             "# HELP quackgis_catalog_refresh_total DuckLake catalog refreshes registered in this process.\n",
             "# TYPE quackgis_catalog_refresh_total counter\n",
             "quackgis_catalog_refresh_total {}\n",
+            "# HELP quackgis_catalog_read_provider_calls_total PostgreSQL DuckLake MetadataProvider calls delegated by this process; excludes writes, pool setup, pgwire, object-store, and SQLite operations and does not claim physical network roundtrips.\n",
+            "# TYPE quackgis_catalog_read_provider_calls_total counter\n",
+            "quackgis_catalog_read_provider_calls_total {}\n",
             "# HELP quackgis_shared_catalog_read_refresh_total Shared-catalog refreshes triggered by read statements.\n",
             "# TYPE quackgis_shared_catalog_read_refresh_total counter\n",
             "quackgis_shared_catalog_read_refresh_total {}\n",
@@ -62,6 +65,7 @@ pub fn render_prometheus() -> String {
         metrics.transaction_ids_allocated_total,
         metrics.writes_denied_total,
         metrics.catalog_refresh_total,
+        catalog_metrics::catalog_read_provider_calls_snapshot(),
         metrics.shared_catalog_read_refresh_total,
         metrics.shared_catalog_strong_refresh_total,
         metrics.snapshot_reads_total,
@@ -126,12 +130,19 @@ mod tests {
         assert!(body.contains("# TYPE quackgis_queries_started_total counter"));
         assert!(body.contains("quackgis_write_denied_total"));
         assert!(body.contains("quackgis_catalog_refresh_total"));
+        assert!(body.contains("# TYPE quackgis_catalog_read_provider_calls_total counter"));
+        assert!(
+            body.contains(
+                "excludes writes, pool setup, pgwire, object-store, and SQLite operations and does not claim physical network roundtrips"
+            )
+        );
         assert!(body.contains("quackgis_snapshot_reads_total"));
         assert!(body.contains("quackgis_snapshot_read_errors_total"));
         assert!(body.contains("quackgis_native_delete_mutations_total"));
         assert!(body.contains("quackgis_native_mutation_aborts_total"));
         assert!(body.contains("quackgis_compactions_total"));
         assert!(!body.contains("QUACKGIS_S3_SECRET_ACCESS_KEY"));
+        assert!(!body.contains("file:///"));
     }
 
     #[test]

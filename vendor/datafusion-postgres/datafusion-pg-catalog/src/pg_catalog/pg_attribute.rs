@@ -231,22 +231,21 @@ impl<C: CatalogInfo> PgAttributeTable<C> {
         }
     }
 
-    /// Field-aware variant that also advertises the PostGIS-compat
-    /// geometry/geography type OID for binary columns whose name matches the
-    /// spatial naming convention. Keeps `pg_attribute.atttypid` consistent
+    /// Field-aware variant that advertises the PostGIS-compatible family OID
+    /// from validated metadata, then legacy binary-column naming conventions.
+    /// Keeps `pg_attribute.atttypid` consistent
     /// with the RowDescription OID produced by
     /// [`arrow_pg::datatypes::field_into_pg_type`].
     fn datafusion_field_to_pg_type(field: &Field) -> (u32, i16, bool, &'static str, &'static str) {
         let dt = field.data_type();
-        if arrow_pg::datatypes::is_binary_arrow_type(dt)
-            && arrow_pg::datatypes::is_geometry_column_name(field.name())
-        {
-            return (arrow_pg::datatypes::GEOMETRY_OID, -1, false, "i", "x");
-        }
-        if arrow_pg::datatypes::is_binary_arrow_type(dt)
-            && arrow_pg::datatypes::is_geography_column_name(field.name())
-        {
-            return (arrow_pg::datatypes::GEOGRAPHY_OID, -1, false, "i", "x");
+        match arrow_pg::datatypes::classify_spatial_field(field) {
+            Some(arrow_pg::datatypes::SpatialFamily::Geometry) => {
+                return (arrow_pg::datatypes::GEOMETRY_OID, -1, false, "i", "x");
+            }
+            Some(arrow_pg::datatypes::SpatialFamily::Geography) => {
+                return (arrow_pg::datatypes::GEOGRAPHY_OID, -1, false, "i", "x");
+            }
+            None => {}
         }
         Self::datafusion_to_pg_type(dt)
     }

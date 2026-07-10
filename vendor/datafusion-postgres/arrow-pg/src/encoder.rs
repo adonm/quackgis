@@ -370,6 +370,14 @@ pub fn encode_value<T: Encoder>(
         DataType::Utf8View if *pg_field.datatype() == Type::CHAR => {
             encoder.encode_field(&pg_char_from_str(get_utf8_view_value(arr, idx)), pg_field)?
         }
+        DataType::Utf8View
+            if *pg_field.datatype() == Type::JSONB || *pg_field.datatype() == Type::JSON =>
+        {
+            let value = get_utf8_view_value(arr, idx).map(|s| {
+                serde_json::from_str::<serde_json::Value>(s).unwrap_or(serde_json::Value::Null)
+            });
+            encoder.encode_field(&value.map(Json), pg_field)?
+        }
         DataType::Utf8View => encoder.encode_field(&get_utf8_view_value(arr, idx), pg_field)?,
         DataType::BinaryView if is_geometry_wire_type(pg_field.datatype()) => {
             encode_binary_as_bytea(encoder, get_binary_view_value(arr, idx), pg_field)?
@@ -377,6 +385,14 @@ pub fn encode_value<T: Encoder>(
         DataType::BinaryView => encoder.encode_field(&get_binary_view_value(arr, idx), pg_field)?,
         DataType::LargeUtf8 if *pg_field.datatype() == Type::CHAR => {
             encoder.encode_field(&pg_char_from_str(get_large_utf8_value(arr, idx)), pg_field)?
+        }
+        DataType::LargeUtf8
+            if *pg_field.datatype() == Type::JSONB || *pg_field.datatype() == Type::JSON =>
+        {
+            let value = get_large_utf8_value(arr, idx).map(|s| {
+                serde_json::from_str::<serde_json::Value>(s).unwrap_or(serde_json::Value::Null)
+            });
+            encoder.encode_field(&value.map(Json), pg_field)?
         }
         DataType::LargeUtf8 => encoder.encode_field(&get_large_utf8_value(arr, idx), pg_field)?,
         DataType::Binary if is_geometry_wire_type(pg_field.datatype()) => {

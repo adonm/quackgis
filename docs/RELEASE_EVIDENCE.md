@@ -18,6 +18,8 @@ storage probes, metrics dashboards, and known limits.
 | `storage-metrics-<recipe>-<sha>-<run_id>` | `Storage smoke` workflow | storage `metrics.json` |
 | `benchmark-report-<recipe>-<sha>-<run_id>` | `Benchmark ladder` workflow | manual LayoutBench/QPS/OLAP benchmark report |
 | `benchmark-metrics-<recipe>-<sha>-<run_id>` | `Benchmark ladder` workflow | manual benchmark `metrics.json` |
+| regional `layoutbench_catalog` log + generated `metrics.json` | `scripts/layoutbench_catalog_report.py` | profile-bound PostgreSQL catalog provider-call deltas and phase budgets |
+| `benchmarks/profiles/*.json` | source tree + `just benchmark-profile-check` | exact row composition, generator, storage, oracle, catalog budget, and required run-metadata contract |
 | `postgis-regress-<sha>-<run_id>` | `PostGIS regress subset` workflow | PostGIS subset log, metrics, and dashboard |
 | `metrics-dashboard.md` | scheduled/manual probe workflows | compact human review surface next to `metrics.json` |
 
@@ -35,7 +37,8 @@ SHA:
 3. storage smoke artifact, at least `kind-alpha-smoke`;
 4. budget check transcript, for example
    `just metrics-budget-check path=<artifact-dir> require_budgeted=true` on the
-   selected compatibility/storage/benchmark metrics;
+   selected compatibility/storage/benchmark metrics; selected regional benchmark
+   evidence must name the committed exact profile id;
 5. PostGIS regress subset artifact;
 6. PostGIS fixture summary from `just postgis-conformance-summary` when the
    conformance ledger changed;
@@ -58,6 +61,14 @@ preview/manual build and include the exact replacement command transcript.
 - `just metrics-budget-check require_budgeted=true` passes for release-selected
   metrics artifacts.
 - QPS/OLAP scan budgets did not regress unexpectedly.
+- Scale claims name a committed profile, exact rows/bytes, storage/hardware
+  profile, and source SHA; catalog provider-call/refresh budgets have
+  measurements from before/after scrapes of the exact serving process or pod.
+- Regional catalog evidence contains exactly one cold-public, direct-internal,
+  and 240-query warm-public phase and passes the profile-bound parser and budget
+  checker. Each phase preserves its process/pod id and raw non-resetting counter
+  start/end; the run preserves numeric id/attempt and RFC3339 start time.
+  Provider-call evidence does not claim physical read or write roundtrips.
 - Native DML/compaction/abort counters and row-count checks match the roadmap
   claim; external-profile artifacts keep `native_mutation_aborts` within its zero
   budget unless the release notes explicitly describe the injected failure.

@@ -1,0 +1,60 @@
+{
+  "manifest_version": 1,
+  "collection_id": "quackgis-multimodal-fixtures-v1",
+  "artifacts": [
+    {
+      "asset_id": "dem-logical-1",
+      "family": "raster",
+      "source_object_id": "test-dem-asc-v1",
+      "asset_version": 1,
+      "path": "test_dem.asc",
+      "source_uri": "fixture:///multimodal/test_dem.asc",
+      "media_type": "text/plain",
+      "format_profile": "esri-ascii-grid",
+      "byte_size": 97,
+      "sha256": "1e1bd708ba6d8af68b3ccb85a48ab5202722ed5bda85ac3fca9ea15d74aed1c2",
+      "bounds": [0.0, 0.0, 4.0, 3.0],
+      "z_bounds": null,
+      "srid": 3857,
+      "coordinate_epoch": 2020.0,
+      "vertical_datum": "EGM96",
+      "transform_pipeline": "identity:EPSG:3857",
+      "lineage": "ascii-grid-header-v1",
+      "quality_status": "validated",
+      "lifecycle_state": "active",
+      "acquired_minute": 1000,
+      "resolution_or_spacing_cm": 100.0,
+      "sidecars": [
+        {
+          "path": "test_dem.prj",
+          "byte_size": 354,
+          "sha256": "e5bb3007cb8be53854ca69db619255122fd733923103daa1ddf74b17ef4b7b04"
+        }
+      ]
+    },
+    {
+      "asset_id": "cloud-logical-1",
+      "family": "point_cloud",
+      "source_object_id": "test-cloud-ply-v1",
+      "asset_version": 1,
+      "path": "test_cloud.ply",
+      "source_uri": "fixture:///multimodal/test_cloud.ply",
+      "media_type": "application/ply",
+      "format_profile": "ply-ascii-1.0",
+      "byte_size": 235,
+      "sha256": "7ab2fed38ba9137a79ce8db2a77fc795d2e332732418700c3150e4bbc7646fe7",
+      "bounds": [100.0, 200.0, 110.0, 215.0],
+      "z_bounds": [5.0, 12.0],
+      "srid": 3857,
+      "coordinate_epoch": 2021.5,
+      "vertical_datum": "ellipsoidal-WGS84",
+      "transform_pipeline": "identity:EPSG:3857",
+      "lineage": "ply-vertex-envelope-v1",
+      "quality_status": "validated",
+      "lifecycle_state": "active",
+      "acquired_minute": 2000,
+      "resolution_or_spacing_cm": 50.0,
+      "sidecars": []
+    }
+  ]
+}

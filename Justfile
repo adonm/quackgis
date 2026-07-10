@@ -29,6 +29,10 @@ qps_deep_min_instances := env_var_or_default("QPS_DEEP_MIN_INSTANCES", "3")
 qps_deep_min_qps := env_var_or_default("QPS_DEEP_MIN_QPS", "1.0")
 qps_deep_disk_budget_gib := env_var_or_default("QPS_DEEP_DISK_BUDGET_GIB", "1024")
 qps_shared_catalog_refresh_ms := env_var_or_default("QPS_SHARED_CATALOG_REFRESH_MS", "60000")
+layoutbench_allow_exact_r100m := env_var_or_default("LAYOUTBENCH_ALLOW_EXACT_R100M", "false")
+layoutbench_max_rows := env_var_or_default("LAYOUTBENCH_MAX_ROWS", "100000000")
+layoutbench_hardware_profile := env_var_or_default("LAYOUTBENCH_HARDWARE_PROFILE", "kind-local-v1")
+layoutbench_object_bytes := env_var_or_default("LAYOUTBENCH_OBJECT_BYTES", "1")
 external_alpha_use_kind_emulators := env_var_or_default("EXTERNAL_ALPHA_USE_KIND_EMULATORS", "true")
 external_catalog_url := env_var_or_default("EXTERNAL_QUACKGIS_CATALOG_URL", "postgres://postgres:postgres@pg.quackgis.svc.cluster.local:5432/quackgis_external")
 external_ducklake_catalog_name := env_var_or_default("EXTERNAL_QUACKGIS_DUCKLAKE_CATALOG_NAME", "quackgis_external")
@@ -226,7 +230,11 @@ test:
 
 # Faster local regression loop: only QuackGIS's non-ignored integration gates.
 test-fast:
-    cargo test -p quackgis-server --lib --test ducklake_persistence --test layoutbench_sf0 --test martin_compat --test postgis_regress --test wire_spatial
+    cargo test -p quackgis-server --lib --test ducklake_persistence --test layoutbench_sf0 --test martin_compat --test multimodal_inventory --test orphan_inventory --test postgis_regress --test process_lifecycle --test wire_spatial
+
+# Validate tiny real raster/point-cloud artifacts and their sidecar inventory contract.
+multimodal-inventory-local:
+    cargo test -p quackgis-server --test multimodal_inventory -- --nocapture
 
 # Run the starter curated PostGIS function regress subset and print pass-rate evidence.
 postgis-regress:
@@ -241,6 +249,15 @@ postgis-conformance-summary format="markdown":
 # Run the deterministic LayoutBench sf0 oracle for spatial-layout work.
 layoutbench-sf0:
     cargo test -p quackgis-server --test layoutbench_sf0 -- --nocapture
+
+# Validate exact benchmark profile arithmetic, naming, and required budgets.
+benchmark-profile-check:
+    python3 scripts/benchmark_profile_check.py benchmarks/profiles/*.json
+    python3 scripts/tests/test_benchmark_profile_check.py
+    python3 scripts/tests/test_layoutbench_catalog_kind_probe.py
+    python3 scripts/tests/test_layoutbench_catalog_report.py
+    python3 scripts/tests/test_metrics_budget_check.py
+    python3 scripts/tests/test_trend_metrics.py
 
 # Seed and run LayoutBench against an already-running local server.
 layoutbench-local scale="sf0" query_iters="3" ingest_order="generated" load_method="insert" compact="false":
@@ -279,12 +296,18 @@ check: fmt-check clippy test
 check-fast: fmt-check clippy test-fast
 
 # Run the same fast gate used by GitHub Actions CI.
-ci: check-fast smoke-local-demo preview-smoke api-client-local-smoke probe-static-check runtime-static-check
+ci: benchmark-profile-check check-fast smoke-local-demo preview-smoke api-client-local-smoke probe-static-check runtime-static-check
 
 # Run the dev QuackGIS server on QUACKGIS_HOST/QUACKGIS_PORT.
 server:
     mkdir -p "$(dirname '{{catalog}}')" "{{data}}"
     cargo run -p quackgis-server -- --host {{host}} --port {{port}} --catalog-path "{{catalog}}" --data-path "{{data}}"
+
+# Offline, dry-run-only inventory of old unreferenced Parquet candidates.
+orphan-inventory min_age_seconds="3600" show_paths="false":
+    @extra=""; \
+    if [ "{{show_paths}}" = "true" ]; then extra="--orphan-show-paths"; fi; \
+    cargo run -p quackgis-server -- --catalog-path "{{catalog}}" --data-path "{{data}}" --orphan-inventory --orphan-min-age-seconds {{min_age_seconds}} $extra
 
 # Connect with psql to a running dev server.
 psql:
@@ -378,7 +401,7 @@ clean-dev:
 # Download the static-ish Martin musl binary into .tmp/bin.
 install-martin:
     mkdir -p .tmp/bin
-    curl -fsSL "https://github.com/maplibre/martin/releases/download/v{{martin_version}}/martin-x86_64-unknown-linux-musl.tar.gz" -o .tmp/martin.tar.gz
+    curl -fsSL "https://github.com/maplibre/martin/releases/download/martin-v{{martin_version}}/martin-x86_64-unknown-linux-musl.tar.gz" -o .tmp/martin.tar.gz
     tar -xzf .tmp/martin.tar.gz -C .tmp/bin martin
     chmod +x .tmp/bin/martin
     {{martin_bin}} --version
@@ -389,7 +412,7 @@ martin-sql:
 
 # Run the real Martin binary E2E (ignored by default; requires MARTIN_BIN).
 martin-e2e: install-martin
-    MARTIN_BIN="$(pwd)/{{martin_bin}}" cargo test -p quackgis-server --test martin_real_e2e -- --ignored --nocapture
+    MARTIN_BIN="{{martin_bin}}" cargo test -p quackgis-server --test martin_real_e2e -- --ignored --nocapture
 
 # Start Martin against an already-running QuackGIS server (auto-discovery path).
 martin:
@@ -477,13 +500,45 @@ kind-probe-scripts:
     kubectl create namespace quackgis --dry-run=client -o yaml | kubectl apply -f -
     kubectl -n quackgis create configmap quackgis-probe-scripts --from-file=deploy/kind/probes --dry-run=client -o yaml | kubectl apply -f -
 
+# Publish benchmark profile definitions consumed by manual Kind benchmark Jobs.
+kind-benchmark-profiles:
+    kubectl create namespace quackgis --dry-run=client -o yaml | kubectl apply -f -
+    kubectl -n quackgis create configmap quackgis-benchmark-profiles --from-file=benchmarks/profiles/layoutbench-regional-r100m-v1.json --dry-run=client -o yaml | kubectl apply -f -
+
+# Publish run metadata for LayoutBench regional catalog measurement Jobs.
+kind-layoutbench-run-config:
+    @set -eu; \
+    kubectl create namespace quackgis --dry-run=client -o yaml | kubectl apply -f -; \
+    source_sha="$(git rev-parse HEAD)"; \
+    run_started_at="$(python3 -c 'import datetime; print(datetime.datetime.now(datetime.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"))')"; \
+    kubectl -n quackgis create configmap layoutbench-run-config \
+        --from-literal=LAYOUTBENCH_SOURCE_SHA="$source_sha" \
+        --from-literal=LAYOUTBENCH_RUN_STARTED_AT="$run_started_at" \
+        --from-literal=LAYOUTBENCH_ALLOW_EXACT_R100M="{{layoutbench_allow_exact_r100m}}" \
+        --from-literal=LAYOUTBENCH_MAX_ROWS="{{layoutbench_max_rows}}" \
+        --from-literal=LAYOUTBENCH_HARDWARE_PROFILE="{{layoutbench_hardware_profile}}" \
+        --from-literal=LAYOUTBENCH_OBJECT_BYTES="{{layoutbench_object_bytes}}" \
+        --dry-run=client -o yaml | kubectl apply -f -
+
 # Static pre-Kind validation for probe scripts and Kubernetes manifests.
 probe-static-check:
     mkdir -p .tmp/pycache
-    PYTHONPYCACHEPREFIX=.tmp/pycache python3 -m py_compile scripts/probe_static_check.py scripts/runtime_static_check.py scripts/trend_metrics.py scripts/metrics_budget_check.py deploy/kind/render_compat_report.py deploy/kind/check_linkerd_injected.py deploy/kind/probes/*.py
+    PYTHONPYCACHEPREFIX=.tmp/pycache python3 -m py_compile scripts/probe_static_check.py scripts/runtime_static_check.py scripts/trend_metrics.py scripts/metrics_budget_check.py scripts/layoutbench_catalog_report.py scripts/external_alpha_evidence_check.py deploy/kind/render_compat_report.py deploy/kind/check_linkerd_injected.py deploy/kind/probes/*.py
     bash -n deploy/kind/probes/*.sh
     python3 scripts/probe_static_check.py deploy/kind
     python3 scripts/probe_static_check.py deploy/kubernetes
+    python3 scripts/tests/test_external_alpha_evidence_check.py
+
+# Validate an external-service Alpha evidence manifest against collected metrics.
+external-alpha-evidence-check manifest=".tmp/external-alpha/manifest.json" metrics=".tmp/compatibility/metrics.json" out=".tmp/external-alpha/README.md":
+    @set -eu; \
+    manifest_arg='{{manifest}}'; \
+    metrics_arg='{{metrics}}'; \
+    out_arg='{{out}}'; \
+    manifest_arg="${manifest_arg#manifest=}"; \
+    metrics_arg="${metrics_arg#metrics=}"; \
+    out_arg="${out_arg#out=}"; \
+    python3 scripts/external_alpha_evidence_check.py --manifest "$manifest_arg" --metrics "$metrics_arg" --out "$out_arg"
 
 # Static guard that the maintained runtime image remains one native-free Rust binary.
 runtime-static-check:
@@ -665,6 +720,45 @@ kind-lake-layoutbench-smoke: kind-ready
     kill "$pf_pid" 2>/dev/null || true; \
     wait "$pf_pid" 2>/dev/null || true; \
     trap - EXIT INT TERM
+
+# Seed the exact regional 100M LayoutBench catalog profile into the Kind lake profile.
+# Requires LAYOUTBENCH_ALLOW_EXACT_R100M=true and enough local disk/time.
+kind-layoutbench-catalog-seed: kind-ready kind-probe-scripts kind-benchmark-profiles kind-layoutbench-run-config
+    @if [ "{{layoutbench_allow_exact_r100m}}" != "true" ]; then \
+        printf 'Refusing exact 100M seed: set LAYOUTBENCH_ALLOW_EXACT_R100M=true and LAYOUTBENCH_MAX_ROWS>=100000000.\n'; \
+        exit 1; \
+    fi
+    just kind-lake-refresh
+    kubectl -n quackgis set env deployment/lake QUACKGIS_DUCKLAKE_ROW_GROUP_ROWS=524288 QUACKGIS_SHARED_CATALOG_REFRESH_MS=86400000 QUACKGIS_SELECTIVE_READ_TARGET_PARTITIONS=1 QUACKGIS_TARGET_PARTITIONS-
+    kubectl -n quackgis scale deployment/lake --replicas=1
+    kubectl -n quackgis rollout status deployment/lake --timeout=180s
+    kubectl -n quackgis wait deployment/lake --for=condition=Available --timeout=180s
+    kubectl -n quackgis delete job layoutbench-catalog-seed --ignore-not-found=true
+    kubectl apply -f deploy/kind/layoutbench-catalog-seed.yaml
+    kubectl -n quackgis wait job/layoutbench-catalog-seed --for=condition=complete --timeout=24h || (kubectl -n quackgis logs deployment/lake --all-containers=true --tail=200 || true; kubectl -n quackgis logs job/layoutbench-catalog-seed || true; false)
+    kubectl -n quackgis logs job/layoutbench-catalog-seed
+
+# Measure catalog provider-call budgets for the preseeded regional 100M profile.
+kind-layoutbench-catalog-measure: kind-ready kind-probe-scripts kind-benchmark-profiles kind-layoutbench-run-config
+    @set -eu; \
+    just kind-lake-refresh; \
+    kubectl -n quackgis set env deployment/lake QUACKGIS_DUCKLAKE_ROW_GROUP_ROWS=524288 QUACKGIS_SHARED_CATALOG_REFRESH_MS=86400000 QUACKGIS_SELECTIVE_READ_TARGET_PARTITIONS=1 QUACKGIS_TARGET_PARTITIONS-; \
+    kubectl -n quackgis scale deployment/lake --replicas=1; \
+    kubectl -n quackgis rollout restart deployment/lake; \
+    kubectl -n quackgis rollout status deployment/lake --timeout=180s; \
+    kubectl -n quackgis wait deployment/lake --for=condition=Available --timeout=180s; \
+    kubectl -n quackgis delete job layoutbench-catalog-probe --ignore-not-found=true; \
+    kubectl apply -f deploy/kind/layoutbench-catalog-probe.yaml; \
+    mkdir -p .tmp/layoutbench-regional .tmp/compatibility; \
+    if ! kubectl -n quackgis wait job/layoutbench-catalog-probe --for=condition=complete --timeout=2h; then \
+        kubectl -n quackgis logs deployment/lake --all-containers=true --tail=200 || true; \
+        kubectl -n quackgis logs job/layoutbench-catalog-probe || true; \
+        exit 1; \
+    fi; \
+    kubectl -n quackgis logs job/layoutbench-catalog-probe | tee .tmp/layoutbench-regional/catalog.log; \
+    python3 scripts/layoutbench_catalog_report.py --profile benchmarks/profiles/layoutbench-regional-r100m-v1.json --log .tmp/layoutbench-regional/catalog.log --out .tmp/compatibility/metrics.json; \
+    cp .tmp/layoutbench-regional/catalog.log .tmp/compatibility/layoutbench-catalog-probe.log; \
+    python3 scripts/trend_metrics.py --format dashboard .tmp/compatibility > .tmp/compatibility/metrics-dashboard.md
 
 # Run an in-cluster concurrent read workload against the lake PostgreSQL/S3 profile.
 kind-read-smoke: kind-ready kind-probe-scripts
@@ -851,7 +945,7 @@ kind-compat-report:
     mkdir -p .tmp/compatibility
     kubectl -n quackgis get pods,jobs,svc,deploy,statefulset -o wide > .tmp/compatibility/kubernetes.txt 2>&1 || true
     kubectl -n quackgis logs statefulset/quackgis --tail=-1 > .tmp/compatibility/quackgis.log 2>&1 || true
-    @for job in qgis-probe qgis-edit-probe ogr-probe api-client-probe geoserver-probe osm-postgis-parity quackgis-demo lake-probe external-lake-probe lake-multipod lb-probe read-seed read-probe qps-seed qps-probe write-setup write-workers write-verify olap-seed olap-probe; do \
+    @for job in qgis-probe qgis-edit-probe ogr-probe api-client-probe geoserver-probe osm-postgis-parity quackgis-demo lake-probe external-lake-probe lake-multipod lb-probe read-seed read-probe qps-seed qps-probe write-setup write-workers write-verify olap-seed olap-probe layoutbench-catalog-seed layoutbench-catalog-probe; do \
         kubectl -n quackgis logs "job/${job}" --tail=-1 > ".tmp/compatibility/${job}.log" 2>&1 || true; \
     done
     kubectl -n quackgis logs deployment/external-lake --all-containers=true --tail=-1 > .tmp/compatibility/external-lake.log 2>&1 || true

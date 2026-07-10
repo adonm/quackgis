@@ -27,7 +27,7 @@ affect catalog/data compatibility.
 |---|---|---|---|---|
 | SQLite/local profile | DuckLake single-catalog metadata in SQLite plus local Parquet; allocator columns differ from DuckDB's writer expectations | Spec-oriented local catalog/data path, not yet drop-in DuckDB-writable | `just check-fast`, `just preview-smoke`, persistence tests, future reference-reader/export gate | Keep as deterministic preview path and close allocator/export compatibility before stronger interop claims |
 | PostgreSQL/S3 profile | `datafusion-ducklake` PostgreSQL multicatalog metadata plus S3-compatible object data | Current schema is library-specific/non-spec; target official SQL catalog + object-store behavior and fewer PostgreSQL roundtrips | `just kind-alpha-smoke`, managed-service and reference-reader/export gates | Do not claim standard DuckLake interoperability until a reference reader opens it or a tested export/migration exists |
-| Geometry storage | WKB/EWKB in Parquet Binary; current writer records Binary as `blob`; QuackGIS discovery uses conventional names and catalog shims | DuckLake `GEOMETRY` or future stable UDT/type metadata | `wire_spatial`, `postgis_regress`, client probes, future unconventionally named geometry/reference-reader tests | Add durable geometry identity while preserving WKB and maintained wire behavior |
+| Spatial family storage | WKB/EWKB stays Parquet Binary; explicit SQL families persist as snapshot-versioned `ducklake_column.column_type` `geometry`/`geography` and validated Arrow field metadata; ordinary Binary stays `blob`; metadata-first discovery retains conventional-name fallback | DuckLake `GEOMETRY`; QuackGIS `geography` remains a local read/write family pending an upstream/reference-reader contract | `explicit_spatial_family_identity_survives_rewrites_and_restart`, vendor field/schema tests, `wire_spatial`, Martin/OGR/QGIS gates | Add durable subtype/SRID/dimensions and a tested old-blob migration only through an upstream-compatible mechanism |
 | Hidden spatial layout columns | QuackGIS-owned ordinary `_qg_*` bbox/time/space/Morton columns maintained on writes; current pruning is statistics-driven, not a published DuckLake partition index | DuckLake partitioning/statistics/Bloom/metadata pruning improvements | `layoutbench_sf0`, QPS/OLAP scan budgets, compaction scan tests | Prefer upstream pruning/statistics or true coarse partitions when exact recheck, catalog growth, and writer fanout remain safe |
 | Autocommit native `DELETE` | Fork-backed positional delete files committed under one snapshot | Multi-deletion-vector/Puffin evolution | `ducklake_delete_uses_atomic_native_delete_files_across_data_files`, external native-delete probe | Move to upstream deletion-vector primitives when they can commit all affected files atomically |
 | Autocommit native `UPDATE` | Fork-backed delete files plus pending replacement data file under one snapshot | Official update/delete mutation APIs over deletion vectors and appended data | `ducklake_update_uses_atomic_native_delete_and_append` | Migrate when upstream can preserve one visible snapshot boundary and `RETURNING` semantics |
@@ -35,7 +35,7 @@ affect catalog/data compatibility.
 | Full-table compaction | QuackGIS `CALL quackgis_compact_table(...)` replacement snapshot | DuckLake optimize/compaction procedures | `ducklake_compact_table_rewrites_without_changing_results` | Replace or alias to upstream procedure when available without changing client contract |
 | Metadata inspection | Safe pgwire UDTFs: `ducklake_snapshots()`, `ducklake_table_info()`, `ducklake_list_files()` | DuckLake metadata tables/functions | `ducklake_metadata_table_functions_roundtrip_through_wire` | Track upstream metadata schemas; keep QuackGIS wrappers stable for clients |
 | CDC row functions | Disabled after pgwire projection panic | Official change-data/log table functions or snapshot diffs | Disabled until safe projection test exists | Re-enable only after pgwire/Arrow projection is safe and row semantics are documented |
-| SQL time travel | Literal `AS OF SNAPSHOT <id>` and named selector forms support the narrow simple one-table read path | Protected snapshots and broader `AS OF`/time-travel reads | `ducklake_snapshot_selector_reads_pinned_table` | Add timestamp resolution and retention against upstream snapshot APIs where possible |
+| SQL time travel | Literal snapshot-id and RFC3339 timestamp `AS OF` plus named selector forms support the narrow simple one-table read path; ids are validated and timestamps resolve deterministically at-or-before | Protected snapshots and broader time-travel reads | `ducklake_snapshot_selector_reads_pinned_table` | Add retention against upstream snapshot APIs where possible |
 | Backup/restore | Local SQLite/filesystem oracle plus external/snapshot runbooks | Protected snapshots / snapshot retention | `ducklake_local_backup_restore_copy_roundtrip`, `docs/ALPHA_EXTERNAL_SERVICES.md`, `docs/SNAPSHOT_OPERATIONS.md` | Use protected snapshots when upstream exposes stable retention semantics |
 | Branch/merge/staged imports | Not implemented | DuckLake branch/merge roadmap | future staged-import/edit-review probes | Prefer upstream branch/merge over QuackGIS-specific staging catalogs |
 | Materialized summaries | Not implemented beyond ordinary tables/queries | DuckLake materialized views / incremental maintenance | future tile/coverage/asset summary probes | Use upstream materialized views before bespoke refresh machinery |
@@ -53,11 +53,18 @@ for a release, copy a representative catalog + object prefix and verify:
 - delete-file semantics after native `DELETE`/`UPDATE`;
 - compacted table reads;
 - geometry bytes and schema identity, explicitly recording whether the reader sees
-  generic Binary/blob or a durable GEOMETRY type;
+  generic Binary/blob or durable GEOMETRY family identity, and whether it rejects
+  or understands QuackGIS `geography`;
 - failure behavior for QuackGIS-only metadata functions.
 
 If a behavior is correct for QuackGIS but not yet safe for reference readers,
 release notes must say so and name the upstream feature that will close the gap.
+
+Current evidence closes QuackGIS-local family identity only. It does not prove
+subtype/SRID/dimension durability, existing-blob migration, geography
+reference-reader interoperability, generic PostgreSQL typmods, or either storage
+profile through an external DuckLake reader. PostgreSQL/S3 external evidence is
+also still required before widening the storage claim.
 
 ## Migration decision record template
 

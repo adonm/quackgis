@@ -3,11 +3,14 @@
 
 use std::sync::Arc;
 
-use datafusion::arrow::datatypes::DataType;
+use datafusion::arrow::datatypes::{DataType, Field};
 use datafusion::common::ParamValues;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::prelude::SessionContext;
 use datafusion::sql::sqlparser::ast::Statement;
+use datafusion_postgres::arrow_pg::datatypes::{
+    GEOGRAPHY_OID, GEOMETRY_OID, SpatialFamily, classify_spatial_field,
+};
 use datafusion_postgres::hooks::HookClient;
 use datafusion_postgres::pgwire::api::Type;
 use datafusion_postgres::pgwire::api::results::{
@@ -20,9 +23,6 @@ use super::encoding::{
 };
 use super::params::first_oid_param;
 use super::surfaces::{is_pgjdbc_typeinfo_name_query, is_pgjdbc_typeinfo_sqltype_query};
-
-const GEOMETRY_OID: u32 = 90_001;
-const GEOGRAPHY_OID: u32 = 90_002;
 
 pub(super) fn extended_info_response(
     statement: &Statement,
@@ -334,15 +334,24 @@ pub(super) struct PgTypeInfo {
     pub(super) attlen: i16,
 }
 
-pub(super) fn for_arrow_field(column_name: &str, data_type: &DataType) -> PgTypeInfo {
-    if crate::geometry_columns::is_geometry_column_name(column_name) {
-        return PgTypeInfo {
-            oid: GEOMETRY_OID,
-            attlen: -1,
-        };
+pub(super) fn for_arrow_field(field: &Field) -> PgTypeInfo {
+    match classify_spatial_field(field) {
+        Some(SpatialFamily::Geometry) => {
+            return PgTypeInfo {
+                oid: GEOMETRY_OID,
+                attlen: -1,
+            };
+        }
+        Some(SpatialFamily::Geography) => {
+            return PgTypeInfo {
+                oid: GEOGRAPHY_OID,
+                attlen: -1,
+            };
+        }
+        None => {}
     }
 
-    match data_type {
+    match field.data_type() {
         DataType::Boolean => PgTypeInfo { oid: 16, attlen: 1 },
         DataType::Int16 => PgTypeInfo { oid: 21, attlen: 2 },
         DataType::Int32 => PgTypeInfo { oid: 23, attlen: 4 },
@@ -378,5 +387,28 @@ pub(super) fn for_arrow_field(column_name: &str, data_type: &DataType) -> PgType
             oid: 25,
             attlen: -1,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion_postgres::arrow_pg::datatypes::with_spatial_family_metadata;
+
+    #[test]
+    fn pgjdbc_field_mapping_prefers_explicit_family_and_rejects_text_name_fallback() {
+        let location = with_spatial_family_metadata(
+            Field::new("location", DataType::Binary, true),
+            Some(SpatialFamily::Geometry),
+        );
+        let earth = with_spatial_family_metadata(
+            Field::new("earth", DataType::Binary, true),
+            Some(SpatialFamily::Geography),
+        );
+        let text_geom = Field::new("geom", DataType::Utf8, true);
+
+        assert_eq!(for_arrow_field(&location).oid, GEOMETRY_OID);
+        assert_eq!(for_arrow_field(&earth).oid, GEOGRAPHY_OID);
+        assert_eq!(for_arrow_field(&text_geom).oid, Type::TEXT.oid());
     }
 }

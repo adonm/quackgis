@@ -197,9 +197,10 @@ async fn martin_record_form_st_asmvt_query_executes() {
 
     // This is the core shape from Martin's Postgres table source:
     // ST_AsMVT(tile, layer_name, extent, geom_column_name) where `tile` is the
-    // derived-table row variable. The datafusion-postgres fork rewrites it to
-    // the geometry-only aggregate QuackGIS currently implements and lowers
-    // Martin's named ST_TileEnvelope margin argument to a positional overload.
+    // derived-table row variable. The datafusion-postgres fork expands the
+    // projected record into QuackGIS's geometry/layer/extent/attribute aggregate
+    // arguments and lowers Martin's named ST_TileEnvelope margin argument to a
+    // positional overload.
     let tile: Vec<u8> = client
         .query_one(
             "SELECT ST_AsMVT(tile, 'points', 4096, 'geom') FROM (\
@@ -207,7 +208,7 @@ async fn martin_record_form_st_asmvt_query_executes() {
                     ST_Transform(ST_CurveToLine(geom::geometry), 3857),\
                     ST_TileEnvelope(0, 0, 0),\
                     4096, 64, true\
-                ) AS geom \
+                ) AS geom, name \
                 FROM quackgis.main.points \
                 WHERE geom && ST_TileEnvelope(0, 0, 0, margin => 0.015625)\
              ) AS tile",
@@ -217,7 +218,12 @@ async fn martin_record_form_st_asmvt_query_executes() {
         .expect("Martin ST_AsMVT record-form query")
         .get(0);
 
-    assert!(!tile.is_empty(), "MVT tile should not be empty");
+    for expected in ["points", "name", "origin"] {
+        assert!(
+            contains_bytes(&tile, expected.as_bytes()),
+            "Martin record-form tile should contain {expected:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

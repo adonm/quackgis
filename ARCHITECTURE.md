@@ -153,28 +153,38 @@ rather than an expanding collection of query-text signatures.
 
 | Layer | Current representation |
 |---|---|
-| Durable data | WKB/EWKB bytes in Parquet Binary columns; the current Rust DuckLake writer records Binary as `blob` |
-| Execution | Arrow Binary/BinaryView WKB arrays consumed by SedonaDB, plus ordinary hidden layout columns |
+| Durable data | WKB/EWKB bytes in Parquet Binary columns; explicit SQL `GEOMETRY(...)`/`GEOGRAPHY(...)` persist snapshot-versioned `ducklake_column.column_type = geometry`/`geography`, while ordinary Binary remains `blob` |
+| Execution | Arrow Binary/BinaryView WKB arrays with validated `quackgis.spatial_family` field metadata consumed by SedonaDB, plus ordinary hidden layout columns |
 | Wire text | hex WKB/EWKB encoded under QuackGIS's advertised spatial type |
 | Wire binary | raw WKB/EWKB bytes using bytea-compatible serializers |
 | PostgreSQL identity | sentinel `geometry`/`geography` OIDs 90001/90002, resolvable through QuackGIS catalog shims |
-| Discovery | conventional geometry column names (`geom`, `geometry`, `footprint`, OGR/QGIS variants) plus QuackGIS metadata surfaces |
+| Discovery | validated family metadata first; conventional binary names (`geom`, `geometry`, `footprint`, OGR/QGIS variants, and geography names) remain a migration fallback |
 
 The current path is intentionally WKB-first and works for maintained clients, but
-two details must not be overstated:
+the family-identity claim must not be overstated:
 
 1. sentinel OIDs are stable QuackGIS identifiers, not dynamic OIDs from a real
    PostGIS installation; and
-2. current durable DuckLake column metadata does not yet carry enough geometry
-   identity to eliminate naming heuristics.
+2. durable metadata records only the generic `geometry` versus `geography` family;
+   it does not durably record or enforce subtype, declared SRID, or dimensions;
+3. `geometry_columns`/`geography_columns` therefore report generic family,
+   dimension 2, and SRID 0; and
+4. old `blob` columns are not rewritten automatically. Binary conventional-name
+   fallback remains for those catalogs, and a non-binary `geom` is not spatial.
 
-### Target identity
+### Identity boundary
 
-QuackGIS should record spec-aligned `GEOMETRY`/geography metadata (or a stable
-upstream UDT/type mechanism) alongside WKB without changing the bytes. That
-metadata should drive `geometry_columns`, SRID/dimension discovery, reference
-reader behavior, and schema evolution. Until then, accepted naming conventions
-and sentinel-OID behavior are part of the explicit compatibility contract.
+The shared Arrow field classifier, DuckLake schema reader/writer, dynamic family
+metadata tables, RowDescription, `pg_attribute`, and pgjdbc mapping all use the
+same metadata-first contract. SQL casts still lower to bytea-compatible execution,
+and text/binary transport remains hex/raw WKB/EWKB. Geometry-only layout, pruning,
+synthetic-rowid, public-alias, and synthetic-index decisions deliberately do not
+opt geography into Cartesian layout semantics.
+
+Still open are durable subtype/SRID/dimension metadata, migration of existing
+`blob` catalogs, geography interoperability in a reference DuckLake reader,
+generic PostgreSQL `pg_type`/typmod fidelity, and external PostgreSQL/S3 evidence.
+Those require independent gates before a broader type-interoperability claim.
 
 CRS authority/code, WKT2/PROJJSON, vertical datum, coordinate epoch, transform
 pipeline, accuracy, and conversion tolerance belong in durable table/column or
@@ -278,15 +288,17 @@ the same one-visible-snapshot contract. See
 
 ## Snapshot reads and dataset history
 
-Literal `AS OF SNAPSHOT <id>` is lowered before PostgreSQL parsing to a named
-snapshot selector. Parsing is only the first safety step: QuackGIS then accepts one
-simple snapshot-qualified table, rejects joins/multiple selectors/non-literal ids,
-checks that the schema/table existed at the requested snapshot, creates a
-query-scoped snapshot-pinned DuckLake catalog, and discards it after the query.
-The normal catalog remains at the current head.
+Literal `AS OF SNAPSHOT <id>` and `AS OF TIMESTAMP '<RFC3339>'` are lowered before
+PostgreSQL parsing to named snapshot selectors. Parsing is only the first safety
+step: QuackGIS then accepts one simple snapshot-qualified table, rejects joins,
+multiple selectors, and non-literals, validates exact ids or resolves the latest
+snapshot at/before the requested instant, checks schema/table visibility, creates
+a query-scoped snapshot-pinned DuckLake catalog, and discards it after the query.
+The normal catalog remains at the current head, and reopening an initialized
+catalog does not manufacture an empty snapshot.
 
-Timestamp resolution, protected retention, rollback, branch/release workflows,
-and CDC are separate product semantics. CDC row functions stay disabled until
+Protected retention, rollback, branch/release workflows, and CDC are separate
+product semantics. CDC row functions stay disabled until
 projection shape, ordering, bounds, update/delete meaning, and simple/extended
 wire behavior are deterministic. See
 [docs/SNAPSHOT_OPERATIONS.md](./docs/SNAPSHOT_OPERATIONS.md).
@@ -311,15 +323,18 @@ unrecorded source of durable truth.
    TLS fails startup when only half configured. Production deployment must enforce
    TLS or a trusted mTLS/proxy boundary.
 2. **SQL authorization.** Coarse read-only/read-write policy is enforced in the
-   DuckLake SQL hook near recognized DDL/DML/COPY/maintenance planning. Future
-   table/schema rules must cover data, catalogs, metadata UDTFs, snapshots, and
-   maintenance consistently.
+   DuckLake SQL hook before catalog refresh or planning. Read-only identities use
+   a structural allowlist for queries and safe session/transaction controls; new,
+   mutating, nested-mutating, and indeterminate statement variants deny by default.
+   Future table/schema rules must cover data, catalogs, metadata UDTFs, snapshots,
+   and maintenance consistently.
 3. **Catalog/object credentials.** These are infrastructure identities scoped to
    the catalog database/schema and object prefix. They are independent of pgwire
    users and rotate independently.
 4. **Metrics and logs.** Process counters and structured events omit SQL text,
-   usernames where unnecessary, object paths, and secrets. Metrics are not an
-   authorization surface and must bind to a private/trusted endpoint.
+   usernames where unnecessary, object paths, and secrets. Pgwire failures are
+   logged by bounded class rather than formatted provider error. Metrics are not
+   an authorization surface and must bind to a private/trusted endpoint.
 5. **Compatibility metadata.** `pg_roles` and privilege helpers help clients infer
    editability; they never grant access by themselves.
 

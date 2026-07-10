@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: layoutbench-catalog-probe
+  namespace: quackgis
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 7200
+  template:
+    spec:
+      restartPolicy: Never
+      volumes:
+        - name: probe-scripts
+          configMap:
+            name: quackgis-probe-scripts
+            defaultMode: 0755
+        - name: benchmark-profiles
+          configMap:
+            name: quackgis-benchmark-profiles
+      containers:
+        - name: layoutbench-catalog-probe
+          image: docker.io/qgis/qgis:ltr-questing
+          envFrom:
+            - configMapRef:
+                name: layoutbench-run-config
+                optional: true
+          env:
+            - name: QUACKGIS_HOST
+              value: lake.quackgis.svc.cluster.local
+            - name: QUACKGIS_PORT
+              value: "5434"
+            - name: QUACKGIS_METRICS_HOST
+              value: lake.quackgis.svc.cluster.local
+            - name: QUACKGIS_METRICS_PORT
+              value: "9187"
+            - name: LAYOUTBENCH_MODE
+              value: measure
+            - name: LAYOUTBENCH_PROFILE
+              value: /opt/quackgis-benchmarks/layoutbench-regional-r100m-v1.json
+          volumeMounts:
+            - name: probe-scripts
+              mountPath: /opt/quackgis-probes
+            - name: benchmark-profiles
+              mountPath: /opt/quackgis-benchmarks
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              PYTHONPATH=/opt/quackgis-probes python3 /opt/quackgis-probes/layoutbench_catalog_probe.py

@@ -15,7 +15,7 @@ This document defines the support bar for Python/API/BI-style clients.
 | GeoPandas `read_postgis` | read WKB-backed geometry into a GeoDataFrame, preserve CRS metadata when available | profile WKB row-query surface covered locally and in Kind; named GeoPandas dependency probe pending |
 | pg_featureserv-like reader | table discovery, bbox filters, JSON/GeoJSON-shaped API reads over pgwire | profile bbox/filter surface covered locally and in Kind; real server pending |
 | BI/SQL tools | simple/extended protocol SELECTs, projection/filter/grouped aggregates | profile grouped aggregate surface covered locally and in Kind; named BI client pending |
-| MVT consumers through Martin | table discovery, non-empty tile, attribute tags | Martin SQL/E2E base exists; profile MVT query covers layer/key/value dictionaries locally and in Kind; real Martin OSM attribute matrix pending |
+| MVT consumers through Martin | table discovery, non-empty tile, attribute tags | real Martin binary opt-in proves configured synthetic attributes; profile MVT query covers layer/key/value dictionaries locally and in Kind; real Martin OSM attribute matrix pending |
 
 ## Probe design rules
 
@@ -83,8 +83,10 @@ than named client containers and asserts the protocol/catalog surfaces first:
   `ST_AsMVTGeom` + `ST_AsMVT(geom, layer, extent, attrs...)`.
 
 The MVT encoder itself now has a focused unit test for key/value dictionaries and
-feature tags. The public SQL/client probes now assert representative attribute
-tags too; copied OSM/Martin binary runs remain the real-data promotion gate.
+feature tags. The public SQL/client probes assert representative attribute tags,
+and `just martin-e2e` runs the real Martin binary over the synthetic fixture and
+requires its configured `name=origin` tag in the returned tile. Copied OSM/Martin
+binary runs remain the real-data promotion gate.
 
 This is a local/wire gate, not a named-client support claim. Promotion still
 requires the containerized client or real server named in the matrix. The local

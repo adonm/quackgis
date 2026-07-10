@@ -120,6 +120,141 @@ async fn write_geo(paths: &StoragePaths) {
         .expect("write geo table");
 }
 
+async fn live_column_types(server: &ServerHandle, table: &str) -> Vec<(String, String)> {
+    let pool = sqlx::SqlitePool::connect(&format!(
+        "sqlite:{}",
+        server.tmp_dir().join("quackgis.db").display()
+    ))
+    .await
+    .expect("open DuckLake catalog");
+    let rows = sqlx::query(
+        "SELECT c.column_name, c.column_type
+         FROM ducklake_column c
+         JOIN ducklake_table t ON t.table_id = c.table_id
+         WHERE t.table_name = ? AND t.end_snapshot IS NULL AND c.end_snapshot IS NULL
+         ORDER BY c.column_order",
+    )
+    .bind(table)
+    .fetch_all(&pool)
+    .await
+    .expect("read live DuckLake column types");
+    rows.into_iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect()
+}
+
+async fn assert_durable_spatial_identity(client: &tokio_postgres::Client, conn_str: &str) {
+    let geometry = client
+        .query(
+            "SELECT f_geometry_column, coord_dimension, srid, type
+             FROM geometry_columns WHERE f_table_name = 'durable_identity'",
+            &[],
+        )
+        .await
+        .expect("geometry_columns identity row");
+    assert_eq!(geometry.len(), 1);
+    assert_eq!(geometry[0].get::<_, String>(0), "location");
+    assert_eq!(geometry[0].get::<_, i32>(1), 2);
+    assert_eq!(geometry[0].get::<_, i32>(2), 0);
+    assert_eq!(geometry[0].get::<_, String>(3), "GEOMETRY");
+
+    let geography = client
+        .query(
+            "SELECT f_geography_column, coord_dimension, srid, type
+             FROM geography_columns WHERE f_table_name = 'durable_identity'",
+            &[],
+        )
+        .await
+        .expect("geography_columns identity row");
+    assert_eq!(geography.len(), 1);
+    assert_eq!(geography[0].get::<_, String>(0), "earth");
+    assert_eq!(geography[0].get::<_, i32>(1), 2);
+    assert_eq!(geography[0].get::<_, i32>(2), 0);
+    assert_eq!(geography[0].get::<_, String>(3), "GEOGRAPHY");
+
+    let oids = raw_row_description_oids(
+        conn_str,
+        "SELECT location, earth, payload, geom FROM public.durable_identity LIMIT 1",
+    )
+    .await;
+    assert_eq!(oids, vec![90_001, 90_002, 17, 25]);
+
+    let bytes = raw_simple_query_first_row(
+        conn_str,
+        "SELECT location, earth, payload FROM public.durable_identity LIMIT 1",
+    )
+    .await;
+    assert_eq!(
+        bytes[0].as_deref(),
+        Some(bytea_hex_text(&point_wkb(3.0, 4.0)).as_slice()),
+        "updated geometry remains WKB bytes"
+    );
+    assert_eq!(
+        bytes[1].as_deref(),
+        Some(bytea_hex_text(&point_wkb(5.0, 6.0)).as_slice())
+    );
+    assert_eq!(bytes[2].as_deref(), Some(b"\\xdeadbeef".as_slice()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explicit_spatial_family_identity_survives_rewrites_and_restart() {
+    let mut server = ServerHandle::start().await;
+    let (client, connection) = tokio_postgres::connect(&server.conn_str(), NoTls)
+        .await
+        .expect("connect");
+    let connection = tokio::spawn(connection);
+
+    client
+        .batch_execute(
+            "CREATE TABLE public.durable_identity (
+                 location GEOMETRY(Point,4326),
+                 earth GEOGRAPHY(Point,4326),
+                 payload BINARY,
+                 geom TEXT
+             );
+             INSERT INTO public.durable_identity VALUES (
+                 X'010100000000000000000000000000000000000000',
+                 X'010100000000000000000014400000000000001840',
+                 X'DEADBEEF',
+                 'not spatial'
+             );
+             UPDATE public.durable_identity
+                SET location = X'010100000000000000000008400000000000001040'
+              WHERE geom = 'not spatial';
+             CALL quackgis_compact_table('public.durable_identity');",
+        )
+        .await
+        .expect("create, mutate, and compact durable spatial families");
+
+    let types = live_column_types(&server, "durable_identity").await;
+    for expected in [
+        ("location", "geometry"),
+        ("earth", "geography"),
+        ("payload", "blob"),
+        ("geom", "varchar"),
+    ] {
+        assert!(
+            types
+                .iter()
+                .any(|(name, ty)| name == expected.0 && ty == expected.1),
+            "missing persisted family/type {expected:?} in {types:?}"
+        );
+    }
+    assert_durable_spatial_identity(&client, &server.conn_str()).await;
+
+    drop(client);
+    connection.abort();
+    server.restart().await;
+    let (client, connection) = tokio_postgres::connect(&server.conn_str(), NoTls)
+        .await
+        .expect("connect after restart");
+    let _connection = tokio::spawn(connection);
+
+    assert_durable_spatial_identity(&client, &server.conn_str()).await;
+    let reopened_types = live_column_types(&server, "durable_identity").await;
+    assert_eq!(reopened_types, types);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn ducklake_sql_ctas_and_insert_route_to_writer() {
     let server = ServerHandle::start().await;
@@ -284,6 +419,99 @@ async fn raw_simple_copy_from_stdin(conn_str: &str, copy_sql: &str, chunks: &[&[
         }
     }
     command.expect("CommandComplete after COPY")
+}
+
+async fn raw_row_description_oids(conn_str: &str, sql: &str) -> Vec<u32> {
+    let (host, port) = parse_conn_addr(conn_str);
+    let mut stream = tokio::net::TcpStream::connect((host.as_str(), port))
+        .await
+        .expect("raw pgwire RowDescription connect");
+    send_startup(&mut stream).await;
+    read_until_ready(&mut stream).await;
+    send_frontend_message(&mut stream, b'Q', cstring_body(sql).as_slice()).await;
+
+    loop {
+        let (typ, body) = read_backend_message(&mut stream).await;
+        match typ {
+            b'T' => return parse_row_description_oids(&body),
+            b'E' => panic!("RowDescription query failed: {}", error_message(&body)),
+            b'Z' => panic!("RowDescription query returned no columns"),
+            _ => {}
+        }
+    }
+}
+
+async fn raw_simple_query_first_row(conn_str: &str, sql: &str) -> Vec<Option<Vec<u8>>> {
+    let (host, port) = parse_conn_addr(conn_str);
+    let mut stream = tokio::net::TcpStream::connect((host.as_str(), port))
+        .await
+        .expect("raw pgwire data row connect");
+    send_startup(&mut stream).await;
+    read_until_ready(&mut stream).await;
+    send_frontend_message(&mut stream, b'Q', cstring_body(sql).as_slice()).await;
+
+    loop {
+        let (typ, body) = read_backend_message(&mut stream).await;
+        match typ {
+            b'D' => return parse_data_row(&body),
+            b'E' => panic!("data row query failed: {}", error_message(&body)),
+            b'Z' => panic!("data row query returned no rows"),
+            _ => {}
+        }
+    }
+}
+
+fn parse_data_row(body: &[u8]) -> Vec<Option<Vec<u8>>> {
+    assert!(body.len() >= 2, "short DataRow body");
+    let count = u16::from_be_bytes(body[0..2].try_into().unwrap()) as usize;
+    let mut offset = 2;
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        assert!(offset + 4 <= body.len(), "short DataRow field length");
+        let len = i32::from_be_bytes(body[offset..offset + 4].try_into().unwrap());
+        offset += 4;
+        if len < 0 {
+            values.push(None);
+            continue;
+        }
+        let len = len as usize;
+        assert!(offset + len <= body.len(), "short DataRow field value");
+        values.push(Some(body[offset..offset + len].to_vec()));
+        offset += len;
+    }
+    values
+}
+
+fn bytea_hex_text(bytes: &[u8]) -> Vec<u8> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut text = Vec::with_capacity(2 + bytes.len() * 2);
+    text.extend_from_slice(b"\\x");
+    for &byte in bytes {
+        text.push(HEX[(byte >> 4) as usize]);
+        text.push(HEX[(byte & 0x0f) as usize]);
+    }
+    text
+}
+
+fn parse_row_description_oids(body: &[u8]) -> Vec<u32> {
+    assert!(body.len() >= 2, "short RowDescription body");
+    let count = u16::from_be_bytes(body[0..2].try_into().unwrap()) as usize;
+    let mut offset = 2;
+    let mut oids = Vec::with_capacity(count);
+    for _ in 0..count {
+        let name_len = body[offset..]
+            .iter()
+            .position(|&byte| byte == 0)
+            .expect("RowDescription field name terminator");
+        offset += name_len + 1;
+        assert!(offset + 18 <= body.len(), "short RowDescription field");
+        offset += 6; // table OID + attribute number
+        oids.push(u32::from_be_bytes(
+            body[offset..offset + 4].try_into().unwrap(),
+        ));
+        offset += 12; // type OID + type size + type modifier + format
+    }
+    oids
 }
 
 fn parse_conn_addr(conn_str: &str) -> (String, u16) {
@@ -894,6 +1122,71 @@ async fn ducklake_snapshot_selector_reads_pinned_table() {
         missing.is_err(),
         "snapshot read must fail closed when the table is absent at the snapshot"
     );
+    let future = client
+        .simple_query("SELECT id FROM public.snapshot_points(snapshot => 9223372036854775807)")
+        .await;
+    assert!(
+        future.is_err(),
+        "snapshot read must reject unknown future ids even when the table visibility interval is open"
+    );
+
+    let pool = sqlx::SqlitePool::connect(&format!(
+        "sqlite:{}",
+        server.tmp_dir().join("quackgis.db").display()
+    ))
+    .await
+    .expect("open snapshot catalog");
+    sqlx::query(
+        "UPDATE ducklake_snapshot
+         SET snapshot_time = CASE
+             WHEN snapshot_id <= ? THEN '2026-07-09 12:00:00.000000'
+             ELSE '2026-07-09 12:00:01.000000'
+         END",
+    )
+    .bind(snapshot_id)
+    .execute(&pool)
+    .await
+    .expect("set deterministic snapshot timestamps");
+    pool.close().await;
+
+    let timestamp_ids: Vec<i32> = client
+        .query(
+            "SELECT id FROM public.snapshot_points
+             AS OF TIMESTAMP '2026-07-09T12:00:00.500000Z'
+             ORDER BY id",
+            &[],
+        )
+        .await
+        .expect("AS OF TIMESTAMP table query")
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert_eq!(timestamp_ids, vec![1]);
+
+    let named_timestamp_ids: Vec<i32> = client
+        .query(
+            "SELECT id FROM public.snapshot_points(
+                 snapshot_at => '2026-07-09T12:00:00.500000+00:00'
+             ) ORDER BY id",
+            &[],
+        )
+        .await
+        .expect("named timestamp selector")
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert_eq!(named_timestamp_ids, vec![1]);
+
+    assert!(
+        client
+            .simple_query(
+                "SELECT id FROM public.snapshot_points
+                 AS OF TIMESTAMP '2026-07-09T11:59:59Z'"
+            )
+            .await
+            .is_err(),
+        "timestamp before catalog history must fail closed"
+    );
     let metrics_after = ducklake_sql::metrics_snapshot();
     assert!(
         metrics_after.snapshot_reads_total >= metrics_before.snapshot_reads_total + 4,
@@ -1363,7 +1656,7 @@ async fn ducklake_writer_api_roundtrip_through_wire() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn ducklake_data_survives_process_restart() {
+async fn ducklake_data_survives_context_reopen_without_advancing_history() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let catalog = tmp.path().join("quackgis.db");
     let data = tmp.path().join("data");
@@ -1372,7 +1665,15 @@ async fn ducklake_data_survives_process_restart() {
 
     write_nums(&paths, "nums", &[1, 2]).await;
 
-    let ctx = build_session_context_with_storage(paths)
+    let snapshots_before = paths
+        .metadata_provider()
+        .await
+        .expect("provider before reopen")
+        .list_snapshots()
+        .expect("snapshots before reopen")
+        .len();
+
+    let ctx = build_session_context_with_storage(paths.clone())
         .await
         .expect("read-side context");
     let out = ctx
@@ -1387,10 +1688,27 @@ async fn ducklake_data_survives_process_restart() {
         .to_string();
     assert!(rendered.contains("1"), "expected 1 in output:\n{rendered}");
     assert!(rendered.contains("2"), "expected 2 in output:\n{rendered}");
+    drop(ctx);
+
+    let reopened = build_session_context_with_storage(paths.clone())
+        .await
+        .expect("second read-side context");
+    drop(reopened);
+    let snapshots_after = paths
+        .metadata_provider()
+        .await
+        .expect("provider after reopen")
+        .list_snapshots()
+        .expect("snapshots after reopen")
+        .len();
+    assert_eq!(
+        snapshots_after, snapshots_before,
+        "opening an initialized catalog must not create bare snapshots"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn ducklake_local_backup_restore_copy_roundtrip() {
+async fn ducklake_local_rollback_to_matched_backup_restores_prior_head() {
     let source = tempfile::TempDir::new().expect("source tempdir");
     let source_catalog = source.path().join("quackgis.db");
     let source_data = source.path().join("data");
@@ -1400,10 +1718,31 @@ async fn ducklake_local_backup_restore_copy_roundtrip() {
     )
     .expect("source paths");
     write_nums(&source_paths, "backup_nums", &[10, 20, 30]).await;
+    let release_snapshot = source_paths
+        .metadata_provider()
+        .await
+        .expect("release provider")
+        .get_current_snapshot()
+        .expect("release snapshot");
 
     let restored = tempfile::TempDir::new().expect("restored tempdir");
     fs::copy(&source_catalog, restored.path().join("quackgis.db")).expect("copy catalog");
     copy_dir_all(&source_data, &restored.path().join("data"));
+
+    // Advance the source after cutting the matched backup. The restored pair must
+    // remain pinned to the recorded release head rather than following this newer
+    // source state.
+    write_nums(&source_paths, "backup_nums", &[999]).await;
+    let newer_snapshot = source_paths
+        .metadata_provider()
+        .await
+        .expect("newer source provider")
+        .get_current_snapshot()
+        .expect("newer source snapshot");
+    assert!(
+        newer_snapshot > release_snapshot,
+        "source head must advance after the release backup"
+    );
 
     let server = ServerHandle::start_with_tempdir(restored).await;
     let (client, conn) = tokio_postgres::connect(&server.conn_str(), NoTls)
@@ -1417,6 +1756,55 @@ async fn ducklake_local_backup_restore_copy_roundtrip() {
         .expect("query restored backup")
         .get(0);
     assert_eq!(restored_sum, 60);
+
+    let restored_head: i64 = client
+        .query_one("SELECT MAX(snapshot_id) FROM ducklake_snapshots()", &[])
+        .await
+        .expect("restored snapshot head")
+        .get(0);
+    assert_eq!(restored_head, release_snapshot);
+
+    let newer_snapshot_count: i64 = client
+        .query_one(
+            &format!(
+                "SELECT COUNT(*) FROM ducklake_snapshots() WHERE snapshot_id = {newer_snapshot}"
+            ),
+            &[],
+        )
+        .await
+        .expect("newer snapshot must be absent from restore")
+        .get(0);
+    assert_eq!(newer_snapshot_count, 0);
+
+    let as_of_ids = client
+        .simple_query(&format!(
+            "SELECT id FROM public.backup_nums AS OF SNAPSHOT {release_snapshot} ORDER BY id"
+        ))
+        .await
+        .expect("simple-protocol AS OF validation on restored release")
+        .into_iter()
+        .filter_map(|message| match message {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row
+                .get(0)
+                .map(|value| value.parse::<i32>().expect("integer id")),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(as_of_ids, vec![10, 20, 30]);
+
+    let visible_files: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM ducklake_list_files()
+             WHERE schema_name = 'main' AND table_name = 'backup_nums'",
+            &[],
+        )
+        .await
+        .expect("restored file inventory")
+        .get(0);
+    assert!(
+        visible_files > 0,
+        "restored release must reference data files"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
