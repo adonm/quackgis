@@ -81,6 +81,7 @@ const GEOMETRY_COLUMN_NAMES: &[&str] = &[
     "the_geom",
     "wkb_geometry",
     "wkb_geom",
+    "geom_wkb",
     "shape",
     "footprint",
     "way", // OpenStreetMap convention
@@ -210,11 +211,7 @@ pub fn into_pg_type(arrow_type: &DataType) -> PgWireResult<Type> {
         DataType::Float64 => Type::FLOAT8,
         DataType::Decimal128(_, _) => Type::NUMERIC,
         DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => Type::TEXT,
-        DataType::List(field)
-        | DataType::FixedSizeList(field, _)
-        | DataType::LargeList(field)
-        | DataType::ListView(field)
-        | DataType::LargeListView(field) => match field.data_type() {
+        DataType::List(field) | DataType::LargeList(field) => match field.data_type() {
             DataType::Boolean => Type::BOOL_ARRAY,
             DataType::Int8 => Type::INT2_ARRAY,
             DataType::Int16 | DataType::UInt8 => Type::INT2_ARRAY,
@@ -365,10 +362,12 @@ mod tests {
 
     #[test]
     fn geometry_named_binary_advertises_geometry_oid() {
-        let field = Arc::new(Field::new("geom", DataType::Binary, true));
-        let ty = field_into_pg_type(&field).expect("geometry field type");
-        assert_eq!(ty.oid(), GEOMETRY_OID);
-        assert_eq!(ty.name(), "geometry");
+        for name in ["geom", "geom_wkb"] {
+            let field = Arc::new(Field::new(name, DataType::Binary, true));
+            let ty = field_into_pg_type(&field).expect("geometry field type");
+            assert_eq!(ty.oid(), GEOMETRY_OID);
+            assert_eq!(ty.name(), "geometry");
+        }
     }
 
     #[test]
@@ -436,6 +435,18 @@ mod tests {
             let field = Arc::new(Field::new("properties", data_type, true));
             let ty = field_into_pg_type(&field).expect("properties field type");
             assert_eq!(ty, Type::JSONB);
+        }
+    }
+
+    #[test]
+    fn schema_mapping_rejects_list_shapes_the_encoder_does_not_support() {
+        let item = Arc::new(Field::new("item", DataType::Int32, true));
+        for data_type in [
+            DataType::FixedSizeList(Arc::clone(&item), 2),
+            DataType::ListView(Arc::clone(&item)),
+            DataType::LargeListView(item),
+        ] {
+            assert!(into_pg_type(&data_type).is_err(), "{data_type}");
         }
     }
 }

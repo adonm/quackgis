@@ -6,6 +6,8 @@ pub mod auth;
 pub mod cli;
 pub mod duckdb_adbc_storage;
 pub mod engine_api;
+pub mod execution_control;
+pub mod lifecycle;
 pub mod metrics;
 pub mod pgwire_server;
 pub mod spatial_compat;

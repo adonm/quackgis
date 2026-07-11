@@ -125,6 +125,7 @@ pub struct AuthConfig {
     users: HashMap<String, AuthUser>,
     trust_write_policy: TablePolicy,
     read_policy: TablePolicy,
+    maintenance_user: Option<String>,
 }
 
 impl Default for AuthConfig {
@@ -140,6 +141,7 @@ impl AuthConfig {
             users: HashMap::new(),
             trust_write_policy: TablePolicy::All,
             read_policy: TablePolicy::All,
+            maintenance_user: None,
         }
     }
 
@@ -178,7 +180,29 @@ impl AuthConfig {
             users,
             trust_write_policy: TablePolicy::All,
             read_policy: TablePolicy::All,
+            maintenance_user: None,
         })
+    }
+
+    pub fn with_maintenance_user(mut self, user: impl Into<String>) -> Result<Self> {
+        let user = user.into();
+        if user.trim() != user || user.is_empty() || user.chars().any(char::is_control) {
+            return Err(anyhow!(
+                "maintenance user cannot be empty or contain surrounding whitespace/control characters"
+            ));
+        }
+        if self.mode == AuthMode::Password
+            && !self
+                .users
+                .get(&user)
+                .is_some_and(|configured| configured.role == AccessRole::ReadWrite)
+        {
+            return Err(anyhow!(
+                "maintenance user must name the configured readwrite identity"
+            ));
+        }
+        self.maintenance_user = Some(user);
+        Ok(self)
     }
 
     pub fn with_readwrite_allowlist(mut self, targets: Vec<WriteTarget>) -> Self {
@@ -257,6 +281,10 @@ impl AuthConfig {
             AuthMode::Password => name.is_some_and(|name| self.users.contains_key(name)),
         };
         known_identity && self.read_policy.allows(Some(target))
+    }
+
+    pub fn allows_maintenance(&self, name: Option<&str>, target: (&str, &str)) -> bool {
+        self.maintenance_user.as_deref() == name && self.allows_write(name, Some(target))
     }
 }
 
@@ -409,5 +437,23 @@ mod tests {
         assert!(auth.allows_read(Some("reader"), ("main", "other")));
         assert!(!auth.allows_read(Some("reader"), ("main", "denied")));
         assert!(!auth.allows_read(Some("missing"), ("main", "allowed")));
+    }
+
+    #[test]
+    fn maintenance_requires_explicit_readwrite_identity_and_table_policy() {
+        let auth = AuthConfig::password(
+            "writer",
+            "readwrite-secret",
+            Some(("reader", "reader-secret")),
+        )
+        .expect("auth config")
+        .with_readwrite_allowlist(parse_write_allowlist("allowed").expect("allowlist"));
+        assert!(auth.clone().with_maintenance_user("reader").is_err());
+        let auth = auth
+            .with_maintenance_user("writer")
+            .expect("maintenance identity");
+        assert!(auth.allows_maintenance(Some("writer"), ("main", "allowed")));
+        assert!(!auth.allows_maintenance(Some("writer"), ("main", "denied")));
+        assert!(!auth.allows_maintenance(Some("reader"), ("main", "allowed")));
     }
 }

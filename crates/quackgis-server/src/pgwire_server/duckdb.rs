@@ -6,46 +6,59 @@
 //! shapes fail closed until their D2-D4 contracts pass.
 
 use std::fmt::Debug;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::ops::ControlFlow;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use arrow_array::{
-    ArrayRef, BinaryArray, BooleanArray, Date32Array, Decimal128Array, Float32Array, Float64Array,
-    Int16Array, Int32Array, Int64Array, RecordBatch, StringArray, TimestampMicrosecondArray,
+    ArrayRef, BinaryArray, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array,
+    Int64Array, RecordBatch, RecordBatchReader, StringArray,
 };
 use arrow_pg::datatypes::{arrow_schema_to_pg_fields, field_into_pg_type};
 use arrow_pg::encode_recordbatch;
-use arrow_schema::{DataType, Field, Schema, SchemaRef};
+use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
 use async_trait::async_trait;
-use chrono::{NaiveDate, NaiveDateTime};
 use futures::{Sink, SinkExt};
-use pgwire::api::cancel::{CancelHandler, DefaultCancelHandler};
+use pgwire::api::cancel::CancelHandler;
 use pgwire::api::copy::CopyHandler;
-use pgwire::api::portal::{Format, Portal};
-use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
+use pgwire::api::portal::{Format, Portal, PortalExecutionState};
+use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler, send_partial_query_response};
 use pgwire::api::results::{CopyResponse, QueryResponse, Response, Tag};
 use pgwire::api::stmt::QueryParser;
 use pgwire::api::store::PortalStore;
 use pgwire::api::{
-    ClientInfo, ClientPortalStore, ConnectionManager, ErrorHandler, PgWireConnectionState,
-    PgWireServerHandlers, Type,
+    ClientInfo, ClientPortalStore, ConnectionManager, DEFAULT_NAME, ErrorHandler,
+    PgWireConnectionState, PgWireServerHandlers, Type,
 };
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::PgWireBackendMessage;
+use pgwire::messages::cancel::CancelRequest;
 use pgwire::messages::copy::{CopyData, CopyDone, CopyFail};
-use regex::Regex;
-use sqlparser::ast::Statement;
+use pgwire::messages::data::DataRow;
+use pgwire::messages::extendedquery::Execute;
+use pgwire::messages::response::TransactionStatus;
+use sqlparser::ast::{
+    CopySource, CopyTarget as AstCopyTarget, Expr, FunctionArg, FunctionArgExpr, FunctionArguments,
+    Ident, ObjectName, ObjectNamePart, Set, Statement, Value, visit_expressions,
+    visit_relations_mut,
+};
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 
+use super::copy_text::{CopyBatchLimits, CopyDecodeError, CopyTextDecoder};
 use super::{
     LoggingErrorHandler, QuackGisStartupHandler, ServerOptions, SimpleStartupHandler,
-    serve_with_handlers, serve_with_handlers_on_listener,
+    serve_with_handlers, serve_with_handlers_on_listener, serve_with_handlers_on_listener_until,
 };
 use crate::auth::{AuthConfig, AuthMode};
 use crate::duckdb_adbc_storage::DuckDbAdbcStorage;
 use crate::engine_api::{
-    EngineError, EngineErrorKind, EngineQueryResult, EngineStorageKernel, EngineTableRef,
-    IngestDisposition,
+    EngineCancellation, EngineError, EngineErrorKind, EngineMaintenanceRequest, EngineQueryStream,
+    EngineResult, EngineStorageKernel, EngineTableRef, EngineTransactionState, IngestDisposition,
+};
+use crate::execution_control::{
+    ActiveQueryRegistry, AdmissionController, AdmissionError, BlockingWorkerError,
+    BlockingWorkerPool, OperationClass, OperationDeadline,
 };
 
 pub async fn serve_duckdb(
@@ -53,7 +66,7 @@ pub async fn serve_duckdb(
     options: &ServerOptions,
     auth: AuthConfig,
 ) -> Result<(), std::io::Error> {
-    let factory = Arc::new(DuckDbHandlerFactory::new(storage, auth));
+    let factory = Arc::new(DuckDbHandlerFactory::new(storage, auth, options));
     serve_with_handlers(factory, options).await
 }
 
@@ -63,20 +76,65 @@ pub async fn serve_duckdb_on_listener(
     options: &ServerOptions,
     auth: AuthConfig,
 ) -> Result<(), std::io::Error> {
-    let factory = Arc::new(DuckDbHandlerFactory::new(storage, auth));
+    let factory = Arc::new(DuckDbHandlerFactory::new(storage, auth, options));
     serve_with_handlers_on_listener(factory, listener, options).await
+}
+
+pub async fn serve_duckdb_until(
+    storage: Arc<DuckDbAdbcStorage>,
+    options: &ServerOptions,
+    auth: AuthConfig,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), std::io::Error> {
+    let factory = Arc::new(DuckDbHandlerFactory::new(storage, auth, options));
+    let address = format!("{}:{}", options.host, options.port);
+    let listener = tokio::net::TcpListener::bind(address).await?;
+    serve_with_handlers_on_listener_until(factory, listener, options, shutdown).await
+}
+
+pub async fn serve_duckdb_on_listener_until(
+    storage: Arc<DuckDbAdbcStorage>,
+    listener: tokio::net::TcpListener,
+    options: &ServerOptions,
+    auth: AuthConfig,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), std::io::Error> {
+    let factory = Arc::new(DuckDbHandlerFactory::new(storage, auth, options));
+    serve_with_handlers_on_listener_until(factory, listener, options, shutdown).await
 }
 
 struct DuckDbHandlerFactory {
     service: Arc<DuckDbService>,
     startup: Arc<QuackGisStartupHandler>,
-    cancel: Arc<DefaultCancelHandler>,
+    cancel: Arc<DuckDbCancelHandler>,
     copy: Arc<DuckDbCopyHandler>,
 }
 
 impl DuckDbHandlerFactory {
-    fn new(storage: Arc<DuckDbAdbcStorage>, auth: AuthConfig) -> Self {
+    fn new(storage: Arc<DuckDbAdbcStorage>, auth: AuthConfig, options: &ServerOptions) -> Self {
         let manager = Arc::new(ConnectionManager::new());
+        let admission = Arc::new(AdmissionController::new(
+            options.max_active_queries(),
+            options.max_queued_queries(),
+            options.max_reader_queries(),
+            options.max_writer_queries(),
+            options.max_maintenance_queries(),
+            options.queue_timeout(),
+        ));
+        let active_queries = Arc::new(ActiveQueryRegistry::default());
+        let blocking_workers = Arc::new(BlockingWorkerPool::new(options.max_blocking_workers()));
+        let control = Arc::new(DuckDbRuntimeControl {
+            admission,
+            active_queries,
+            blocking_workers,
+            statement_timeout: options.statement_timeout(),
+            copy_limits: CopyBatchLimits {
+                max_rows: options.copy_batch_rows(),
+                max_bytes: options.copy_batch_bytes(),
+                max_row_bytes: options.copy_max_row_bytes(),
+            },
+            result_batch_bytes: options.result_batch_bytes(),
+        });
         let startup = match auth.mode() {
             AuthMode::Trust => QuackGisStartupHandler::Trust(SimpleStartupHandler {
                 connection_manager: Arc::clone(&manager),
@@ -86,10 +144,35 @@ impl DuckDbHandlerFactory {
             )),
         };
         Self {
-            service: Arc::new(DuckDbService::new(storage, auth)),
+            service: Arc::new(DuckDbService::new(storage, auth, Arc::clone(&control))),
             startup: Arc::new(startup),
-            cancel: Arc::new(DefaultCancelHandler::new(manager)),
+            cancel: Arc::new(DuckDbCancelHandler {
+                active_queries: Arc::clone(&control.active_queries),
+                blocking_workers: Arc::clone(&control.blocking_workers),
+            }),
             copy: Arc::new(DuckDbCopyHandler),
+        }
+    }
+}
+
+struct DuckDbCancelHandler {
+    active_queries: Arc<ActiveQueryRegistry>,
+    blocking_workers: Arc<BlockingWorkerPool>,
+}
+
+#[async_trait]
+impl CancelHandler for DuckDbCancelHandler {
+    async fn on_cancel_request(&self, request: CancelRequest) {
+        let registry = Arc::clone(&self.active_queries);
+        let secret = request.secret_key.to_bytes().to_vec();
+        match self
+            .blocking_workers
+            .run_control(move || registry.cancel(request.pid, &secret))
+            .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => log::warn!("DuckDB native cancellation failed: {error}"),
+            Err(error) => log::warn!("DuckDB cancellation worker failed: {error:?}"),
         }
     }
 }
@@ -133,6 +216,8 @@ struct DuckDbStatement {
 struct DuckDbParser {
     storage: Arc<DuckDbAdbcStorage>,
     auth: AuthConfig,
+    admission: Arc<AdmissionController>,
+    blocking_workers: Arc<BlockingWorkerPool>,
 }
 
 #[async_trait]
@@ -148,6 +233,9 @@ impl QueryParser for DuckDbParser {
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
+        if client.transaction_status() == TransactionStatus::Error {
+            return Err(failed_transaction_error());
+        }
         if let Some(copy_target) = parse_copy_target(sql)? {
             authorize_copy(client, &self.auth, &copy_target)?;
             let empty = Arc::new(Schema::empty());
@@ -162,11 +250,23 @@ impl QueryParser for DuckDbParser {
         }
         let validated = validate_statement(sql, ProtocolMode::Extended)?;
         authorize_statement(client, &self.auth, &validated.ast)?;
-        let storage = client_session(client, Arc::clone(&self.storage)).await?;
-        let describe_sql = validated.sql.clone();
-        let description = tokio::task::spawn_blocking(move || storage.describe(&describe_sql))
+        let storage = client_session(
+            client,
+            Arc::clone(&self.storage),
+            Arc::clone(&self.blocking_workers),
+        )
+        .await?;
+        let _permit = self
+            .admission
+            .acquire(validated.kind.operation_class())
             .await
-            .map_err(join_error)?
+            .map_err(admission_error)?;
+        let describe_sql = validated.sql.clone();
+        let description = self
+            .blocking_workers
+            .run_regular(move || storage.describe(&describe_sql))
+            .await
+            .map_err(blocking_worker_error)?
             .map_err(engine_error)?;
         let parameter_schema = Arc::new(Schema::new(
             description
@@ -239,17 +339,34 @@ struct DuckDbService {
     storage: Arc<DuckDbAdbcStorage>,
     parser: Arc<DuckDbParser>,
     auth: AuthConfig,
+    control: Arc<DuckDbRuntimeControl>,
+}
+
+struct DuckDbRuntimeControl {
+    admission: Arc<AdmissionController>,
+    active_queries: Arc<ActiveQueryRegistry>,
+    blocking_workers: Arc<BlockingWorkerPool>,
+    statement_timeout: std::time::Duration,
+    copy_limits: CopyBatchLimits,
+    result_batch_bytes: usize,
 }
 
 impl DuckDbService {
-    fn new(storage: Arc<DuckDbAdbcStorage>, auth: AuthConfig) -> Self {
+    fn new(
+        storage: Arc<DuckDbAdbcStorage>,
+        auth: AuthConfig,
+        control: Arc<DuckDbRuntimeControl>,
+    ) -> Self {
         Self {
             parser: Arc::new(DuckDbParser {
                 storage: Arc::clone(&storage),
                 auth: auth.clone(),
+                admission: Arc::clone(&control.admission),
+                blocking_workers: Arc::clone(&control.blocking_workers),
             }),
             storage,
             auth,
+            control,
         }
     }
 }
@@ -264,8 +381,20 @@ impl SimpleQueryHandler for DuckDbService {
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
         let (sql, kind, ast) = validate_simple_sql(query)?;
+        let failed_transaction = client.transaction_status() == TransactionStatus::Error;
+        if failed_transaction
+            && !matches!(
+                &kind,
+                SimpleStatementKind::Commit | SimpleStatementKind::Rollback
+            )
+        {
+            return Err(failed_transaction_error());
+        }
         match (&kind, ast.as_ref()) {
             (SimpleStatementKind::Copy(target), _) => authorize_copy(client, &self.auth, target)?,
+            (SimpleStatementKind::Maintenance(command), _) => {
+                authorize_maintenance(client, &self.auth, command)?
+            }
             (_, Some(statement)) => authorize_statement(client, &self.auth, statement)?,
             (_, None) => {
                 return Err(user_error(
@@ -274,24 +403,63 @@ impl SimpleQueryHandler for DuckDbService {
                 ));
             }
         }
-        let storage = client_session(client, Arc::clone(&self.storage)).await?;
+        let storage = client_session(
+            client,
+            Arc::clone(&self.storage),
+            Arc::clone(&self.control.blocking_workers),
+        )
+        .await?;
         match kind {
             SimpleStatementKind::Read => {
-                let result = tokio::task::spawn_blocking(move || storage.query_result(&sql))
+                let permit = self
+                    .control
+                    .admission
+                    .acquire(OperationClass::Reader)
                     .await
-                    .map_err(join_error)?
-                    .map_err(engine_error)?;
+                    .map_err(admission_error)?;
+                let mut result = self
+                    .control
+                    .blocking_workers
+                    .run_regular(move || storage.query_stream(&sql))
+                    .await
+                    .map_err(blocking_worker_error)?
+                    .map_err(engine_error)?
+                    .with_guard(Box::new(permit));
+                if let Some(cancellation) = result.cancellation() {
+                    let (pid, secret) = client.pid_and_secret_key();
+                    let deadline_cancellation = Arc::clone(&cancellation);
+                    let guard = self.control.active_queries.register(
+                        pid,
+                        secret.to_bytes().to_vec(),
+                        cancellation,
+                    );
+                    result = result.with_guard(Box::new(guard));
+                    result = result.with_guard(Box::new(OperationDeadline::start(
+                        self.control.statement_timeout,
+                        deadline_cancellation,
+                    )));
+                }
                 Ok(vec![Response::Query(query_response(
                     result,
                     &Format::UnifiedText,
+                    self.control.result_batch_bytes,
+                    Arc::clone(&self.control.blocking_workers),
                 )?)])
             }
             SimpleStatementKind::Write(command) => {
-                let affected =
-                    tokio::task::spawn_blocking(move || storage.execute_update_contract(&sql))
-                        .await
-                        .map_err(join_error)?
-                        .map_err(engine_error)?;
+                let _permit = self
+                    .control
+                    .admission
+                    .acquire(OperationClass::Writer)
+                    .await
+                    .map_err(admission_error)?;
+                let affected = self
+                    .control
+                    .blocking_workers
+                    .run_regular(move || storage.execute_update_contract(&sql))
+                    .await
+                    .map_err(blocking_worker_error)?
+                    .map_err(engine_error)?;
                 let mut tag = Tag::new(command);
                 if let Some(rows) = affected.and_then(|rows| usize::try_from(rows).ok()) {
                     tag = tag.with_rows(rows);
@@ -299,27 +467,119 @@ impl SimpleQueryHandler for DuckDbService {
                 Ok(vec![Response::Execution(tag)])
             }
             SimpleStatementKind::Begin => {
-                tokio::task::spawn_blocking(move || storage.begin_transaction())
+                let _permit = self
+                    .control
+                    .admission
+                    .acquire(OperationClass::Writer)
                     .await
-                    .map_err(join_error)?
+                    .map_err(admission_error)?;
+                self.control
+                    .blocking_workers
+                    .run_regular(move || storage.begin_transaction())
+                    .await
+                    .map_err(blocking_worker_error)?
                     .map_err(anyhow_error)?;
                 Ok(vec![Response::TransactionStart(Tag::new("BEGIN"))])
             }
             SimpleStatementKind::Commit => {
-                tokio::task::spawn_blocking(move || storage.commit_transaction())
+                let _permit = self
+                    .control
+                    .admission
+                    .acquire(OperationClass::Writer)
                     .await
-                    .map_err(join_error)?
-                    .map_err(anyhow_error)?;
-                Ok(vec![Response::TransactionEnd(Tag::new("COMMIT"))])
+                    .map_err(admission_error)?;
+                client.portal_store().clear_portals();
+                if failed_transaction {
+                    self.control
+                        .blocking_workers
+                        .run_regular(move || storage.rollback_transaction())
+                        .await
+                        .map_err(blocking_worker_error)?
+                        .map_err(anyhow_error)?;
+                    Ok(vec![Response::TransactionEnd(Tag::new("ROLLBACK"))])
+                } else {
+                    self.control
+                        .blocking_workers
+                        .run_regular(move || storage.commit_transaction())
+                        .await
+                        .map_err(blocking_worker_error)?
+                        .map_err(anyhow_error)?;
+                    Ok(vec![Response::TransactionEnd(Tag::new("COMMIT"))])
+                }
             }
             SimpleStatementKind::Rollback => {
-                tokio::task::spawn_blocking(move || storage.rollback_transaction())
+                let _permit = self
+                    .control
+                    .admission
+                    .acquire(OperationClass::Writer)
                     .await
-                    .map_err(join_error)?
+                    .map_err(admission_error)?;
+                client.portal_store().clear_portals();
+                self.control
+                    .blocking_workers
+                    .run_regular(move || storage.rollback_transaction())
+                    .await
+                    .map_err(blocking_worker_error)?
                     .map_err(anyhow_error)?;
                 Ok(vec![Response::TransactionEnd(Tag::new("ROLLBACK"))])
             }
-            SimpleStatementKind::Copy(target) => begin_copy(client, storage, target)
+            SimpleStatementKind::Maintenance(command) => {
+                if storage.transaction_state() != EngineTransactionState::Idle {
+                    return Err(user_error(
+                        "25001",
+                        "DuckDB maintenance cannot run inside an explicit transaction",
+                    ));
+                }
+                let _permit = self
+                    .control
+                    .admission
+                    .acquire(OperationClass::Maintenance)
+                    .await
+                    .map_err(admission_error)?;
+                let user = client
+                    .metadata()
+                    .get("user")
+                    .cloned()
+                    .unwrap_or_else(|| "<unknown>".to_owned());
+                let target = command.target_label();
+                let result = self
+                    .control
+                    .blocking_workers
+                    .run_regular(move || storage.maintain(command.request))
+                    .await
+                    .map_err(blocking_worker_error)?;
+                match result {
+                    Ok(report) => {
+                        let rows = report
+                            .affected_rows
+                            .and_then(|rows| usize::try_from(rows).ok());
+                        crate::audit::log_maintenance(
+                            &user,
+                            "merge_adjacent_files",
+                            &target,
+                            crate::audit::AuditOutcome::Succeeded,
+                            rows,
+                        );
+                        let mut tag = Tag::new("CALL");
+                        if let Some(rows) = rows {
+                            tag = tag.with_rows(rows);
+                        }
+                        Ok(vec![Response::Execution(tag)])
+                    }
+                    Err(error) => {
+                        crate::audit::log_maintenance(
+                            &user,
+                            "merge_adjacent_files",
+                            &target,
+                            crate::audit::AuditOutcome::Failed,
+                            None,
+                        );
+                        Err(engine_error(error))
+                    }
+                }
+            }
+            SimpleStatementKind::SessionSet => Ok(vec![Response::Execution(Tag::new("SET"))]),
+            SimpleStatementKind::Copy(target) => begin_copy(client, storage, target, &self.control)
                 .await
                 .map(|response| vec![response]),
         }
@@ -333,6 +593,71 @@ impl ExtendedQueryHandler for DuckDbService {
 
     fn query_parser(&self) -> Arc<Self::QueryParser> {
         Arc::clone(&self.parser)
+    }
+
+    async fn on_execute<C>(&self, client: &mut C, message: Execute) -> PgWireResult<()>
+    where
+        C: ClientInfo + ClientPortalStore + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C::PortalStore: PortalStore<Statement = Self::Statement>,
+        C::Error: Debug,
+        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+    {
+        if message.max_rows < 0 {
+            return Err(user_error("22023", "Execute.max_rows must not be negative"));
+        }
+        let portal_name = message.name.as_deref().unwrap_or(DEFAULT_NAME);
+        let portal = client
+            .portal_store()
+            .get_portal(portal_name)
+            .ok_or_else(|| PgWireError::PortalNotFound(portal_name.to_owned()))?;
+        if portal.statement.statement.kind != StatementKind::Read {
+            return self._on_execute(client, message).await;
+        }
+        if !matches!(client.state(), PgWireConnectionState::ReadyForQuery) {
+            return Err(PgWireError::NotReadyForQuery);
+        }
+        client.set_state(PgWireConnectionState::QueryInProgress);
+        let initial = matches!(&*portal.state().lock().await, PortalExecutionState::Initial);
+        if initial {
+            match ExtendedQueryHandler::do_query(
+                self,
+                client,
+                portal.as_ref(),
+                message.max_rows as usize,
+            )
+            .await?
+            {
+                Response::Query(response) => portal.start(response).await,
+                _ => {
+                    client.set_state(PgWireConnectionState::ReadyForQuery);
+                    return Err(user_error(
+                        "XX000",
+                        "DuckDB read portal produced a non-query response",
+                    ));
+                }
+            }
+        }
+        let state = portal.state();
+        let mut state = state.lock().await;
+        let suspended = match &mut *state {
+            PortalExecutionState::Suspended(response) => {
+                send_partial_query_response(client, response, message.max_rows as usize).await?
+            }
+            PortalExecutionState::Finished => {
+                client.set_state(PgWireConnectionState::ReadyForQuery);
+                return Err(user_error("55000", "DuckDB portal is already finished"));
+            }
+            PortalExecutionState::Initial => {
+                client.set_state(PgWireConnectionState::ReadyForQuery);
+                return Err(user_error("XX000", "DuckDB portal did not start"));
+            }
+        };
+        if !suspended {
+            *state = PortalExecutionState::Finished;
+        }
+        drop(state);
+        client.set_state(PgWireConnectionState::ReadyForQuery);
+        Ok(())
     }
 
     async fn do_query<C>(
@@ -349,50 +674,97 @@ impl ExtendedQueryHandler for DuckDbService {
     {
         let statement = &portal.statement.statement;
         if let Some(target) = &statement.copy_target {
-            let storage = client_session(client, Arc::clone(&self.storage)).await?;
-            return begin_copy(client, storage, target.clone()).await;
+            let storage = client_session(
+                client,
+                Arc::clone(&self.storage),
+                Arc::clone(&self.control.blocking_workers),
+            )
+            .await?;
+            return begin_copy(client, storage, target.clone(), &self.control).await;
         }
         let parameters = parameter_batch(portal, statement)?;
-        let storage = client_session(client, Arc::clone(&self.storage)).await?;
+        let storage = client_session(
+            client,
+            Arc::clone(&self.storage),
+            Arc::clone(&self.control.blocking_workers),
+        )
+        .await?;
         let sql = statement.sql.clone();
         match statement.kind {
             StatementKind::Read => {
-                let result = tokio::task::spawn_blocking(move || {
-                    if let Some(parameters) = parameters {
-                        storage.query_bound(&sql, parameters)
-                    } else {
-                        storage.query_result(&sql)
-                    }
-                })
-                .await
-                .map_err(join_error)?
-                .map_err(engine_error)?;
+                let permit = self
+                    .control
+                    .admission
+                    .acquire(OperationClass::Reader)
+                    .await
+                    .map_err(admission_error)?;
+                let mut result = self
+                    .control
+                    .blocking_workers
+                    .run_regular(move || {
+                        if let Some(parameters) = parameters {
+                            storage.query_bound_stream(&sql, Some(parameters))
+                        } else {
+                            storage.query_stream(&sql)
+                        }
+                    })
+                    .await
+                    .map_err(blocking_worker_error)?
+                    .map_err(engine_error)?
+                    .with_guard(Box::new(permit));
+                if let Some(cancellation) = result.cancellation() {
+                    let (pid, secret) = client.pid_and_secret_key();
+                    let deadline_cancellation = Arc::clone(&cancellation);
+                    let guard = self.control.active_queries.register(
+                        pid,
+                        secret.to_bytes().to_vec(),
+                        cancellation,
+                    );
+                    result = result.with_guard(Box::new(guard));
+                    result = result.with_guard(Box::new(OperationDeadline::start(
+                        self.control.statement_timeout,
+                        deadline_cancellation,
+                    )));
+                }
                 Ok(Response::Query(query_response(
                     result,
                     &portal.result_column_format,
+                    self.control.result_batch_bytes,
+                    Arc::clone(&self.control.blocking_workers),
                 )?))
             }
             StatementKind::Write(command) => {
-                let affected = tokio::task::spawn_blocking(move || {
-                    if let Some(parameters) = parameters {
-                        storage.execute_update_bound(&sql, parameters)
-                    } else {
-                        storage.execute_update_contract(&sql)
-                    }
-                })
-                .await
-                .map_err(join_error)?
-                .map_err(engine_error)?;
+                let _permit = self
+                    .control
+                    .admission
+                    .acquire(OperationClass::Writer)
+                    .await
+                    .map_err(admission_error)?;
+                let affected = self
+                    .control
+                    .blocking_workers
+                    .run_regular(move || {
+                        if let Some(parameters) = parameters {
+                            storage.execute_update_bound(&sql, parameters)
+                        } else {
+                            storage.execute_update_contract(&sql)
+                        }
+                    })
+                    .await
+                    .map_err(blocking_worker_error)?
+                    .map_err(engine_error)?;
                 let mut tag = Tag::new(command);
                 if let Some(rows) = affected.and_then(|rows| usize::try_from(rows).ok()) {
                     tag = tag.with_rows(rows);
                 }
                 Ok(Response::Execution(tag))
             }
+            StatementKind::SessionSet => Ok(Response::Execution(Tag::new("SET"))),
             StatementKind::Copy
             | StatementKind::Begin
             | StatementKind::Commit
-            | StatementKind::Rollback => Err(user_error(
+            | StatementKind::Rollback
+            | StatementKind::Maintenance => Err(user_error(
                 "0A000",
                 "extended protocol does not support this DuckDB statement shape",
             )),
@@ -407,7 +779,21 @@ enum StatementKind {
     Begin,
     Commit,
     Rollback,
+    SessionSet,
+    Maintenance,
     Copy,
+}
+
+impl StatementKind {
+    fn operation_class(self) -> OperationClass {
+        match self {
+            Self::Read | Self::SessionSet => OperationClass::Reader,
+            Self::Write(_) | Self::Begin | Self::Commit | Self::Rollback | Self::Copy => {
+                OperationClass::Writer
+            }
+            Self::Maintenance => OperationClass::Maintenance,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -442,6 +828,11 @@ fn validate_simple_sql(
         StatementKind::Begin => SimpleStatementKind::Begin,
         StatementKind::Commit => SimpleStatementKind::Commit,
         StatementKind::Rollback => SimpleStatementKind::Rollback,
+        StatementKind::SessionSet => SimpleStatementKind::SessionSet,
+        StatementKind::Maintenance => SimpleStatementKind::Maintenance(
+            parse_maintenance_call(&validated.ast)?
+                .ok_or_else(|| user_error("XX000", "validated maintenance call has no command"))?,
+        ),
         StatementKind::Copy => unreachable!("COPY is classified before structural parsing"),
     };
     Ok((validated.sql, kind, Some(validated.ast)))
@@ -453,6 +844,8 @@ enum SimpleStatementKind {
     Begin,
     Commit,
     Rollback,
+    SessionSet,
+    Maintenance(MaintenanceCommand),
     Copy(CopyTarget),
 }
 
@@ -468,6 +861,12 @@ fn validate_statement(sql: &str, mode: ProtocolMode) -> PgWireResult<ValidatedSt
         ));
     }
     let statement = statements.pop().expect("one parsed statement");
+    if let Some(function) = unsupported_spatial_function(&statement) {
+        return Err(user_error(
+            "0A000",
+            &format!("PostGIS function {function} is not supported by QuackGIS"),
+        ));
+    }
     let kind = match &statement {
         Statement::Query(_) => StatementKind::Read,
         Statement::CreateTable(_) => StatementKind::Write("CREATE TABLE"),
@@ -481,6 +880,13 @@ fn validate_statement(sql: &str, mode: ProtocolMode) -> PgWireResult<ValidatedSt
         Statement::Rollback { .. } if matches!(mode, ProtocolMode::Simple) => {
             StatementKind::Rollback
         }
+        Statement::Set(set) if supported_session_set(set) => StatementKind::SessionSet,
+        Statement::ShowVariable { variable } if is_search_path(variable) => StatementKind::Read,
+        Statement::Call(_) if matches!(mode, ProtocolMode::Simple) => {
+            parse_maintenance_call(&statement)?
+                .ok_or_else(|| user_error("0A000", "unsupported DuckDB maintenance procedure"))?;
+            StatementKind::Maintenance
+        }
         _ => {
             return Err(user_error(
                 "0A000",
@@ -488,11 +894,250 @@ fn validate_statement(sql: &str, mode: ProtocolMode) -> PgWireResult<ValidatedSt
             ));
         }
     };
+    let execution_sql = if matches!(&statement, Statement::ShowVariable { variable } if is_search_path(variable))
+    {
+        "SELECT 'public'::VARCHAR AS search_path".to_owned()
+    } else {
+        let mut execution = statement.clone();
+        rewrite_public_relations(&mut execution);
+        execution.to_string()
+    };
     Ok(ValidatedStatement {
-        sql,
+        sql: execution_sql,
         kind,
         ast: statement,
     })
+}
+
+fn unsupported_spatial_function(statement: &Statement) -> Option<&'static str> {
+    let mut unsupported = None;
+    let _: ControlFlow<()> = visit_expressions(statement, |expression| {
+        let Expr::Function(function) = expression else {
+            return ControlFlow::Continue(());
+        };
+        let Some(name) = function.name.0.last().and_then(|part| match part {
+            ObjectNamePart::Identifier(identifier) => Some(identifier.value.as_str()),
+            _ => None,
+        }) else {
+            return ControlFlow::Continue(());
+        };
+        unsupported = if name.eq_ignore_ascii_case("st_ndims") {
+            Some("ST_NDims")
+        } else if name.eq_ignore_ascii_case("st_coorddim") {
+            Some("ST_CoordDim")
+        } else if name.eq_ignore_ascii_case("st_geometryn") {
+            Some("ST_GeometryN")
+        } else {
+            None
+        };
+        if unsupported.is_some() {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    unsupported
+}
+
+#[derive(Clone, Debug)]
+struct MaintenanceCommand {
+    request: EngineMaintenanceRequest,
+    schema: String,
+    table: String,
+}
+
+impl MaintenanceCommand {
+    fn target_label(&self) -> String {
+        format!("{}.{}", self.schema, self.table)
+    }
+}
+
+fn parse_maintenance_call(statement: &Statement) -> PgWireResult<Option<MaintenanceCommand>> {
+    let Statement::Call(function) = statement else {
+        return Ok(None);
+    };
+    let name = object_name_values(&function.name)
+        .ok_or_else(|| user_error("0A000", "maintenance procedure name must be an identifier"))?;
+    if !matches!(name.as_slice(), [name] if name.eq_ignore_ascii_case("quackgis_merge_adjacent_files"))
+    {
+        return Ok(None);
+    }
+    if function.uses_odbc_syntax
+        || !matches!(function.parameters, FunctionArguments::None)
+        || function.filter.is_some()
+        || function.null_treatment.is_some()
+        || function.over.is_some()
+        || !function.within_group.is_empty()
+    {
+        return Err(user_error(
+            "0A000",
+            "unsupported maintenance procedure modifiers",
+        ));
+    }
+    let FunctionArguments::List(arguments) = &function.args else {
+        return Err(user_error(
+            "42601",
+            "maintenance procedure requires five literal arguments",
+        ));
+    };
+    if arguments.duplicate_treatment.is_some()
+        || !arguments.clauses.is_empty()
+        || arguments.args.len() != 5
+    {
+        return Err(user_error(
+            "42601",
+            "maintenance procedure requires five literal arguments",
+        ));
+    }
+    let expression = |index: usize| -> PgWireResult<&Expr> {
+        match &arguments.args[index] {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(expression)) => Ok(expression),
+            _ => Err(user_error(
+                "42601",
+                "maintenance procedure accepts positional literals only",
+            )),
+        }
+    };
+    let string_literal = |index: usize, label: &str| -> PgWireResult<String> {
+        let Expr::Value(value) = expression(index)? else {
+            return Err(user_error(
+                "42601",
+                &format!("{label} must be a string literal"),
+            ));
+        };
+        let Value::SingleQuotedString(value) = &value.value else {
+            return Err(user_error(
+                "42601",
+                &format!("{label} must be a string literal"),
+            ));
+        };
+        if value.is_empty() || value.len() > 128 || value.chars().any(char::is_control) {
+            return Err(user_error("22023", &format!("invalid maintenance {label}")));
+        }
+        Ok(value.clone())
+    };
+    let optional_u64 = |index: usize, label: &str| -> PgWireResult<Option<u64>> {
+        let Expr::Value(value) = expression(index)? else {
+            return Err(user_error(
+                "42601",
+                &format!("{label} must be a positive integer or NULL"),
+            ));
+        };
+        match &value.value {
+            Value::Null => Ok(None),
+            Value::Number(value, false) => value
+                .parse::<u64>()
+                .ok()
+                .filter(|value| *value > 0)
+                .map(Some)
+                .ok_or_else(|| {
+                    user_error(
+                        "22023",
+                        &format!("{label} must be a positive integer or NULL"),
+                    )
+                }),
+            _ => Err(user_error(
+                "42601",
+                &format!("{label} must be a positive integer or NULL"),
+            )),
+        }
+    };
+    let schema = string_literal(0, "schema")?;
+    let schema = if schema.eq_ignore_ascii_case("main") || schema.eq_ignore_ascii_case("public") {
+        "main".to_owned()
+    } else {
+        return Err(user_error(
+            "0A000",
+            "maintenance supports the public schema only",
+        ));
+    };
+    let table = string_literal(1, "table")?;
+    let max_compacted_files = optional_u64(2, "max_compacted_files")?;
+    let max_file_size = optional_u64(3, "max_file_size")?;
+    let min_file_size = optional_u64(4, "min_file_size")?;
+    Ok(Some(MaintenanceCommand {
+        request: EngineMaintenanceRequest::MergeAdjacentFiles {
+            schema: schema.clone(),
+            table: table.clone(),
+            max_compacted_files,
+            max_file_size,
+            min_file_size,
+        },
+        schema,
+        table,
+    }))
+}
+
+fn supported_session_set(set: &Set) -> bool {
+    let Set::SingleAssignment {
+        scope,
+        hivevar,
+        variable,
+        values,
+    } = set
+    else {
+        return false;
+    };
+    if scope.is_some() || *hivevar || values.len() != 1 {
+        return false;
+    }
+    let Some(name) = object_name_values(variable)
+        .and_then(|parts| (parts.len() == 1).then(|| parts[0].to_ascii_lowercase()))
+    else {
+        return false;
+    };
+    let value = values[0]
+        .to_string()
+        .trim_matches('\'')
+        .to_ascii_lowercase();
+    match name.as_str() {
+        "standard_conforming_strings" => value == "on",
+        "client_min_messages" => matches!(value.as_str(), "error" | "warning" | "notice"),
+        _ => false,
+    }
+}
+
+fn is_search_path(variable: &[Ident]) -> bool {
+    matches!(variable, [name] if name.value.eq_ignore_ascii_case("search_path"))
+}
+
+fn rewrite_public_relations(statement: &mut Statement) {
+    let _: ControlFlow<()> = visit_relations_mut(statement, |name| {
+        let table = match name.0.as_slice() {
+            [
+                ObjectNamePart::Identifier(schema),
+                ObjectNamePart::Identifier(table),
+            ] if schema.value.eq_ignore_ascii_case("public") => Some(table.clone()),
+            [
+                ObjectNamePart::Identifier(catalog),
+                ObjectNamePart::Identifier(schema),
+                ObjectNamePart::Identifier(table),
+            ] if catalog.value.eq_ignore_ascii_case("quackgis")
+                && schema.value.eq_ignore_ascii_case("public") =>
+            {
+                Some(table.clone())
+            }
+            _ => None,
+        };
+        if let Some(table) = table {
+            *name = ObjectName(vec![
+                ObjectNamePart::Identifier(Ident::new("quackgis")),
+                ObjectNamePart::Identifier(Ident::new("main")),
+                ObjectNamePart::Identifier(table),
+            ]);
+        }
+        ControlFlow::Continue(())
+    });
+}
+
+fn object_name_values(name: &ObjectName) -> Option<Vec<String>> {
+    name.0
+        .iter()
+        .map(|part| match part {
+            ObjectNamePart::Identifier(ident) => Some(ident.value.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 fn authorize_statement<C>(client: &C, auth: &AuthConfig, statement: &Statement) -> PgWireResult<()>
@@ -520,6 +1165,32 @@ where
     .map_err(engine_error)
 }
 
+fn authorize_maintenance<C>(
+    client: &C,
+    auth: &AuthConfig,
+    command: &MaintenanceCommand,
+) -> PgWireResult<()>
+where
+    C: ClientInfo + ?Sized,
+{
+    let user = client.metadata().get("user").map(String::as_str);
+    if auth.allows_maintenance(user, (&command.schema, &command.table)) {
+        return Ok(());
+    }
+    let user = user.unwrap_or("<unknown>");
+    let target = command.target_label();
+    crate::audit::log_authorization_denied(
+        user,
+        "maintenance",
+        &target,
+        "maintenance_identity_or_table_policy",
+    );
+    Err(user_error(
+        "42501",
+        "maintenance requires the configured maintenance identity and table policy",
+    ))
+}
+
 fn normalize_sql(sql: &str) -> PgWireResult<String> {
     let sql = sql.trim();
     if sql.is_empty() {
@@ -529,29 +1200,45 @@ fn normalize_sql(sql: &str) -> PgWireResult<String> {
 }
 
 fn parse_copy_target(sql: &str) -> PgWireResult<Option<CopyTarget>> {
-    let Some(captures) = copy_regex().captures(sql.trim().trim_end_matches(';').trim()) else {
+    let normalized = normalize_sql(sql)?;
+    if !normalized
+        .split_whitespace()
+        .next()
+        .is_some_and(|token| token.eq_ignore_ascii_case("copy"))
+    {
         return Ok(None);
-    };
-    let target = captures
-        .name("target")
-        .expect("COPY target capture")
-        .as_str()
-        .split('.')
-        .collect::<Vec<_>>();
-    if target.len() != 3 {
+    }
+    let mut statements = Parser::parse_sql(&PostgreSqlDialect {}, &normalized)
+        .map_err(|error| user_error("42601", &error.to_string()))?;
+    if statements.len() != 1 {
         return Err(user_error(
             "0A000",
-            "DuckDB COPY checkpoint requires catalog.schema.table",
+            "DuckDB COPY requires exactly one statement",
         ));
     }
-    let columns = captures
-        .name("columns")
-        .expect("COPY columns capture")
-        .as_str()
-        .split(',')
-        .map(str::trim)
-        .filter(|column| !column.is_empty())
-        .map(str::to_owned)
+    let Statement::Copy {
+        source: CopySource::Table {
+            table_name,
+            columns,
+        },
+        to: false,
+        target: AstCopyTarget::Stdin,
+        options,
+        legacy_options,
+        values,
+    } = statements.pop().expect("one COPY statement")
+    else {
+        return Err(user_error(
+            "0A000",
+            "only COPY table (columns) FROM STDIN is supported",
+        ));
+    };
+    if !options.is_empty() || !legacy_options.is_empty() || !values.is_empty() {
+        return Err(user_error("0A000", "COPY options are not supported"));
+    }
+    let columns = columns
+        .into_iter()
+        .map(|column| column.value)
         .collect::<Vec<_>>();
     if columns.is_empty() {
         return Err(user_error(
@@ -559,24 +1246,37 @@ fn parse_copy_target(sql: &str) -> PgWireResult<Option<CopyTarget>> {
             "DuckDB COPY requires an explicit column list",
         ));
     }
+    let parts = object_name_values(&table_name)
+        .ok_or_else(|| user_error("42601", "COPY target must contain identifiers only"))?;
+    let (catalog, schema, table) = match parts.as_slice() {
+        [table] => ("quackgis", "main", table.as_str()),
+        [schema, table]
+            if schema.eq_ignore_ascii_case("public") || schema.eq_ignore_ascii_case("main") =>
+        {
+            ("quackgis", "main", table.as_str())
+        }
+        [catalog, schema, table]
+            if catalog.eq_ignore_ascii_case("quackgis")
+                && (schema.eq_ignore_ascii_case("public")
+                    || schema.eq_ignore_ascii_case("main")) =>
+        {
+            ("quackgis", "main", table.as_str())
+        }
+        _ => {
+            return Err(user_error(
+                "0A000",
+                "COPY target must be table, public.table, or quackgis.main.table",
+            ));
+        }
+    };
     Ok(Some(CopyTarget {
         table: EngineTableRef {
-            catalog: target[0].to_owned(),
-            schema: target[1].to_owned(),
-            table: target[2].to_owned(),
+            catalog: catalog.to_owned(),
+            schema: schema.to_owned(),
+            table: table.to_owned(),
         },
         columns,
     }))
-}
-
-fn copy_regex() -> &'static Regex {
-    static COPY: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(
-            r"(?i)^COPY\s+(?P<target>[a-z_][a-z0-9_.]*)\s*\((?P<columns>[^)]+)\)\s+FROM\s+STDIN$",
-        )
-        .expect("bounded COPY regex")
-    });
-    &COPY
 }
 
 fn parameter_batch(
@@ -635,18 +1335,110 @@ fn parameter_batch(
         .map_err(|error| user_error("22000", &error.to_string()))
 }
 
-fn query_response(result: EngineQueryResult, format: &Format) -> PgWireResult<QueryResponse> {
+struct StreamingRowState {
+    query: Option<EngineQueryStream>,
+    current_rows: Option<Box<dyn Iterator<Item = PgWireResult<DataRow>> + Send>>,
+    fields: Arc<Vec<pgwire::api::results::FieldInfo>>,
+    blocking_workers: Arc<BlockingWorkerPool>,
+}
+
+struct MeasuredRows {
+    rows: Box<dyn Iterator<Item = PgWireResult<DataRow>> + Send>,
+    active: bool,
+}
+
+impl MeasuredRows {
+    fn finish(&mut self) {
+        if self.active {
+            self.active = false;
+            crate::metrics::query_batch_finished();
+        }
+    }
+}
+
+impl Iterator for MeasuredRows {
+    type Item = PgWireResult<DataRow>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let row = self.rows.next();
+        if row.is_none() {
+            self.finish();
+        }
+        row
+    }
+}
+
+impl Drop for MeasuredRows {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+fn validate_result_batch(batch: &RecordBatch, max_bytes: usize) -> PgWireResult<usize> {
+    let bytes = batch.get_array_memory_size();
+    if bytes > max_bytes {
+        crate::metrics::query_batch_rejected();
+        return Err(user_error(
+            "54000",
+            "DuckDB result batch exceeds the configured Arrow batch byte limit",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn query_response(
+    result: EngineQueryStream,
+    format: &Format,
+    max_batch_bytes: usize,
+    blocking_workers: Arc<BlockingWorkerPool>,
+) -> PgWireResult<QueryResponse> {
     let fields = Arc::new(arrow_schema_to_pg_fields(
         result.schema.as_ref(),
         format,
         None,
     )?);
-    let row_fields = Arc::clone(&fields);
-    let rows = result
-        .batches
-        .into_iter()
-        .flat_map(move |batch| encode_recordbatch(Arc::clone(&row_fields), batch));
-    Ok(QueryResponse::new(fields, futures::stream::iter(rows)))
+    let rows = futures::stream::try_unfold(
+        StreamingRowState {
+            query: Some(result),
+            current_rows: None,
+            fields: Arc::clone(&fields),
+            blocking_workers,
+        },
+        move |mut state| async move {
+            loop {
+                if let Some(rows) = state.current_rows.as_mut() {
+                    if let Some(row) = rows.next() {
+                        return row.map(|row| Some((row, state)));
+                    }
+                    state.current_rows = None;
+                }
+                let mut query = state.query.take().ok_or_else(|| {
+                    user_error("XX000", "DuckDB query stream lost its native reader")
+                })?;
+                let blocking_workers = Arc::clone(&state.blocking_workers);
+                let (returned, batch) = blocking_workers
+                    .run_regular(move || {
+                        let batch = query.next_batch();
+                        (query, batch)
+                    })
+                    .await
+                    .map_err(blocking_worker_error)?;
+                state.query = Some(returned);
+                match batch.map_err(engine_error)? {
+                    Some(batch) => {
+                        let bytes = validate_result_batch(&batch, max_batch_bytes)?;
+                        crate::metrics::query_batch_started(bytes);
+                        state.current_rows = Some(Box::new(MeasuredRows {
+                            rows: encode_recordbatch(Arc::clone(&state.fields), batch),
+                            active: true,
+                        }));
+                    }
+                    None => return Ok(None),
+                }
+            }
+        },
+    );
+    Ok(QueryResponse::new(fields, rows))
 }
 
 fn engine_error(error: EngineError) -> PgWireError {
@@ -668,6 +1460,23 @@ fn engine_error(error: EngineError) -> PgWireError {
     user_error(&sqlstate, error.message())
 }
 
+fn admission_error(error: AdmissionError) -> PgWireError {
+    match error {
+        AdmissionError::QueueFull => user_error("53400", "DuckDB query admission queue is full"),
+        AdmissionError::QueueTimeout => {
+            user_error("57014", "canceling statement due to queue timeout")
+        }
+        AdmissionError::Closed => user_error("57P01", "DuckDB query admission is unavailable"),
+    }
+}
+
+fn failed_transaction_error() -> PgWireError {
+    user_error(
+        "25P02",
+        "current transaction is aborted, commands ignored until end of transaction block",
+    )
+}
+
 fn anyhow_error(error: anyhow::Error) -> PgWireError {
     user_error("XX000", &error.to_string())
 }
@@ -675,6 +1484,7 @@ fn anyhow_error(error: anyhow::Error) -> PgWireError {
 async fn client_session<C>(
     client: &C,
     database: Arc<DuckDbAdbcStorage>,
+    blocking_workers: Arc<BlockingWorkerPool>,
 ) -> PgWireResult<Arc<DuckDbAdbcStorage>>
 where
     C: ClientInfo + Unpin + Send + Sync,
@@ -682,9 +1492,10 @@ where
     if let Some(session) = client.session_extensions().get::<DuckDbAdbcStorage>() {
         return Ok(session);
     }
-    let session = tokio::task::spawn_blocking(move || database.open_session())
+    let session = blocking_workers
+        .run_regular(move || database.open_session())
         .await
-        .map_err(join_error)?
+        .map_err(blocking_worker_error)?
         .map_err(anyhow_error)?;
     client.session_extensions().insert(session);
     client
@@ -699,23 +1510,132 @@ struct CopySessionState {
 }
 
 struct CopyRequest {
-    table: EngineTableRef,
+    decoder: CopyTextDecoder,
+    sender: Option<tokio::sync::mpsc::Sender<CopyBatchMessage>>,
+    worker: Option<tokio::task::JoinHandle<EngineResult<Option<i64>>>>,
+    cancellation: Arc<CopyCancellation>,
+    rows: usize,
+    bytes: usize,
+    batches: usize,
+    max_chunk_bytes: usize,
+    started_at: std::time::Instant,
+    metrics_recorded: Arc<AtomicBool>,
+    finished: bool,
+}
+
+impl Drop for CopyRequest {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.cancellation.abort_input();
+        }
+        if self
+            .metrics_recorded
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            crate::metrics::copy_failed(self.started_at.elapsed());
+        }
+    }
+}
+
+enum CopyBatchMessage {
+    Batch(RecordBatch),
+    Finish,
+    Abort,
+}
+
+struct CopyBatchReader {
     schema: SchemaRef,
-    data: Vec<u8>,
+    receiver: tokio::sync::mpsc::Receiver<CopyBatchMessage>,
+    aborted: Arc<AtomicBool>,
+    finished: bool,
+}
+
+impl Iterator for CopyBatchReader {
+    type Item = Result<RecordBatch, ArrowError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+        if self.aborted.load(Ordering::Acquire) {
+            self.finished = true;
+            return Some(Err(ArrowError::ExternalError(Box::new(
+                std::io::Error::new(std::io::ErrorKind::Interrupted, "COPY input was aborted"),
+            ))));
+        }
+        match self.receiver.blocking_recv() {
+            Some(CopyBatchMessage::Batch(batch)) => Some(Ok(batch)),
+            Some(CopyBatchMessage::Finish) => {
+                self.finished = true;
+                None
+            }
+            Some(CopyBatchMessage::Abort) => {
+                self.finished = true;
+                Some(Err(ArrowError::ExternalError(Box::new(
+                    std::io::Error::new(std::io::ErrorKind::Interrupted, "COPY input was aborted"),
+                ))))
+            }
+            None => {
+                self.finished = true;
+                Some(Err(ArrowError::ExternalError(Box::new(
+                    std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "COPY input closed before completion",
+                    ),
+                ))))
+            }
+        }
+    }
+}
+
+impl RecordBatchReader for CopyBatchReader {
+    fn schema(&self) -> SchemaRef {
+        Arc::clone(&self.schema)
+    }
+}
+
+struct CopyCancellation {
+    aborted: Arc<AtomicBool>,
+    wake: tokio::sync::mpsc::Sender<CopyBatchMessage>,
+    native: Arc<dyn EngineCancellation>,
+}
+
+impl CopyCancellation {
+    fn abort_input(&self) {
+        self.aborted.store(true, Ordering::Release);
+        let _ = self.wake.try_send(CopyBatchMessage::Abort);
+    }
+}
+
+impl EngineCancellation for CopyCancellation {
+    fn cancel(&self) -> EngineResult<()> {
+        self.abort_input();
+        self.native.cancel()
+    }
 }
 
 async fn begin_copy<C>(
     client: &C,
     storage: Arc<DuckDbAdbcStorage>,
     target: CopyTarget,
+    control: &DuckDbRuntimeControl,
 ) -> PgWireResult<Response>
 where
     C: ClientInfo + Unpin + Send + Sync,
 {
-    let table = target.table.clone();
-    let full_schema = tokio::task::spawn_blocking(move || storage.table_schema(&table))
+    let permit = control
+        .admission
+        .acquire(OperationClass::Writer)
         .await
-        .map_err(join_error)?
+        .map_err(admission_error)?;
+    let table = target.table.clone();
+    let schema_storage = Arc::clone(&storage);
+    let full_schema = control
+        .blocking_workers
+        .run_regular(move || schema_storage.table_schema(&table))
+        .await
+        .map_err(blocking_worker_error)?
         .map_err(engine_error)?;
     let fields = target
         .columns
@@ -731,6 +1651,74 @@ where
     let state = client
         .session_extensions()
         .get_or_insert_with(CopySessionState::default);
+    {
+        let request = state
+            .request
+            .lock()
+            .map_err(|_| user_error("XX000", "DuckDB COPY state is poisoned"))?;
+        if request.is_some() {
+            return Err(user_error(
+                "55000",
+                "another COPY operation is already active",
+            ));
+        }
+    }
+
+    let operation_storage = Arc::clone(&storage);
+    let operation = control
+        .blocking_workers
+        .run_regular(move || operation_storage.start_ingest_operation())
+        .await
+        .map_err(blocking_worker_error)?
+        .map_err(engine_error)?;
+    let native = operation.cancellation();
+    let aborted = Arc::new(AtomicBool::new(false));
+    let (sender, receiver) = tokio::sync::mpsc::channel(2);
+    let cancellation = Arc::new(CopyCancellation {
+        aborted: Arc::clone(&aborted),
+        wake: sender.clone(),
+        native,
+    });
+    let reader = CopyBatchReader {
+        schema: Arc::clone(&schema),
+        receiver,
+        aborted,
+        finished: false,
+    };
+    let cancellation_trait: Arc<dyn EngineCancellation> = cancellation.clone();
+    let (pid, secret) = client.pid_and_secret_key();
+    let active_guard = control.active_queries.register(
+        pid,
+        secret.to_bytes().to_vec(),
+        Arc::clone(&cancellation_trait),
+    );
+    let deadline = OperationDeadline::start(control.statement_timeout, cancellation_trait);
+    let guards: Vec<Box<dyn Send>> =
+        vec![Box::new(permit), Box::new(active_guard), Box::new(deadline)];
+    let started_at = std::time::Instant::now();
+    let metrics_recorded = Arc::new(AtomicBool::new(false));
+    let worker_metrics_recorded = Arc::clone(&metrics_recorded);
+    crate::metrics::copy_started();
+    let ingest_table = target.table.clone();
+    let worker = control
+        .blocking_workers
+        .spawn_regular(move || {
+            let _guards = guards;
+            let result =
+                operation.execute(&ingest_table, Box::new(reader), IngestDisposition::Append);
+            if result.is_err()
+                && worker_metrics_recorded
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+            {
+                crate::metrics::copy_failed(started_at.elapsed());
+            }
+            result
+        })
+        .await
+        .map_err(blocking_worker_error)?;
+    let decoder = CopyTextDecoder::new(schema, control.copy_limits).map_err(copy_decode_error)?;
+
     let mut request = state
         .request
         .lock()
@@ -742,9 +1730,17 @@ where
         ));
     }
     *request = Some(CopyRequest {
-        table: target.table,
-        schema,
-        data: Vec::new(),
+        decoder,
+        sender: Some(sender),
+        worker: Some(worker),
+        cancellation,
+        rows: 0,
+        bytes: 0,
+        batches: 0,
+        max_chunk_bytes: control.copy_limits.max_bytes,
+        started_at,
+        metrics_recorded,
+        finished: false,
     });
     Ok(Response::CopyIn(CopyResponse::new(
         0,
@@ -753,220 +1749,75 @@ where
     )))
 }
 
-fn copy_record_batch(schema: SchemaRef, data: &[u8]) -> PgWireResult<(RecordBatch, usize)> {
-    let text = std::str::from_utf8(data)
-        .map_err(|_| user_error("22021", "COPY text must be valid UTF-8"))?;
-    let rows = text
-        .lines()
-        .filter(|line| !line.is_empty())
-        .map(|line| line.split('\t').collect::<Vec<_>>())
-        .collect::<Vec<_>>();
-    if rows.is_empty() {
-        return Err(user_error("22000", "COPY requires at least one data row"));
-    }
-    if rows.iter().any(|row| row.len() != schema.fields().len()) {
-        return Err(user_error(
-            "22P04",
-            "COPY row has the wrong number of columns",
-        ));
-    }
-    let arrays = schema
-        .fields()
-        .iter()
-        .enumerate()
-        .map(|(column, field)| copy_array(field.data_type(), &rows, column))
-        .collect::<PgWireResult<Vec<_>>>()?;
-    let row_count = rows.len();
-    RecordBatch::try_new(schema, arrays)
-        .map(|batch| (batch, row_count))
-        .map_err(|error| user_error("22000", &error.to_string()))
-}
-
-fn copy_array(data_type: &DataType, rows: &[Vec<&str>], column: usize) -> PgWireResult<ArrayRef> {
-    fn value<'a>(row: &'a [&'a str], column: usize) -> Option<&'a str> {
-        (row[column] != r"\N").then_some(row[column])
-    }
-    match data_type {
-        DataType::Boolean => rows
-            .iter()
-            .map(|row| value(row, column).map(parse_copy_bool).transpose())
-            .collect::<PgWireResult<Vec<_>>>()
-            .map(|values| Arc::new(BooleanArray::from(values)) as ArrayRef),
-        DataType::Int16 => rows
-            .iter()
-            .map(|row| {
-                value(row, column)
-                    .map(str::parse::<i16>)
-                    .transpose()
-                    .map_err(|_| user_error("22P02", "invalid COPY Int16 value"))
-            })
-            .collect::<PgWireResult<Vec<_>>>()
-            .map(|values| Arc::new(Int16Array::from(values)) as ArrayRef),
-        DataType::Int32 => rows
-            .iter()
-            .map(|row| {
-                value(row, column)
-                    .map(str::parse::<i32>)
-                    .transpose()
-                    .map_err(|_| user_error("22P02", "invalid COPY Int32 value"))
-            })
-            .collect::<PgWireResult<Vec<_>>>()
-            .map(|values| Arc::new(Int32Array::from(values)) as ArrayRef),
-        DataType::Int64 => rows
-            .iter()
-            .map(|row| {
-                value(row, column)
-                    .map(str::parse::<i64>)
-                    .transpose()
-                    .map_err(|_| user_error("22P02", "invalid COPY Int64 value"))
-            })
-            .collect::<PgWireResult<Vec<_>>>()
-            .map(|values| Arc::new(Int64Array::from(values)) as ArrayRef),
-        DataType::Float32 => rows
-            .iter()
-            .map(|row| {
-                value(row, column)
-                    .map(str::parse::<f32>)
-                    .transpose()
-                    .map_err(|_| user_error("22P02", "invalid COPY Float32 value"))
-            })
-            .collect::<PgWireResult<Vec<_>>>()
-            .map(|values| Arc::new(Float32Array::from(values)) as ArrayRef),
-        DataType::Float64 => rows
-            .iter()
-            .map(|row| {
-                value(row, column)
-                    .map(str::parse::<f64>)
-                    .transpose()
-                    .map_err(|_| user_error("22P02", "invalid COPY Float64 value"))
-            })
-            .collect::<PgWireResult<Vec<_>>>()
-            .map(|values| Arc::new(Float64Array::from(values)) as ArrayRef),
-        DataType::Decimal128(precision, scale) => {
-            let values = rows
-                .iter()
-                .map(|row| {
-                    value(row, column)
-                        .map(|value| parse_copy_decimal(value, *precision, *scale))
-                        .transpose()
-                })
-                .collect::<PgWireResult<Vec<_>>>()?;
-            Decimal128Array::from(values)
-                .with_precision_and_scale(*precision, *scale)
-                .map(|array| Arc::new(array) as ArrayRef)
-                .map_err(|error| user_error("22003", &error.to_string()))
-        }
-        DataType::Date32 => rows
-            .iter()
-            .map(|row| value(row, column).map(parse_copy_date).transpose())
-            .collect::<PgWireResult<Vec<_>>>()
-            .map(|values| Arc::new(Date32Array::from(values)) as ArrayRef),
-        DataType::Timestamp(arrow_schema::TimeUnit::Microsecond, None) => rows
-            .iter()
-            .map(|row| value(row, column).map(parse_copy_timestamp).transpose())
-            .collect::<PgWireResult<Vec<_>>>()
-            .map(|values| Arc::new(TimestampMicrosecondArray::from(values)) as ArrayRef),
-        DataType::Utf8 => Ok(Arc::new(StringArray::from(
-            rows.iter()
-                .map(|row| value(row, column))
-                .collect::<Vec<_>>(),
-        ))),
-        DataType::Binary => {
-            let values = rows
-                .iter()
-                .map(|row| value(row, column).map(parse_copy_hex).transpose())
-                .collect::<PgWireResult<Vec<_>>>()?;
-            Ok(Arc::new(BinaryArray::from_opt_vec(
-                values.iter().map(|value| value.as_deref()).collect(),
-            )))
-        }
-        unsupported => Err(user_error(
-            "0A000",
-            &format!("unsupported DuckDB COPY Arrow type {unsupported}"),
-        )),
-    }
-}
-
-fn parse_copy_bool(value: &str) -> PgWireResult<bool> {
-    match value.to_ascii_lowercase().as_str() {
-        "t" | "true" | "1" | "y" | "yes" | "on" => Ok(true),
-        "f" | "false" | "0" | "n" | "no" | "off" => Ok(false),
-        _ => Err(user_error("22P02", "invalid COPY Boolean value")),
-    }
-}
-
-fn parse_copy_decimal(value: &str, precision: u8, scale: i8) -> PgWireResult<i128> {
-    let decimal = value
-        .parse::<rust_decimal::Decimal>()
-        .map_err(|_| user_error("22P02", "invalid COPY Decimal128 value"))?;
-    let target_scale = u32::try_from(scale)
-        .map_err(|_| user_error("0A000", "negative Decimal128 COPY scale is unsupported"))?;
-    let source_scale = decimal.scale();
-    let mut mantissa = decimal.mantissa();
-    if source_scale < target_scale {
-        let factor = 10_i128
-            .checked_pow(target_scale - source_scale)
-            .ok_or_else(|| user_error("22003", "COPY Decimal128 scale overflows"))?;
-        mantissa = mantissa
-            .checked_mul(factor)
-            .ok_or_else(|| user_error("22003", "COPY Decimal128 value overflows"))?;
-    } else if source_scale > target_scale {
-        let divisor = 10_i128
-            .checked_pow(source_scale - target_scale)
-            .ok_or_else(|| user_error("22003", "COPY Decimal128 scale overflows"))?;
-        if mantissa % divisor != 0 {
-            return Err(user_error(
-                "22003",
-                "COPY Decimal128 value exceeds the target scale",
-            ));
-        }
-        mantissa /= divisor;
-    }
-    let digits = mantissa.unsigned_abs().to_string().len();
-    if digits > usize::from(precision) {
-        return Err(user_error(
-            "22003",
-            "COPY Decimal128 value exceeds the target precision",
-        ));
-    }
-    Ok(mantissa)
-}
-
-fn parse_copy_date(value: &str) -> PgWireResult<i32> {
-    let date = NaiveDate::parse_from_str(value, "%Y-%m-%d")
-        .map_err(|_| user_error("22007", "invalid COPY Date32 value"))?;
-    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid Unix epoch");
-    i32::try_from(date.signed_duration_since(epoch).num_days())
-        .map_err(|_| user_error("22008", "COPY Date32 value is out of range"))
-}
-
-fn parse_copy_timestamp(value: &str) -> PgWireResult<i64> {
-    NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f")
-        .map(|timestamp| timestamp.and_utc().timestamp_micros())
-        .map_err(|_| user_error("22007", "invalid COPY Timestamp value"))
-}
-
-fn parse_copy_hex(value: &str) -> PgWireResult<Vec<u8>> {
-    let hex = value
-        .strip_prefix(r"\x")
-        .ok_or_else(|| user_error("22P02", "COPY binary value must use \\x hex format"))?;
-    if !hex.len().is_multiple_of(2) || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(user_error(
-            "22P02",
-            "COPY binary value contains invalid hex",
-        ));
-    }
-    (0..hex.len())
-        .step_by(2)
-        .map(|index| {
-            u8::from_str_radix(&hex[index..index + 2], 16)
-                .map_err(|_| user_error("22P02", "COPY binary value contains invalid hex"))
-        })
-        .collect()
-}
-
 fn join_error(error: tokio::task::JoinError) -> PgWireError {
     user_error("XX000", &format!("DuckDB worker failed: {error}"))
+}
+
+fn blocking_worker_error(error: BlockingWorkerError) -> PgWireError {
+    match error {
+        BlockingWorkerError::Closed => {
+            user_error("57P01", "DuckDB blocking worker pool is unavailable")
+        }
+        BlockingWorkerError::Join(error) => join_error(error),
+    }
+}
+
+fn copy_decode_error(error: CopyDecodeError) -> PgWireError {
+    user_error(error.sqlstate, &error.message)
+}
+
+fn decode_copy_data(
+    state: &CopySessionState,
+    data: &[u8],
+) -> PgWireResult<(
+    tokio::sync::mpsc::Sender<CopyBatchMessage>,
+    Vec<RecordBatch>,
+)> {
+    let mut request = state
+        .request
+        .lock()
+        .map_err(|_| user_error("XX000", "DuckDB COPY state is poisoned"))?;
+    let Some(active) = request.as_mut() else {
+        return Err(user_error("55000", "no DuckDB COPY operation is active"));
+    };
+    if data.len() > active.max_chunk_bytes {
+        return Err(user_error(
+            "54000",
+            "one COPY data chunk exceeds the configured batch byte limit",
+        ));
+    }
+    let batches = match active.decoder.push(data) {
+        Ok(batches) => batches,
+        Err(error) => return Err(copy_decode_error(error)),
+    };
+    let sender = active
+        .sender
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| user_error("55000", "DuckDB COPY input is already closed"))?;
+    active.bytes = active.bytes.saturating_add(data.len());
+    active.batches = active.batches.saturating_add(batches.len());
+    active.rows = active
+        .rows
+        .saturating_add(batches.iter().map(RecordBatch::num_rows).sum::<usize>());
+    Ok((sender, batches))
+}
+
+fn take_copy_request(state: &CopySessionState) -> Option<CopyRequest> {
+    state.request.lock().ok()?.take()
+}
+
+async fn cleanup_aborted_copy(mut request: CopyRequest) {
+    request.cancellation.abort_input();
+    request.sender.take();
+    if let Some(worker) = request.worker.take() {
+        match worker.await {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => log::debug!("DuckDB COPY abort cleanup completed: {error}"),
+            Err(error) => log::warn!("DuckDB COPY abort worker failed: {error}"),
+        }
+    }
+    request.finished = true;
 }
 
 fn user_error(code: &str, message: &str) -> PgWireError {
@@ -987,22 +1838,27 @@ impl CopyHandler for DuckDbCopyHandler {
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-        const MAX_COPY_BYTES: usize = 16 * 1024 * 1024;
         let state = client
             .session_extensions()
             .get::<CopySessionState>()
             .ok_or_else(|| user_error("55000", "no DuckDB COPY operation is active"))?;
-        let mut request = state
-            .request
-            .lock()
-            .map_err(|_| user_error("XX000", "DuckDB COPY state is poisoned"))?;
-        let request = request
-            .as_mut()
-            .ok_or_else(|| user_error("55000", "no DuckDB COPY operation is active"))?;
-        if request.data.len().saturating_add(data.data.len()) > MAX_COPY_BYTES {
-            return Err(user_error("54000", "DuckDB COPY checkpoint exceeds 16 MiB"));
+        let (sender, batches) = match decode_copy_data(&state, &data.data) {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                if let Some(request) = take_copy_request(&state) {
+                    cleanup_aborted_copy(request).await;
+                }
+                return Err(error);
+            }
+        };
+        for batch in batches {
+            if sender.send(CopyBatchMessage::Batch(batch)).await.is_err() {
+                if let Some(request) = take_copy_request(&state) {
+                    cleanup_aborted_copy(request).await;
+                }
+                return Err(user_error("57014", "DuckDB COPY ingestion was aborted"));
+            }
         }
-        request.data.extend_from_slice(&data.data);
         Ok(())
     }
 
@@ -1016,23 +1872,55 @@ impl CopyHandler for DuckDbCopyHandler {
             .session_extensions()
             .get::<CopySessionState>()
             .ok_or_else(|| user_error("55000", "no DuckDB COPY operation is active"))?;
-        let request = state
+        let mut request = state
             .request
             .lock()
             .map_err(|_| user_error("XX000", "DuckDB COPY state is poisoned"))?
             .take()
             .ok_or_else(|| user_error("55000", "no DuckDB COPY operation is active"))?;
-        let (batch, rows) = copy_record_batch(request.schema, &request.data)?;
-        let session = client
-            .session_extensions()
-            .get::<DuckDbAdbcStorage>()
-            .ok_or_else(|| user_error("XX000", "DuckDB client session is unavailable"))?;
-        tokio::task::spawn_blocking(move || {
-            session.ingest_contract(&request.table, vec![batch], IngestDisposition::Append)
-        })
-        .await
-        .map_err(join_error)?
-        .map_err(engine_error)?;
+        let batches = request.decoder.finish().map_err(copy_decode_error)?;
+        request.batches = request.batches.saturating_add(batches.len());
+        request.rows = request
+            .rows
+            .saturating_add(batches.iter().map(RecordBatch::num_rows).sum::<usize>());
+        let rows = request.rows;
+        let sender = request
+            .sender
+            .take()
+            .ok_or_else(|| user_error("55000", "DuckDB COPY input is already closed"))?;
+        let commit_started = std::time::Instant::now();
+        for batch in batches {
+            sender
+                .send(CopyBatchMessage::Batch(batch))
+                .await
+                .map_err(|_| user_error("57014", "DuckDB COPY ingestion was aborted"))?;
+        }
+        sender
+            .send(CopyBatchMessage::Finish)
+            .await
+            .map_err(|_| user_error("57014", "DuckDB COPY ingestion was aborted"))?;
+        drop(sender);
+        request
+            .worker
+            .take()
+            .ok_or_else(|| user_error("55000", "DuckDB COPY worker is unavailable"))?
+            .await
+            .map_err(join_error)?
+            .map_err(engine_error)?;
+        request.finished = true;
+        if request
+            .metrics_recorded
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            crate::metrics::copy_completed(
+                request.rows,
+                request.bytes,
+                request.batches,
+                request.started_at.elapsed(),
+                commit_started.elapsed(),
+            );
+        }
         client
             .send(PgWireBackendMessage::CommandComplete(
                 Tag::new("COPY").with_rows(rows).into(),
@@ -1049,9 +1937,9 @@ impl CopyHandler for DuckDbCopyHandler {
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
         if let Some(state) = client.session_extensions().get::<CopySessionState>()
-            && let Ok(mut request) = state.request.lock()
+            && let Some(request) = take_copy_request(&state)
         {
-            *request = None;
+            cleanup_aborted_copy(request).await;
         }
         user_error("57014", &format!("COPY aborted: {}", fail.message))
     }
@@ -1083,5 +1971,128 @@ mod tests {
         assert!(validate_statement("SELECT 1; SELECT 2", ProtocolMode::Simple).is_err());
         assert!(validate_statement("TRUNCATE quackgis.main.points", ProtocolMode::Simple).is_err());
         assert!(validate_statement("BEGIN", ProtocolMode::Extended).is_err());
+    }
+
+    #[test]
+    fn unsupported_spatial_functions_are_structurally_rejected() {
+        for (function, sql) in [
+            ("ST_NDims", "SELECT ST_NDims(ST_Point(1, 2))"),
+            ("ST_CoordDim", "SELECT public.ST_CoordDim(ST_Point(1, 2))"),
+            (
+                "ST_GeometryN",
+                "SELECT ST_AsText(ST_GeometryN(ST_Point(1, 2), 1))",
+            ),
+        ] {
+            let error = match validate_statement(sql, ProtocolMode::Simple) {
+                Ok(_) => panic!("unsupported spatial function {function}"),
+                Err(error) => error,
+            };
+            assert!(error.to_string().contains(function), "{error}");
+        }
+
+        for sql in [
+            "SELECT 'ST_NDims(g)'",
+            "SELECT 1 /* ST_CoordDim(g) */",
+            "SELECT ST_Dimension(ST_Point(1, 2))",
+        ] {
+            validate_statement(sql, ProtocolMode::Simple)
+                .unwrap_or_else(|error| panic!("supported SQL {sql}: {error}"));
+        }
+    }
+
+    #[test]
+    fn maintenance_call_is_literal_bounded_and_simple_protocol_only() {
+        let validated = validate_statement(
+            "CALL quackgis_merge_adjacent_files('public', 'points', 8, 16777216, NULL)",
+            ProtocolMode::Simple,
+        )
+        .expect("maintenance call");
+        assert_eq!(validated.kind, StatementKind::Maintenance);
+        let command = parse_maintenance_call(&validated.ast)
+            .expect("maintenance parse")
+            .expect("maintenance command");
+        assert_eq!(command.schema, "main");
+        assert_eq!(command.table, "points");
+        assert_eq!(
+            command.request,
+            EngineMaintenanceRequest::MergeAdjacentFiles {
+                schema: "main".to_owned(),
+                table: "points".to_owned(),
+                max_compacted_files: Some(8),
+                max_file_size: Some(16_777_216),
+                min_file_size: None,
+            }
+        );
+        for sql in [
+            "CALL quackgis_merge_adjacent_files('main', 'points', 0, NULL, NULL)",
+            "CALL quackgis_merge_adjacent_files('other', 'points', 8, NULL, NULL)",
+            "CALL quackgis_merge_adjacent_files('main', current_user, 8, NULL, NULL)",
+            "CALL arbitrary_procedure('main', 'points', 8, NULL, NULL)",
+        ] {
+            assert!(
+                validate_statement(sql, ProtocolMode::Simple).is_err(),
+                "{sql}"
+            );
+        }
+        assert!(
+            validate_statement(
+                "CALL quackgis_merge_adjacent_files('main', 'points', 8, NULL, NULL)",
+                ProtocolMode::Extended,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn result_batch_byte_limit_fails_closed() {
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "value",
+                DataType::Utf8,
+                false,
+            )])),
+            vec![Arc::new(StringArray::from(vec!["bounded-result"]))],
+        )
+        .expect("batch");
+        let bytes = batch.get_array_memory_size();
+        assert_eq!(
+            validate_result_batch(&batch, bytes).expect("exact ceiling"),
+            bytes
+        );
+        assert!(validate_result_batch(&batch, bytes - 1).is_err());
+    }
+
+    #[test]
+    fn client_session_and_public_schema_rules_are_structural() {
+        let set = validate_statement("SET standard_conforming_strings = ON", ProtocolMode::Simple)
+            .expect("supported SET");
+        assert_eq!(set.kind, StatementKind::SessionSet);
+        assert!(validate_statement("SET TimeZone = 'UTC'", ProtocolMode::Simple).is_err());
+
+        let show =
+            validate_statement("SHOW search_path", ProtocolMode::Simple).expect("supported SHOW");
+        assert_eq!(show.kind, StatementKind::Read);
+        assert_eq!(show.sql, "SELECT 'public'::VARCHAR AS search_path");
+
+        let query = validate_statement(
+            "SELECT count(*) FROM \"public\".\"points\"",
+            ProtocolMode::Simple,
+        )
+        .expect("public relation");
+        assert!(query.sql.contains("quackgis.main.\"points\""));
+
+        for sql in [
+            "COPY points (id, name) FROM STDIN",
+            "COPY \"public\".\"points\" (\"id\", \"name\") FROM STDIN",
+            "COPY quackgis.main.points (id, name) FROM STDIN",
+        ] {
+            let target = parse_copy_target(sql)
+                .expect("COPY parse")
+                .expect("COPY target");
+            assert_eq!(target.table.catalog, "quackgis");
+            assert_eq!(target.table.schema, "main");
+            assert_eq!(target.table.table, "points");
+            assert_eq!(target.columns, ["id", "name"]);
+        }
     }
 }

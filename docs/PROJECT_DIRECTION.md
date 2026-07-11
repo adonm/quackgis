@@ -35,18 +35,25 @@ The repository proves a bounded local runtime:
 - ADBC transports Arrow between DuckDB and the Rust edge.
 - Simple and extended pgwire support a deliberately narrow statement surface.
 - Parameterized reads/mutations, transactions, text COPY, SCRAM, table policy,
-  restart, and reopen have pinned native integration tests.
+  maintained session settings/search path, `public` mapping, quoted COPY, restart,
+  and reopen have pinned native integration tests.
 - Forty-two native, rewrite, or macro spatial cases execute through pgwire.
 - DuckDB and extension artifacts are version- and checksum-pinned.
 
 It is not yet a resource-bounded service:
 
-- query results are materialized before pgwire delivery;
-- COPY buffers a complete request and has a 16 MiB ceiling;
-- pgwire cancellation does not cancel the native statement;
-- blocking query work has no productized admission budget;
-- DuckDB memory, thread, temporary-storage, and spill policy are not configurable
-  as a stable server contract;
+- query results stream one native Arrow batch at a time, but strict byte/RSS
+  evidence remains open;
+- COPY incrementally builds bounded Arrow batches and atomically publishes through
+  session-local staging; scale/RSS/throughput evidence remains open;
+- pgwire cancellation and deadlines interrupt active native result and COPY
+  workers, but an idle COPY client receives the error only on its next frame or
+  disconnect; broader write cancellation and 100-cancel latency evidence remain
+  open;
+- connection, queue, global active-query, and reader/writer-class admission are
+  bounded; native calls use a fixed worker budget with reserved control capacity;
+- DuckDB memory, CPU threads, temporary storage, and spill are autosized from the
+  effective cgroup/host capacity and remain explicitly configurable;
 - PostgreSQL catalogs, geometry identity, and named GIS clients are incomplete;
 - shared catalog/object-storage profiles fail closed; and
 - current scale evidence is fixture-level, not a product performance claim.
@@ -126,9 +133,14 @@ health, and transaction cleanup.
 ### Streaming ingestion
 
 Parse COPY chunks incrementally into bounded Arrow builders and feed one ADBC
-ingest stream under one transaction. Bound rows and bytes per batch; roll back on
-parse failure, cancellation, disconnect, or timeout. COPY is the primary bulk path;
-INSERT remains a compatibility path.
+stream into session-local staging. Bound rows and bytes per batch, then publish to
+DuckLake with one atomic statement only after clean EOF. Parse failure,
+cancellation, disconnect, or timeout must leave the target unchanged. COPY is the
+primary bulk path; INSERT remains a compatibility path.
+
+For the explicit hidden bbox layout, derive bounds in the DuckDB publication SQL.
+Do not decode WKB row-by-row in Rust. Automatic predicate injection must remain a
+separate structurally proven rule that always retains the exact predicate.
 
 ### Spatial execution and layout
 

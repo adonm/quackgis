@@ -115,10 +115,63 @@ pub struct EngineQueryResult {
     pub batches: Vec<RecordBatch>,
 }
 
+pub trait EngineBatchStream: Send {
+    fn next_batch(&mut self) -> EngineResult<Option<RecordBatch>>;
+}
+
+pub trait EngineCancellation: Send + Sync {
+    fn cancel(&self) -> EngineResult<()>;
+}
+
+pub struct EngineQueryStream {
+    pub schema: SchemaRef,
+    batches: Box<dyn EngineBatchStream>,
+    cancellation: Option<std::sync::Arc<dyn EngineCancellation>>,
+    _guards: Vec<Box<dyn Send>>,
+}
+
+impl EngineQueryStream {
+    pub fn new(schema: SchemaRef, batches: Box<dyn EngineBatchStream>) -> Self {
+        Self {
+            schema,
+            batches,
+            cancellation: None,
+            _guards: Vec::new(),
+        }
+    }
+
+    pub fn next_batch(&mut self) -> EngineResult<Option<RecordBatch>> {
+        self.batches.next_batch()
+    }
+
+    pub fn with_guard(mut self, guard: Box<dyn Send>) -> Self {
+        self._guards.push(guard);
+        self
+    }
+
+    pub fn with_cancellation(
+        mut self,
+        cancellation: std::sync::Arc<dyn EngineCancellation>,
+    ) -> Self {
+        self.cancellation = Some(cancellation);
+        self
+    }
+
+    pub fn cancellation(&self) -> Option<std::sync::Arc<dyn EngineCancellation>> {
+        self.cancellation.clone()
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EngineSnapshot {
     pub id: i64,
     pub timestamp: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EngineResourceSample {
+    pub memory_bytes: u64,
+    pub temporary_storage_bytes: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -159,6 +212,7 @@ pub trait EngineStorageKernel {
         disposition: IngestDisposition,
     ) -> EngineResult<Option<i64>>;
     fn snapshots(&self) -> EngineResult<Vec<EngineSnapshot>>;
+    fn resource_sample(&self) -> EngineResult<EngineResourceSample>;
     fn maintain(&self, request: EngineMaintenanceRequest) -> EngineResult<EngineMaintenanceReport>;
 }
 

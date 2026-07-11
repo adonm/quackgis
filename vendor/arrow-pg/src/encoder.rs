@@ -201,6 +201,29 @@ fn get_large_binary_value(arr: &Arc<dyn Array>, idx: usize) -> Option<&[u8]> {
     })
 }
 
+fn get_fixed_size_binary_value(arr: &Arc<dyn Array>, idx: usize) -> Option<&[u8]> {
+    (!arr.is_null(idx)).then(|| {
+        arr.as_any()
+            .downcast_ref::<FixedSizeBinaryArray>()
+            .expect("Arrow field and array type must agree")
+            .value(idx)
+    })
+}
+
+fn parse_json_value(value: Option<&str>) -> PgWireResult<Option<Json<serde_json::Value>>> {
+    value
+        .map(|value| {
+            serde_json::from_str(value).map(Json).map_err(|error| {
+                PgWireError::UserError(Box::new(ErrorInfo::new(
+                    "ERROR".to_owned(),
+                    "22P02".to_owned(),
+                    format!("invalid JSON value: {error}"),
+                )))
+            })
+        })
+        .transpose()
+}
+
 fn get_date32_value(arr: &Arc<dyn Array>, idx: usize) -> Option<NaiveDate> {
     if arr.is_null(idx) {
         return None;
@@ -338,10 +361,7 @@ pub fn encode_value<T: Encoder>(
         DataType::Utf8
             if *pg_field.datatype() == Type::JSONB || *pg_field.datatype() == Type::JSON =>
         {
-            let value = get_utf8_value(arr, idx).map(|s| {
-                serde_json::from_str::<serde_json::Value>(s).unwrap_or(serde_json::Value::Null)
-            });
-            encoder.encode_field(&value.map(Json), pg_field)?
+            encoder.encode_field(&parse_json_value(get_utf8_value(arr, idx))?, pg_field)?
         }
         DataType::Utf8 => encoder.encode_field(&get_utf8_value(arr, idx), pg_field)?,
         DataType::Utf8View if *pg_field.datatype() == Type::CHAR => {
@@ -350,10 +370,7 @@ pub fn encode_value<T: Encoder>(
         DataType::Utf8View
             if *pg_field.datatype() == Type::JSONB || *pg_field.datatype() == Type::JSON =>
         {
-            let value = get_utf8_view_value(arr, idx).map(|s| {
-                serde_json::from_str::<serde_json::Value>(s).unwrap_or(serde_json::Value::Null)
-            });
-            encoder.encode_field(&value.map(Json), pg_field)?
+            encoder.encode_field(&parse_json_value(get_utf8_view_value(arr, idx))?, pg_field)?
         }
         DataType::Utf8View => encoder.encode_field(&get_utf8_view_value(arr, idx), pg_field)?,
         DataType::BinaryView if is_geometry_wire_type(pg_field.datatype()) => {
@@ -366,10 +383,7 @@ pub fn encode_value<T: Encoder>(
         DataType::LargeUtf8
             if *pg_field.datatype() == Type::JSONB || *pg_field.datatype() == Type::JSON =>
         {
-            let value = get_large_utf8_value(arr, idx).map(|s| {
-                serde_json::from_str::<serde_json::Value>(s).unwrap_or(serde_json::Value::Null)
-            });
-            encoder.encode_field(&value.map(Json), pg_field)?
+            encoder.encode_field(&parse_json_value(get_large_utf8_value(arr, idx))?, pg_field)?
         }
         DataType::LargeUtf8 => encoder.encode_field(&get_large_utf8_value(arr, idx), pg_field)?,
         DataType::Binary if is_geometry_wire_type(pg_field.datatype()) => {
@@ -381,6 +395,9 @@ pub fn encode_value<T: Encoder>(
         }
         DataType::LargeBinary => {
             encoder.encode_field(&get_large_binary_value(arr, idx), pg_field)?
+        }
+        DataType::FixedSizeBinary(_) => {
+            encode_binary_as_bytea(encoder, get_fixed_size_binary_value(arr, idx), pg_field)?
         }
         DataType::Date32 => encoder.encode_field(&get_date32_value(arr, idx), pg_field)?,
         DataType::Date64 => encoder.encode_field(&get_date64_value(arr, idx), pg_field)?,
@@ -480,6 +497,9 @@ pub fn encode_value<T: Encoder>(
         },
         DataType::Interval(interval_unit) => match interval_unit {
             IntervalUnit::YearMonth => {
+                if arr.is_null(idx) {
+                    return encoder.encode_field(&None::<PgInterval>, pg_field);
+                }
                 let interval_array = arr
                     .as_any()
                     .downcast_ref::<IntervalYearMonthArray>()
@@ -488,12 +508,18 @@ pub fn encode_value<T: Encoder>(
                 encoder.encode_field(&PgInterval::new(months, 0, 0), pg_field)?;
             }
             IntervalUnit::DayTime => {
+                if arr.is_null(idx) {
+                    return encoder.encode_field(&None::<PgInterval>, pg_field);
+                }
                 let interval_array = arr.as_any().downcast_ref::<IntervalDayTimeArray>().unwrap();
                 let (days, millis) = IntervalDayTimeType::to_parts(interval_array.value(idx));
                 encoder
                     .encode_field(&PgInterval::new(0, days, millis as i64 * 1000i64), pg_field)?;
             }
             IntervalUnit::MonthDayNano => {
+                if arr.is_null(idx) {
+                    return encoder.encode_field(&None::<PgInterval>, pg_field);
+                }
                 let interval_array = arr
                     .as_any()
                     .downcast_ref::<IntervalMonthDayNanoArray>()
@@ -550,11 +576,26 @@ pub fn encode_value<T: Encoder>(
                 encoder.encode_field(&PgInterval::new(0, 0, microseconds), pg_field)?;
             }
         },
-        DataType::List(_) | DataType::FixedSizeList(_, _) | DataType::LargeList(_) => {
+        DataType::List(_) => {
             if arr.is_null(idx) {
                 return encoder.encode_field(&None::<&[i8]>, pg_field);
             }
-            let array = arr.as_any().downcast_ref::<ListArray>().unwrap().value(idx);
+            let array = arr
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .expect("Arrow field and array type must agree")
+                .value(idx);
+            encode_list(encoder, array, pg_field)?
+        }
+        DataType::LargeList(_) => {
+            if arr.is_null(idx) {
+                return encoder.encode_field(&None::<&[i8]>, pg_field);
+            }
+            let array = arr
+                .as_any()
+                .downcast_ref::<LargeListArray>()
+                .expect("Arrow field and array type must agree")
+                .value(idx);
             encode_list(encoder, array, pg_field)?
         }
         DataType::Struct(arrow_fields) => encode_struct(encoder, arr, idx, arrow_fields, pg_field)?,
@@ -608,8 +649,138 @@ mod tests {
     use bytes::BytesMut;
     use pgwire::{api::results::FieldFormat, types::format::FormatOptions};
     use postgres_types::Type;
+    use proptest::prelude::*;
 
     use super::*;
+
+    #[derive(Default)]
+    struct TextCaptureEncoder {
+        encoded: Vec<Vec<u8>>,
+    }
+
+    impl Encoder for TextCaptureEncoder {
+        type Item = Vec<Vec<u8>>;
+
+        fn encode_field<T>(&mut self, value: &T, pg_field: &FieldInfo) -> PgWireResult<()>
+        where
+            T: ToSql + ToSqlText + Sized,
+        {
+            self.encode_field_with_type(value, pg_field.datatype(), pg_field)
+        }
+
+        fn encode_field_with_type<T>(
+            &mut self,
+            value: &T,
+            data_type: &Type,
+            _pg_field: &FieldInfo,
+        ) -> PgWireResult<()>
+        where
+            T: ToSql + ToSqlText + Sized,
+        {
+            let mut bytes = BytesMut::new();
+            value
+                .to_sql_text(data_type, &mut bytes, &FormatOptions::default())
+                .map_err(PgWireError::ApiError)?;
+            self.encoded.push(bytes.to_vec());
+            Ok(())
+        }
+
+        fn take_row(&mut self) -> Self::Item {
+            std::mem::take(&mut self.encoded)
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn geometry_sentinel_preserves_generated_wkb_text_payloads(
+            values in prop::collection::vec(prop::option::of(prop::collection::vec(any::<u8>(), 0..128)), 0..64)
+        ) {
+            let array: Arc<dyn Array> = Arc::new(BinaryArray::from_iter(
+                values.iter().map(|value| value.as_deref()),
+            ));
+            let arrow_field = Field::new("geom_wkb", DataType::Binary, true);
+            let geometry = FieldInfo::new(
+                "geom_wkb".to_owned(),
+                None,
+                None,
+                crate::datatypes::geometry_pg_type(),
+                FieldFormat::Text,
+            );
+            let bytea = FieldInfo::new(
+                "payload".to_owned(),
+                None,
+                None,
+                Type::BYTEA,
+                FieldFormat::Text,
+            );
+            for index in 0..values.len() {
+                let mut geometry_encoder = TextCaptureEncoder::default();
+                encode_value(&mut geometry_encoder, &array, index, &arrow_field, &geometry)?;
+                let mut bytea_encoder = TextCaptureEncoder::default();
+                encode_value(&mut bytea_encoder, &array, index, &arrow_field, &bytea)?;
+                prop_assert_eq!(geometry_encoder.encoded, bytea_encoder.encoded);
+            }
+        }
+
+        #[test]
+        fn generated_fixed_binary_values_encode_without_panics(
+            values in prop::collection::vec(prop::option::of(any::<[u8; 4]>()), 0..64)
+        ) {
+            let array: Arc<dyn Array> = Arc::new(
+                FixedSizeBinaryArray::try_from_sparse_iter_with_size(
+                    values.iter().map(|value| value.as_ref().map(|value| value.as_slice())),
+                    4,
+                ).expect("valid generated fixed binary"),
+            );
+            let arrow_field = Field::new("payload", DataType::FixedSizeBinary(4), true);
+            let pg_field = FieldInfo::new(
+                "payload".to_owned(), None, None, Type::BYTEA, FieldFormat::Text,
+            );
+            for index in 0..values.len() {
+                let mut encoder = TextCaptureEncoder::default();
+                encode_value(&mut encoder, &array, index, &arrow_field, &pg_field)?;
+                prop_assert_eq!(encoder.encoded.len(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_json_fails_instead_of_becoming_json_null() {
+        let array: Arc<dyn Array> = Arc::new(StringArray::from(vec![Some("{not json")]));
+        let arrow_field = Field::new("properties", DataType::Utf8, true);
+        let pg_field = FieldInfo::new(
+            "properties".to_owned(),
+            None,
+            None,
+            Type::JSONB,
+            FieldFormat::Text,
+        );
+        let mut encoder = TextCaptureEncoder::default();
+        let error = encode_value(&mut encoder, &array, 0, &arrow_field, &pg_field)
+            .expect_err("invalid JSON must fail closed");
+        assert!(matches!(error, PgWireError::UserError(_)));
+        assert!(encoder.encoded.is_empty());
+    }
+
+    #[test]
+    fn null_intervals_emit_one_null_field() {
+        let array: Arc<dyn Array> = Arc::new(IntervalYearMonthArray::from(vec![None]));
+        let arrow_field = Field::new(
+            "interval_value",
+            DataType::Interval(IntervalUnit::YearMonth),
+            true,
+        );
+        let pg_field = FieldInfo::new(
+            "interval_value".to_owned(),
+            None,
+            None,
+            Type::INTERVAL,
+            FieldFormat::Text,
+        );
+        let mut encoder = TextCaptureEncoder::default();
+        encode_value(&mut encoder, &array, 0, &arrow_field, &pg_field).expect("null interval");
+        assert_eq!(encoder.encoded.len(), 1);
+    }
 
     #[test]
     fn encodes_dictionary_array() {

@@ -3,6 +3,7 @@
 
 use std::fs::File;
 use std::io::{BufReader, Error as IoError, ErrorKind};
+use std::time::Duration;
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
@@ -18,14 +19,19 @@ use pgwire::tokio::process_socket;
 use rustls_pemfile::{certs, pkcs8_private_keys};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::net::TcpListener;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, watch};
+use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::{self, ServerConfig};
 
 use crate::auth::{AccessRole, AuthConfig};
 
+mod copy_text;
 mod duckdb;
-pub use duckdb::{serve_duckdb, serve_duckdb_on_listener};
+pub use duckdb::{
+    serve_duckdb, serve_duckdb_on_listener, serve_duckdb_on_listener_until, serve_duckdb_until,
+};
+pub const MAX_COPY_BATCHES_PER_CHUNK: usize = copy_text::MAX_BATCHES_PER_COPY_CHUNK;
 
 #[derive(Clone, Debug)]
 pub struct ServerOptions {
@@ -34,6 +40,18 @@ pub struct ServerOptions {
     tls_cert_path: Option<String>,
     tls_key_path: Option<String>,
     max_connections: usize,
+    max_active_queries: usize,
+    max_reader_queries: usize,
+    max_writer_queries: usize,
+    max_maintenance_queries: usize,
+    max_queued_queries: usize,
+    max_blocking_workers: usize,
+    queue_timeout: Duration,
+    statement_timeout: Duration,
+    result_batch_bytes: usize,
+    copy_batch_rows: usize,
+    copy_batch_bytes: usize,
+    copy_max_row_bytes: usize,
 }
 
 impl Default for ServerOptions {
@@ -43,7 +61,19 @@ impl Default for ServerOptions {
             port: 5432,
             tls_cert_path: None,
             tls_key_path: None,
-            max_connections: 0,
+            max_connections: 64,
+            max_active_queries: 8,
+            max_reader_queries: 8,
+            max_writer_queries: 2,
+            max_maintenance_queries: 1,
+            max_queued_queries: 64,
+            max_blocking_workers: 9,
+            queue_timeout: Duration::from_secs(30),
+            statement_timeout: Duration::from_secs(300),
+            result_batch_bytes: 8 * 1024 * 1024,
+            copy_batch_rows: 65_536,
+            copy_batch_bytes: 8 * 1024 * 1024,
+            copy_max_row_bytes: 1024 * 1024,
         }
     }
 }
@@ -76,6 +106,114 @@ impl ServerOptions {
     pub fn with_max_connections(mut self, max_connections: usize) -> Self {
         self.max_connections = max_connections;
         self
+    }
+
+    pub fn with_max_active_queries(mut self, max_active_queries: usize) -> Self {
+        self.max_active_queries = max_active_queries;
+        self
+    }
+
+    pub fn with_max_reader_queries(mut self, max_reader_queries: usize) -> Self {
+        self.max_reader_queries = max_reader_queries;
+        self
+    }
+
+    pub fn with_max_writer_queries(mut self, max_writer_queries: usize) -> Self {
+        self.max_writer_queries = max_writer_queries;
+        self
+    }
+
+    pub fn with_max_maintenance_queries(mut self, max_maintenance_queries: usize) -> Self {
+        self.max_maintenance_queries = max_maintenance_queries;
+        self
+    }
+
+    pub fn with_max_queued_queries(mut self, max_queued_queries: usize) -> Self {
+        self.max_queued_queries = max_queued_queries;
+        self
+    }
+
+    pub fn with_max_blocking_workers(mut self, max_blocking_workers: usize) -> Self {
+        self.max_blocking_workers = max_blocking_workers;
+        self
+    }
+
+    pub fn with_queue_timeout(mut self, queue_timeout: Duration) -> Self {
+        self.queue_timeout = queue_timeout;
+        self
+    }
+
+    pub fn with_statement_timeout(mut self, statement_timeout: Duration) -> Self {
+        self.statement_timeout = statement_timeout;
+        self
+    }
+
+    pub fn with_result_batch_bytes(mut self, result_batch_bytes: usize) -> Self {
+        self.result_batch_bytes = result_batch_bytes;
+        self
+    }
+
+    pub fn with_copy_batch_rows(mut self, copy_batch_rows: usize) -> Self {
+        self.copy_batch_rows = copy_batch_rows;
+        self
+    }
+
+    pub fn with_copy_batch_bytes(mut self, copy_batch_bytes: usize) -> Self {
+        self.copy_batch_bytes = copy_batch_bytes;
+        self
+    }
+
+    pub fn with_copy_max_row_bytes(mut self, copy_max_row_bytes: usize) -> Self {
+        self.copy_max_row_bytes = copy_max_row_bytes;
+        self
+    }
+
+    fn max_active_queries(&self) -> usize {
+        self.max_active_queries
+    }
+
+    fn max_queued_queries(&self) -> usize {
+        self.max_queued_queries
+    }
+
+    fn max_reader_queries(&self) -> usize {
+        self.max_reader_queries
+    }
+
+    fn max_writer_queries(&self) -> usize {
+        self.max_writer_queries
+    }
+
+    fn max_maintenance_queries(&self) -> usize {
+        self.max_maintenance_queries
+    }
+
+    fn max_blocking_workers(&self) -> usize {
+        self.max_blocking_workers
+    }
+
+    fn queue_timeout(&self) -> Duration {
+        self.queue_timeout
+    }
+
+    fn statement_timeout(&self) -> Duration {
+        self.statement_timeout
+    }
+
+    fn result_batch_bytes(&self) -> usize {
+        self.result_batch_bytes
+    }
+
+    fn copy_batch_rows(&self) -> usize {
+        self.copy_batch_rows
+    }
+
+    fn copy_batch_bytes(&self) -> usize {
+        self.copy_batch_bytes
+    }
+
+    fn copy_max_row_bytes(&self) -> usize {
+        self.copy_max_row_bytes
     }
 }
 
@@ -116,6 +254,19 @@ pub async fn serve_with_handlers_on_listener<H>(
 where
     H: PgWireServerHandlers + Send + Sync + 'static,
 {
+    let (_shutdown_guard, shutdown) = watch::channel(false);
+    serve_with_handlers_on_listener_until(handlers, listener, options, shutdown).await
+}
+
+pub async fn serve_with_handlers_on_listener_until<H>(
+    handlers: Arc<H>,
+    listener: TcpListener,
+    options: &ServerOptions,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<(), IoError>
+where
+    H: PgWireServerHandlers + Send + Sync + 'static,
+{
     let tls_acceptor = match (
         options.tls_cert_path.as_deref(),
         options.tls_key_path.as_deref(),
@@ -137,31 +288,46 @@ where
     log::info!("quackgis pgwire listening on {}", listener.local_addr()?);
     let limiter =
         (options.max_connections > 0).then(|| Arc::new(Semaphore::new(options.max_connections)));
+    let mut connections = JoinSet::new();
     loop {
-        match listener.accept().await {
-            Ok((socket, peer)) => {
-                let handlers = Arc::clone(&handlers);
-                let tls_acceptor = tls_acceptor.clone();
-                let limiter = limiter.clone();
-                tokio::spawn(async move {
-                    let _permit = match limiter {
-                        Some(limiter) => match limiter.try_acquire_owned() {
-                            Ok(permit) => Some(permit),
-                            Err(_) => {
-                                log::warn!("pgwire connection rejected from {peer}: limit reached");
-                                return;
-                            }
-                        },
-                        None => None,
-                    };
-                    if let Err(error) = process_socket(socket, tls_acceptor, handlers).await {
-                        log::warn!("pgwire socket error from {peer}: {error}");
-                    }
-                });
+        tokio::select! {
+            biased;
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
             }
-            Err(error) => log::warn!("pgwire accept error: {error}"),
+            accepted = listener.accept() => match accepted {
+                Ok((socket, peer)) => {
+                    let handlers = Arc::clone(&handlers);
+                    let tls_acceptor = tls_acceptor.clone();
+                    let limiter = limiter.clone();
+                    connections.spawn(async move {
+                        let _permit = match limiter {
+                            Some(limiter) => match limiter.try_acquire_owned() {
+                                Ok(permit) => Some(permit),
+                                Err(_) => {
+                                    log::warn!("pgwire connection rejected from {peer}: limit reached");
+                                    return;
+                                }
+                            },
+                            None => None,
+                        };
+                        if let Err(error) = process_socket(socket, tls_acceptor, handlers).await {
+                            log::warn!("pgwire socket error from {peer}: {error}");
+                        }
+                    });
+                }
+                Err(error) => log::warn!("pgwire accept error: {error}"),
+            },
         }
     }
+    while let Some(result) = connections.join_next().await {
+        if let Err(error) = result {
+            log::warn!("pgwire connection task failed during drain: {error}");
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]

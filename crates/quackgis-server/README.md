@@ -28,10 +28,14 @@ mise exec -- just smoke
 
 Supported locally: bounded simple/extended pgwire, parameters, create/insert/
 update/delete, transactions, text COPY for maintained types, SCRAM/table policy,
-portals, official DuckLake reopen, and the curated spatial subset.
+portals, `public` schema mapping, maintained SET/SHOW forms, quoted COPY targets,
+official DuckLake reopen, and the curated spatial subset.
 
-Not yet supported as product claims: result/COPY streaming, native cancellation,
-resource admission, broad catalogs, named GIS clients, or remote/shared storage.
+Query results stream from ADBC with native cancellation, deadlines, bounded
+admission, and autosized DuckDB resource controls. COPY incrementally decodes
+bounded Arrow batches into one ADBC stream and publishes atomically. Not yet
+supported as product claims: COPY/query scale and RSS budgets, broad catalogs,
+named GIS clients, or remote/shared storage.
 
 See the root `README.md`, `ARCHITECTURE.md`, and `docs/COMPATIBILITY.md` for the
 current contract.

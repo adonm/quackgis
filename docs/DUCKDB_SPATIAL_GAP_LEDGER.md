@@ -21,7 +21,7 @@ in required pull-request CI.
 | Mechanical SQL rewrite | 5 | A recorded DuckDB SQL spelling produces the same maintained result. |
 | QuackGIS macro | 6 | A small explicit compatibility expression is required and executable. |
 | Rust pgwire/catalog edge | 10 | SRID/EWKB identity, extent metadata, or catalog behavior remains owned by the compatibility edge. |
-| Extension candidate | 5 | `ST_NDims`/`ST_CoordDim` and `ST_GeometryN` family gaps need a real macro/extension implementation before DuckDB pgwire promotion. |
+| Extension candidate | 5 | `ST_NDims`/`ST_CoordDim` and `ST_GeometryN` family gaps return ledger-pinned `0A000` errors until a real macro/extension implementation is promoted. |
 | Explicit unsupported | 0 | No case in the current claimed subset is intentionally dropped. |
 
 The machine-owned classification is
@@ -35,7 +35,8 @@ This closes classification for the current 57-case subset. The pinned CLI probe
 executes the classified DuckDB expressions, while `duckdb-pgwire-workflow-test`
 sends all 42 original PostGIS expressions through the server-owned rewrite/macro
 edge with maintained scalar results. The pgwire test reads this ledger and the
-curated regress source so the lists cannot drift silently. It does not yet route
-the 10 Rust-edge or five extension-candidate cases, prove geometry/geography OIDs,
-or classify the broader SQL-portability and client-trace corpus. Those remain M3
-work.
+curated regress source so the lists cannot drift silently. The five extension
+candidates also pass through simple and extended pgwire to prove stable errors and
+session reuse. It does not yet route the 10 Rust-edge cases, prove
+geometry/geography OIDs, or classify the broader SQL-portability and client-trace
+corpus. Those remain M3 work.

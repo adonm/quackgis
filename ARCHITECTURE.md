@@ -61,8 +61,11 @@ together. Parsed read/write policy runs before ADBC prepare or schema lookup.
 ### SQL admission
 
 Standalone `sqlparser` parses exactly one statement. The current allowlist admits
-bounded query, create-table, insert, update, delete, and simple transaction shapes.
-Unsupported shapes fail closed. COPY has a dedicated parser and protocol state.
+bounded query, create-table, insert, update, delete, simple transaction, and strict
+maintained SET/SHOW shapes. An AST relation visitor maps PostgreSQL `public` to
+DuckLake `quackgis.main` before execution while policy sees the original target.
+Unsupported shapes fail closed. COPY uses parsed one-/two-/three-part identifiers
+and dedicated protocol state.
 
 ### Storage authority
 
@@ -75,29 +78,58 @@ separate root; alternating writers is never supported.
 Current path:
 
 ```text
-SQL → normalize/rewrite → PostgreSQL AST → authorization
+SQL → normalize/rewrite → PostgreSQL AST → authorization/admission
     → per-client DuckDB ADBC session → describe/bind/execute
-    → Vec<RecordBatch> → Arrow-to-pgwire encoder → client
+    → owned ADBC reader → one Arrow batch → pgwire rows → client
 ```
 
-The materialized `Vec<RecordBatch>` boundary is migration debt. The target owns a
-live ADBC reader/statement/connection lease and transfers bounded batches to async
-pgwire with backpressure. Portals consume the same stream. Cancellation targets
-the active native statement, and uncertain cleanup quarantines the connection.
+The live stream owns its ADBC reader, statement, connection lease, admission
+permit, cancellation registration, and deadline. Pgwire requests another native
+batch only after exhausting the current batch; portals consume the same stream.
+Native interruption maps to SQLSTATE `57014`. Only a stream that reaches native
+EOF returns its connection; cancellation, reader failure, or dropping a partially
+delivered result quarantines the session. Driver batches larger than the
+configured byte ceiling fail with SQLSTATE `54000` before pgwire encoding. This
+bounds the protocol edge but does not
+prevent a native driver from temporarily allocating that batch; full RSS evidence
+remains open.
 
 ## Session and transaction ownership
 
 Each pgwire client lazily opens an independent DuckDB session. Explicit
 transactions remain session-affine. Reentrant use fails instead of deadlocking.
 Native failures that make commit/rollback state uncertain quarantine the session.
+Each first quarantine transition increments a path-free process counter.
 Disconnect attempts rollback. Future pools may reuse only clean, idle sessions.
+
+All runtime ADBC calls pass through a fixed process-owned blocking-worker pool.
+Regular work is capped below the total by one slot so cancellation/control work
+cannot queue behind every operation it may need to interrupt. Admission permits
+bound complete operations globally and within reader/writer classes; a reserved
+maintenance class defines the control-plane ceiling for future server-exposed
+maintenance. Worker permits bound only the synchronous native call.
 
 ## COPY lifecycle
 
-Current COPY parses a bounded complete request into Arrow and ingests through ADBC.
-The target parser incrementally builds bounded Arrow batches from protocol chunks
-under one transaction. Parse failure, disconnect, cancel, or timeout must publish
-zero rows. COPY is the primary bulk path; repeated INSERT is compatibility only.
+COPY incrementally decodes protocol chunks into row- and byte-bounded Arrow
+batches. One bounded channel feeds one ADBC stream into a session-local temporary
+DuckDB table. Clean EOF publishes to DuckLake with one atomic `INSERT`; parse
+failure, disconnect, cancel, or timeout drops the staging input without touching
+the target. Worker-owned admission/deadline guards release on cancellation; the
+pinned pgwire callback API cannot deliver an asynchronous error to an idle COPY
+socket until its next frame or disconnect. COPY is the primary bulk path;
+repeated INSERT is compatibility only.
+
+When a target declares all four `DOUBLE` columns `_qg_minx`, `_qg_miny`,
+`_qg_maxx`, `_qg_maxy` and COPY supplies a recognized binary geometry column,
+the publication statement computes bbox values with DuckDB Spatial. Rust never
+decodes geometry rows. The reserved columns must be nullable, the table must have
+exactly one recognized geometry field, and clients may not supply bbox values.
+Partial, wrong-type, caller-supplied, or ambiguous layouts fail closed before
+staging; tables with no reserved bbox columns are copied unchanged. Until
+schema-aware DML recomputation is implemented, direct pgwire `INSERT`/`UPDATE` on
+any table containing reserved bbox columns fails closed; this prevents stale or
+forged bounds while keeping COPY as the supported write path.
 
 ## Spatial compatibility
 

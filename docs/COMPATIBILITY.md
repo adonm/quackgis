@@ -14,8 +14,15 @@ The required real-driver workflow proves:
   `BEGIN`, `COMMIT`, or `ROLLBACK` statement;
 - parameterized reads and mutations without SQL interpolation;
 - PostgreSQL text `COPY FROM STDIN` for the maintained scalar and WKB types;
-- portal paging, transaction isolation, disconnect rollback, restart, and reopen;
-- Arrow result encoding for maintained scalar types; and
+- `SET standard_conforming_strings`, bounded `client_min_messages`,
+  `SHOW search_path`, `public` relation mapping, and quoted COPY targets;
+- portal paging, transaction isolation, failed-transaction `25P02` enforcement,
+  `COMMIT`-as-rollback after failure, disconnect rollback, restart, and reopen;
+- the simple-protocol, server-owned
+  `CALL quackgis_merge_adjacent_files(...)` maintenance procedure for an
+  explicitly configured identity; arbitrary procedures remain unsupported;
+- Arrow result encoding for maintained scalar types, with generated WKB payload/
+  null and fixed-binary properties; and
 - 42 curated spatial cases sent with their original PostGIS spelling through the
   real server, using DuckDB Spatial plus bounded QuackGIS rewrites/macros.
 
@@ -58,13 +65,36 @@ surfaces remain open unless a focused test says otherwise.
 ## Deliberate runtime limits
 
 - Local official DuckLake catalog and local data paths only.
+- Maintenance is disabled unless `QUACKGIS_MAINTENANCE_USER` names the caller;
+  it remains constrained by the write table allowlist and cannot run inside an
+  explicit transaction.
 - Exact pinned DuckDB library version/digest and preinstalled signed extensions.
-- Results are materialized at the ADBC boundary.
-- Native DuckDB statement cancellation is not wired through pgwire cancellation.
-- COPY is bounded to 16 MiB and does not yet implement full PostgreSQL options,
-  escaping, arrays, JSON, time zones, or every scalar type.
+- Query results stream one driver-produced Arrow batch at a time and reject a
+  driver batch above the configured byte ceiling before pgwire encoding; native
+  allocation and 1M/10M RSS evidence remain open.
+- A fully exhausted result returns its native connection. Closing a suspended
+  portal or otherwise dropping a partially delivered result quarantines that
+  session; independent sessions remain isolated.
+- Pgwire cancellation interrupts active DuckDB result and COPY workers. A COPY
+  client that sends no further frame does not receive its error until it resumes
+  or disconnects; broader write/commit cancellation and latency evidence remain
+  gaps. When the client resumes, deadline cancellation returns `57014` and the
+  target remains unchanged even after staging batches were flushed.
+- COPY has no total request ceiling, incrementally decodes PostgreSQL text escapes,
+  and enforces configured row, Arrow-batch, and post-decode wire-chunk limits. The
+  pinned pgwire dependency may allocate a declared frame before that check;
+  CSV/binary COPY options, arrays, JSON, time zones, and every scalar type remain
+  unsupported.
+- Reserved bbox layouts are validated before COPY staging; clients cannot provide
+  bbox values, and partial/wrong-type/ambiguous layouts fail with stable `0A000`.
+- Direct `INSERT` and `UPDATE` on a table containing maintained bbox columns return
+  `0A000`; use COPY until schema-aware DML recomputation is implemented. `DELETE`
+  does not create stale surviving rows and remains supported.
 - `pg_catalog`, `information_schema`, geometry/geography OID discovery, and GIS
   client-specific metadata are incomplete.
+- Binary columns named `geom_wkb` use the same geometry sentinel OID as the
+  maintained COPY bbox layout; subtype/SRID/dimension catalog identity remains
+  open.
 - Shared PostgreSQL/object-storage DuckLake, multi-writer recovery, migration,
   production packaging, soak, and disaster-recovery evidence remain open.
 

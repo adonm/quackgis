@@ -6,8 +6,13 @@ use arrow_array::{
     Array, BinaryArray, Float64Array, Int32Array, Int64Array, RecordBatch, StringArray,
 };
 use arrow_schema::{DataType, Field, Schema};
-use quackgis_server::duckdb_adbc_storage::{DuckDbAdbcConfig, DuckDbAdbcStorage, ExtensionPolicy};
-use quackgis_server::engine_api::{EngineMaintenanceRequest, EngineStorageKernel, EngineTableRef};
+use quackgis_server::duckdb_adbc_storage::{
+    DuckDbAdbcConfig, DuckDbAdbcStorage, DuckDbResourceConfig, ExtensionPolicy,
+};
+use quackgis_server::engine_api::{
+    EngineErrorKind, EngineMaintenanceRequest, EngineStorageKernel, EngineTableRef,
+    EngineTransactionState,
+};
 
 fn point_wkb(x: f64, y: f64) -> Vec<u8> {
     let mut wkb = Vec::with_capacity(21);
@@ -158,14 +163,17 @@ fn official_ducklake_roundtrips_arrow_and_one_snapshot_transaction() {
         .expect("snapshot count after rollback");
     assert_eq!(first_i64(&snapshots_after_rollback[0], 0), snapshots_before);
 
+    let lifecycle = storage.lifecycle();
     storage
         .transaction(|transaction| {
+            assert_eq!(lifecycle.active_transactions(), 1);
             transaction
                 .execute_update("UPDATE quackgis.main.points SET name = 'uno' WHERE id = 2")?;
             transaction.execute_update("DELETE FROM quackgis.main.points WHERE id = 1")?;
             Ok(())
         })
         .expect("one-snapshot DuckLake mutation");
+    assert_eq!(lifecycle.active_transactions(), 0);
 
     let snapshots_after = storage
         .query("SELECT count(*) AS snapshots FROM ducklake_snapshots('quackgis')")
@@ -437,4 +445,205 @@ fn duckdb_hidden_bbox_candidates_keep_exact_spatial_recheck() {
         .query(&exact_sql)
         .expect("exact recheck after reopen");
     assert_eq!(first_i64(&reopened_exact[0], 0), 2);
+}
+
+#[test]
+#[ignore = "requires QUACKGIS_DUCKDB_ADBC_DRIVER pointing to libduckdb"]
+fn query_stream_owns_connection_and_reads_incrementally() {
+    let driver =
+        std::env::var_os("QUACKGIS_DUCKDB_ADBC_DRIVER").expect("set QUACKGIS_DUCKDB_ADBC_DRIVER");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_path = temp.path().join("data");
+    std::fs::create_dir(&data_path).expect("data path");
+    let config = DuckDbAdbcConfig {
+        driver_path: driver.into(),
+        database_uri: ":memory:".to_owned(),
+        ducklake_uri: format!(
+            "ducklake:{}",
+            temp.path().join("catalog.ducklake").display()
+        ),
+        catalog_name: "quackgis".to_owned(),
+        data_path: data_path.display().to_string(),
+        extension_policy: ExtensionPolicy::LoadOnly,
+    };
+    let storage = Arc::new(
+        DuckDbAdbcStorage::open_with_resources(
+            config,
+            DuckDbResourceConfig {
+                threads: 4,
+                memory_limit_bytes: 1_073_741_824,
+                temp_directory: data_path.join(".tmp"),
+                max_temp_directory_bytes: 10_737_418_240,
+            },
+        )
+        .expect("open storage"),
+    );
+    let settings = storage
+        .query(
+            "SELECT name, value FROM duckdb_settings() \
+             WHERE name IN ('max_temp_directory_size', 'memory_limit', 'temp_directory', 'threads') \
+             ORDER BY name",
+        )
+        .expect("resource settings");
+    let names = settings[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("setting names");
+    let values = settings[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("setting values");
+    assert_eq!(names.value(0), "max_temp_directory_size");
+    assert_eq!(values.value(0), "10.0 GiB");
+    assert_eq!(names.value(1), "memory_limit");
+    assert_eq!(values.value(1), "1.0 GiB");
+    assert_eq!(names.value(2), "temp_directory");
+    assert_eq!(values.value(2), data_path.join(".tmp").to_string_lossy());
+    assert_eq!(names.value(3), "threads");
+    assert_eq!(values.value(3), "4");
+    let resources = storage.resource_sample().expect("DuckDB resource sample");
+    assert!(resources.memory_bytes > 0);
+    storage
+        .readiness_probe()
+        .expect("empty DuckLake readiness probe");
+
+    let mut stream = storage
+        .query_stream("SELECT i::BIGINT AS id FROM range(100000) AS rows(i) ORDER BY i")
+        .expect("open query stream");
+    assert_eq!(stream.schema.fields().len(), 1);
+    let first = stream
+        .next_batch()
+        .expect("first batch")
+        .expect("non-empty stream");
+    assert!(
+        first.num_rows() < 100_000,
+        "driver must expose multiple batches"
+    );
+    assert!(
+        storage.query("SELECT 1").is_err(),
+        "live stream retains the sole session connection"
+    );
+    let mut rows = first.num_rows();
+    while let Some(batch) = stream.next_batch().expect("next batch") {
+        rows += batch.num_rows();
+    }
+    assert_eq!(rows, 100_000);
+    drop(stream);
+    assert_eq!(
+        storage
+            .query("SELECT 1")
+            .expect("connection returned")
+            .len(),
+        1
+    );
+
+    let mut empty = storage
+        .query_stream("SELECT 1::INTEGER AS id WHERE false")
+        .expect("empty stream");
+    assert_eq!(empty.schema.fields().len(), 1);
+    assert!(empty.next_batch().expect("empty batch read").is_none());
+    drop(empty);
+    storage
+        .query("SELECT 1")
+        .expect("empty stream returned connection");
+
+    let quarantined = Arc::new(storage.open_session().expect("independent stream session"));
+    let mut partial = quarantined
+        .query_stream("SELECT i::BIGINT AS id FROM range(100000) AS rows(i) ORDER BY i")
+        .expect("open partial stream");
+    assert!(partial.next_batch().expect("partial first batch").is_some());
+    drop(partial);
+    assert_eq!(
+        quarantined.transaction_state(),
+        EngineTransactionState::Quarantined
+    );
+    let error = match quarantined.query_stream("SELECT 1") {
+        Ok(_) => panic!("quarantined session must reject reuse"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind, EngineErrorKind::Quarantined);
+    storage
+        .readiness_probe()
+        .expect("independent DuckLake readiness after query work");
+}
+
+#[test]
+#[ignore = "requires QUACKGIS_DUCKDB_ADBC_DRIVER pointing to libduckdb"]
+fn offline_backup_restores_exact_catalog_snapshot() {
+    let driver =
+        std::env::var_os("QUACKGIS_DUCKDB_ADBC_DRIVER").expect("set QUACKGIS_DUCKDB_ADBC_DRIVER");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_path = temp.path().join("data");
+    std::fs::create_dir(&data_path).expect("data path");
+    let catalog_path = temp.path().join("catalog.ducklake");
+    let backup_path = temp.path().join("backup");
+    let config = DuckDbAdbcConfig {
+        driver_path: driver.into(),
+        database_uri: ":memory:".to_owned(),
+        ducklake_uri: format!("ducklake:{}", catalog_path.display()),
+        catalog_name: "quackgis".to_owned(),
+        data_path: data_path.display().to_string(),
+        extension_policy: ExtensionPolicy::LoadOnly,
+    };
+    let storage = DuckDbAdbcStorage::open(config.clone()).expect("open backup source");
+    storage
+        .execute_update("CREATE TABLE quackgis.main.recovery(id INTEGER, name VARCHAR)")
+        .expect("create recovery table");
+    storage
+        .execute_update("INSERT INTO quackgis.main.recovery VALUES (1, 'one'), (2, 'two')")
+        .expect("seed recovery table");
+    let snapshot_id = storage
+        .snapshots()
+        .expect("source snapshots")
+        .last()
+        .unwrap()
+        .id;
+    drop(storage);
+
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../scripts/duckdb_local_backup.py");
+    let backup = std::process::Command::new("python3")
+        .arg(&script)
+        .arg("backup")
+        .arg("--catalog")
+        .arg(&catalog_path)
+        .arg("--data-root")
+        .arg(&data_path)
+        .arg("--destination")
+        .arg(&backup_path)
+        .status()
+        .expect("run local backup");
+    assert!(backup.success());
+    std::fs::remove_file(&catalog_path).expect("remove source catalog");
+    std::fs::remove_dir_all(&data_path).expect("remove source data");
+    let restore = std::process::Command::new("python3")
+        .arg(&script)
+        .arg("restore")
+        .arg("--backup")
+        .arg(&backup_path)
+        .arg("--catalog")
+        .arg(&catalog_path)
+        .arg("--data-root")
+        .arg(&data_path)
+        .status()
+        .expect("run local restore");
+    assert!(restore.success());
+
+    let restored = DuckDbAdbcStorage::open(config).expect("open restored catalog");
+    let rows = restored
+        .query("SELECT count(*)::BIGINT, sum(id)::BIGINT FROM quackgis.main.recovery")
+        .expect("query restored rows");
+    assert_eq!(first_i64(&rows[0], 0), 2);
+    assert_eq!(first_i64(&rows[0], 1), 3);
+    assert_eq!(
+        restored
+            .snapshots()
+            .expect("restored snapshots")
+            .last()
+            .unwrap()
+            .id,
+        snapshot_id
+    );
 }

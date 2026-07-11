@@ -15,12 +15,16 @@ Local ownership:
 - `quackgis.spatial_family` field metadata takes precedence over conservative
   column-name fallback;
 - WKB/EWKB remains raw binary in PostgreSQL binary format and hex in text format;
-  and
+- generated properties prove geometry sentinel payload identity and fixed-size
+  binary/null encoding; unsupported list layouts fail during schema mapping;
+- invalid JSON fails closed instead of silently becoming JSON `null`; and
 - the crate is built and linted as a normal member of the root dependency graph.
 
 This encoder should eventually become a QuackGIS-owned crate with focused
-property/fuzz coverage for every advertised Arrow type. Until then, Arrow and
-pgwire versions are pinned together with the server.
+property/fuzz coverage for every advertised Arrow type. Initial generated WKB and
+fixed-binary properties are maintained; the complete advertised-type matrix
+remains open. Until then, Arrow and pgwire versions are pinned together with the
+server.
 
 ## Retired forks
 

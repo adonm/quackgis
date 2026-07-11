@@ -212,6 +212,14 @@ duckdb-current-benchmark driver=duckdb_adbc_driver duckdb_bin=duckdb_bin out=".t
     HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" DUCKDB_BIN="$duckdb_arg" QUACKGIS_BENCHMARK_OUT="$out_arg" \
       cargo test -p quackgis-server --release --test duckdb_wire_read current_duckdb_transport_profile -- --ignored --exact --nocapture --test-threads=1
 
+# Create an offline, exact-path local DuckLake backup with a checksum manifest.
+duckdb-local-backup catalog=catalog data=data out=".tmp/duckdb-backup":
+    python3 scripts/duckdb_local_backup.py backup --catalog "{{catalog}}" --data-root "{{data}}" --destination "{{out}}"
+
+# Restore a verified local DuckLake backup to its exact original paths.
+duckdb-local-restore backup catalog=catalog data=data:
+    python3 scripts/duckdb_local_backup.py restore --backup "{{backup}}" --catalog "{{catalog}}" --data-root "{{data}}"
+
 # Compatibility alias for the original read-only checkpoint recipe.
 duckdb-pgwire-read-test: duckdb-pgwire-workflow-test
 
@@ -257,6 +265,7 @@ probe-static-check:
     python3 scripts/tests/test_duckdb_engine_probe.py
     python3 scripts/tests/test_duckdb_spatial_compat_probe.py
     python3 scripts/tests/test_duckdb_runtime_static_check.py
+    python3 scripts/tests/test_duckdb_local_backup.py
 
 # Validate maintained documentation links, commands, and spatial claims.
 project-contract-check:

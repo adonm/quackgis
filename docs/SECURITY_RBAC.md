@@ -10,6 +10,7 @@ QuackGIS currently implements a small service-identity model, not PostgreSQL RBA
 | SCRAM-SHA-256 password startup | real DuckDB pgwire workflow |
 | read/write and optional read-only identity | auth unit + real workflow |
 | normalized read/write table allowlists | structural policy unit + denied real cases |
+| separate opt-in maintenance identity and table policy | auth/parser unit + real pgwire compaction workflow |
 | fail-closed TLS material configuration | startup validation |
 | bounded/redacted auth and authorization audit events | audit/policy tests |
 | optional private metrics endpoint | metrics unit tests |
@@ -39,9 +40,10 @@ binding, secret rotation, and production failure drills remain open.
 - Object identity is normalized from the parsed statement, never a raw SQL prefix.
 - Compatibility rewrites may shape SQL/results but may not change the underlying
   table authorization decision.
-- Administrative capabilities for maintenance, backup/restore, retention, and
-  future shared storage require separate permissions rather than inheriting SELECT
-  or write access.
+- `QUACKGIS_MAINTENANCE_USER` grants one existing read/write identity the bounded
+  compaction call; the write table allowlist still applies. Backup/restore,
+  retention, and future shared storage remain offline/operator capabilities and
+  do not inherit SQL access.
 
 ## Required Local 1.0 evidence
 
@@ -51,7 +53,8 @@ binding, secret rotation, and production failure drills remain open.
 - read-only and allowlist denials return stable SQLSTATE `42501` before ADBC;
 - query timeout/cancel and connection quarantine do not bypass policy;
 - secret rotation and revocation have a documented deployment behavior;
-- backup/restore and maintenance actions emit redacted administrative events; and
+- online backup/restore and all maintenance actions emit redacted administrative
+  events (the current offline backup tool runs outside the server audit stream); and
 - metadata visible to restricted identities is trace-tested and filtered.
 
 Do not claim full PostgreSQL object privileges. Add only the permissions required

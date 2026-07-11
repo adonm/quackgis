@@ -11,13 +11,65 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 - Official local DuckLake create, Arrow ingest/query, transaction, snapshot
   inspection, adjacent-file merge, and reopen workflows.
 - Structural single-statement admission and parsed read/write table policy.
-- Parameterized reads/mutations, bounded PostgreSQL text COPY, independent client
-  sessions, transaction cleanup, and portal paging.
+- Parameterized reads/mutations, incremental bounded PostgreSQL text COPY with
+  atomic publication, independent client sessions, transaction cleanup, and
+  portal paging.
+- Failed explicit transactions reject subsequent simple/extended work with
+  `25P02`; `COMMIT` rolls back prior writes and returns the session to service.
 - DuckDB Spatial execution with 42 curated original-PostGIS expressions routed
   through native functions or bounded server-owned rewrites/macros.
 - Checksum/version validation for `libduckdb` and signed `spatial`/`ducklake`
   extensions, plus a load-only runtime image contract.
 - DataFusion-free Arrow-to-pgwire encoder with maintained WKB sentinel identity.
+- Generated Arrow encoder properties for geometry WKB payload/null identity and
+  fixed-size binary values, plus fail-closed invalid JSON/unsupported list shapes
+  and null-safe interval encoding.
+- Configured fail-closed Arrow result-batch ceiling with batch byte/in-flight
+  metrics.
+- Fixed native blocking-worker budget with a reserved cancellation/control slot
+  and active/queued/high-water metrics.
+- Global plus reader/writer/maintenance-class admission limits and per-class
+  active/queued/high-water metrics, with a 32-contender ceiling regression.
+- Opt-in maintenance identity and a literal-only server-owned adjacent-file
+  compaction call with write-policy enforcement, maintenance admission, audit
+  events, transaction rejection, and pgwire/reopen evidence.
+- Opt-in `/healthz` and startup/drain-aware `/readyz` responses beside `/metrics`,
+  plus active-transaction and explicit session-quarantine metrics.
+- Bounded SIGINT/SIGTERM connection drain that stops acceptance, rejects new
+  transactions, permits established work to finish, and aborts at a configured
+  deadline.
+- Checksummed offline local backup/restore with symlink/source-change rejection,
+  exact-path enforcement, staged publication, and native snapshot/count recovery
+  evidence.
+- Periodic aggregate DuckDB tracked-memory and temporary-storage samples with
+  current/high-water gauges and sampler health counters.
+- Structural compatibility for maintained PostgreSQL session settings,
+  `SHOW search_path`, `public`→`quackgis.main` relation mapping, and quoted
+  one-/two-/three-part COPY targets.
+- DuckDB-computed bbox maintenance during COPY for the explicit reserved-column
+  layout contract, including NULL, exact-recheck, and reopen evidence.
+- Fail-closed bbox layout validation rejects partial, wrong-type, caller-supplied,
+  or ambiguous reserved columns before staging and keeps the pgwire session usable.
+- COPY deadline evidence after flushed batches, with an explicit pre-publication
+  cancellation check preventing aborted ADBC EOF normalization from publishing.
+- A generated 220k-row, greater-than-20-MiB pgwire COPY regression using bounded
+  60-KiB client chunks, proving the request is no longer capped at 16 MiB.
+- COPY persistence checks for NULL/scalar/WKB values and official DuckLake
+  adjacent-file compaction after fragmented loads.
+- Stable `0A000` errors for the five maintained `ST_NDims`, `ST_CoordDim`, and
+  `ST_GeometryN` extension-candidate cases, verified through simple and extended
+  pgwire with session reuse.
+- Fail-closed native query-stream cleanup: only observed EOF returns a connection;
+  partial delivery, reader failure, or cancellation quarantines the session with
+  an explicit engine error.
+- Deep local readiness that binds pgwire and queries the DuckLake snapshot surface
+  before reporting ready, with explicit starting, storage-unavailable, and draining
+  states kept separate from process liveness.
+- Fail-closed `0A000` rejection for direct `INSERT`/`UPDATE` against maintained
+  bbox layouts, preventing stale or caller-forged bounds until schema-aware DML
+  recomputation is available.
+- A deterministic 32-client native pgwire admission regression: suspended portals
+  retain eight reader permits and no ninth reader enters before release.
 
 ### Changed
 
@@ -46,8 +98,12 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 
 ### Known limits
 
-- Materialized query results and 16 MiB buffered COPY.
-- No native cancellation, resource admission, or productized memory/spill policy.
+- Query and COPY streaming have strict scale/RSS/throughput evidence still open.
+- Query cancellation/deadlines, classed admission/resource controls, sampled
+  native memory/temporary storage, and a fixed blocking-worker budget are
+  implemented; general write cancellation and native scale/concurrency evidence
+  remain open.
 - Local official DuckLake only.
 - Incomplete catalogs, geometry identity, spatial gaps, and named GIS clients.
-- No production backup/restore, upgrade, soak, or shared-profile evidence.
+- No online/relocated production recovery, upgrade, soak, or shared-profile
+  evidence.

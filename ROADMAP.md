@@ -22,14 +22,14 @@ validation do not close milestones.
 |---|---|---|
 | Engine/storage | pinned DuckDB 1.5.4 through ADBC and local official DuckLake | local paths only |
 | Protocol | bounded simple/extended pgwire | narrow statements and parameter types |
-| Results | Arrow-to-pgwire encoding | complete ADBC result materialization |
-| COPY | text COPY to Arrow ingest | complete request buffered; 16 MiB maximum |
-| Transactions | independent sessions, commit/rollback/isolation | no production admission/failure policy |
+| Results | one driver Arrow batch at a time through pgwire with fail-closed byte ceiling | native-allocation/RSS scale evidence open |
+| COPY | incremental bounded text decoding to one ADBC stream and atomic DuckLake publication | 1 GiB/RSS/throughput evidence and pre-decode pgwire frame bound open; accepted wire chunks are bounded after dependency decoding |
+| Transactions | independent sessions, commit/rollback/isolation and failed-transaction `25P02` enforcement | write/commit cancellation policy incomplete |
 | Spatial | 42 native/rewrite/macro cases through pgwire | 10 edge gaps and 5 extension candidates |
 | Security | SCRAM and read/write table allowlists | incomplete metadata filtering/TLS evidence |
-| Operations | restart/reopen, snapshot inspection, adjacent-file merge | no production backup/restore/shared profile |
+| Operations | restart/reopen, snapshot inspection, adjacent-file merge, checksummed offline exact-path backup/restore | no online/relocated production recovery or shared profile |
 | Performance | fixture-level bbox/exact-recheck oracle | no current scale or layout-maintenance claim |
-| Metrics | process/auth/policy counters | no query, ingest, memory, spill, or cancellation metrics |
+| Metrics/status | policy, classed admission, lifecycle, cancellation, timeout, quarantine, COPY rows/bytes/batches/latency, sampled DuckDB memory/temporary storage, liveness, and DuckLake-probed readiness/drain state | probe is local/read-only; no write-capacity SLO |
 
 ## M0 — truthful, focused repository
 

@@ -5,16 +5,33 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use adbc_core::options::IngestMode;
-use arrow_array::{Int32Array, Int64Array, RecordBatch, StringArray};
+use arrow_array::{Array, Int32Array, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use bytes::Bytes;
-use futures::{SinkExt, stream};
+use futures::{SinkExt, StreamExt, stream};
 use quackgis_server::duckdb_adbc_storage::{DuckDbAdbcConfig, DuckDbAdbcStorage, ExtensionPolicy};
 use quackgis_server::pgwire_server::ServerOptions;
 use serde::Deserialize;
 use serde_json::json;
 
 struct ChildGuard(std::process::Child);
+
+fn first_i64(batch: &RecordBatch, column: usize) -> i64 {
+    batch
+        .column(column)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("Int64 result")
+        .value(0)
+}
+
+fn flushed_copy_rows(count: usize) -> Bytes {
+    let mut rows = String::new();
+    for id in 0..count {
+        rows.push_str(&format!("{id}\trow-{id}\n"));
+    }
+    Bytes::from(rows)
+}
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
@@ -33,6 +50,13 @@ struct SpatialLedgerCase {
     name: String,
     disposition: String,
     expected: Option<String>,
+    unsupported: Option<UnsupportedSpatialExpectation>,
+}
+
+#[derive(Deserialize)]
+struct UnsupportedSpatialExpectation {
+    sqlstate: String,
+    message: String,
 }
 
 fn executable_spatial_cases() -> Vec<(String, String, String)> {
@@ -76,6 +100,34 @@ fn executable_spatial_cases() -> Vec<(String, String, String)> {
         .collect()
 }
 
+fn unsupported_spatial_cases() -> Vec<(String, String, UnsupportedSpatialExpectation)> {
+    let case_pattern = regex::Regex::new(
+        r#"(?s)Case\s*\{\s*name:\s*"(?P<name>[^"]+)",\s*sql:\s*"(?P<sql>[^"]+)""#,
+    )
+    .expect("spatial case regex");
+    let regress = case_pattern
+        .captures_iter(include_str!(
+            "../../../tests/fixtures/postgis_curated_cases.rs"
+        ))
+        .map(|captures| (captures["name"].to_owned(), captures["sql"].to_owned()))
+        .collect::<HashMap<_, _>>();
+    let ledger: SpatialLedger =
+        serde_json::from_str(include_str!("../../../tests/duckdb_spatial_compat.json"))
+            .expect("DuckDB spatial compatibility ledger");
+    ledger
+        .cases
+        .into_iter()
+        .filter_map(|case| {
+            case.unsupported.map(|expectation| {
+                let sql = regress
+                    .get(&case.name)
+                    .unwrap_or_else(|| panic!("missing maintained spatial case {}", case.name));
+                (case.name, sql.clone(), expectation)
+            })
+        })
+        .collect()
+}
+
 fn normalize_spatial_scalar(value: &str) -> String {
     let trimmed = value.trim();
     let upper = trimmed.to_ascii_uppercase();
@@ -99,6 +151,87 @@ fn normalize_spatial_scalar(value: &str) -> String {
         return upper.to_ascii_lowercase();
     }
     trimmed.to_owned()
+}
+
+async fn prove_native_admission_limit(port: u16) {
+    const CLIENTS: usize = 32;
+    const LIMIT: usize = 8;
+    let barrier = Arc::new(tokio::sync::Barrier::new(CLIENTS + 1));
+    let (entered_tx, mut entered_rx) = tokio::sync::mpsc::channel(CLIENTS);
+    let mut releases = Vec::with_capacity(CLIENTS);
+    let mut tasks = Vec::with_capacity(CLIENTS);
+
+    for id in 0..CLIENTS {
+        let barrier = Arc::clone(&barrier);
+        let entered_tx = entered_tx.clone();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        releases.push(Some(release_tx));
+        tasks.push(tokio::spawn(async move {
+            let (mut client, connection) = tokio_postgres::connect(
+                &format!("host=127.0.0.1 port={port} user=postgres dbname=quackgis"),
+                tokio_postgres::NoTls,
+            )
+            .await
+            .expect("native admission client connect");
+            let connection_task = tokio::spawn(connection);
+            let transaction = client
+                .transaction()
+                .await
+                .expect("native admission transaction");
+            let statement = transaction
+                .prepare("SELECT i::BIGINT FROM range(100000) AS rows(i)")
+                .await
+                .expect("native admission statement");
+            let portal = transaction
+                .bind(&statement, &[])
+                .await
+                .expect("native admission portal");
+            barrier.wait().await;
+            let rows = transaction
+                .query_portal(&portal, 1)
+                .await
+                .expect("native admission first row");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get::<_, i64>(0), 0);
+            entered_tx.send(id).await.expect("report admitted client");
+            release_rx.await.expect("release admitted client");
+            drop(portal);
+            drop(transaction);
+            connection_task.abort();
+        }));
+    }
+    drop(entered_tx);
+    barrier.wait().await;
+
+    for wave in 0..(CLIENTS / LIMIT) {
+        let mut admitted = Vec::with_capacity(LIMIT);
+        for _ in 0..LIMIT {
+            admitted.push(
+                tokio::time::timeout(Duration::from_secs(5), entered_rx.recv())
+                    .await
+                    .unwrap_or_else(|_| panic!("native admission wave {wave} stalled"))
+                    .expect("admitted client channel"),
+            );
+        }
+        if wave == 0 {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(200), entered_rx.recv())
+                    .await
+                    .is_err(),
+                "a ninth native reader entered while eight portals retained permits"
+            );
+        }
+        for id in admitted {
+            releases[id]
+                .take()
+                .expect("one release per client")
+                .send(())
+                .expect("release native admission client");
+        }
+    }
+    for task in tasks {
+        task.await.expect("native admission task");
+    }
 }
 
 #[tokio::test]
@@ -130,6 +263,7 @@ async fn cli_duckdb_backend_serves_an_official_local_catalog() {
             .arg("--readonly-password=reader-secret")
             .arg("--write-allowlist=cli_points,private_points")
             .arg("--read-allowlist=cli_points")
+            .arg("--shutdown-timeout-ms=500")
             .spawn()
             .expect("start DuckDB CLI backend"),
     );
@@ -145,8 +279,7 @@ async fn cli_duckdb_backend_serves_an_official_local_catalog() {
             .dbname("quackgis");
         match config.connect(tokio_postgres::NoTls).await {
             Ok((client, connection)) => {
-                tokio::spawn(connection);
-                connected = Some(client);
+                connected = Some((client, tokio::spawn(connection)));
                 break;
             }
             Err(error) if server.0.try_wait().expect("server status").is_none() => {
@@ -156,7 +289,7 @@ async fn cli_duckdb_backend_serves_an_official_local_catalog() {
             Err(error) => panic!("DuckDB CLI backend exited before accepting connections: {error}"),
         }
     }
-    let client = connected.unwrap_or_else(|| {
+    let (client, writer_task) = connected.unwrap_or_else(|| {
         let _ = server.0.kill();
         let _ = server.0.wait();
         panic!("DuckDB CLI backend did not accept connections before the timeout")
@@ -181,6 +314,16 @@ async fn cli_duckdb_backend_serves_an_official_local_catalog() {
         .batch_execute("CREATE TABLE quackgis.main.private_points(id INTEGER)")
         .await
         .expect("writer can create second allowlisted table");
+    let denied_maintenance = client
+        .batch_execute(
+            "CALL quackgis_merge_adjacent_files('main', 'cli_points', 8, 16777216, NULL)",
+        )
+        .await
+        .expect_err("maintenance is disabled without an explicit identity");
+    assert_eq!(
+        denied_maintenance.code(),
+        Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
+    );
     let statement = client
         .prepare_typed(
             "SELECT name FROM quackgis.main.cli_points WHERE id = $1::INTEGER",
@@ -250,11 +393,43 @@ async fn cli_duckdb_backend_serves_an_official_local_catalog() {
         Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
     );
 
-    drop(client);
+    drop(statement);
     drop(reader);
     reader_task.abort();
-    server.0.kill().expect("stop CLI backend");
-    server.0.wait().expect("reap CLI backend");
+    client
+        .batch_execute("BEGIN")
+        .await
+        .expect("begin transaction before graceful shutdown");
+    client
+        .batch_execute("INSERT INTO quackgis.main.cli_points VALUES (3, 'drained')")
+        .await
+        .expect("write before graceful shutdown");
+    let signal_result = unsafe { libc::kill(server.0.id() as i32, libc::SIGTERM) };
+    assert_eq!(signal_result, 0, "send SIGTERM to CLI backend");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    client
+        .batch_execute("COMMIT")
+        .await
+        .expect("active transaction commits during drain");
+    let rejected_begin = client
+        .batch_execute("BEGIN")
+        .await
+        .expect_err("draining server rejects a new transaction");
+    assert!(
+        rejected_begin
+            .as_db_error()
+            .is_some_and(|error| error.message().contains("draining"))
+    );
+    drop(client);
+    writer_task.abort();
+    let status = server
+        .0
+        .wait()
+        .expect("reap gracefully stopped CLI backend");
+    assert!(
+        status.success(),
+        "CLI backend did not stop cleanly: {status}"
+    );
 }
 
 #[tokio::test]
@@ -298,6 +473,12 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
             IngestMode::Create,
         )
         .expect("seed official DuckLake");
+    storage
+        .execute_update(
+            "CREATE TABLE quackgis.main.stream_rows AS \
+             SELECT i::INTEGER AS id FROM range(100000) AS rows(i)",
+        )
+        .expect("seed streaming rows");
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -305,14 +486,20 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
     let port = listener.local_addr().expect("address").port();
     let options = ServerOptions::new()
         .with_host("127.0.0.1".to_owned())
-        .with_port(port);
+        .with_port(port)
+        .with_statement_timeout(Duration::from_secs(2))
+        .with_copy_batch_rows(64)
+        .with_copy_batch_bytes(65_536)
+        .with_copy_max_row_bytes(16_384);
     let server_storage = Arc::clone(&storage);
     let task = tokio::spawn(async move {
         let _ = quackgis_server::pgwire_server::serve_duckdb_on_listener(
             server_storage,
             listener,
             &options,
-            quackgis_server::auth::AuthConfig::trust(),
+            quackgis_server::auth::AuthConfig::trust()
+                .with_maintenance_user("postgres")
+                .expect("maintenance identity"),
         )
         .await;
     });
@@ -334,6 +521,8 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
     .expect("pgwire connect");
     let connection_task = tokio::spawn(connection);
 
+    prove_native_admission_limit(port).await;
+
     let simple = client
         .simple_query("SELECT count(*) AS rows FROM quackgis.main.wire_points")
         .await
@@ -342,6 +531,167 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
         message,
         tokio_postgres::SimpleQueryMessage::Row(row) if row.get(0) == Some("3")
     )));
+    client
+        .batch_execute("SET standard_conforming_strings = ON")
+        .await
+        .expect("standard strings setting");
+    client
+        .batch_execute("SET client_min_messages = error")
+        .await
+        .expect("client message setting");
+    let search_path = client
+        .simple_query("SHOW search_path")
+        .await
+        .expect("SHOW search_path");
+    assert!(search_path.iter().any(|message| matches!(
+        message,
+        tokio_postgres::SimpleQueryMessage::Row(row) if row.get(0) == Some("public")
+    )));
+    let public_count = client
+        .query_one("SELECT count(*)::BIGINT FROM public.wire_points", &[])
+        .await
+        .expect("public schema mapping");
+    assert_eq!(public_count.get::<_, i64>(0), 3);
+    client
+        .batch_execute("CREATE TABLE quackgis.main.quoted_copy(id INTEGER, name VARCHAR)")
+        .await
+        .expect("create quoted COPY target");
+    let quoted_copy = client
+        .copy_in("COPY \"public\".\"quoted_copy\" (\"id\", \"name\") FROM STDIN")
+        .await
+        .expect("start quoted two-part COPY");
+    let mut quoted_copy = std::pin::pin!(quoted_copy);
+    quoted_copy
+        .send(Bytes::from_static(b"1\tquoted\n"))
+        .await
+        .expect("send quoted COPY row");
+    assert_eq!(quoted_copy.finish().await.expect("finish quoted COPY"), 1);
+    let quoted_count = client
+        .query_one("SELECT count(*)::BIGINT FROM public.quoted_copy", &[])
+        .await
+        .expect("query quoted COPY through public schema");
+    assert_eq!(quoted_count.get::<_, i64>(0), 1);
+    client
+        .batch_execute(
+            "CREATE TABLE quackgis.main.layout_copy(\
+             id INTEGER, geom_wkb BLOB, _qg_minx DOUBLE, _qg_miny DOUBLE, \
+             _qg_maxx DOUBLE, _qg_maxy DOUBLE)",
+        )
+        .await
+        .expect("create maintained bbox target");
+    let layout_copy = client
+        .copy_in("COPY public.layout_copy (id, geom_wkb) FROM STDIN")
+        .await
+        .expect("start maintained bbox COPY");
+    let mut layout_copy = std::pin::pin!(layout_copy);
+    layout_copy
+        .send(Bytes::from_static(
+            b"1\t\\x0101000000000000000000F03F0000000000000040\n2\t\\N\n",
+        ))
+        .await
+        .expect("send maintained bbox rows");
+    assert_eq!(layout_copy.finish().await.expect("finish bbox COPY"), 2);
+    let bbox = client
+        .query_one(
+            "SELECT _qg_minx, _qg_miny, _qg_maxx, _qg_maxy \
+             FROM public.layout_copy WHERE id = 1",
+            &[],
+        )
+        .await
+        .expect("query maintained bbox");
+    assert_eq!(bbox.get::<_, f64>(0), 1.0);
+    assert_eq!(bbox.get::<_, f64>(1), 2.0);
+    assert_eq!(bbox.get::<_, f64>(2), 1.0);
+    assert_eq!(bbox.get::<_, f64>(3), 2.0);
+    let exact_bbox = client
+        .query_one(
+            "SELECT count(*)::BIGINT FROM public.layout_copy \
+             WHERE _qg_minx <= 1.5 AND _qg_maxx >= 0.5 \
+               AND _qg_miny <= 2.5 AND _qg_maxy >= 1.5 \
+               AND ST_Intersects(ST_GeomFromWKB(geom_wkb), \
+                   ST_MakeEnvelope(0.5, 1.5, 1.5, 2.5))",
+            &[],
+        )
+        .await
+        .expect("bbox candidate plus exact recheck");
+    assert_eq!(exact_bbox.get::<_, i64>(0), 1);
+    let supplied_bbox = client
+        .copy_in::<str, Bytes>(
+            "COPY public.layout_copy \
+             (id, geom_wkb, _qg_minx, _qg_miny, _qg_maxx, _qg_maxy) FROM STDIN",
+        )
+        .await
+        .expect("open rejected bbox COPY protocol stream");
+    let mut supplied_bbox = std::pin::pin!(supplied_bbox);
+    let supplied_bbox = match supplied_bbox
+        .send(Bytes::from_static(
+            b"3\t\\x010100000000000000000008400000000000001040\t3\t4\t3\t4\n",
+        ))
+        .await
+    {
+        Err(error) => error,
+        Ok(()) => match supplied_bbox.finish().await {
+            Ok(_) => panic!("caller-supplied bbox columns must fail closed"),
+            Err(error) => error,
+        },
+    };
+    assert_eq!(
+        supplied_bbox.code(),
+        Some(&tokio_postgres::error::SqlState::FEATURE_NOT_SUPPORTED)
+    );
+    let layout_count = client
+        .query_one("SELECT count(*)::BIGINT FROM public.layout_copy", &[])
+        .await
+        .expect("layout session remains reusable after rejected COPY");
+    assert_eq!(layout_count.get::<_, i64>(0), 2);
+    for sql in [
+        "INSERT INTO public.layout_copy (id, geom_wkb) VALUES (3, NULL)",
+        "UPDATE public.layout_copy SET geom_wkb = NULL WHERE id = 1",
+        "UPDATE public.layout_copy SET _qg_minx = 0 WHERE id = 1",
+    ] {
+        let error = client
+            .execute(sql, &[])
+            .await
+            .expect_err("direct maintained bbox mutation must fail closed");
+        assert_eq!(
+            error.code(),
+            Some(&tokio_postgres::error::SqlState::FEATURE_NOT_SUPPORTED),
+            "{sql}"
+        );
+    }
+    let layout_count = client
+        .query_one("SELECT count(*)::BIGINT FROM public.layout_copy", &[])
+        .await
+        .expect("layout session remains reusable after rejected mutations");
+    assert_eq!(layout_count.get::<_, i64>(0), 2);
+
+    let stream_started = Instant::now();
+    let row_stream = client
+        .query_raw(
+            "SELECT id FROM quackgis.main.stream_rows ORDER BY id",
+            std::iter::empty::<&i32>(),
+        )
+        .await
+        .expect("open pgwire row stream");
+    futures::pin_mut!(row_stream);
+    let first = tokio::time::timeout(Duration::from_secs(2), row_stream.next())
+        .await
+        .expect("first row deadline")
+        .expect("first row")
+        .expect("first row result");
+    let first_row_elapsed = stream_started.elapsed();
+    assert_eq!(first.get::<_, i32>(0), 0);
+    let mut streamed_rows = 1_usize;
+    while let Some(row) = row_stream.next().await {
+        let row = row.expect("streamed row");
+        assert_eq!(row.get::<_, i32>(0), streamed_rows as i32);
+        streamed_rows += 1;
+    }
+    assert_eq!(streamed_rows, 100_000);
+    assert!(
+        first_row_elapsed < stream_started.elapsed(),
+        "first row must arrive before the complete result"
+    );
 
     let spatial_cases = executable_spatial_cases();
     assert_eq!(spatial_cases.len(), 42, "executable spatial ledger count");
@@ -357,6 +707,34 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
             normalize_spatial_scalar(&actual),
             normalize_spatial_scalar(&expected),
             "DuckDB pgwire spatial case {name}"
+        );
+    }
+    let unsupported_spatial = unsupported_spatial_cases();
+    assert_eq!(unsupported_spatial.len(), 5, "unsupported spatial cases");
+    for (name, sql, expected) in unsupported_spatial {
+        for error in [
+            client
+                .query_one(&sql, &[])
+                .await
+                .expect_err("extended unsupported spatial query"),
+            client
+                .simple_query(&sql)
+                .await
+                .expect_err("simple unsupported spatial query"),
+        ] {
+            let database = error
+                .as_db_error()
+                .unwrap_or_else(|| panic!("DuckDB pgwire spatial case {name}: {error}"));
+            assert_eq!(database.code().code(), expected.sqlstate, "{name}");
+            assert_eq!(database.message(), expected.message, "{name}");
+        }
+        assert_eq!(
+            client
+                .query_one("SELECT 1::INTEGER", &[])
+                .await
+                .expect("session remains reusable")
+                .get::<_, i32>(0),
+            1
         );
     }
 
@@ -448,6 +826,13 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
     assert_eq!(first_page[0].get::<_, i32>(0), 1);
     assert_eq!(second_page[0].get::<_, i32>(0), 2);
     assert_eq!(final_page[0].get::<_, i32>(0), 3);
+    assert!(
+        paging_transaction
+            .query_portal(&portal, 1)
+            .await
+            .expect("observe paged DuckDB EOF")
+            .is_empty()
+    );
     paging_transaction
         .commit()
         .await
@@ -600,16 +985,16 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
     let mut scalar_copy = std::pin::pin!(scalar_copy);
     scalar_copy
         .send(Bytes::from_static(
-            b"7\tt\t1.25\t2026-07-11\t2026-07-11 12:34:56.123456\t12.34\n",
+            b"7\tt\t1.25\t2026-07-11\t2026-07-11 12:34:56.123456\t12.34\n\\N\t\\N\t\\N\t\\N\t\\N\t\\N\n",
         ))
         .await
         .expect("send scalar COPY row");
-    assert_eq!(scalar_copy.finish().await.expect("finish scalar COPY"), 1);
+    assert_eq!(scalar_copy.finish().await.expect("finish scalar COPY"), 2);
     let scalar_copy_row = client
         .query_one(
             "SELECT small_id, enabled, ratio, CAST(observed_on AS VARCHAR), \
              CAST(observed_at AS VARCHAR), CAST(amount AS VARCHAR) \
-             FROM quackgis.main.wire_copy_scalars",
+             FROM quackgis.main.wire_copy_scalars WHERE small_id = 7",
             &[],
         )
         .await
@@ -623,6 +1008,116 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
         "2026-07-11 12:34:56.123456"
     );
     assert_eq!(scalar_copy_row.get::<_, String>(5), "12.34");
+
+    const LARGE_COPY_ROWS: usize = 220_000;
+    client
+        .batch_execute("CREATE TABLE quackgis.main.large_copy(id INTEGER, name VARCHAR)")
+        .await
+        .expect("create large COPY target");
+    let large_copy = client
+        .copy_in("COPY public.large_copy (id, name) FROM STDIN")
+        .await
+        .expect("start large COPY");
+    let mut large_copy = std::pin::pin!(large_copy);
+    let payload = "x".repeat(96);
+    let mut chunk = Vec::with_capacity(60 * 1024);
+    let mut wire_bytes = 0_usize;
+    for id in 0..LARGE_COPY_ROWS {
+        let row = format!("{id}\t{payload}\n");
+        if chunk.len() + row.len() > 60 * 1024 {
+            wire_bytes += chunk.len();
+            large_copy
+                .send(Bytes::from(std::mem::take(&mut chunk)))
+                .await
+                .expect("send bounded large COPY chunk");
+            chunk = Vec::with_capacity(60 * 1024);
+        }
+        chunk.extend_from_slice(row.as_bytes());
+    }
+    if !chunk.is_empty() {
+        wire_bytes += chunk.len();
+        large_copy
+            .send(Bytes::from(chunk))
+            .await
+            .expect("send final large COPY chunk");
+    }
+    assert!(wire_bytes > 20 * 1024 * 1024);
+    assert_eq!(
+        large_copy.finish().await.expect("finish large COPY"),
+        LARGE_COPY_ROWS as u64
+    );
+    let large_count = client
+        .query_one("SELECT count(*)::BIGINT FROM public.large_copy", &[])
+        .await
+        .expect("large COPY count");
+    assert_eq!(large_count.get::<_, i64>(0), LARGE_COPY_ROWS as i64);
+
+    client
+        .batch_execute("CREATE TABLE quackgis.main.fragmented_copy(id INTEGER, name VARCHAR)")
+        .await
+        .expect("create fragmented COPY target");
+    for id in 0..8 {
+        let fragmented_copy = client
+            .copy_in("COPY quackgis.main.fragmented_copy (id, name) FROM STDIN")
+            .await
+            .expect("start fragmented COPY");
+        let mut fragmented_copy = std::pin::pin!(fragmented_copy);
+        fragmented_copy
+            .send(Bytes::from(format!("{id}\tfragment-{id}\n")))
+            .await
+            .expect("send fragmented COPY row");
+        assert_eq!(
+            fragmented_copy
+                .finish()
+                .await
+                .expect("finish fragmented COPY"),
+            1
+        );
+    }
+    let fragment_files_before = client
+        .query_one(
+            "SELECT count(*)::BIGINT FROM \
+             ducklake_list_files('quackgis', 'fragmented_copy', schema => 'main')",
+            &[],
+        )
+        .await
+        .expect("fragmented files before pgwire maintenance")
+        .get::<_, i64>(0);
+    assert!(fragment_files_before >= 8);
+    client
+        .batch_execute(
+            "CALL quackgis_merge_adjacent_files('public', 'fragmented_copy', 8, 16777216, NULL)",
+        )
+        .await
+        .expect("run bounded pgwire maintenance");
+    let fragment_files_after = client
+        .query_one(
+            "SELECT count(*)::BIGINT FROM \
+             ducklake_list_files('quackgis', 'fragmented_copy', schema => 'main')",
+            &[],
+        )
+        .await
+        .expect("fragmented files after pgwire maintenance")
+        .get::<_, i64>(0);
+    assert!(fragment_files_after * 2 <= fragment_files_before);
+    client
+        .batch_execute("BEGIN")
+        .await
+        .expect("begin maintenance rejection transaction");
+    let transactional_maintenance = client
+        .batch_execute(
+            "CALL quackgis_merge_adjacent_files('main', 'fragmented_copy', 8, 16777216, NULL)",
+        )
+        .await
+        .expect_err("maintenance inside a transaction is rejected");
+    assert_eq!(
+        transactional_maintenance.code(),
+        Some(&tokio_postgres::error::SqlState::ACTIVE_SQL_TRANSACTION)
+    );
+    client
+        .batch_execute("ROLLBACK")
+        .await
+        .expect("rollback after maintenance rejection");
 
     client
         .batch_execute("BEGIN")
@@ -663,6 +1158,155 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
     .await
     .expect("observer pgwire connect");
     let observer_task = tokio::spawn(observer_connection);
+
+    client
+        .batch_execute("CREATE TABLE quackgis.main.failed_copy(id INTEGER, name VARCHAR)")
+        .await
+        .expect("create atomic COPY failure target");
+    let mut failed_copy = Box::pin(
+        client
+            .copy_in("COPY quackgis.main.failed_copy (id, name) FROM STDIN")
+            .await
+            .expect("start malformed COPY"),
+    );
+    failed_copy
+        .send(flushed_copy_rows(64))
+        .await
+        .expect("send flushed COPY batch");
+    let malformed_send = failed_copy.send(Bytes::from_static(b"3\n")).await;
+    let malformed_failed = if malformed_send.is_err() {
+        true
+    } else {
+        failed_copy.as_mut().finish().await.is_err()
+    };
+    assert!(malformed_failed, "malformed COPY must fail");
+    let failed_rows = observer
+        .query_one(
+            "SELECT count(*)::BIGINT FROM quackgis.main.failed_copy",
+            &[],
+        )
+        .await
+        .expect("observe malformed COPY rollback");
+    assert_eq!(failed_rows.get::<_, i64>(0), 0);
+
+    observer
+        .batch_execute("CREATE TABLE quackgis.main.disconnected_copy(id INTEGER, name VARCHAR)")
+        .await
+        .expect("create disconnected COPY target");
+    let (abandoned, abandoned_connection) = tokio_postgres::connect(
+        &format!("host=127.0.0.1 port={port} user=postgres dbname=quackgis"),
+        tokio_postgres::NoTls,
+    )
+    .await
+    .expect("abandoned COPY client connect");
+    let abandoned_task = tokio::spawn(abandoned_connection);
+    let mut abandoned_copy = Box::pin(
+        abandoned
+            .copy_in("COPY quackgis.main.disconnected_copy (id, name) FROM STDIN")
+            .await
+            .expect("start abandoned COPY"),
+    );
+    abandoned_copy
+        .send(flushed_copy_rows(64))
+        .await
+        .expect("send abandoned flushed batch");
+    drop(abandoned_copy);
+    drop(abandoned);
+    abandoned_task.abort();
+    let _ = abandoned_task.await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let disconnected_rows = observer
+        .query_one(
+            "SELECT count(*)::BIGINT FROM quackgis.main.disconnected_copy",
+            &[],
+        )
+        .await
+        .expect("observe disconnected COPY rollback");
+    assert_eq!(disconnected_rows.get::<_, i64>(0), 0);
+
+    observer
+        .batch_execute("CREATE TABLE quackgis.main.cancelled_copy(id INTEGER, name VARCHAR)")
+        .await
+        .expect("create cancelled COPY target");
+    let (cancelled, cancelled_connection) = tokio_postgres::connect(
+        &format!("host=127.0.0.1 port={port} user=postgres dbname=quackgis"),
+        tokio_postgres::NoTls,
+    )
+    .await
+    .expect("cancelled COPY client connect");
+    let cancel_token = cancelled.cancel_token();
+    let cancelled_task = tokio::spawn(cancelled_connection);
+    let mut cancelled_copy = Box::pin(
+        cancelled
+            .copy_in("COPY quackgis.main.cancelled_copy (id, name) FROM STDIN")
+            .await
+            .expect("start cancelled COPY"),
+    );
+    cancelled_copy
+        .send(flushed_copy_rows(64))
+        .await
+        .expect("send cancelled flushed batch");
+    cancel_token
+        .cancel_query(tokio_postgres::NoTls)
+        .await
+        .expect("cancel COPY");
+    assert!(
+        cancelled_copy.as_mut().finish().await.is_err(),
+        "cancelled COPY must fail"
+    );
+    drop(cancelled_copy);
+    drop(cancelled);
+    cancelled_task.abort();
+    let _ = cancelled_task.await;
+    let cancelled_rows = observer
+        .query_one(
+            "SELECT count(*)::BIGINT FROM quackgis.main.cancelled_copy",
+            &[],
+        )
+        .await
+        .expect("observe cancelled COPY rollback");
+    assert_eq!(cancelled_rows.get::<_, i64>(0), 0);
+
+    observer
+        .batch_execute("CREATE TABLE quackgis.main.timed_out_copy(id INTEGER, name VARCHAR)")
+        .await
+        .expect("create timed-out COPY target");
+    let (timed_out, timed_out_connection) = tokio_postgres::connect(
+        &format!("host=127.0.0.1 port={port} user=postgres dbname=quackgis"),
+        tokio_postgres::NoTls,
+    )
+    .await
+    .expect("timed-out COPY client connect");
+    let timed_out_task = tokio::spawn(timed_out_connection);
+    let mut timed_out_copy = Box::pin(
+        timed_out
+            .copy_in("COPY public.timed_out_copy (id, name) FROM STDIN")
+            .await
+            .expect("start timed-out COPY"),
+    );
+    timed_out_copy
+        .send(flushed_copy_rows(64))
+        .await
+        .expect("send timed-out flushed batch");
+    tokio::time::sleep(Duration::from_millis(2_200)).await;
+    let timeout_error = timed_out_copy
+        .as_mut()
+        .finish()
+        .await
+        .expect_err("timed-out COPY must fail on the next frame");
+    assert_eq!(
+        timeout_error.code(),
+        Some(&tokio_postgres::error::SqlState::QUERY_CANCELED)
+    );
+    drop(timed_out_copy);
+    drop(timed_out);
+    timed_out_task.abort();
+    let _ = timed_out_task.await;
+    let timed_out_rows = observer
+        .query_one("SELECT count(*)::BIGINT FROM public.timed_out_copy", &[])
+        .await
+        .expect("observe timed-out COPY rollback");
+    assert_eq!(timed_out_rows.get::<_, i64>(0), 0);
 
     client
         .batch_execute("BEGIN")
@@ -716,6 +1360,53 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
         .expect("observer after commit");
     assert_eq!(after_commit.get::<_, String>(0), "committed");
 
+    client
+        .batch_execute("BEGIN")
+        .await
+        .expect("begin failed-transaction oracle");
+    client
+        .batch_execute("INSERT INTO quackgis.main.wire_mutations VALUES (9, 'must_rollback')")
+        .await
+        .expect("write before transaction error");
+    let transaction_error = client
+        .batch_execute("TRUNCATE quackgis.main.wire_mutations")
+        .await
+        .expect_err("unsupported statement fails the transaction");
+    assert_eq!(
+        transaction_error.code(),
+        Some(&tokio_postgres::error::SqlState::FEATURE_NOT_SUPPORTED)
+    );
+    let aborted_query = client
+        .query_one(
+            "SELECT count(*)::BIGINT FROM quackgis.main.wire_mutations",
+            &[],
+        )
+        .await
+        .expect_err("failed transaction rejects extended queries");
+    assert_eq!(
+        aborted_query.code(),
+        Some(&tokio_postgres::error::SqlState::IN_FAILED_SQL_TRANSACTION)
+    );
+    client
+        .batch_execute("COMMIT")
+        .await
+        .expect("COMMIT rolls back a failed transaction");
+    let after_failed_transaction = observer
+        .query_one(
+            "SELECT count(*)::BIGINT FROM quackgis.main.wire_mutations",
+            &[],
+        )
+        .await
+        .expect("observer after failed transaction");
+    assert_eq!(after_failed_transaction.get::<_, i64>(0), 1);
+    client
+        .query_one(
+            "SELECT count(*)::BIGINT FROM quackgis.main.wire_mutations",
+            &[],
+        )
+        .await
+        .expect("session reusable after failed transaction rollback");
+
     let unsupported = client
         .batch_execute("TRUNCATE quackgis.main.wire_mutations")
         .await
@@ -762,6 +1453,40 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
         .await
         .expect("official snapshot inspection through pgwire");
     assert!(snapshots.get::<_, i64>(0) > 0);
+
+    let cancel_token = client.cancel_token();
+    let cancel_rows = client
+        .query_raw(
+            "SELECT i::BIGINT FROM range(1000000000) AS cancel_rows(i)",
+            std::iter::empty::<&i32>(),
+        )
+        .await
+        .expect("open cancellable query");
+    futures::pin_mut!(cancel_rows);
+    cancel_rows
+        .next()
+        .await
+        .expect("cancellable first row")
+        .expect("cancellable first row result");
+    cancel_token
+        .cancel_query(tokio_postgres::NoTls)
+        .await
+        .expect("send native cancel request");
+    let cancellation_error = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match cancel_rows.next().await {
+                Some(Ok(_)) => continue,
+                Some(Err(error)) => break error,
+                None => panic!("cancellable query completed without cancellation"),
+            }
+        }
+    })
+    .await
+    .expect("native cancellation deadline");
+    assert_eq!(
+        cancellation_error.code(),
+        Some(&tokio_postgres::error::SqlState::QUERY_CANCELED)
+    );
 
     drop(client);
     drop(observer);
@@ -820,6 +1545,84 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
             .value(0),
         "010100000000000000000000000000000000000000"
     );
+    let copied_wkb = reopened
+        .query(
+            "SELECT string_agg(hex(geom_wkb), ',' ORDER BY id) \
+             FROM quackgis.main.wire_copy",
+        )
+        .expect("all COPY WKB after restart");
+    assert_eq!(
+        copied_wkb[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("ordered WKB hex")
+            .value(0),
+        "010100000000000000000000000000000000000000,0101000000000000000000F03F000000000000F03F"
+    );
+    let bbox_after_restart = reopened
+        .query(
+            "SELECT _qg_minx, _qg_miny, _qg_maxx, _qg_maxy, \
+             count(*) OVER ()::BIGINT FROM quackgis.main.layout_copy \
+             WHERE id = 1",
+        )
+        .expect("maintained bbox after restart");
+    for (column, expected) in [1.0, 2.0, 1.0, 2.0].into_iter().enumerate() {
+        let values = bbox_after_restart[0]
+            .column(column)
+            .as_any()
+            .downcast_ref::<arrow_array::Float64Array>()
+            .expect("bbox Float64");
+        assert_eq!(values.value(0), expected);
+    }
+    assert_eq!(first_i64(&bbox_after_restart[0], 4), 1);
+    let scalar_after_restart = reopened
+        .query(
+            "SELECT count(*)::BIGINT, \
+             count(*) FILTER (WHERE small_id IS NULL AND enabled IS NULL AND ratio IS NULL \
+               AND observed_on IS NULL AND observed_at IS NULL AND amount IS NULL)::BIGINT, \
+             max(CAST(small_id AS VARCHAR)), max(CAST(enabled AS VARCHAR)), \
+             max(CAST(ratio AS VARCHAR)), max(CAST(observed_on AS VARCHAR)), \
+             max(CAST(observed_at AS VARCHAR)), max(CAST(amount AS VARCHAR)) \
+             FROM quackgis.main.wire_copy_scalars",
+        )
+        .expect("COPY scalar and NULL values after restart");
+    assert_eq!(first_i64(&scalar_after_restart[0], 0), 2);
+    assert_eq!(first_i64(&scalar_after_restart[0], 1), 1);
+    let expected = [
+        "7",
+        "true",
+        "1.25",
+        "2026-07-11",
+        "2026-07-11 12:34:56.123456",
+        "12.34",
+    ];
+    for (column, expected) in expected.into_iter().enumerate() {
+        let values = scalar_after_restart[0]
+            .column(column + 2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("scalar text result");
+        assert!(!values.is_null(0));
+        assert_eq!(values.value(0), expected);
+    }
+
+    let files_after_restart = reopened
+        .query(
+            "SELECT count(*)::BIGINT FROM \
+             ducklake_list_files('quackgis', 'fragmented_copy', schema => 'main')",
+        )
+        .expect("compacted files after restart");
+    let files_after_restart = first_i64(&files_after_restart[0], 0);
+    assert!(
+        files_after_restart * 2 <= fragment_files_before,
+        "pgwire compaction must survive restart: before={fragment_files_before}, after={files_after_restart}"
+    );
+    let canonical = reopened
+        .query("SELECT count(*)::BIGINT, sum(id)::BIGINT FROM quackgis.main.fragmented_copy")
+        .expect("fragmented canonical result after pgwire compaction and restart");
+    assert_eq!(first_i64(&canonical[0], 0), 8);
+    assert_eq!(first_i64(&canonical[0], 1), 28);
 }
 
 const BENCHMARK_ROWS: i64 = 100_000;

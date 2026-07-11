@@ -25,17 +25,28 @@ planner/executor and official DuckLake is the sole writer for new storage.
 - parameterized reads and mutations;
 - independent transactions and portal paging;
 - PostgreSQL text COPY for maintained scalar/WKB types;
+- maintained client settings, `public` schema mapping, and quoted COPY targets;
+- optional reserved bbox columns validated and maintained by DuckDB during COPY;
+- explicitly authorized adjacent-file compaction through a server-owned call;
 - SCRAM and parsed read/write table policy; and
 - 42 curated spatial cases using original PostGIS spellings through DuckDB native
   functions or bounded QuackGIS rewrites/macros.
 
 Important limits:
 
-- results and COPY are currently materialized/buffered;
-- native cancellation, admission, memory/spill controls, and query metrics remain
-  roadmap work;
+- query results stream one native Arrow batch at a time; COPY incrementally builds
+  bounded Arrow batches and publishes atomically through session-local staging;
+- query cancellation/deadlines, global and reader/writer-class admission, DuckDB
+  resource controls, and query lifecycle/batch metrics are implemented; result
+  batches fail closed at a configured byte ceiling, and native calls use a fixed
+  worker budget with a reserved cancellation slot; strict RSS/native-concurrency
+  evidence remains roadmap work;
 - broad PostgreSQL catalogs and named GIS-client parity are incomplete; and
 - remote/shared catalog and object-storage profiles fail closed.
+
+When `QUACKGIS_METRICS_PORT` is configured, the same loopback HTTP listener serves
+`/healthz`, startup/drain-aware readiness at `/readyz`, and Prometheus data at
+`/metrics`.
 
 See [docs/ROADMAP_STATUS.md](./docs/ROADMAP_STATUS.md) for exact evidence.
 
