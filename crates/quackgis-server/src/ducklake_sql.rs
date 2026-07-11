@@ -1801,6 +1801,125 @@ fn statement_allowed_for_readonly(statement: &Statement) -> bool {
     }
 }
 
+/// Apply the shared role and table policy before an engine prepares or executes
+/// a structurally parsed statement. DuckDB uses this at its ADBC trust boundary;
+/// the legacy hook applies the same underlying helpers in its native flow.
+#[cfg(feature = "duckdb-adbc")]
+pub(crate) fn authorize_engine_statement(
+    auth: &AuthConfig,
+    user: Option<&str>,
+    statement: &Statement,
+) -> crate::engine_api::EngineResult<()> {
+    use crate::engine_api::{EngineError, EngineErrorKind};
+
+    if !statement_allowed_for_readonly(statement) {
+        let target = ducklake_statement_parts(statement);
+        let target_ref = target
+            .as_ref()
+            .map(|(schema, table)| (schema.as_str(), table.as_str()));
+        if !auth.allows_write(user, target_ref) {
+            let target_label = target
+                .as_ref()
+                .map(|(schema, table)| format!("{schema}.{table}"))
+                .unwrap_or_else(|| "<indeterminate>".to_string());
+            record_engine_authorization_denial(
+                user,
+                statement_kind(statement),
+                &target_label,
+                "write_policy",
+                true,
+            );
+            let message = match auth.role_for_user(user) {
+                AccessRole::ReadOnly => {
+                    "read-only QuackGIS role cannot execute write statements".to_string()
+                }
+                AccessRole::ReadWrite => {
+                    format!("QuackGIS write allowlist does not permit writes to {target_label}")
+                }
+            };
+            return Err(EngineError::new(EngineErrorKind::Unauthorized, message));
+        }
+    }
+
+    if auth.read_policy_restricted() {
+        let targets = read_targets_for_statement(statement);
+        if targets.sensitive_metadata {
+            record_engine_authorization_denial(
+                user,
+                statement_kind(statement),
+                "<metadata>",
+                "read_allowlist",
+                false,
+            );
+            return Err(EngineError::new(
+                EngineErrorKind::Unauthorized,
+                "restricted read allowlist denies unfiltered catalog metadata surfaces",
+            ));
+        }
+        for target in targets.tables {
+            if !auth.allows_read(user, (&target.schema, &target.table)) {
+                let target_label = format!("{}.{}", target.schema, target.table);
+                record_engine_authorization_denial(
+                    user,
+                    statement_kind(statement),
+                    &target_label,
+                    "read_allowlist",
+                    false,
+                );
+                return Err(EngineError::new(
+                    EngineErrorKind::Unauthorized,
+                    format!("QuackGIS read allowlist does not permit reads from {target_label}"),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "duckdb-adbc")]
+pub(crate) fn authorize_engine_copy_target(
+    auth: &AuthConfig,
+    user: Option<&str>,
+    schema: &str,
+    table: &str,
+) -> crate::engine_api::EngineResult<()> {
+    use crate::engine_api::{EngineError, EngineErrorKind};
+
+    if auth.allows_write(user, Some((schema, table))) {
+        return Ok(());
+    }
+    let target = format!("{schema}.{table}");
+    record_engine_authorization_denial(user, "copy", &target, "write_policy", true);
+    let message = match auth.role_for_user(user) {
+        AccessRole::ReadOnly => "read-only QuackGIS role cannot execute COPY FROM".to_string(),
+        AccessRole::ReadWrite => {
+            format!("QuackGIS write allowlist does not permit COPY to {target}")
+        }
+    };
+    Err(EngineError::new(EngineErrorKind::Unauthorized, message))
+}
+
+#[cfg(feature = "duckdb-adbc")]
+fn record_engine_authorization_denial(
+    user: Option<&str>,
+    statement_kind: &str,
+    target: &str,
+    reason: &str,
+    write: bool,
+) {
+    let denied_total = if write {
+        WRITE_DENIED_COUNTER.fetch_add(1, Ordering::Relaxed) + 1
+    } else {
+        READ_DENIED_COUNTER.fetch_add(1, Ordering::Relaxed) + 1
+    };
+    let user = user.unwrap_or("unknown");
+    log::warn!(
+        "quackgis_engine_authorization_denied user={user} statement_kind={statement_kind} target={target} reason={reason} denied_total={denied_total}"
+    );
+    crate::audit::log_authorization_denied(user, statement_kind, target, reason);
+}
+
 #[derive(Debug, Default, Clone)]
 struct ReadTargets {
     tables: Vec<TableKey>,

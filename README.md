@@ -5,8 +5,7 @@ binary: built for platform/application developers who need high-throughput,
 parallel-reader spatial SQL and columnar OLAP analysis over DuckLake/Parquet
 data.
 
-The unreleased roadmap is pivoting storage authority to DuckDB + official
-DuckLake. The current preview still combines:
+QuackGIS combines:
 
 PostgreSQL wire protocol via
 [datafusion-postgres](https://github.com/datafusion-contrib/datafusion-postgres),
@@ -15,14 +14,13 @@ spatial execution/performance via
 [DuckLake](https://ducklake.select)
 ([datafusion-ducklake](https://github.com/datafusion-contrib/datafusion-ducklake)).
 
-No PostgreSQL query engine. DuckDB is not embedded in the current server, but the
-target architecture makes DuckDB the DuckLake writer/query authority behind the
-QuackGIS pgwire/PostGIS compatibility edge. The goal is a shared spatial data lake
-that can answer large, complex spatial questions quickly, then run DuckDB-native
-columnar analysis — fanout stats, primitive aggregates and calculations, and
-pushdown filters — over the relevant Parquet records while common PostGIS clients —
-**QGIS, GeoServer, GDAL/OGR, Martin, psql, psycopg** — connect and work without
-significant changes.
+No PostgreSQL query engine. No DuckDB runtime in the current default server. The
+approved roadmap migrates the query/storage center to DuckDB + official DuckLake
+while retaining the Rust pgwire/PostGIS/client compatibility and control plane.
+The goal is a shared spatial data lake that can answer large, complex spatial
+questions quickly, run broad columnar analysis over relevant Parquet records, and
+let common PostGIS clients — **QGIS, GeoServer, GDAL/OGR, Martin, psql, psycopg** —
+connect without significant changes.
 
 ```text
 QGIS / GeoServer (JDBC) / psql / OGR / psycopg
@@ -32,8 +30,8 @@ quackgis server (one Rust binary)
 ├── datafusion-postgres   wire protocol · auth · TLS · pg_catalog
 ├── quackgis compat layer geometry OID/EWKB · geometry_columns ·
 │                         spatial_ref_sys · client shims
-├── DuckDB target         ST_* kernels · CRS · spatial joins · columnar OLAP
-└── official DuckLake     DuckDB-authored catalog + Parquet
+├── SedonaDB/DataFusion   ST_* kernels · CRS · spatial joins · columnar OLAP
+└── datafusion-ducklake   DuckLake catalog + Parquet
         ▼
 DuckLake storage = SQL catalog + Parquet objects
 profiles: SQLite + local files, PostgreSQL + S3
@@ -60,12 +58,17 @@ full project goal: managed external services, regional real-data/client matrices
 budgeted trend reports, native maintenance, snapshots, security/DR, and eventually
 multi-modal spatial asset inventories before broad production claims.
 
+The roadmap-selected DuckDB center is also runnable as a **feature-gated local
+migration profile**. It uses the pinned ADBC driver and official DuckLake, but is
+not the default and does not yet carry catalog/client/shared-storage parity. See
+[docs/DUCKDB_PGWIRE_CHECKPOINT.md](./docs/DUCKDB_PGWIRE_CHECKPOINT.md).
+
 ## Quick start (dev storage path)
 
 ```sh
-mise install              # Rust, just, kind/kubectl/helm, cargo-nextest
+mise install              # Rust, DuckDB CLI, just, kind/kubectl/helm, cargo-nextest
 eval "$(mise activate bash)" # optional: activate pinned tools/env for this shell
-just setup                # also downloads Martin into .tmp/bin
+just setup                # also bootstraps libduckdb/extensions and Martin under .tmp
 just ref-init             # optional: clone all reference repos into .tmp/ref
 just preview-smoke        # one-command preview acceptance smoke
 just server               # runs on 127.0.0.1:5434 with .tmp/dev storage
@@ -96,6 +99,8 @@ SELECT postgis_version();                                -- 3.4 QUACKGIS
   execution queue, and risks; implemented status stays out of this file.
 - [docs/ROADMAP_STATUS.md](./docs/ROADMAP_STATUS.md) — implemented contracts vs
   active roadmap frontiers.
+- [docs/ENGINE_CAPABILITY_LEDGER.md](./docs/ENGINE_CAPABILITY_LEDGER.md) — D0
+  backend ownership, preserve/replace/redesign decisions, and DuckDB parity gates.
 - [docs/LOCAL_KIND_LINKERD_FOCUS.md](./docs/LOCAL_KIND_LINKERD_FOCUS.md) — local
   Kind+Linkerd maximum capability ladder, scale knobs, and claim boundaries.
 - [docs/DEVELOPER_PREVIEW.md](./docs/DEVELOPER_PREVIEW.md) — exact local preview
@@ -169,13 +174,18 @@ just test                      # unit + wire integration tests
 just test-fast                 # non-ignored QuackGIS regression loop only
 just check                     # fmt + clippy + tests
 just check-fast                # fmt + clippy + focused regression loop
+mise run duckdb-bootstrap      # pinned libduckdb + signed ducklake/spatial extensions
+just duckdb-adbc-compile-check # compile/unit-test optional ADBC path without libduckdb
 just layoutbench-sf0           # layout/pruning correctness oracle
 just benchmark-profile-check   # validate exact 100M profile and catalog budgets
 just kind-layoutbench-catalog-measure # manual preseeded exact 100M catalog-call budget gate
 just layoutbench-local-smoke   # temp-server layoutbench smoke
 just multimodal-inventory-local # raster/point-cloud sidecar artifact oracle
-just duckdb-engine-probe       # optional DuckDB spatial + DuckLake extension feasibility probe
-just duckdb-authority-probe    # DuckDB-authored official DuckLake vertical slice
+just duckdb-engine-probe       # pinned DuckDB spatial + DuckLake extension feasibility probe
+just duckdb-spatial-compat-probe # classify/execute maintained PostGIS cases on DuckDB
+just duckdb-authority-probe    # independent DuckDB CLI writer/reopen evidence packet
+just duckdb-adbc-storage-test  # real ADBC Arrow/DuckLake slice after duckdb-bootstrap
+just duckdb-pgwire-workflow-test # DuckDB create/COPY/query/mutation/transaction wire gate
 just duckdb-reference-evidence-check # DuckDB/DuckLake reference-reader packet gate
 just multimodal-inventory-evidence-check # copied COG/COPC inventory packet gate
 just orphan-inventory          # offline dry-run old prewrite inventory
@@ -183,6 +193,8 @@ just orphan-quarantine-plan    # offline source->quarantine plan outside live da
 just postgis-regress           # starter curated PostGIS function regress subset
 just postgis-conformance-summary # static fixture coverage summary
 just runtime-static-check      # guard single-binary native-free runtime image
+just duckdb-runtime-static-check # guard pinned native evaluation image recipe
+just duckdb-runtime-offline-smoke # build image and LOAD extensions with --network none
 just metrics-budget-check path=.tmp/compatibility # fail closed on budgeted metrics artifacts
 just martin-sql                # Martin-generated SQL compatibility gate
 just martin-e2e                # opt-in real Martin binary E2E
@@ -210,6 +222,17 @@ just external-alpha-evidence-check # validate redacted external Alpha packet man
 just metrics-trend path=.tmp/compatibility # flatten metrics.json artifacts to CSV
 just metrics-dashboard path=.tmp/compatibility # render release-ready Markdown trends
 QUACKGIS_METRICS_PORT=9187 just server # optional Prometheus /metrics endpoint
+```
+
+To run the bounded DuckDB server after `mise run duckdb-bootstrap`, use separate
+catalog/data roots:
+
+```sh
+mkdir -p .tmp/duckdb-server
+mise exec -- cargo run -p quackgis-server --features duckdb-adbc -- \
+  --engine-backend=duckdb \
+  --catalog-path=.tmp/duckdb-server/catalog.ducklake \
+  --data-path=.tmp/duckdb-server/data
 ```
 
 For one-off commands without shell activation, keep the same recipes and let mise
@@ -241,9 +264,10 @@ Parquet object/file data. SQLite/local is deterministic and spec-oriented but no
 yet a drop-in DuckDB-writable catalog; the current PostgreSQL/S3 multicatalog
 backend is a library-specific Alpha profile
 until reference-reader or tested export/migration evidence proves a stronger
-claim. Extending datafusion-ducklake is in scope, with every divergence and
-migration trigger recorded in `DIVERGENCE.md` and `docs/DUCKLAKE_ALIGNMENT.md`.
-DuckDB's official DuckLake extension is the preferred external reference-reader
-gate before any DuckDB/ADBC writer or engine pivot.
+claim. The roadmap replaces the forked writer and DataFusion/SedonaDB execution
+center with DuckDB and official DuckLake through staged capability-preservation,
+migration, client, spatial, concurrency, packaging, and recovery gates. See
+`ROADMAP.md`; current divergences remain recorded in `DIVERGENCE.md` and
+`docs/DUCKLAKE_ALIGNMENT.md` until retirement.
 
 Licensed under the [Apache License 2.0](./LICENSE).

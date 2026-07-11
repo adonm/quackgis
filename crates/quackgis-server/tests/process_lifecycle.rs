@@ -151,6 +151,57 @@ fn bind_failure_exits_nonzero() {
     );
 }
 
+#[test]
+fn duckdb_server_backend_requires_feature_in_default_binary() {
+    let port = reserve_port();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let output = server_command(port, &tmp)
+        .arg("--engine-backend")
+        .arg("duckdb")
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run DuckDB backend with default-feature binary");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("requires a binary built with --features duckdb-adbc"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(!tmp.path().join("quackgis.db").exists());
+    assert!(!tmp.path().join("data").exists());
+}
+
+#[test]
+fn invalid_configured_tls_exits_instead_of_serving_plaintext() {
+    let port = reserve_port();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let certificate = tmp.path().join("invalid-cert.pem");
+    let key = tmp.path().join("invalid-key.pem");
+    fs::write(&certificate, "not a certificate").expect("write invalid certificate");
+    fs::write(&key, "not a private key").expect("write invalid key");
+
+    let output = server_command(port, &tmp)
+        .arg("--tls-cert")
+        .arg(&certificate)
+        .arg("--tls-key")
+        .arg(&key)
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run server with invalid TLS material");
+
+    assert!(!output.status.success());
+    assert!(
+        TcpStream::connect(("127.0.0.1", port)).is_err(),
+        "server must not remain available over plaintext after TLS setup fails"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failed to configure requested TLS"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn sigterm_stops_server_cleanly_and_catalog_reopens() {
     let port = reserve_port();

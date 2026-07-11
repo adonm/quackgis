@@ -42,6 +42,32 @@ Any intentional change to QPS, OLAP, bytes-scanned, file-group, or pass-rate
 budgets should be backed by a run-stamped `metrics.json` artifact and summarized
 in the release evidence record.
 
+## Native DuckDB development artifacts
+
+- `mise.toml` and `mise.lock` pin the DuckDB CLI used by local probes.
+- `mise run duckdb-bootstrap` downloads the official Linux x86_64 `libduckdb`
+  v1.5.4 archive, verifies its committed release SHA-256 and the extracted shared
+  library SHA-256, and installs only into ignored `.tmp/duckdb`.
+- DuckDB installs its signed, engine-version-matched `ducklake` and `spatial`
+  extensions into an isolated repository-local home. The bootstrap records their
+  resolved SHA-256 digests in `.tmp/duckdb/manifest.json`.
+- Native library paths are operator/developer configuration, never client input.
+  The ADBC boundary requires an absolute regular-file path and production remains
+  fail-closed `LOAD` only. Network-backed `INSTALL` belongs only in the explicit
+  bootstrap step.
+- The ADBC open boundary re-hashes the selected library and requires both the
+  committed SHA-256 and exact SQL runtime `version()` (`v1.5.4`) before claiming a
+  data root or attaching DuckLake. A modified or mixed-version native runtime
+  fails before creating the authority marker or data directory.
+- This developer path currently supports Linux x86_64. D4 still requires a
+  published platform matrix, immutable production artifacts, upgrade/mixed-version
+  refusal, and clean-room deployment evidence.
+- `scripts/prepare_duckdb_runtime.py` independently checks committed SHA-256 values
+  for the shared library and both extensions before constructing an image context.
+  `deploy/Containerfile.duckdb-runtime` also pins the base image digest and has an
+  offline `--network none` load smoke. Update the bootstrap and runtime checksums
+  together only after the real ADBC, spatial, compatibility, and recovery gates.
+
 ## Data/catalog compatibility
 
 - SQLite/local and PostgreSQL/S3 profiles are both maintained storage contracts.

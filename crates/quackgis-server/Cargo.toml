@@ -14,6 +14,10 @@ keywords.workspace = true
 categories.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+duckdb-adbc = ["dep:adbc_core", "dep:adbc_driver_manager", "dep:sha2"]
+
 [[bin]]
 name = "quackgis-server"
 path = "src/main.rs"
@@ -29,12 +33,17 @@ datafusion-expr-common = { workspace = true }
 datafusion-functions-aggregate-common = { workspace = true }
 arrow-ord = { workspace = true }
 arrow-select = { workspace = true }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
 sedona-functions = { workspace = true }
 sedona-geo = { workspace = true }
 sedona-proj = { workspace = true }
 sedona-geometry = { workspace = true }
 geo-traits = { workspace = true }
 datafusion-ducklake = { workspace = true }
+adbc_core = { workspace = true, optional = true }
+adbc_driver_manager = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 object_store = { workspace = true }
 url = { workspace = true }
 sqlx = { workspace = true }
@@ -60,4 +69,5 @@ tempfile = { workspace = true }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = { workspace = true }
+bytes = "1"

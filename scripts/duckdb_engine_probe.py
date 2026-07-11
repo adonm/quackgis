@@ -20,9 +20,7 @@ from typing import NamedTuple
 
 
 ENGINE_SQL = """
-INSTALL spatial;
 LOAD spatial;
-INSTALL ducklake;
 LOAD ducklake;
 
 CREATE TABLE qg_points AS

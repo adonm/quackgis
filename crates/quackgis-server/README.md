@@ -61,6 +61,7 @@ CLI flags (all optional, env-overridable per `clap`'s `env` feature):
 
 | Flag | Env | Default | Notes |
 |---|---|---|---|
+| `--engine-backend` | `QUACKGIS_ENGINE_BACKEND` | `legacy-datafusion` | explicit backend; `duckdb` fails closed until D2 pgwire parity |
 | `--host` | `QUACKGIS_HOST` | `127.0.0.1` | bind addr |
 | `--port` | `QUACKGIS_PORT` | `5434` | bind port (5434 to coexist with system PG) |
 | `--catalog-path` | `QUACKGIS_CATALOG_PATH` | `quackgis.db` | SQLite DuckLake catalog path (dev) |

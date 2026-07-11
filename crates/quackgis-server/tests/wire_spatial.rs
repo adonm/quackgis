@@ -82,6 +82,70 @@ async fn startup_auth_code(port: u16, user: &str) -> i32 {
     i32::from_be_bytes(body[0..4].try_into().expect("auth code bytes"))
 }
 
+async fn raw_pgwire_connect(port: u16) -> tokio::net::TcpStream {
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("raw pgwire connect");
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&196_608_i32.to_be_bytes());
+    payload.extend_from_slice(b"user\0postgres\0database\0quackgis\0\0");
+    let length = (payload.len() + 4) as i32;
+    stream
+        .write_all(&length.to_be_bytes())
+        .await
+        .expect("write startup length");
+    stream
+        .write_all(&payload)
+        .await
+        .expect("write startup payload");
+    loop {
+        let (tag, body) = raw_backend_message(&mut stream).await;
+        match tag {
+            b'Z' => return stream,
+            b'E' => panic!("raw startup failed: {}", String::from_utf8_lossy(&body)),
+            _ => {}
+        }
+    }
+}
+
+async fn raw_frontend_message(stream: &mut tokio::net::TcpStream, tag: u8, body: &[u8]) {
+    stream.write_all(&[tag]).await.expect("write frontend tag");
+    let length = (body.len() + 4) as i32;
+    stream
+        .write_all(&length.to_be_bytes())
+        .await
+        .expect("write frontend length");
+    stream.write_all(body).await.expect("write frontend body");
+}
+
+async fn raw_backend_message(stream: &mut tokio::net::TcpStream) -> (u8, Vec<u8>) {
+    let mut tag = [0_u8; 1];
+    stream.read_exact(&mut tag).await.expect("read backend tag");
+    let mut length = [0_u8; 4];
+    stream
+        .read_exact(&mut length)
+        .await
+        .expect("read backend length");
+    let length = i32::from_be_bytes(length);
+    assert!(length >= 4, "invalid backend message length {length}");
+    let mut body = vec![0_u8; length as usize - 4];
+    stream
+        .read_exact(&mut body)
+        .await
+        .expect("read backend body");
+    (tag[0], body)
+}
+
+fn first_raw_text_column(body: &[u8]) -> String {
+    assert!(body.len() >= 6, "short DataRow");
+    assert_eq!(i16::from_be_bytes([body[0], body[1]]), 1);
+    let length = i32::from_be_bytes(body[2..6].try_into().expect("column length"));
+    assert!(length >= 0, "unexpected NULL page value");
+    let length = length as usize;
+    assert!(body.len() >= 6 + length, "short DataRow value");
+    String::from_utf8(body[6..6 + length].to_vec()).expect("text DataRow value")
+}
+
 fn point_wkb(x: f64, y: f64) -> Vec<u8> {
     let mut out = Vec::with_capacity(21);
     out.push(1);
@@ -941,6 +1005,70 @@ async fn wire_extended_protocol_describe() {
         .expect("execute prepared");
     let v: String = row.get(0);
     assert_eq!(v, "POINT(9 9)");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn extended_execute_max_rows_suspends_and_resumes_portal() {
+    let server = ServerHandle::start().await;
+    let mut stream = raw_pgwire_connect(server.port()).await;
+
+    let mut parse = Vec::new();
+    parse.extend_from_slice(b"page-stmt\0");
+    parse.extend_from_slice(
+        b"SELECT id FROM (VALUES (1), (2), (3), (4), (5)) AS page(id) ORDER BY id\0",
+    );
+    parse.extend_from_slice(&0_i16.to_be_bytes());
+    raw_frontend_message(&mut stream, b'P', &parse).await;
+
+    let mut bind = Vec::new();
+    bind.extend_from_slice(b"page-portal\0page-stmt\0");
+    bind.extend_from_slice(&0_i16.to_be_bytes()); // parameter format count
+    bind.extend_from_slice(&0_i16.to_be_bytes()); // parameter value count
+    bind.extend_from_slice(&0_i16.to_be_bytes()); // result format count
+    raw_frontend_message(&mut stream, b'B', &bind).await;
+    raw_frontend_message(&mut stream, b'D', b"Ppage-portal\0").await;
+
+    for expected_page in [["1", "2"].as_slice(), ["3", "4"].as_slice()] {
+        let mut execute = b"page-portal\0".to_vec();
+        execute.extend_from_slice(&2_i32.to_be_bytes());
+        raw_frontend_message(&mut stream, b'E', &execute).await;
+        raw_frontend_message(&mut stream, b'S', &[]).await;
+
+        let mut rows = Vec::new();
+        let mut suspended = false;
+        loop {
+            let (tag, body) = raw_backend_message(&mut stream).await;
+            match tag {
+                b'D' => rows.push(first_raw_text_column(&body)),
+                b's' => suspended = true,
+                b'E' => panic!("extended query failed: {}", String::from_utf8_lossy(&body)),
+                b'Z' => break,
+                _ => {}
+            }
+        }
+        assert_eq!(rows, expected_page);
+        assert!(suspended, "non-final page must emit PortalSuspended");
+    }
+
+    let mut execute = b"page-portal\0".to_vec();
+    execute.extend_from_slice(&2_i32.to_be_bytes());
+    raw_frontend_message(&mut stream, b'E', &execute).await;
+    raw_frontend_message(&mut stream, b'S', &[]).await;
+    let mut rows = Vec::new();
+    let mut completed = false;
+    loop {
+        let (tag, body) = raw_backend_message(&mut stream).await;
+        match tag {
+            b'D' => rows.push(first_raw_text_column(&body)),
+            b'C' => completed = true,
+            b's' => panic!("final page must not remain suspended"),
+            b'E' => panic!("extended query failed: {}", String::from_utf8_lossy(&body)),
+            b'Z' => break,
+            _ => {}
+        }
+    }
+    assert_eq!(rows, ["5"]);
+    assert!(completed, "final page must emit CommandComplete");
 }
 
 #[tokio::test(flavor = "multi_thread")]

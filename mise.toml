@@ -10,6 +10,9 @@ QUACKGIS_CATALOG_PATH = "{{config_root}}/.tmp/dev/quackgis.db"
 QUACKGIS_DATA_PATH = "{{config_root}}/.tmp/dev/data"
 MARTIN_VERSION = "1.11.0"
 MARTIN_BIN = "{{config_root}}/.tmp/bin/martin"
+DUCKDB_VERSION = "1.5.4"
+DUCKDB_HOME = "{{config_root}}/.tmp/duckdb/home"
+QUACKGIS_DUCKDB_ADBC_DRIVER = "{{config_root}}/.tmp/duckdb/v1.5.4/lib/libduckdb.so"
 MARTIN_PORT = "3000"
 QGIS_IMAGE = "docker.io/qgis/qgis:ltr-questing"
 GEOSERVER_IMAGE = "docker.osgeo.org/geoserver:3.0.0"
@@ -31,7 +34,12 @@ rust = "1.95.0"
 "aqua:kubernetes-sigs/kind" = "0.29.0"
 "aqua:kubernetes/kubectl" = "1.33.2"
 "aqua:helm/helm" = "3.18.3"
+"aqua:duckdb/duckdb" = "1.5.4"
 "cargo:cargo-nextest" = "latest"
+
+[tasks.duckdb-bootstrap]
+description = "Install checksum-pinned libduckdb and signed DuckDB extensions"
+run = "python3 scripts/bootstrap_duckdb.py"
 
 [settings]
 experimental = true

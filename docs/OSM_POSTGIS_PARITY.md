@@ -130,8 +130,9 @@ not implement OSM replication itself.
 - QGIS edits against copied OSM layers with real-world attribute widths and NULLs.
 - Conflict tests for refresh-while-client-open.
 
-This is where general pgjdbc fetch-size portal suspension, geometry write
-parameters, and privilege metadata should be implemented if traces require them.
+This is where the implemented pgjdbc fetch-size portal suspension path should be
+exercised at realistic page sizes. Expand geometry write parameters and privilege
+metadata only when traces require them.
 
 ### Performance and larger extracts
 

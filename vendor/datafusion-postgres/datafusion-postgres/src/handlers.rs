@@ -256,6 +256,9 @@ impl ExtendedQueryHandler for DfSessionService {
         &self,
         client: &mut C,
         portal: &Portal<Self::Statement>,
+        // The pgwire default on_execute implementation owns max_rows paging:
+        // this method supplies one streaming QueryResponse, then Portal::fetch
+        // emits bounded pages and PortalSuspended until the stream is exhausted.
         _max_rows: usize,
     ) -> PgWireResult<Response>
     where

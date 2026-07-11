@@ -1,11 +1,10 @@
 # DuckDB/ADBC evaluation plan
 
-This plan records the unreleased architecture pivot to DuckDB as the DuckLake
-compatibility anchor and storage authority. Today QuackGIS still contains a Rust
-pgwire service over DataFusion, SedonaDB, and `datafusion-ducklake`, but there is
-no released storage contract to preserve. The decision is to iterate faster by
-making DuckDB + official DuckLake the canonical writer/query substrate and keeping
-QuackGIS focused on pgwire/PostGIS compatibility.
+This plan records and validates the selected migration to DuckDB as QuackGIS's
+query/storage engine and official DuckLake as its storage authority. Today
+QuackGIS is still a Rust pgwire service over DataFusion, SedonaDB, and
+`datafusion-ducklake`; the Rust pgwire/PostGIS/control-plane contract remains while
+the center is replaced through the D0–D5 gates in `ROADMAP.md`.
 
 The evaluation exists because storage compatibility is the weakest current design
 boundary: the PostgreSQL/S3 DuckLake profile is QuackGIS/`datafusion-ducklake`-
@@ -14,9 +13,9 @@ path exists.
 
 ## Decision principles
 
-1. **DuckDB-authored storage is the target.** Do not spend release-grade effort
-   making old preview catalogs readable unless it directly informs export or
-   compatibility tests.
+1. **DuckDB-authored official DuckLake is the target.** Compatibility is proven at
+   each migration gate; legacy QuackGIS catalogs are comparison/export inputs, not
+   the future write format.
 2. **pgwire remains a QuackGIS responsibility.** QGIS, GeoServer, OGR, Martin,
    pgjdbc, and PostgreSQL drivers observe PostgreSQL wire/catalog behavior that
    DuckDB does not provide.
@@ -33,14 +32,12 @@ path exists.
 
 ### 1. Reference-reader gate
 
-Legacy QuackGIS writes data through the current path only as a compatibility
-oracle. A separate DuckDB process, accessed by CLI or ADBC, loads the official
-`ducklake` extension, attaches a copied catalog and object prefix, and verifies
-tables.
+QuackGIS writes data through the current path. A separate DuckDB process, accessed
+by CLI or ADBC, loads the official `ducklake` extension, attaches a copied catalog
+and object prefix, and verifies tables.
 
-This gate remains useful for proving that old QuackGIS-written catalogs are not the
-future format. New positive storage claims should be earned from DuckDB-authored
-catalogs.
+This is the lowest-risk path and should become mandatory before stronger DuckLake
+claims.
 
 Required checks:
 
@@ -52,17 +49,14 @@ Required checks:
 - geometry/geography bytes and visible type identity;
 - failure behavior for QuackGIS-only metadata/functions.
 
-### 2. DuckDB storage-authority kernel
+### 2. Experimental DuckDB/ADBC storage kernel
 
-Introduce a storage-authority path that sends DDL, Arrow/batch ingestion, mutation,
-compaction, and metadata inspection to DuckDB while keeping QuackGIS's
-pgwire/catalog/policy layer unchanged. Start out-of-process for speed and crash
-isolation; move to ADBC or embedded DuckDB after semantics are proven.
+Introduce an internal storage-kernel experiment that sends DDL, Arrow ingestion,
+mutation, compaction, and metadata inspection to DuckDB through ADBC while keeping
+QuackGIS's pgwire/catalog/policy layer unchanged.
 
-The experiment is acceptable only if every step can be verified through DuckDB
-reopen/reference reads and maintained pgwire client traces. Side-by-side comparison
-against the old backend is useful, but not a release blocker because old catalogs
-are unreleased preview artifacts.
+The experiment is acceptable only if it runs side-by-side with the current backend
+and compares every result against both QuackGIS reads and the DuckDB reference gate.
 
 Proof requirements:
 
@@ -72,9 +66,7 @@ Proof requirements:
 - process-kill drills before and after DuckDB/DuckLake commit;
 - orphan/prewrite behavior and cleanup evidence;
 - exact PostGIS-client traces unchanged at pgwire;
-- clear rollback to the current preview backend during the spike, followed by a
-  delete/demote decision once DuckDB-backed storage passes the local and client
-  gates.
+- clear rollback to the current `datafusion-ducklake` backend.
 
 ### 3. QuackGIS DuckDB extension
 
@@ -95,11 +87,13 @@ The extension should not own pgwire auth, RowDescription OIDs, PostgreSQL catalo
 emulation, cursor/portal state, COPY protocol, RBAC, metrics, or release-evidence
 policy. Those remain in the QuackGIS server.
 
-### 4. Full DuckDB-backed engine pivot
+### 4. Full DuckDB-backed engine migration
 
-This is now the preferred unreleased target. It becomes the only supported storage
-path once the DuckDB authority probe, minimal pgwire route, maintained clients, and
-external PostgreSQL/S3 profile pass without weakening mutation safety.
+This is the selected target, not an assumption that parity already exists. DuckDB
+becomes the default only after the ADBC/storage, query, spatial/client, operations,
+and cutover gates preserve mutation safety, client compatibility, and release
+evidence while reducing fork burden and improving standard DuckLake
+interoperability.
 
 The pivot decision must explicitly compare:
 
@@ -116,39 +110,33 @@ The pivot decision must explicitly compare:
    QuackGIS storage:
 
    ```sh
+   mise install
+   mise run duckdb-bootstrap
    just duckdb-engine-probe
    ```
 
-   Set `DUCKDB_BIN=/path/to/duckdb` to use a locally downloaded CLI without
-   changing the QuackGIS runtime or dependency graph.
+   `mise.toml`/`mise.lock` pin the CLI. The bootstrap verifies the official
+   `libduckdb` release checksums and preinstalls DuckDB-signed, version-matched
+   extensions under ignored `.tmp/duckdb`.
 
-   This command is optional because the repo does not pin DuckDB as a QuackGIS
-   runtime dependency. It writes `.tmp/duckdb-engine/README.md` and fails closed if
-   the DuckDB CLI is unavailable or the extensions cannot load.
+   The CLI and native library remain development/evaluation dependencies rather
+   than part of the default server runtime. The probe writes
+   `.tmp/duckdb-engine/README.md`, uses `LOAD` only, and fails closed if the pinned
+   CLI or preinstalled extensions are unavailable.
 1. **DuckDB attach smoke:** copied local catalog/object prefix opens in DuckDB with
    official `ducklake`; record DuckDB version, extension version, command/ADBC path,
    and exact failure if it cannot attach.
-2. **DuckDB authority vertical slice:** run DuckDB as the writer against an
-   official DuckLake catalog and prove create/insert/update/delete/reopen/snapshot
-   behavior:
-
-   ```sh
-   just duckdb-authority-probe
-   ```
-
-   This writes `.tmp/duckdb-authority/README.md` and
-   `.tmp/duckdb-authority/manifest.json`.
-3. **Read parity:** compare schemas, counts, samples, extents, and geometry bytes
+2. **Read parity:** compare schemas, counts, samples, extents, and geometry bytes
    for untouched COPY/INSERT tables.
-4. **Mutation parity:** repeat after QuackGIS native `DELETE`, `UPDATE`, and
+3. **Mutation parity:** repeat after QuackGIS native `DELETE`, `UPDATE`, and
    compaction; reject partial or stale reads.
-5. **External profile parity:** run the same checks against the managed
+4. **External profile parity:** run the same checks against the managed
    PostgreSQL/S3 copied-prefix Alpha packet.
-6. **Writer experiment:** prototype DuckDB/ADBC writes behind an explicit feature
-   flag or separate binary; compare result catalogs with the current backend.
-7. **Decision record:** choose one of: keep current backend with DuckDB reference
-   gate, add DuckDB as optional writer, migrate storage authority to DuckDB, or
-   document export/migration as the compatibility path.
+5. **Writer migration:** promote DuckDB/ADBC writes behind an explicit feature flag;
+   compare result catalogs with the current backend and prohibit mixed writers.
+6. **Cutover record:** document capability parity/limits, legacy export/import,
+   packaged versions, rollback evidence, and the gates permitting DuckDB to become
+   the default.
 
 ## Evidence record template
 
@@ -156,7 +144,7 @@ The pivot decision must explicitly compare:
 DuckDB version:
 DuckLake extension version/source:
 Connection path: CLI | ADBC | other
-Storage profile: local-sqlite | postgresql-s3-compatible
+Storage profile: local-sqlite | duckdb-local-ducklake | postgresql-s3-compatible
 Catalog/object source SHA:
 Dataset rows/files/bytes:
 Attach result:
@@ -181,8 +169,7 @@ just duckdb-reference-evidence-check \
 The checker is a static packet gate. It does not run DuckDB; it prevents a packet
 from claiming `duckdb_reference_readable` unless DuckDB/extension versions,
 connection path, dataset counts, required parity checks, and the final decision are
-present and consistent. It accepts both legacy `local-sqlite`/`postgresql-s3-
-compatible` profiles and the new DuckDB-authored `duckdb-local-ducklake` profile.
+present and consistent.
 
 Minimal manifest shape:
 
@@ -220,12 +207,11 @@ Minimal manifest shape:
 
 ## Current stance
 
-The current recommendation is a direct DuckDB storage-authority pivot. DuckDB's
-official DuckLake extension is both the writer target and the named reference gate
-for QuackGIS storage claims. The old `datafusion-ducklake` writer remains only as a
-preview/comparison path while QuackGIS has no release contract to migrate. A
-QuackGIS DuckDB extension should wait until the DuckDB-backed pgwire route exposes
-specific missing functions or metadata helpers.
+The roadmap now selects DuckDB as the target query/storage engine and its official
+DuckLake extension as the storage authority. The Rust pgwire/PostGIS/control-plane
+edge remains. Migration proceeds side-by-side through the D0–D5 capability,
+storage, query, spatial/client, operations, and cutover gates in `ROADMAP.md`; the
+current backend remains the comparison/rollback oracle until parity is proven.
 
 ## Initial local result — 2026-07-10
 
@@ -256,43 +242,97 @@ compatibility: either make `datafusion-ducklake` write the allocator/catalog fie
 DuckDB expects, provide a tested export/migration, or prototype DuckDB/ADBC as the
 writer and keep QuackGIS as the pgwire/PostGIS compatibility layer.
 
-## DuckDB-authority local result — 2026-07-10
+## ADBC storage-kernel slice — 2026-07-11
 
-The first DuckDB-authored official DuckLake vertical slice passed with DuckDB
-`v1.5.2 (Variegata) 8a5851971f`:
+The concrete allocator incompatibility above justified starting the side-by-side
+writer experiment. The `duckdb-adbc` Cargo feature now exposes
+`DuckDbAdbcStorage`, a synchronous internal boundary that:
 
-```sh
-DUCKDB_BIN=.tmp/bin/duckdb-v1.5.2/duckdb just duckdb-authority-probe
-```
+- dynamically loads an operator-selected absolute `libduckdb` path using the
+  `duckdb_adbc_init` entry point and ADBC 1.1;
+- loads the official `ducklake` extension and attaches a caller-selected local
+  catalog/data path (remote paths fail closed until the shared-profile authority
+  and credential adapter exists);
+- disables DuckLake data inlining so the existing DataFusion comparison reader is
+  not silently presented with rows outside Parquet;
+- ingests Arrow 58 `RecordBatch` streams using ADBC target catalog/schema/table
+  options;
+- executes query, DDL, and DML statements; and
+- maps an ADBC transaction to one DuckLake snapshot, with rollback on callback
+  failure, panic cleanup, fail-fast reentrant access, autocommit restoration, and
+  connection quarantine when commit/rollback cleanup leaves the outcome unsafe.
 
-Validated artifact: `.tmp/duckdb-authority/README.md`.
-
-The probe created a new official DuckLake catalog, disabled data inlining, created
-`public.points` with WKB and `_qg_*` layout columns, inserted three rows, updated
-one row, deleted one row, inspected DuckLake table metadata, reopened the catalog,
-ran an exact WKB spatial predicate, and listed snapshots. All six checks passed:
-
-- `create_insert`;
-- `mutation`;
-- `metadata`;
-- `reopen`;
-- `spatial_wkb`;
-- `snapshot_metadata`.
-
-Interpretation: the fastest ideal-architecture path is now validated at the storage
-authority layer. Next work should route a minimal QuackGIS pgwire workflow to this
-DuckDB-authored path instead of investing in the unreleased `datafusion-ducklake`
-writer.
-
-The same artifact was also accepted by the reference-reader packet checker under
-the `duckdb-local-ducklake` profile:
+The real-driver slice passes against project-pinned DuckDB/libduckdb 1.5.4:
 
 ```sh
-just duckdb-reference-evidence-check \
-  manifest=.tmp/duckdb-reference/authority-manifest.json \
-  out=.tmp/duckdb-reference/authority-README.md
+mise install
+mise run duckdb-bootstrap
+mise exec -- just duckdb-adbc-storage-test
 ```
 
-That packet reported `duckdb_reference_readable` with 7/7 checks passed. This is
-the first positive storage-interoperability claim, and it comes from DuckDB-authored
-storage rather than QuackGIS-authored preview catalogs.
+It creates an official local DuckLake through Arrow ingestion, preserves valid WKB,
+runs an exact DuckDB spatial predicate, rejects reentrant connection use without a
+deadlock, runs `UPDATE` and `DELETE` in one transaction, verifies exactly one new
+snapshot, drops the connection, and reopens the catalog for another exact spatial
+read. The feature-gated local server now promotes this kernel into the real
+`--engine-backend=duckdb` CLI route for bounded structural pgwire reads/writes,
+COPY, transactions, SCRAM/table policy, and restart. The default server still uses
+`datafusion-ducklake`; shared PostgreSQL/S3 configuration, native cancellation/
+streaming, catalog/PostGIS/client parity, concurrent process writers, crash drills,
+spatial family metadata, and production multi-platform packaging remain blockers.
+
+ADBC itself does **not** enforce DuckLake compatibility. It is the Arrow transport;
+compatibility comes from routing all durable operations through DuckDB's official
+`ducklake` extension and testing the resulting catalogs with independent readers.
+The repository bootstrap verifies the official libduckdb archive and extracted
+library checksums. DuckDB verifies official extension signatures, and the bootstrap
+records the installed extension digests in `.tmp/duckdb/manifest.json`; all probes
+then use fail-closed `LOAD` only. This closes the reproducible Linux x86_64 local
+dependency gap, not D4: immutable production image artifacts, a supported platform
+matrix, upgrade/mixed-version refusal, and clean-room deployment evidence remain.
+The required pull-request CI bootstraps the same pinned artifacts and runs the real
+ADBC storage, engine smoke, and independent authority probes after the fast gate.
+
+### Engine-contract expansion
+
+The D0 `engine_api` contract now uses direct Arrow 58 types rather than DataFusion
+plans or catalogs for statement description, parameter batches, query schemas and
+batches, table discovery, ingest disposition, snapshots, maintenance, and bounded
+classified errors. The DuckDB ADBC implementation proves against the pinned native
+runtime that it can:
+
+- prepare and describe positional parameters and result schemas;
+- bind a one-row Arrow parameter batch without SQL literal interpolation;
+- preserve a result schema when a query returns zero rows;
+- discover an official DuckLake table schema through ADBC;
+- return typed official snapshot ids/timestamps;
+- merge adjacent official DuckLake files without changing row results; and
+- shut down ADBC before an independent DuckDB CLI reopens the same authored
+  catalog and reproduces exact spatial counts.
+
+The process-owned `ManagedDatabase` can also open independent connection/session
+handles against its one attached official catalog. The native gate proves a second
+session sees committed Arrow ingest, cannot see another session's uncommitted
+mutation, and sees it immediately after commit. Each handle retains independent
+busy/quarantine state. This is local same-process isolation, not shared-catalog or
+multi-process writer evidence.
+
+The native-code trust boundary now verifies the exact committed `libduckdb.so`
+SHA-256 before loading it, then queries and requires exact DuckDB SQL runtime
+version `v1.5.4` before claiming the data root or attaching DuckLake. A focused
+unit oracle proves a modified library fails without creating the configured root.
+This complements image-context provenance and prevents a path-only configuration
+from silently selecting a different ABI/runtime.
+
+This is now both a storage/query-kernel contract and a bounded local pgwire route,
+not D2 completion. ADBC results remain materialized, while the server owns
+independent per-client transactions and lazily encodes their Arrow batches through
+the existing PostgreSQL OID layer. Native cancellation, broader parameter/COPY
+types and options, catalog/PostGIS shims, maintained clients, and shared operation
+remain open; the legacy branch still returns a DataFusion `SessionContext`.
+
+The native gate also carries a first DuckDB layout oracle: WKB points and hidden
+bbox columns are written through official DuckLake, a polygon-hole query proves
+bbox candidates safely over-select exact results, `EXPLAIN` contains both hidden
+filters and `ST_Intersects`, and reopen preserves the exact count. Time/Morton
+maintenance and scale/scan budgets remain future D3 evidence.

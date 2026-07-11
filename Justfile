@@ -20,6 +20,7 @@ osm_polygon_limit := env_var_or_default("OSM_POLYGON_LIMIT", "50")
 container_engine := env_var_or_default("CONTAINER_ENGINE", "podman")
 kind_cluster := env_var_or_default("KIND_CLUSTER", "quackgis")
 quackgis_image := env_var_or_default("QUACKGIS_IMAGE", "localhost/quackgis:dev")
+duckdb_runtime_image := env_var_or_default("QUACKGIS_DUCKDB_RUNTIME_IMAGE", "localhost/quackgis-duckdb-runtime:dev")
 linkerd_iptables_mode := env_var_or_default("LINKERD_IPTABLES_MODE", "nft")
 qps_deep_factor := env_var_or_default("QPS_DEEP_FACTOR", "10000")
 qps_deep_workers := env_var_or_default("QPS_DEEP_WORKERS", "32")
@@ -43,6 +44,9 @@ external_s3_secret_access_key := env_var_or_default("EXTERNAL_QUACKGIS_S3_SECRET
 external_s3_region := env_var_or_default("EXTERNAL_QUACKGIS_S3_REGION", "us-east-1")
 external_s3_allow_http := env_var_or_default("EXTERNAL_QUACKGIS_S3_ALLOW_HTTP", "true")
 duckdb_bin := env_var_or_default("DUCKDB_BIN", "duckdb")
+duckdb_version := env_var_or_default("DUCKDB_VERSION", "1.5.4")
+duckdb_home := env_var_or_default("DUCKDB_HOME", ".tmp/duckdb/home")
+duckdb_adbc_driver := env_var_or_default("QUACKGIS_DUCKDB_ADBC_DRIVER", ".tmp/duckdb/v" + duckdb_version + "/lib/libduckdb.so")
 ref_datafusion_postgres_url := env_var_or_default("REF_DATAFUSION_POSTGRES_URL", "https://github.com/adonm/datafusion-postgres")
 ref_datafusion_postgres_branch := env_var_or_default("REF_DATAFUSION_POSTGRES_BRANCH", "quackgis/fixes")
 ref_datafusion_postgres_upstream_url := env_var_or_default("REF_DATAFUSION_POSTGRES_UPSTREAM_URL", "https://github.com/datafusion-contrib/datafusion-postgres")
@@ -77,9 +81,10 @@ ref_sqlite_branch := env_var_or_default("REF_SQLITE_BRANCH", "master")
 default:
     just --list
 
-# Install mise-managed tools and project-local helper binaries.
+# Install mise-managed tools and project-local native/helper binaries.
 setup:
     mise install
+    mise run duckdb-bootstrap
     just install-martin
 
 # Verify the local development toolchain expected by repo recipes.
@@ -89,6 +94,8 @@ doctor:
     cargo --version
     cargo fmt --version
     cargo clippy --version
+    mise exec -- duckdb --version
+    @test -f '{{duckdb_adbc_driver}}' || { printf '%s\n' 'DuckDB ADBC driver missing; run `just setup`.' >&2; exit 2; }
     @printf "QuackGIS dev toolchain looks usable. Run 'just smoke' for a quick server check.\n"
 
 # Smallest newcomer smoke: start the test server and run one spatial pgwire query.
@@ -257,6 +264,13 @@ duckdb-reference-evidence-check manifest=".tmp/duckdb-reference/manifest.json" o
     mkdir -p "$(dirname "${out_arg}")"; \
     python3 scripts/duckdb_reference_evidence_check.py --manifest "${manifest_arg}" --out "${out_arg}"
 
+# Install checksum-pinned libduckdb and signed extensions into ignored .tmp.
+duckdb-bootstrap duckdb_bin=duckdb_bin:
+    @set -eu; \
+    duckdb_arg='{{duckdb_bin}}'; \
+    duckdb_arg="${duckdb_arg#duckdb_bin=}"; \
+    python3 scripts/bootstrap_duckdb.py --duckdb-bin "$duckdb_arg"
+
 # Run the out-of-process DuckDB spatial + DuckLake extension engine probe.
 duckdb-engine-probe out=".tmp/duckdb-engine/README.md" attach_sql="" duckdb_bin=duckdb_bin:
     @set -eu; \
@@ -266,14 +280,23 @@ duckdb-engine-probe out=".tmp/duckdb-engine/README.md" attach_sql="" duckdb_bin=
     out_arg="${out_arg#out=}"; \
     attach_arg="${attach_arg#attach_sql=}"; \
     duckdb_arg="${duckdb_arg#duckdb_bin=}"; \
+    duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; \
     mkdir -p "$(dirname "${out_arg}")"; \
     if [ -n "$attach_arg" ]; then \
-        python3 scripts/duckdb_engine_probe.py --duckdb-bin "$duckdb_arg" --out "$out_arg" --attach-sql "$attach_arg"; \
+        HOME="$duckdb_home_arg" python3 scripts/duckdb_engine_probe.py --duckdb-bin "$duckdb_arg" --out "$out_arg" --attach-sql "$attach_arg"; \
     else \
-        python3 scripts/duckdb_engine_probe.py --duckdb-bin "$duckdb_arg" --out "$out_arg"; \
+        HOME="$duckdb_home_arg" python3 scripts/duckdb_engine_probe.py --duckdb-bin "$duckdb_arg" --out "$out_arg"; \
     fi
 
-# Run the DuckDB-authored official DuckLake vertical-slice probe.
+# Classify and execute the maintained PostGIS subset against pinned DuckDB spatial.
+duckdb-spatial-compat-probe out=".tmp/duckdb-spatial/README.md" manifest=".tmp/duckdb-spatial/manifest.json" duckdb_bin=duckdb_bin:
+    @set -eu; \
+    out_arg='{{out}}'; manifest_arg='{{manifest}}'; duckdb_arg='{{duckdb_bin}}'; \
+    out_arg="${out_arg#out=}"; manifest_arg="${manifest_arg#manifest=}"; duckdb_arg="${duckdb_arg#duckdb_bin=}"; \
+    duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; \
+    HOME="$duckdb_home_arg" python3 scripts/duckdb_spatial_compat_probe.py --duckdb-bin "$duckdb_arg" --out "$out_arg" --manifest "$manifest_arg"
+
+# Run the real DuckDB ADBC -> official DuckLake Arrow/mutation/reopen slice.
 duckdb-authority-probe workdir=".tmp/duckdb-authority" out=".tmp/duckdb-authority/README.md" manifest=".tmp/duckdb-authority/manifest.json" duckdb_bin=duckdb_bin:
     @set -eu; \
     workdir_arg='{{workdir}}'; \
@@ -284,7 +307,36 @@ duckdb-authority-probe workdir=".tmp/duckdb-authority" out=".tmp/duckdb-authorit
     out_arg="${out_arg#out=}"; \
     manifest_arg="${manifest_arg#manifest=}"; \
     duckdb_arg="${duckdb_arg#duckdb_bin=}"; \
-    python3 scripts/duckdb_authority_probe.py --duckdb-bin "$duckdb_arg" --workdir "$workdir_arg" --out "$out_arg" --manifest "$manifest_arg"
+    duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; \
+    HOME="$duckdb_home_arg" python3 scripts/duckdb_authority_probe.py --duckdb-bin "$duckdb_arg" --workdir "$workdir_arg" --out "$out_arg" --manifest "$manifest_arg"
+
+# Run the real in-process DuckDB ADBC -> official DuckLake slice.
+duckdb-adbc-storage-test driver=duckdb_adbc_driver:
+    @set -eu; \
+    driver_arg='{{driver}}'; \
+    driver_arg="${driver_arg#driver=}"; \
+    if [ ! -f "$driver_arg" ]; then \
+        echo 'DuckDB ADBC driver is missing; run `mise run duckdb-bootstrap`' >&2; \
+        exit 2; \
+    fi; \
+    driver_arg="$(realpath "$driver_arg")"; \
+    duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; \
+    HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" cargo test -p quackgis-server --features duckdb-adbc --test duckdb_adbc_storage -- --ignored --nocapture
+
+# Run the bounded local DuckDB pgwire create/COPY/query/mutation/transaction workflow.
+duckdb-pgwire-workflow-test driver=duckdb_adbc_driver:
+    @set -eu; driver_arg='{{driver}}'; driver_arg="${driver_arg#driver=}"; \
+    if [ ! -f "$driver_arg" ]; then echo 'DuckDB ADBC driver is missing; run `mise run duckdb-bootstrap`' >&2; exit 2; fi; \
+    driver_arg="$(realpath "$driver_arg")"; duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; \
+    HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" cargo test -p quackgis-server --features duckdb-adbc --test duckdb_wire_read -- --ignored --nocapture
+
+# Compatibility alias for the original read-only checkpoint recipe.
+duckdb-pgwire-read-test: duckdb-pgwire-workflow-test
+
+# Compile and unit-test the feature-gated ADBC boundary without requiring libduckdb.
+duckdb-adbc-compile-check:
+    cargo test -p quackgis-server --features duckdb-adbc --lib
+    cargo test -p quackgis-server --features duckdb-adbc --test duckdb_adbc_storage --no-run
 
 # Run the starter curated PostGIS function regress subset and print pass-rate evidence.
 postgis-regress:
@@ -351,7 +403,7 @@ check: fmt-check clippy test
 check-fast: fmt-check clippy test-fast
 
 # Run the same fast gate used by GitHub Actions CI.
-ci: benchmark-profile-check check-fast smoke-local-demo preview-smoke api-client-local-smoke probe-static-check runtime-static-check
+ci: benchmark-profile-check check-fast duckdb-adbc-compile-check smoke-local-demo preview-smoke api-client-local-smoke probe-static-check runtime-static-check
 
 # Run the dev QuackGIS server on QUACKGIS_HOST/QUACKGIS_PORT.
 server:
@@ -596,13 +648,15 @@ kind-layoutbench-run-config:
 # Static pre-Kind validation for probe scripts and Kubernetes manifests.
 probe-static-check:
     mkdir -p .tmp/pycache
-    PYTHONPYCACHEPREFIX=.tmp/pycache python3 -m py_compile scripts/probe_static_check.py scripts/runtime_static_check.py scripts/trend_metrics.py scripts/metrics_budget_check.py scripts/layoutbench_catalog_report.py scripts/external_alpha_evidence_check.py scripts/duckdb_authority_probe.py scripts/duckdb_engine_probe.py scripts/duckdb_reference_evidence_check.py scripts/multimodal_inventory_evidence_check.py scripts/tests/test_duckdb_authority_probe.py scripts/tests/test_duckdb_engine_probe.py scripts/tests/test_duckdb_reference_evidence_check.py scripts/tests/test_multimodal_inventory_evidence_check.py scripts/tests/test_render_compat_report.py deploy/kind/render_compat_report.py deploy/kind/check_linkerd_injected.py deploy/kind/probes/*.py
+    PYTHONPYCACHEPREFIX=.tmp/pycache python3 -m py_compile scripts/probe_static_check.py scripts/runtime_static_check.py scripts/duckdb_runtime_static_check.py scripts/prepare_duckdb_runtime.py scripts/trend_metrics.py scripts/metrics_budget_check.py scripts/layoutbench_catalog_report.py scripts/external_alpha_evidence_check.py scripts/bootstrap_duckdb.py scripts/duckdb_authority_probe.py scripts/duckdb_engine_probe.py scripts/duckdb_spatial_compat_probe.py scripts/duckdb_reference_evidence_check.py scripts/multimodal_inventory_evidence_check.py scripts/tests/test_duckdb_authority_probe.py scripts/tests/test_duckdb_engine_probe.py scripts/tests/test_duckdb_runtime_static_check.py scripts/tests/test_duckdb_spatial_compat_probe.py scripts/tests/test_duckdb_reference_evidence_check.py scripts/tests/test_multimodal_inventory_evidence_check.py scripts/tests/test_render_compat_report.py deploy/kind/render_compat_report.py deploy/kind/check_linkerd_injected.py deploy/kind/probes/*.py
     bash -n deploy/kind/probes/*.sh
     python3 scripts/probe_static_check.py deploy/kind
     python3 scripts/probe_static_check.py deploy/kubernetes
     python3 scripts/tests/test_external_alpha_evidence_check.py
     python3 scripts/tests/test_duckdb_authority_probe.py
     python3 scripts/tests/test_duckdb_engine_probe.py
+    python3 scripts/tests/test_duckdb_spatial_compat_probe.py
+    python3 scripts/tests/test_duckdb_runtime_static_check.py
     python3 scripts/tests/test_duckdb_reference_evidence_check.py
 
 # Validate an external-service Alpha evidence manifest against collected metrics.
@@ -619,6 +673,25 @@ external-alpha-evidence-check manifest=".tmp/external-alpha/manifest.json" metri
 # Static guard that the maintained runtime image remains one native-free Rust binary.
 runtime-static-check:
     python3 scripts/runtime_static_check.py deploy/Containerfile.runtime
+
+# Guard the separate native DuckDB runtime against online installs or missing artifacts.
+duckdb-runtime-static-check:
+    python3 scripts/duckdb_runtime_static_check.py deploy/Containerfile.duckdb-runtime
+    python3 scripts/tests/test_duckdb_runtime_static_check.py
+
+# Assemble a verified Linux x86_64 DuckDB runtime context under ignored .tmp.
+duckdb-runtime-context:
+    cargo build -p quackgis-server --release --features duckdb-adbc
+    @duckdb_path="$(mise exec -- which duckdb)"; \
+    python3 scripts/prepare_duckdb_runtime.py --server target/release/quackgis-server --duckdb-bin "$duckdb_path"
+
+# Build the immutable local DuckDB evaluation runtime image.
+duckdb-runtime-image: duckdb-runtime-static-check duckdb-runtime-context
+    {{container_engine}} build -t {{duckdb_runtime_image}} -f deploy/Containerfile.duckdb-runtime .tmp/duckdb-runtime
+
+# Prove pinned extensions load with all container networking disabled.
+duckdb-runtime-offline-smoke: duckdb-runtime-image
+    {{container_engine}} run --rm --network none --entrypoint /usr/local/bin/duckdb {{duckdb_runtime_image}} -csv -noheader :memory: -c "LOAD spatial; LOAD ducklake; SELECT ST_AsText(ST_Point(1, 2));"
 
 # Flatten one or more compatibility/storage metrics artifacts for trend analysis.
 metrics-trend path=".tmp/compatibility" format="csv":

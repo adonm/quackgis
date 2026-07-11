@@ -11,6 +11,7 @@ only when it appears in one of the maintained gates below.
 | Pgwire claimed subset | Functions and metadata exercised through the QuackGIS server protocol boundary | `just postgis-regress`; `crates/quackgis-server/tests/postgis_regress.rs` currently has 57 cases and prints `postgis_regress_subset passed=<n> total=<n> pass_rate=<x>` |
 | SQL portability fixtures | SedonaDB/PostGIS function-kernel parity and documented mechanical rewrites | `tests/run_sql.sh` includes the SQL fixtures summarized by `just postgis-conformance-summary` |
 | Client traces | Real client SQL/catalog/wire behavior | Kind probes for QGIS, GDAL/OGR, GeoServer, and Martin; see `docs/COMPATIBILITY_MATRIX.md` |
+| DuckDB migration classifier | Every 57-case pgwire claim has one DuckDB native/rewrite/macro/edge/extension/unsupported disposition; executable cases are checked against pinned DuckDB | `just duckdb-spatial-compat-probe`; `docs/DUCKDB_SPATIAL_GAP_LEDGER.md` |
 
 The pgwire subset is the release claim. The SQL portability fixtures are broader
 function-kernel evidence and are promoted to pgwire/client claims only when a
@@ -18,6 +19,10 @@ server or client trace needs that surface.
 
 Use `just postgis-conformance-summary` to render the current fixture counts for
 release notes or conformance reviews.
+
+The DuckDB classifier currently records 31 native cases, 5 mechanical rewrites,
+4 QuackGIS macros, 12 Rust-edge cases, and 5 extension candidates. This is
+migration evidence, not a DuckDB-backed pgwire support claim.
 
 ## Current covered families
 

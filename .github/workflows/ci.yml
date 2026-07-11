@@ -30,3 +30,20 @@ jobs:
         run: |
           set -euo pipefail
           mise exec -- just ci
+
+      - name: Bootstrap pinned DuckDB runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          mise run duckdb-bootstrap
+
+      - name: Run native DuckDB gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          mise exec -- just duckdb-adbc-storage-test
+          mise exec -- just duckdb-pgwire-workflow-test
+          mise exec -- just duckdb-engine-probe
+          mise exec -- just duckdb-authority-probe
+          mise exec -- just duckdb-spatial-compat-probe
+          mise exec -- just duckdb-runtime-static-check

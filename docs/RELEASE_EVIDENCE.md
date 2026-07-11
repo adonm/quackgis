@@ -21,6 +21,7 @@ storage probes, metrics dashboards, and known limits.
 | regional `layoutbench_catalog` log + generated `metrics.json` | `scripts/layoutbench_catalog_report.py` | profile-bound PostgreSQL catalog provider-call deltas and phase budgets |
 | `benchmarks/profiles/*.json` | source tree + `just benchmark-profile-check` | exact row composition, generator, storage, oracle, catalog budget, and required run-metadata contract |
 | `postgis-regress-<sha>-<run_id>` | `PostGIS regress subset` workflow | PostGIS subset log, metrics, and dashboard |
+| `.tmp/duckdb-runtime/artifact-manifest.json` + offline image transcript | `duckdb-runtime-offline-smoke` in CI artifacts | Linux x86_64 native artifact digests and proof that extensions load with container networking disabled; evaluation-only until D4 promotion |
 | `metrics-dashboard.md` | scheduled/manual probe workflows | compact human review surface next to `metrics.json` |
 
 The dashboard is a summary, not the source of truth. Keep the original
@@ -79,6 +80,9 @@ preview/manual build and include the exact replacement command transcript.
   `docs/ALPHA_EXTERNAL_SERVICES.md` drill results.
 - Release notes call out any DuckLake alignment or reference-reader caveat from
   `docs/DUCKLAKE_ALIGNMENT.md`.
+- DuckDB-backed release claims require the exact runtime artifact manifest and
+  offline smoke transcript; current artifacts are evaluation evidence and do not
+  override the blocked pgwire/default-backend status.
 
 ## Manifest fields
 

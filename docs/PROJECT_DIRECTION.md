@@ -11,8 +11,9 @@ status or milestone detail:
 
 QuackGIS is the **PostGIS-compatible SQL and control plane for an open spatial
 lakehouse**. It lets platform and application teams keep large shared spatial data
-in DuckLake/Parquet, execute through DataFusion + SedonaDB, and preserve the GIS,
-driver, API, and BI ecosystem that already understands PostgreSQL/PostGIS.
+in DuckLake/Parquet, execute through DuckDB and its official DuckLake/spatial
+extension ecosystem, and preserve the GIS, driver, API, and BI ecosystem that
+already understands PostgreSQL/PostGIS through the Rust QuackGIS edge.
 
 The durable advantage is the combination, not any one subsystem:
 
@@ -53,14 +54,15 @@ The core job is:
 
 QuackGIS is not a smaller PostgreSQL, OLTP database, desktop GIS, map server, or
 universal spatial-format decoder. PostgreSQL is an interface and optional catalog
-store; DuckDB is the unreleased storage-authority target but not yet embedded in
-the current runtime; heavy assets remain in object storage behind queryable
+store; DuckDB is the target query/storage engine and official DuckLake authority,
+but remains feature-gated while the capability-preserving migration in
+`ROADMAP.md` is executed. Heavy assets remain in object storage behind queryable
 footprint/provenance indexes.
 
-Compatibility breadth is earned from maintained workflows. Storage-specific
-features are adopted from DuckLake when they preserve QuackGIS correctness and
-interoperability gates. When PostgreSQL illusion, optimization, and correctness
-conflict, explicit limits and correctness win.
+Compatibility breadth is earned from maintained workflows. Engine and storage
+features are adopted from DuckDB/official DuckLake when they preserve QuackGIS
+correctness and interoperability gates. When PostgreSQL illusion, optimization,
+and correctness conflict, explicit limits and correctness win.
 
 ## Claim discipline
 

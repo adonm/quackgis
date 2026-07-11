@@ -33,6 +33,11 @@ use crate::catalog_compat::CatalogCompatHook;
 use crate::context::StoragePaths;
 use crate::ducklake_sql::{DuckLakeCopyHandler, DuckLakeSqlHook};
 
+#[cfg(feature = "duckdb-adbc")]
+mod duckdb;
+#[cfg(feature = "duckdb-adbc")]
+pub use duckdb::serve_duckdb;
+
 pub async fn serve(
     session_context: Arc<SessionContext>,
     opts: &ServerOptions,

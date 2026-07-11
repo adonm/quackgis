@@ -104,6 +104,12 @@ Status: 🟢 in sync · 🟡 local patches, upstreamable · 🔴 blocked.
       default extended execution. QuackGIS uses it to refresh snapshot-scoped
       DuckLake table providers while the default handler retains parameter
       binding, result formats, result-schema checks, and statement timeouts.
+  22. local vendored patch — fail startup when configured TLS certificate/key
+      material cannot be loaded or parsed. Upstream logged a warning and silently
+      served plaintext, which violates the QuackGIS transport trust boundary.
+  23. local test/documentation clarification — retain pgwire's streaming
+      `QueryResponse`/`Portal::fetch` ownership of `Execute.max_rows`; a QuackGIS raw
+      protocol oracle now locks repeated suspend/resume and final completion.
 - **Remaining fork target:** extended-protocol `FETCH` RowDescription
   mismatch (`DataRow field count does not match`). Not blocking QGIS/libpq.
 - **Upstream plan:** split into small PRs after local soak: Arc recursion fix

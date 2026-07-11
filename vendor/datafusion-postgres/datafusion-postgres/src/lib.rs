@@ -124,16 +124,14 @@ pub async fn serve_with_handlers(
     // Set up TLS if configured
     let tls_acceptor =
         if let (Some(cert_path), Some(key_path)) = (&opts.tls_cert_path, &opts.tls_key_path) {
-            match setup_tls(cert_path, key_path) {
-                Ok(acceptor) => {
-                    info!("TLS enabled using cert: {cert_path} and key: {key_path}");
-                    Some(acceptor)
-                }
-                Err(e) => {
-                    warn!("Failed to setup TLS: {e}. Running without encryption.");
-                    None
-                }
-            }
+            let acceptor = setup_tls(cert_path, key_path).map_err(|error| {
+                IOError::new(
+                    error.kind(),
+                    format!("failed to configure requested TLS: {error}"),
+                )
+            })?;
+            info!("TLS enabled using cert: {cert_path} and key: {key_path}");
+            Some(acceptor)
         } else {
             info!("TLS not configured. Running without encryption.");
             None

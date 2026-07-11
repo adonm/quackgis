@@ -41,6 +41,7 @@ use url::Url;
 
 use crate::auth::{AccessRole, AuthConfig, AuthMode};
 use crate::catalog_metrics::MeteredMetadataProvider;
+use crate::storage_authority::{StorageAuthority, claim_object_store, marker_key};
 
 /// Default name of the DuckLake catalog as seen by clients. Persisted tables
 /// live under `quackgis.main.<table>`. The default catalog for unqualified
@@ -206,6 +207,27 @@ impl StoragePaths {
 
     pub fn is_shared_catalog(&self) -> bool {
         matches!(self.profile, StorageProfile::Postgres { .. })
+    }
+
+    /// Atomically claim this profile's data root for one writer implementation.
+    /// Reopening with the same authority is idempotent; a different authority
+    /// fails before catalog initialization or object writes.
+    pub async fn claim_authority(&self, authority: StorageAuthority) -> Result<()> {
+        let prefix = if self.data_path().to_ascii_lowercase().starts_with("s3://") {
+            let url = Url::parse(self.data_path()).context("parsing S3 data path for authority")?;
+            trim_object_key(url.path())
+        } else {
+            self.data_path().trim_matches('/').to_string()
+        };
+        let marker = marker_key(&prefix);
+        claim_object_store(self.object_store()?.as_ref(), &marker, authority)
+            .await
+            .with_context(|| {
+                format!(
+                    "claiming DuckLake data root for storage authority {}",
+                    authority
+                )
+            })
     }
 
     /// Inventory old unreferenced Parquet candidates without deleting anything.
@@ -963,6 +985,33 @@ mod tests {
     fn target_partitions_parser_rejects_invalid_values() {
         assert!(parse_target_partitions_value("many").is_err());
         assert!(parse_target_partitions_value("-1").is_err());
+    }
+
+    #[tokio::test]
+    async fn local_storage_authority_is_bound_to_the_configured_data_root() {
+        let temp = tempfile::tempdir().expect("temporary storage root");
+        let catalog = temp.path().join("catalog.db");
+        let data = temp.path().join("data");
+        let storage = StoragePaths::new(
+            catalog.to_str().expect("catalog path"),
+            data.to_str().expect("data path"),
+        )
+        .expect("local storage profile");
+
+        storage
+            .claim_authority(StorageAuthority::LegacyDataFusionDuckLake)
+            .await
+            .expect("initial legacy authority claim");
+        assert!(
+            data.join(crate::storage_authority::AUTHORITY_MARKER_NAME)
+                .is_file()
+        );
+
+        let error = storage
+            .claim_authority(StorageAuthority::DuckDbOfficialDuckLake)
+            .await
+            .expect_err("same data root must reject a second authority");
+        assert!(format!("{error:#}").contains("authority mismatch"));
     }
 
     /// Smoke: context builds, exposes SedonaDB ST_* functions, and answers

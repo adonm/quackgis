@@ -13,10 +13,10 @@ This document defines what must be true before widening the security claim.
 | Control | Status | Evidence |
 |---|---|---|
 | Trust-mode local development | ✅ default preview | local smokes |
-| SCRAM-SHA-256 password auth | ✅ implemented | `password_auth_and_readonly_role_fail_closed` |
+| SCRAM-SHA-256 password auth | ✅ implemented | `password_auth_and_readonly_role_fail_closed`; real DuckDB CLI process in `duckdb-pgwire-workflow-test` |
 | Read/write vs read-only roles | ✅ coarse role model | AST allowlist permits queries/session/read controls and denies all mutating or indeterminate statement variants before catalog refresh with SQLSTATE `42501`; denials increment `quackgis_write_denied_total` and emit redacted `quackgis_audit` authorization events |
-| Write service table allowlists | ✅ implemented for write-capable identities | `QUACKGIS_WRITE_ALLOWLIST` / `--write-allowlist` normalizes `table`, `public.table`, `main.table`, and `quackgis.main.table`; denied or indeterminate writes fail with SQLSTATE `42501`; `password_auth_write_allowlist_limits_readwrite_targets` |
-| Read service table allowlists | ✅ fail-closed table and metadata gate | `QUACKGIS_READ_ALLOWLIST` / `--read-allowlist` uses the same target normalization, denies non-allowlisted DuckLake reads, denies unfiltered `pg_catalog`/`information_schema` and DuckLake metadata UDTFs while restricted, reflects explicit-user SELECT privilege metadata, and increments `quackgis_read_denied_total`; `password_auth_read_allowlist_denies_tables_and_metadata` |
+| Write service table allowlists | ✅ implemented for write-capable identities | `QUACKGIS_WRITE_ALLOWLIST` / `--write-allowlist` normalizes `table`, `public.table`, `main.table`, and `quackgis.main.table`; denied or indeterminate writes fail with SQLSTATE `42501`; the real DuckDB CLI gate denies reader INSERT and COPY before ADBC access |
+| Read service table allowlists | ✅ fail-closed table and metadata gate | `QUACKGIS_READ_ALLOWLIST` / `--read-allowlist` uses the same target normalization, denies non-allowlisted DuckLake reads and unfiltered metadata while restricted, and increments `quackgis_read_denied_total`; both legacy wire tests and the real DuckDB CLI process cover the decision |
 | `pg_roles` and privilege helper metadata | ✅ compatibility surface | `wire_spatial` privilege/catalog tests |
 | pgwire TLS cert/key | ✅ configurable | ops docs and Kubernetes example |
 | Metrics endpoint | ✅ opt-in, no SQL/secrets | metrics tests, read-only denial counter test, and external profile scrape |
@@ -47,7 +47,7 @@ This document defines what must be true before widening the security claim.
 | Probe | Required behavior |
 |---|---|
 | Missing read/write password in password mode | server fails closed at startup |
-| Missing TLS cert or key half | server fails closed at startup |
+| Missing TLS cert/key half or invalid configured certificate/key material | server fails closed at startup and never falls back to plaintext |
 | Wrong password | connection denied; no fallback to trust mode |
 | Read-only CREATE/COPY/DML/compaction | denied with SQLSTATE `42501` before catalog refresh or DuckLake mutation; DDL/DML/maintenance/unknown-call denials increment `quackgis_write_denied_total` |
 | Write allowlist denial | non-allowlisted DuckLake `CREATE TABLE`/`COPY FROM STDIN`/DML/`ALTER TABLE`/compaction targets and indeterminate write statements are denied before planning; explicit-user `has_table_privilege`/`has_column_privilege` write metadata matches the allowlist |

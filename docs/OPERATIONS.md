@@ -17,6 +17,7 @@ production claims.
 
 ```sh
 mise install
+mise run duckdb-bootstrap # needed for native DuckDB/ADBC and authority probes
 eval "$(mise activate bash)"
 just ci
 just preview-smoke
@@ -26,9 +27,18 @@ just demo-local
 ```
 
 Use an activated mise shell for interactive work; this keeps the pinned Rust,
-container, Kubernetes, and probe-tool environment on `PATH`. In CI or one-off
+DuckDB CLI, container, Kubernetes, and probe-tool environment on `PATH`. In CI or one-off
 scripts, keep the same Justfile entrypoints and prefix them with mise instead,
 for example `mise exec -- just ci`.
+
+`mise run duckdb-bootstrap` supports Linux x86_64 and installs ignored local
+artifacts under `.tmp/duckdb`: the SHA-256-pinned official `libduckdb` v1.5.4
+release, headers, and DuckDB-signed version-matched `ducklake` and `spatial`
+extensions. It writes `.tmp/duckdb/manifest.json` with resolved paths and SHA-256
+digests. DuckDB probes set an isolated `HOME` and use `LOAD` only, so test/runtime
+execution does not download extensions. Re-run the bootstrap after deleting
+`.tmp/duckdb`; do not copy these host artifacts into production images without the
+D4 platform, provenance, upgrade, and crash-isolation gates.
 
 The default local server listens on `127.0.0.1:5434` and uses:
 
@@ -40,6 +50,7 @@ The default local server listens on `127.0.0.1:5434` and uses:
 | `QUACKGIS_CATALOG_URL` | unset | PostgreSQL DuckLake catalog URL; switches storage profile when set |
 | `QUACKGIS_DUCKLAKE_CATALOG_NAME` | `quackgis` | DuckLake catalog name inside PostgreSQL metadata |
 | `QUACKGIS_DATA_PATH` | `.tmp/dev/data` | Parquet data directory |
+| `QUACKGIS_ENGINE_BACKEND` | `legacy-datafusion` | Explicit backend; `duckdb` is rejected until the D2 pgwire route passes |
 | `QUACKGIS_S3_ENDPOINT` | unset | S3-compatible endpoint for `s3://` data paths |
 | `QUACKGIS_S3_ACCESS_KEY_ID` / `QUACKGIS_S3_SECRET_ACCESS_KEY` | unset | S3 credentials |
 | `QUACKGIS_S3_REGION` | `us-east-1` | S3 signing region |
@@ -87,7 +98,9 @@ quackgis-server --host 0.0.0.0 --port 5434
 ```
 
 The server fails closed if only one of `QUACKGIS_TLS_CERT` or `QUACKGIS_TLS_KEY`
-is set, or if password auth is enabled without a non-empty read/write password.
+is set, if configured certificate/key material cannot be loaded and parsed, or if
+password auth is enabled without a non-empty read/write password. Configured TLS
+never falls back to a plaintext listener.
 Password auth negotiates PostgreSQL SASL/SCRAM-SHA-256; still pair it with
 direct TLS, a trusted mTLS mesh, or an authenticated PostgreSQL-aware proxy so
 queries, metadata, and object/catalog paths are not exposed on the wire.
@@ -116,6 +129,14 @@ limits for the external PostgreSQL/S3 profile. See
 and failure-mode probe checklist.
 
 Storage profiles:
+
+Every write-capable start claims `_quackgis/storage-authority-v1` under the data
+prefix with an atomic create-only write. Reopening with the same authority is
+idempotent; opening the same prefix with another authority fails before catalog
+initialization. Backup/restore for the same backend preserves this marker. A
+legacy-to-DuckDB export creates a distinct destination prefix and must not copy the
+source marker. Dry-run orphan inventory does not create a marker; quarantine apply
+does because it mutates the data root.
 
 | Profile | Status | Intended use |
 |---|---|---|
@@ -148,7 +169,7 @@ just kind-qps-deep-smoke # larger Linkerd-observed reader gate; QPS_DEEP_* tunab
 just kind-mtls-smoke     # Linkerd-injected lake profile with mTLS evidence
 ```
 
-`mise.toml` pins Rust, Just, Kind, kubectl, Helm, and cargo-nextest; Podman is the
+`mise.toml` pins Rust, DuckDB CLI, Just, Kind, kubectl, Helm, and cargo-nextest; Podman is the
 host container runtime. The repo defaults `CONTAINER_ENGINE=podman`,
 `KIND_EXPERIMENTAL_PROVIDER=podman`, `KIND_CLUSTER=quackgis`, and
 `QUACKGIS_IMAGE=localhost/quackgis:dev`, so the same commands work in activated
@@ -315,6 +336,7 @@ Relevant files:
 | Path | Purpose |
 |---|---|
 | `deploy/Containerfile.runtime` | runtime-only image used by the cached host-build Kind path |
+| `deploy/Containerfile.duckdb-runtime` | Linux x86_64 native evaluation image with pinned DuckDB artifacts and no runtime install |
 | `deploy/Containerfile` | clean container-native fallback image for Kind probes |
 | `deploy/kind/cluster.yaml` | Kind cluster config |
 | `deploy/kind/quackgis.yaml` | QuackGIS StatefulSet + Service |
@@ -326,6 +348,23 @@ Relevant files:
 | `deploy/kind/geoserver-probe.yaml` | official GeoServer 3.0.0 datastore + WFS/WMS/WFS-T probe Job |
 | `deploy/kind/postgis-osm.yaml` | opt-in PostGIS reference deployment for real OSM parity |
 | `deploy/kind/osm-postgis-parity-probe.yaml` | opt-in real OSM PostGIS → QuackGIS copy/read parity Job |
+
+The native evaluation image has an explicit offline gate:
+
+```sh
+mise run duckdb-bootstrap
+just duckdb-runtime-static-check
+just duckdb-runtime-offline-smoke
+```
+
+The context preparer verifies committed SHA-256 values for `libduckdb`,
+`ducklake`, and `spatial`, records server/CLI digests and source SHA, and refuses
+missing or modified artifacts. The Containerfile pins its base image by digest,
+runs as uid/gid 999, contains no downloader/package-manager/install step, and sets
+the exact ADBC driver and isolated extension home. The smoke builds the image and
+runs DuckDB with `--network none`; successful `LOAD` proves the image does not
+depend on runtime extension downloads. This is Linux x86_64 local/CI packaging
+evidence, not pgwire readiness or managed-service D4 promotion.
 
 ### Opt-in real OSM PostGIS parity
 

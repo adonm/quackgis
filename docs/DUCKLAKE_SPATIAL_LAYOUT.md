@@ -20,6 +20,13 @@ rechecked by SedonaDB. The current layout helps skip Parquet row groups/files wi
 ordinary hidden-column statistics. True DuckLake partition pruning is a target,
 not a current claim.
 
+The DuckDB migration has the same non-negotiable rule. A pinned native ADBC oracle
+now writes WKB plus `_qg_minx/_qg_miny/_qg_maxx/_qg_maxy` into official DuckLake,
+uses a polygon-with-hole fixture where bbox candidates are 3 but exact hits are 2,
+asserts DuckDB `EXPLAIN` retains both hidden-column filters and `ST_Intersects`, and
+repeats the exact result after reopen. This proves the local logical contract, not
+large-profile scan-byte pruning.
+
 Current preview status: WKB-derived hidden bbox/bucket/sort columns, safe
 single-table bbox rewrites, simple temporal `BETWEEN` bucket prefilters,
 LayoutBench `sf0`, COPY/INSERT ingest variants, whole-table compaction, native

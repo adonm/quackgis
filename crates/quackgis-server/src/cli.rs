@@ -11,6 +11,24 @@ pub enum CliAuthMode {
     Password,
 }
 
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+pub enum CliEngineBackend {
+    /// Current DataFusion/SedonaDB/datafusion-ducklake comparison backend.
+    #[default]
+    LegacyDatafusion,
+    /// Feature-gated DuckDB + official DuckLake local backend.
+    Duckdb,
+}
+
+impl From<CliEngineBackend> for crate::engine::EngineBackend {
+    fn from(value: CliEngineBackend) -> Self {
+        match value {
+            CliEngineBackend::LegacyDatafusion => Self::LegacyDataFusion,
+            CliEngineBackend::Duckdb => Self::DuckDb,
+        }
+    }
+}
+
 /// QuackGIS server — PostGIS-compatible SQL over pgwire, backed by SedonaDB.
 #[derive(Debug, Clone, Parser)]
 #[command(
@@ -20,6 +38,26 @@ pub enum CliAuthMode {
     version
 )]
 pub struct Cli {
+    /// Query/storage backend. DuckDB requires a `duckdb-adbc` build and currently
+    /// supports only the bounded local profile documented by the project.
+    #[arg(
+        long,
+        env = "QUACKGIS_ENGINE_BACKEND",
+        value_enum,
+        default_value_t = CliEngineBackend::LegacyDatafusion
+    )]
+    pub engine_backend: CliEngineBackend,
+
+    /// Absolute path to the pinned libduckdb ADBC driver. Required by the DuckDB
+    /// backend and ignored by the legacy backend.
+    #[arg(long, env = "QUACKGIS_DUCKDB_ADBC_DRIVER")]
+    pub duckdb_driver: Option<std::path::PathBuf>,
+
+    /// DuckDB control database URI. Durable data and metadata live in the
+    /// attached official DuckLake catalog, so the local default is in-memory.
+    #[arg(long, env = "QUACKGIS_DUCKDB_DATABASE_URI", default_value = ":memory:")]
+    pub duckdb_database_uri: String,
+
     /// Bind host.
     #[arg(long, env = "QUACKGIS_HOST", default_value = "127.0.0.1")]
     pub host: String,
@@ -28,7 +66,8 @@ pub struct Cli {
     #[arg(long, env = "QUACKGIS_PORT", default_value_t = 5434)]
     pub port: u16,
 
-    /// Path to the DuckLake SQLite catalog file. Created if missing.
+    /// Path to the catalog file. The legacy backend uses its SQLite catalog;
+    /// DuckDB attaches this path through the official `ducklake` extension.
     /// Ignored when --catalog-url is set.
     #[arg(long, env = "QUACKGIS_CATALOG_PATH", default_value = "quackgis.db")]
     pub catalog_path: String,

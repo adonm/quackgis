@@ -41,11 +41,23 @@ jobs:
       - name: Run tests
         run: LD_LIBRARY_PATH= mise exec -- cargo test --workspace
 
+      - name: Compile experimental DuckDB ADBC boundary
+        run: LD_LIBRARY_PATH= mise exec -- just duckdb-adbc-compile-check
+
       - name: Run clippy
         run: LD_LIBRARY_PATH= mise exec -- cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Run DuckDB ADBC clippy
+        run: LD_LIBRARY_PATH= mise exec -- cargo clippy -p quackgis-server --all-targets --features duckdb-adbc -- -D warnings
+
       - name: Build release binary
         run: mise exec -- cargo build -p quackgis-server --release
+
+      - name: Bootstrap pinned DuckDB artifacts
+        run: mise run duckdb-bootstrap
+
+      - name: Build and smoke DuckDB runtime without network
+        run: CONTAINER_ENGINE=docker mise exec -- just duckdb-runtime-offline-smoke
 
       - name: Package Linux x86_64 binary
         id: package

@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: Apache-2.0
+# Linux x86_64 DuckDB evaluation runtime assembled from verified local artifacts.
+
+FROM registry.fedoraproject.org/fedora-minimal@sha256:cabc9f4e7442ec0fef46fb40e4626f3e58a8863fb408d821840a3df5e3d885f8
+COPY quackgis-server /usr/local/bin/quackgis-server
+COPY duckdb /usr/local/bin/duckdb
+COPY libduckdb.so /opt/quackgis/lib/libduckdb.so
+COPY duckdb-home /opt/quackgis/duckdb
+COPY artifact-manifest.json /opt/quackgis/artifact-manifest.json
+ENV HOME=/opt/quackgis/duckdb
+ENV QUACKGIS_DUCKDB_ADBC_DRIVER=/opt/quackgis/lib/libduckdb.so
+ENV LD_LIBRARY_PATH=/opt/quackgis/lib
+USER 999:999
+EXPOSE 5434
+ENTRYPOINT ["/usr/local/bin/quackgis-server"]
+CMD ["--host", "0.0.0.0", "--port", "5434", "--catalog-path", "/var/lib/quackgis/quackgis.db", "--data-path", "/var/lib/quackgis/data"]

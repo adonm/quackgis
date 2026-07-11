@@ -40,6 +40,8 @@ datafusion-expr-common = "54"
 datafusion-functions-aggregate-common = "54"
 arrow-ord = "58"
 arrow-select = "58"
+arrow-array = "58"
+arrow-schema = "58"
 
 # Spatial engine — use SedonaDB subcrates directly instead of the umbrella
 # `sedona` crate so QuackGIS does not compile unused GEOS/GDAL/raster/catalog
@@ -59,6 +61,13 @@ geo-traits = "0.3"
 # SQLite/local remains the default correctness profile; PostgreSQL catalog +
 # S3-compatible object storage is the Alpha scaled-storage profile.
 datafusion-ducklake = { path = "vendor/datafusion-ducklake", default-features = false, features = ["metadata-sqlite", "write-sqlite", "metadata-postgres", "write-postgres", "multicatalog-postgres"] }
+
+# Experimental storage-authority boundary. ADBC 0.23 accepts the Arrow 58
+# RecordBatches used by the current DataFusion stack. The DuckDB driver itself is
+# loaded at runtime from an operator-pinned libduckdb shared library.
+adbc_core = "=0.23.0"
+adbc_driver_manager = "=0.23.0"
+sha2 = "0.10"
 
 # Object-store plumbing — versions aligned with DF 54 / ducklake main.
 object_store = { version = "0.13", default-features = false, features = ["aws"] }

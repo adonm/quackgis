@@ -31,12 +31,25 @@ for probed client versions. See [ROADMAP.md](../ROADMAP.md) for forward outcomes
 | Feature | Status |
 |---|---|
 | Simple + extended query protocol | ✅ upstream |
-| TLS, password auth, RBAC roles | TLS and SCRAM-SHA-256 password startup are wired; coarse read/write vs read-only authorization uses a structural fail-closed statement allowlist before catalog refresh and returns SQLSTATE `42501`; optional `QUACKGIS_WRITE_ALLOWLIST` restricts write-capable identities to normalized DuckLake table targets with matching explicit-user table/column privilege metadata. Read-side object RBAC remains production hardening; see `docs/SECURITY_RBAC.md`. |
+| TLS, password auth, RBAC roles | TLS and SCRAM-SHA-256 password startup are wired; coarse read/write vs read-only authorization uses structural fail-closed policy and returns SQLSTATE `42501`; optional write/read allowlists restrict normalized DuckLake table targets and unfiltered metadata. The DuckDB local backend applies the same decisions before ADBC prepare/schema access. Filtered metadata and external rotation evidence remain production hardening; see `docs/SECURITY_RBAC.md`. |
 | pg_catalog + information_schema emulation | ✅ upstream (datafusion-pg-catalog) |
-| Portals / fetch-size suspension | general `setFetchSize` suspension is not implemented; maintained GeoServer WFS/WMS smoke does not require it; city-scale pgjdbc evidence is the decision gate |
+| Portals / fetch-size suspension | raw extended protocol proves `Execute.max_rows` paging, repeated `PortalSuspended`, resume, and final `CommandComplete`; maintained GeoServer smoke does not require it, and realistic pgjdbc city-scale evidence remains open |
 | `DECLARE BINARY CURSOR` / `FETCH` | ✅ simple-query/libpq path; narrow PostgreSQL-driver extended cursor shim for OGR read; general extended-protocol FETCH remains unsupported |
 | COPY subprotocol | ✅ PostgreSQL text `COPY FROM STDIN` for simple + extended pgwire; focused coverage for GDAL-style WKB/bytea escapes and chunked `CopyData` |
 | LISTEN/NOTIFY, PL/pgSQL, triggers | ❌ non-goals |
+
+## Feature-gated DuckDB local profile
+
+`--engine-backend=duckdb` is available only in a `--features duckdb-adbc` build and
+is not the default compatibility profile. The pinned real-driver gate covers the
+actual server process, structural simple/extended SELECT and bounded DDL/DML,
+parameterized SELECT/INSERT/UPDATE/DELETE, core scalar/WKB text COPY, portals,
+transactions, SCRAM/read-write policy, exact DuckDB spatial execution, snapshots,
+restart, and all 40 executable entries in the maintained spatial ledger. It does
+**not** yet claim PostgreSQL/PostGIS catalog discovery,
+geometry/geography OIDs, maintained QGIS/OGR/GeoServer/Martin traces, native
+cancellation, shared PostgreSQL/object storage, or production operations. See
+[DUCKDB_PGWIRE_CHECKPOINT.md](./DUCKDB_PGWIRE_CHECKPOINT.md).
 
 ## Spatial engine (SedonaDB)
 

@@ -40,7 +40,7 @@ affect catalog/data compatibility.
 | CDC row functions | Disabled after pgwire projection panic | Official change-data/log table functions or snapshot diffs | Disabled until safe projection test exists | Re-enable only after pgwire/Arrow projection is safe and row semantics are documented |
 | SQL time travel | Literal snapshot-id and RFC3339 timestamp `AS OF` plus named selector forms support the narrow simple one-table read path; ids are validated and timestamps resolve deterministically at-or-before | Protected snapshots and broader time-travel reads | `ducklake_snapshot_selector_reads_pinned_table` | Add retention against upstream snapshot APIs where possible |
 | Backup/restore | Local SQLite/filesystem oracle plus external/snapshot runbooks | Protected snapshots / snapshot retention | `ducklake_local_backup_restore_copy_roundtrip`, `docs/ALPHA_EXTERNAL_SERVICES.md`, `docs/SNAPSHOT_OPERATIONS.md` | Use protected snapshots when upstream exposes stable retention semantics |
-| DuckDB reference readability | DuckDB v1.5.2 CLI loads `spatial` + `ducklake`, passes a minimal WKB spatial smoke, passes a DuckDB-authored official DuckLake create/insert/update/delete/reopen/snapshot vertical slice, and the reference packet checker accepts the `duckdb-local-ducklake` profile; official `ducklake:sqlite:` attach still fails against the old QuackGIS preview SQLite catalog before table discovery | Official DuckDB `ducklake` extension and ADBC client path | `docs/DUCKDB_ADBC_EVALUATION.md`, `just duckdb-engine-probe`, `just duckdb-authority-probe`, `just duckdb-reference-evidence-check`, external Alpha catalog interoperability packet | Make DuckDB-authored storage the canonical path; keep old QuackGIS-written catalogs as preview artifacts or export sources only |
+| DuckDB reference readability | DuckDB v1.5.2 CLI loads `spatial` + `ducklake` and passes a minimal WKB spatial smoke, but official `ducklake:sqlite:` attach fails against the QuackGIS preview SQLite catalog before table discovery; the feature-gated ADBC path now writes and reopens a separate official DuckLake with libduckdb 1.5.4 | Official DuckDB `ducklake` extension and ADBC client path | `docs/DUCKDB_ADBC_EVALUATION.md`, `just duckdb-engine-probe`, `just duckdb-adbc-storage-test`, `just duckdb-reference-evidence-check`, external Alpha catalog interoperability packet | Complete roadmap D0–D5: DuckDB authors new release catalogs, legacy roots use tested export/import, and independent official readers remain a release gate |
 | Branch/merge/staged imports | Not implemented | DuckLake branch/merge roadmap | future staged-import/edit-review probes | Prefer upstream branch/merge over QuackGIS-specific staging catalogs |
 | Materialized summaries | Not implemented beyond ordinary tables/queries | DuckLake materialized views / incremental maintenance | future tile/coverage/asset summary probes | Use upstream materialized views before bespoke refresh machinery |
 | Asset metadata | Ordinary sidecar tables with WKB `footprint`, URIs, scalar metadata | VARIANT/UDT/fixed-size-array support | `docs/MULTIMODAL_ASSETS.md`, footprint discovery tests | Move semi-structured metadata/calibration arrays to stable upstream types, not custom binary islands |
@@ -93,10 +93,9 @@ Migration trigger / rollback plan:
 
 ## Current release stance
 
-The maintained release stance is conservative: SQLite/local is the current
-spec-oriented single-catalog path but not yet drop-in DuckDB-writable; PostgreSQL
-multicatalog storage is a QuackGIS/library-specific Alpha backend until
-interoperability or export is proven.
-QuackGIS may fork to preserve one-snapshot spatial write semantics, and official
-DuckLake primitives should replace fork-backed behavior when they satisfy the same
-correctness, migration, and client-compatibility gates.
+The current release stance remains conservative: SQLite/local is the active
+single-catalog path but not drop-in DuckDB-writable, and PostgreSQL multicatalog is
+a QuackGIS/library-specific Alpha backend. The roadmap-selected release format is
+DuckDB-authored official DuckLake. Current fork-backed behavior remains only as a
+comparison/rollback oracle until the D0–D5 correctness, migration, client, and
+operations gates permit cutover.
