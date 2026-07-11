@@ -1,106 +1,55 @@
 # Release evidence policy
 
-Every release should be reviewable without rerunning probes. The release artifact
-bundle ties a source SHA to binaries, container images, compatibility probes,
-storage probes, metrics dashboards, and known limits.
+Every release claim must be reviewable from artifacts tied to one source SHA and
+one exact DuckDB/extension bundle.
 
-## Release artifact set
+## Current preview evidence
 
-| Artifact | Producer | Purpose |
-|---|---|---|
-| `quackgis-server-<version>-linux-x86_64.tar.gz` | `CI artifacts` workflow | release binary |
-| `*.sha256` | `CI artifacts` workflow | binary integrity |
-| GHCR image tags | `CI artifacts` workflow | runtime image identity |
-| `release-evidence-<version>.json` | `CI artifacts` workflow | machine-readable index for release evidence |
-| `compatibility-report-<sha>-<run_id>` | `Compatibility probes` workflow | QGIS/OGR/GeoServer/OSM logs and rendered report |
-| `compatibility-metrics-<sha>-<run_id>` | `Compatibility probes` workflow | compatibility `metrics.json` |
-| `storage-kind-logs-<recipe>-<sha>-<run_id>` | `Storage smoke` workflow | storage probe logs/report |
-| `storage-metrics-<recipe>-<sha>-<run_id>` | `Storage smoke` workflow | storage `metrics.json` |
-| `benchmark-report-<recipe>-<sha>-<run_id>` | `Benchmark ladder` workflow | manual LayoutBench/QPS/OLAP benchmark report |
-| `benchmark-metrics-<recipe>-<sha>-<run_id>` | `Benchmark ladder` workflow | manual benchmark `metrics.json` |
-| regional `layoutbench_catalog` log + generated `metrics.json` | `scripts/layoutbench_catalog_report.py` | profile-bound PostgreSQL catalog provider-call deltas and phase budgets |
-| `benchmarks/profiles/*.json` | source tree + `just benchmark-profile-check` | exact row composition, generator, storage, oracle, catalog budget, and required run-metadata contract |
-| `postgis-regress-<sha>-<run_id>` | `PostGIS regress subset` workflow | PostGIS subset log, metrics, and dashboard |
-| `.tmp/duckdb-runtime/artifact-manifest.json` + offline image transcript | `duckdb-runtime-offline-smoke` in CI artifacts | Linux x86_64 native artifact digests and proof that extensions load with container networking disabled; evaluation-only until D4 promotion |
-| `metrics-dashboard.md` | scheduled/manual probe workflows | compact human review surface next to `metrics.json` |
+| Artifact/gate | Purpose |
+|---|---|
+| `just check-fast` | Rust formatting, clippy, unit and compile-time integration targets |
+| `just duckdb-adbc-storage-test` | native Arrow/DuckLake write/query/transaction/reopen behavior |
+| `just duckdb-pgwire-workflow-test` | real server protocol, auth, policy, COPY, transaction, spatial, restart behavior |
+| `just duckdb-spatial-compat-probe` | maintained spatial disposition/result classification |
+| `just duckdb-runtime-static-check` | immutable load-only runtime-image contract |
+| `.tmp/duckdb/manifest.json` | native library/extension paths and SHA-256 values |
+| `.tmp/duckdb-current-benchmark/manifest.json` | deterministic direct DuckDB/ADBC/pgwire correctness and liveness comparison |
 
-The dashboard is a summary, not the source of truth. Keep the original
-`metrics.json`, probe logs, and rendered compatibility/storage report in the
-release evidence packet.
+`just ci` is the required aggregate local/CI gate after native bootstrap.
+CI uploads runtime verification manifests, not redistributable native binaries.
 
-## Minimum release gate
+## Local 1.0 release packet
 
-Before publishing a public tag, attach or reference evidence for the same source
-SHA:
+The release packet must include:
 
-1. `just check-fast` via CI or a local transcript;
-2. compatibility probe artifact from the maintained workflow;
-3. storage smoke artifact, at least `kind-alpha-smoke`;
-4. budget check transcript, for example
-   `just metrics-budget-check path=<artifact-dir> require_budgeted=true` on the
-   selected compatibility/storage/benchmark metrics; selected regional benchmark
-   evidence must name the committed exact profile id;
-5. PostGIS regress subset artifact;
-6. PostGIS fixture summary from `just postgis-conformance-summary` when the
-   conformance ledger changed;
-7. release binary checksum and image digest/tags;
-8. known limitations copied from `docs/COMPATIBILITY.md`,
-   `docs/POSTGIS_CONFORMANCE.md`, and roadmap open items.
+- source SHA, version, Rust lockfile, DuckDB/extension versions and digests;
+- server binary checksum and runtime image digest;
+- all M1–M4 test/client/performance reports;
+- named client versions and copied-data manifests;
+- exact 10M profile hardware/data/budget/results;
+- query/COPY memory, spill, cancellation, and admission evidence;
+- backup/restore and upgrade/rollback transcripts;
+- TLS/auth/secret-rotation evidence;
+- 24-hour soak summary and raw metrics/log locations; and
+- known limits copied from `COMPATIBILITY.md` and `ROADMAP_STATUS.md`.
 
-If any scheduled artifact is missing for the release SHA, label the release as a
-preview/manual build and include the exact replacement command transcript.
+## Evidence rules
 
-## Evidence review checklist
+- Artifacts identify exact source SHA and native bundle.
+- Performance claims identify rows, bytes, files, row groups, load method,
+  hardware, concurrency, plans, and budget outcome.
+- Result checks use counts/checksums/exact spatial oracles, not successful exit
+  alone.
+- Metrics and logs exclude SQL text, parameters, credentials, WKB, signed URIs,
+  and sensitive paths.
+- Missing required evidence downgrades the artifact to a preview/manual build.
+- Retired-engine, emulator-only, static-profile, and design evidence cannot satisfy
+  current release gates.
 
-- Source SHA in all artifacts matches the release manifest.
-- Compatibility/storage/benchmark workflows ran `metrics-budget-check` on their
-  uploaded `metrics.json`, including required-check assertions for expected
-  recipe outputs; reports do not contain `❌ fail` rows, and the gate did not run
-  against an empty artifact directory.
-- `metrics-dashboard.md` is present beside `metrics.json` when workflows produced
-  metrics.
-- `just metrics-budget-check require_budgeted=true` passes for release-selected
-  metrics artifacts.
-- QPS/OLAP scan budgets did not regress unexpectedly.
-- Scale claims name a committed profile, exact rows/bytes, storage/hardware
-  profile, and source SHA; catalog provider-call/refresh budgets have
-  measurements from before/after scrapes of the exact serving process or pod.
-- Regional catalog evidence contains exactly one cold-public, direct-internal,
-  and 240-query warm-public phase and passes the profile-bound parser and budget
-  checker. Each phase preserves its process/pod id and raw non-resetting counter
-  start/end; the run preserves numeric id/attempt and RFC3339 start time.
-  Provider-call evidence does not claim physical read or write roundtrips.
-- Native DML/compaction/abort counters and row-count checks match the roadmap
-  claim; external-profile artifacts keep `native_mutation_aborts` within its zero
-  budget unless the release notes explicitly describe the injected failure.
-- PostGIS regress pass-rate is recorded and unsupported surfaces are documented in
-  `docs/POSTGIS_CONFORMANCE.md`; release-selected metrics keep
-  `postgis_total` and `postgis_pass_rate` at or above their emitted minimums.
-- External PostgreSQL/S3 claims are not made unless the evidence packet includes
-  `docs/ALPHA_EXTERNAL_SERVICES.md` drill results.
-- Release notes call out any DuckLake alignment or reference-reader caveat from
-  `docs/DUCKLAKE_ALIGNMENT.md`.
-- DuckDB-backed release claims require the exact runtime artifact manifest and
-  offline smoke transcript; current artifacts are evaluation evidence and do not
-  override the blocked pgwire/default-backend status.
+## Shared 1.x evidence
 
-## Manifest fields
-
-`release-evidence-<version>.json` points to artifact naming patterns instead of
-embedding large probe logs. Its `scheduled_evidence` object names metrics/log
-artifact prefixes and canonical filenames:
-
-- `metrics_file`: `metrics.json`;
-- `dashboard_file`: `metrics-dashboard.md`;
-- compatibility, storage, benchmark, and PostGIS artifact prefixes keyed by source
-  SHA.
-
-Release managers should download those artifacts, attach them to the release or
-archive them in the release evidence location, and record any skipped drills in
-the release notes.
-
-## Promotion rule
-
-A roadmap item is release-backed only when its evidence appears in the release
-packet or is explicitly scoped as future/manual. Docs can define the contract;
-execution artifacts make the claim.
+Shared claims additionally require two repeatable managed-service runs covering
+multi-process visibility, conflicts/response loss, throttling/interruption,
+credential rotation, backup/restore, cleanup, independent DuckDB reopen, and a
+24-hour measured topology. Local emulator results are companion evidence, not
+managed-service proof.

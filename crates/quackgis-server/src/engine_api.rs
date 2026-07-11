@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Engine-neutral D0 contracts shared by the legacy and DuckDB adapters.
+//! Arrow-native contracts between the DuckDB storage kernel and protocol edge.
 //!
-//! These types intentionally depend on Arrow rather than DataFusion plans,
-//! catalogs, or errors. The first implementation is the feature-gated DuckDB
-//! storage kernel; pgwire and the legacy backend still need migration onto this
-//! boundary before D0 can close.
+//! These types intentionally expose neither DuckDB ADBC details nor protocol
+//! implementation details, keeping storage behavior directly testable.
 
 use std::error::Error;
 use std::fmt;

@@ -1,150 +1,36 @@
 # Fork divergence ledger
 
-Tracks every fork QuackGIS consumes, the upstream it tracks, and what differs
-from upstream HEAD. Policy: ride upstream heads; fork when a gap blocks us;
-every fork divergence is an upstream PR candidate after enough local soak.
+## Active vendored code
 
-Status: 🟢 in sync · 🟡 local patches, upstreamable · 🔴 blocked.
+### `vendor/arrow-pg`
 
-## Active forks
+QuackGIS retains a small Arrow-to-pgwire encoder derived from
+`datafusion-contrib/datafusion-postgres`'s `arrow-pg` crate.
 
-### `adonm/sedona-db` — 🟡 upstreamable
+Local ownership:
 
-- **Upstream:** `apache/sedona-db` (`main`, currently DF 52.5 / Arrow 57).
-- **Consumed via:** root `Cargo.toml`, branch `quackgis/df54`.
-- **Head:** `2f00283`.
-- **Purpose:** target DuckLake 1.0+ via `datafusion-ducklake` main, which is on
-  DataFusion 54. SedonaDB upstream lags (DF 52.5), so the fork aligns SedonaDB
-  with the QuackGIS stack (DF 54 / Arrow 58 / object_store 0.13).
-- **Diff:** mechanical API adaptation only; no kernel/semantic changes.
-  - DF 52→53: `PlanProperties` now `Arc`, `Join::try_new` `null_aware` arg,
-    `PartitionedFile.ordering`, `object_store 0.13`, `&Vec<usize> -> &[usize]`.
-  - DF 53→54: removed `as_any` from many DF traits in favour of inherent
-    `downcast_ref`; keep Arrow `Array::as_any()` and DF `ExtensionOptions` /
-    `UserDefinedLogicalNode::as_any()` where still required. `MetricType` casing,
-    `partition_statistics -> Arc<Statistics>`, `PartitionedFile.table_reference`,
-    `MemoryPool::{name, Display}`, generic accumulator `'static` bounds.
-- **Upstream plan:** PR after the DF54 path has repeatable local and
-  managed-service quality evidence. The bump is large enough that submitting
-  after representative coverage is preferable.
+- DataFusion dataframe support and its optional dependency are removed;
+- GeoArrow/PostGIS optional implementation branches are removed;
+- binary Arrow fields may advertise QuackGIS geometry/geography sentinel OIDs;
+- `quackgis.spatial_family` field metadata takes precedence over conservative
+  column-name fallback;
+- WKB/EWKB remains raw binary in PostgreSQL binary format and hex in text format;
+  and
+- the crate is built and linted as a normal member of the root dependency graph.
 
-### `adonm/datafusion-postgres` — 🟡 upstreamable
+This encoder should eventually become a QuackGIS-owned crate with focused
+property/fuzz coverage for every advertised Arrow type. Until then, Arrow and
+pgwire versions are pinned together with the server.
 
-- **Upstream:** `datafusion-contrib/datafusion-postgres` (`master`, currently
-  DF 53 / Arrow 58).
-- **Consumed via:** root `Cargo.toml`, vendored path
-  `vendor/datafusion-postgres/datafusion-postgres`.
-- **Base:** `2c2e5d9` (pushed to `adonm/datafusion-postgres@quackgis/fixes`).
-- **Purpose:** track QuackGIS stack (DF 54) and carry correctness + client-
-  compatibility patches found by M2 probes (psql, tokio-postgres, Martin).
-- **Patches:**
-  1. `2c43dc6` — fix `PgCatalogContextProvider for Arc<T>` infinite recursion.
-     `self.roles()` / `self.role()` resolved to the Arc impl itself, causing
-     stack overflow on `pg_catalog.pg_roles`. Fix: `(**self).roles()` / `role()`.
-  2. `98b3865` — honour `DECLARE ... BINARY CURSOR` by using
-     `Format::UnifiedBinary` and propagating the result format to the portal.
-  3. `2b17034` — mechanical DF 53→54 bump.
-  4. `912823e` — `::geometry`/`::geography` cast preprocessing to `::bytea`.
-  5. `81a2b68` — `&&` (PGOverlap) operator rewrite to `st_overlaps_bbox`.
-  6. `445f7cb` — `::jsonb` cast rewrite to `::varchar` for Martin discovery.
-  7. `7c73826` + local extension — shortcut Martin table discovery to a reduced
-     `geometry_columns`/`pg_attribute` projection that still returns JSONB
-     property names and PostgreSQL types (avoids pg_index/pg_opclass machinery
-     without dropping MVT attributes).
-  8. `a42a948` — return NULL `relkind` in Martin discovery shortcut.
-  9. `f027b2f` — map Arrow `Int8` to PostgreSQL internal `"char"` (OID 18)
-     so `pg_class.relkind` decodes correctly via tokio-postgres.
-  10. `b548ef3` — rewrite `PGOverlap` inside derived-table subqueries.
-  11. `98a65d4` + local extension — rewrite `ST_AsMVT(tile, ...)` record form to
-      scalar geometry/layer/extent arguments plus every non-geometry column from
-      the derived record projection, preserving configured MVT attributes.
-  12. `b81c65c` + local extension — encode Martin discovery `properties` across
-      Arrow Utf8/Utf8View/LargeUtf8 as JSONB.
-  13. `67399c5` — shortcut Martin function-discovery query to empty result
-      (QuackGIS has no tile-generating SQL functions).
-  14. `25eab17` — rewrite Martin's `ST_TileEnvelope(..., margin => 0.015625)`
-      named argument to positional, matching QuackGIS' margin overload.
-   15. `93f8273` + local correction — rewrite PostGIS fixture DDL before parsing:
-       `CREATE EXTENSION ...` and PL/pgSQL `DO $$ ... $$` blocks become no-ops;
-       `serial`/`bigserial` become `int`/`bigint`; explicit `GEOMETRY(...)` and
-       `GEOGRAPHY(...)` declarations now survive to the QuackGIS DDL hook while
-       execution casts still lower to `bytea`;
-      `CREATE INDEX`, `CLUSTER`, and `COMMENT ON` become no-ops; and
-      `CREATE MATERIALIZED VIEW` is lowered to `CREATE VIEW`.
-  16. `8958716` — sanitize pathological PostgreSQL quoted identifiers into
-      deterministic safe quoted names before sqlparser sees fixture DDL. This
-      closes the upstream Martin `SpacesAndQuotes.sql` fixture without changing
-      the fixture input.
-   17. `2c35282` + local extension — advertise PostGIS-compatible
-       `geometry`/`geography` type OIDs from a centralized validated Arrow field
-       family annotation, then fall back for old binary catalogs to the spatial
-       naming convention (`geom`, `geometry`, `the_geom`, `wkb_geometry`,
-       `wkb_geom`, `shape`, `footprint`, `way` / `geog`, `geography`,
-       `the_geog`), in both RowDescription
-      (`arrow-pg::datatypes::field_into_pg_type`) and `pg_attribute.atttypid`
-      (`datafusion_field_to_pg_type`). Wire encoding is unchanged (raw WKB /
-      hex-EWKB), so existing bytea clients are unaffected; QGIS/GeoServer now
-      see a distinct spatial type OID instead of `bytea`. Sentinel OIDs
-      `GEOMETRY_OID=90001` / `GEOGRAPHY_OID=90002` are used because the PostGIS
-      type OIDs are dynamic per-install.
-  18. `bc75e99` — handle DataFusion 54's casted oid-string literal shape in
-      the oid coercion analyzer rule (`CAST('public' AS Int32)` /
-      `TRY_CAST(...)`) and update tests to the DF54 `Cast`/`TryCast` API.
-  19. `2c2e5d9` — make custom spatial type OIDs resolvable by clients such as
-      tokio-postgres: oid-like catalog fields now advertise PostgreSQL `oid`,
-      internal type-info queries bind `$1` as `oid`, `oid` parameters deserialize
-      back to DataFusion integer values, and geometry/geography WKB payloads are
-      encoded through bytea-compatible serializers while retaining the advertised
-      geometry/geography OIDs.
-  20. local vendored patch — add a raw pre-parse `QueryHook::rewrite_sql` hook so
-      QuackGIS can lower parser-level compatibility syntax (currently
-      `AS OF SNAPSHOT <id>`) before the PostgreSQL dialect parser rejects it.
-  21. local vendored patch — add an opt-in
-      `QueryHook::replan_extended_query(...)` plan/context replacement before
-      default extended execution. QuackGIS uses it to refresh snapshot-scoped
-      DuckLake table providers while the default handler retains parameter
-      binding, result formats, result-schema checks, and statement timeouts.
-  22. local vendored patch — fail startup when configured TLS certificate/key
-      material cannot be loaded or parsed. Upstream logged a warning and silently
-      served plaintext, which violates the QuackGIS transport trust boundary.
-  23. local test/documentation clarification — retain pgwire's streaming
-      `QueryResponse`/`Portal::fetch` ownership of `Execute.max_rows`; a QuackGIS raw
-      protocol oracle now locks repeated suspend/resume and final completion.
-- **Remaining fork target:** extended-protocol `FETCH` RowDescription
-  mismatch (`DataRow field count does not match`). Not blocking QGIS/libpq.
-- **Upstream plan:** split into small PRs after local soak: Arc recursion fix
-  first, binary cursor second, DF54 bump if upstream has not already moved.
-  Martin-specific rewrites (7-14) are QuackGIS-specific and stay in-fork.
+## Retired forks
 
-### `datafusion-ducklake` vendored fork — 🟡 atomic mutation patches
+The following forks/vendors are no longer compiled or retained in the repository:
 
-- **Upstream:** `datafusion-contrib/datafusion-ducklake` (`main`, currently DF
-  54 / Arrow 58). This is the Rust-native path closest to official DuckLake
-  v1.0+.
-- **Consumed via:** root `Cargo.toml`, path `vendor/datafusion-ducklake`.
-- **Base:** `adonm/datafusion-ducklake` main commit `117c0c5`.
-- **Local patches:** atomic table-mutation surface: `DeleteFileMutation`,
-  `TableMutation`, `MetadataWriter::commit_table_mutation(...)`, SQLite and
-  multicatalog PostgreSQL implementations,
-  `DuckLakeTableWriter::write_pending_data_file(...)`, plus oracles proving
-  multi-file deletes, mixed delete+append/retire+append commits, pending-file
-  visibility, and stale-conflict rollback.
-- **Spatial family patch:** field-aware writes persist recognized binary Arrow
-  metadata as DuckLake `geometry`/`geography`; reads restore that metadata from
-  snapshot-versioned `column_type`, including per-file rename schemas. This is a
-  family-only QuackGIS contract: subtype/SRID/dimensions, old-blob migration, and
-  geography reference-reader interoperability remain open.
-- **Schema-only lookup patch:** `DuckLakeSchema::table_schema(...)` performs the
-  snapshot-scoped table and structure lookups and builds the Arrow schema without
-  querying files. QuackGIS uses it for safe spatial-pruning preflight so the
-  scan-ready `SchemaProvider::table(...)` path remains unchanged while avoiding a
-  redundant catalog file request. This small API addition is an upstream PR
-  candidate after benchmark soak.
-- **Remaining fork targets:** structural file/partition pruning and any upstream API
-  cleanup after QuackGIS native DML/compaction soak.
+- `adonm/sedona-db` / Sedona SQL function crates;
+- `datafusion-postgres` and `datafusion-pg-catalog`;
+- `datafusion-ducklake`; and
+- DataFusion itself.
 
-## Rebase hygiene
-
-- Default branches track upstream. QuackGIS patches live on `quackgis/*`.
-- Rebase `quackgis/*` at milestone boundaries; avoid upstream PRs until local
-  tests prove the patch across QuackGIS workflows.
+Their historical patches remain available in Git history through commit
+`81328a3` and earlier. New compatibility work belongs at the owned pgwire edge,
+DuckDB SQL/macros, a narrowly scoped DuckDB extension, or upstream DuckDB/DuckLake.

@@ -25,25 +25,30 @@ jobs:
           install: true
           cache: true
 
-      - name: Run fast verification
-        shell: bash
-        run: |
-          set -euo pipefail
-          mise exec -- just ci
-
       - name: Bootstrap pinned DuckDB runtime
         shell: bash
         run: |
           set -euo pipefail
           mise run duckdb-bootstrap
 
-      - name: Run native DuckDB gates
+      - name: Run required repository gate
         shell: bash
         run: |
           set -euo pipefail
-          mise exec -- just duckdb-adbc-storage-test
-          mise exec -- just duckdb-pgwire-workflow-test
+          mise exec -- just ci
+
+      - name: Run independent DuckDB probes
+        shell: bash
+        run: |
+          set -euo pipefail
           mise exec -- just duckdb-engine-probe
           mise exec -- just duckdb-authority-probe
           mise exec -- just duckdb-spatial-compat-probe
           mise exec -- just duckdb-runtime-static-check
+
+      - name: Upload current benchmark evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: duckdb-current-benchmark-${{ github.sha }}
+          path: .tmp/duckdb-current-benchmark/manifest.json
+          if-no-files-found: error

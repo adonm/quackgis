@@ -2,10 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Run a DuckDB-authored DuckLake vertical-slice probe.
 
-This probe bypasses QuackGIS's current `datafusion-ducklake` writer. DuckDB creates
-the DuckLake catalog, writes WKB rows, mutates them, reopens the catalog, and emits
-a small evidence manifest. It is the fastest unreleased-path check for making
-DuckDB the QuackGIS storage authority.
+DuckDB creates the DuckLake catalog, writes WKB rows, mutates them, reopens the
+catalog, and emits a small evidence manifest. It is an independent check of the
+official storage-authority contract.
 """
 
 from __future__ import annotations

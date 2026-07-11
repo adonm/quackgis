@@ -1,115 +1,79 @@
 # QuackGIS quickstart
 
-This is the shortest path to a local QuackGIS developer preview and the Kind
-client probes that validate real GIS workflows.
+This is the maintained path to the local DuckDB-only developer preview.
 
-For the focused project direction — platform/app developers, high-throughput
-spatial lakehouse workloads, and Alpha scaled storage — see
-[PROJECT_DIRECTION.md](./PROJECT_DIRECTION.md).
-
-## 1. Install pinned tools
+## 1. Install and bootstrap
 
 ```sh
 mise install
-eval "$(mise activate bash)"
+mise run duckdb-bootstrap
+eval "$(mise activate bash)" # optional interactive shell
 just doctor
 ```
 
-Podman is the default local container runtime. `mise.toml` pins Rust, Just, Kind,
-kubectl, Helm, and cargo-nextest.
+The bootstrap verifies the pinned DuckDB library and installs signed,
+version-matched `spatial` and `ducklake` extensions into ignored `.tmp` paths.
 
-## 2. Run the developer-preview acceptance smoke
-
-```sh
-just preview-smoke
-```
-
-This starts a temporary QuackGIS server on `127.0.0.1:15434`, creates a DuckLake
-table, bulk-loads WKB points through PostgreSQL text `COPY FROM STDIN`, queries
-the rows with `ST_AsText(ST_GeomFromWKB(...))`, runs
-`CALL quackgis_compact_table('public.preview_points')`, verifies results are
-unchanged, and then stops the server.
-
-Expected tail:
-
-```text
-preview_table public.preview_points
-preview_copy_rows 3
-developer_preview_ok True
-```
-
-See [DEVELOPER_PREVIEW.md](./DEVELOPER_PREVIEW.md) for the preview contract,
-manual SQL, and verification checklist.
-
-## 3. Run a local demo without Kubernetes
+## 2. Run the acceptance gate
 
 ```sh
-just demo-local
+just smoke
 ```
 
-This starts QuackGIS on `127.0.0.1:5434`, seeds `public.demo_points` and
-`public.demo_polygons`, prints QGIS/OGR connection hints, and keeps the server in
-the foreground until Ctrl-C.
+This runs the real DuckDB pgwire workflow: startup, SCRAM, structural policy,
+create, COPY, parameters, mutations, transactions, portals, spatial queries,
+snapshot inspection, shutdown, and reopen.
 
-Seed only, after `just server` or another local deployment is already running:
+Run the storage kernel separately when diagnosing ADBC/DuckLake behavior:
 
 ```sh
-just seed-local-demo
+just duckdb-adbc-storage-test
 ```
 
-## 4. Run the five-minute Kind demo
+## 3. Start a server
 
 ```sh
-just demo-kind
+mkdir -p .tmp/duckdb-server
+cargo run -p quackgis-server -- \
+  --catalog-path=.tmp/duckdb-server/catalog.ducklake \
+  --data-path=.tmp/duckdb-server/data
 ```
 
-This creates or reuses the `quackgis` Kind cluster, deploys QuackGIS, seeds stable
-demo layers, and prints client connection hints. Expected tail:
+With an activated mise shell, the required driver and DuckDB home are already in
+the environment. Otherwise prefix the command with `mise exec --`.
 
-```text
-demo_tables ['public.demo_points', 'public.demo_polygons']
-demo_ok True
-```
-
-Seed only, after an existing deployment is ready:
+Connect in development trust mode:
 
 ```sh
-just seed-kind-demo
+psql -h 127.0.0.1 -p 5434 -U postgres
 ```
 
-## 5. Connect clients inside Kind
-
-The in-cluster connection is:
-
-```text
-host: quackgis.quackgis.svc.cluster.local
-port: 5434
-database: quackgis
-user: postgres
-password: <empty>
-tables: public.demo_points, public.demo_polygons
+```sql
+SELECT ST_AsText(ST_GeomFromText('POINT(1 2)'));
 ```
 
-Example OGR command from a container/job using the cluster DNS:
+The currently maintained write examples are exercised by `just smoke`; the public
+SQL surface is deliberately bounded. Do not infer support for arbitrary DDL,
+multi-statement batches, broad catalogs, compaction calls, or GIS clients from
+ordinary DuckDB/PostgreSQL behavior.
+
+## 4. Verify changes
 
 ```sh
-ogrinfo 'PG:host=quackgis.quackgis.svc.cluster.local port=5434 user=postgres dbname=quackgis' demo_points -so
+just check-fast
+just ci
 ```
 
-## 6. Run the full client gate
-
-```sh
-just kind-compatibility
-just kind-compat-report
-```
-
-The compatibility report is written to `.tmp/compatibility/README.md` and includes
-QGIS read/edit, OGR load/read, and GeoServer WFS/WMS/WFS-T status.
+`just ci` includes pinned native storage and pgwire gates, so bootstrap must have
+completed first.
 
 ## Troubleshooting
 
-- `just kind-ready` validates Podman, Kind, kubectl, and current cluster state.
-- `examples/` has QGIS, OGR, and GeoServer setup notes for the stable demo layers.
-- `just kind-status` shows nodes plus QuackGIS namespace pods/jobs/services.
-- `just kind-logs` prints the QuackGIS server log tail.
-- `just kind-down` deletes the local Kind cluster if you want a clean slate.
+- Missing driver/extensions: rerun `mise run duckdb-bootstrap`.
+- Startup rejects remote paths: shared profiles are intentionally disabled.
+- Startup rejects a data root: inspect `_quackgis/storage-authority-v1`; migrate to
+  a separate root rather than replacing a mismatched marker.
+- Unsupported SQL returns a stable error by design; check
+  [COMPATIBILITY.md](./COMPATIBILITY.md).
+- Use `QUACKGIS_LOG=debug` for protocol/runtime diagnostics, but do not include
+  credentials or sensitive paths in issue reports.

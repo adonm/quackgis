@@ -4,10 +4,8 @@
 use std::{collections::HashMap, fmt};
 
 use anyhow::{Result, anyhow};
-use datafusion_postgres::pgwire::api::ClientInfo;
-use datafusion_postgres::pgwire::api::auth::sasl::scram::{
-    SCRAM_ITERATIONS, gen_salted_password, random_nonce,
-};
+use pgwire::api::ClientInfo;
+use pgwire::api::auth::sasl::scram::{SCRAM_ITERATIONS, gen_salted_password, random_nonce};
 
 const METADATA_USER: &str = "user";
 

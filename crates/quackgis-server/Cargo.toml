@@ -8,15 +8,12 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "PostGIS-compatible Sedona-powered OLAP spatial lakehouse database on DuckLake"
+description = "PostGIS-compatible DuckDB spatial lakehouse server on official DuckLake"
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 publish.workspace = true
-
-[features]
-default = []
-duckdb-adbc = ["dep:adbc_core", "dep:adbc_driver_manager", "dep:sha2"]
+autotests = false
 
 [[bin]]
 name = "quackgis-server"
@@ -26,37 +23,34 @@ path = "src/main.rs"
 name = "quackgis_server"
 path = "src/lib.rs"
 
+[[test]]
+name = "duckdb_adbc_storage"
+path = "tests/duckdb_adbc_storage.rs"
+
+[[test]]
+name = "duckdb_wire_read"
+path = "tests/duckdb_wire_read.rs"
+
 [dependencies]
-datafusion-postgres = { workspace = true }
-datafusion = { workspace = true }
-datafusion-expr-common = { workspace = true }
-datafusion-functions-aggregate-common = { workspace = true }
-arrow-ord = { workspace = true }
-arrow-select = { workspace = true }
+arrow-pg = { workspace = true }
+pgwire = { workspace = true }
+sqlparser = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
-sedona-functions = { workspace = true }
-sedona-geo = { workspace = true }
-sedona-proj = { workspace = true }
-sedona-geometry = { workspace = true }
-geo-traits = { workspace = true }
-datafusion-ducklake = { workspace = true }
-adbc_core = { workspace = true, optional = true }
-adbc_driver_manager = { workspace = true, optional = true }
-sha2 = { workspace = true, optional = true }
-object_store = { workspace = true }
-url = { workspace = true }
-sqlx = { workspace = true }
+adbc_core = { workspace = true }
+adbc_driver_manager = { workspace = true }
+sha2 = { workspace = true }
 
 tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+rustls-pki-types = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 async-trait = { workspace = true }
 futures = "0.3"
-proj-wkt = { workspace = true }
-proj-core = { workspace = true }
 regex = { workspace = true }
 chrono = { workspace = true }
 rust_decimal = "1.42"

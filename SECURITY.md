@@ -4,22 +4,18 @@ QuackGIS is pre-1.0 developer software. Please report security issues privately
 through GitHub security advisories when available, or by opening an issue that
 omits exploit details and requests a private channel.
 
-## Current dependency exception
+## Native runtime trust boundary
 
-GitHub Dependabot alert `GHSA-2f9f-gq7v-9h6m` / `CVE-2026-43868` reports
-`thrift <= 0.22.0`. In this workspace it is transitive through:
+The configured DuckDB ADBC library is native code loaded into the server process.
+Treat its path as operator-controlled configuration, never client input. Startup
+requires the exact committed SHA-256 and DuckDB SQL version before claiming or
+opening a data root. Production packaging must include version-matched signed
+`spatial` and `ducklake` extensions and run with extension installation disabled.
 
-```text
-datafusion 54 -> parquet 58.3.0 -> thrift 0.17.0
-```
+## Network and authentication limits
 
-`cargo update -p thrift --precise 0.23.0` is blocked by `parquet 58.3.0`'s
-`thrift = ^0.17` requirement, and `cargo update -p parquet` has no compatible
-patched release for DataFusion 54. `parquet 59` removes the vulnerable `thrift`
-dependency, but no compatible DataFusion release is available in the current
-stack yet.
-
-Local mitigation: QuackGIS does not expose Apache Thrift as a network protocol;
-the affected code is in the Parquet dependency path behind DataFusion/DuckLake.
-Revisit this exception when the DataFusion stack can move to a Parquet line that
-no longer depends on `thrift 0.17`.
+Trust authentication is development-only. Password mode uses SCRAM-SHA-256, but
+configured TLS is currently optional rather than mandatory and does not implement
+channel binding. Deploy behind explicit network policy, configure certificate and
+PKCS#8 key together, and use read/write allowlists for service identities. Remote
+catalog/object-store profiles remain disabled.

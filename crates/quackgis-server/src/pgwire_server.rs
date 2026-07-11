@@ -1,114 +1,165 @@
 // SPDX-License-Identifier: Apache-2.0
-//! QuackGIS pgwire handler assembly.
-//!
-//! datafusion-postgres exposes query hooks, but COPY FROM STDIN also needs a
-//! pgwire COPY sub-protocol handler. This module keeps the binary and tests on
-//! the same handler stack.
+//! Engine-neutral pgwire/TLS/SCRAM edge and DuckDB handler assembly.
 
+use std::fs::File;
+use std::io::{BufReader, Error as IoError, ErrorKind};
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
-use datafusion::prelude::SessionContext;
-use datafusion_postgres::hooks::QueryHook;
-use datafusion_postgres::hooks::cursor::CursorStatementHook;
-use datafusion_postgres::hooks::set_show::SetShowHook;
-use datafusion_postgres::hooks::transactions::TransactionStatementHook;
-use datafusion_postgres::pgwire::api::auth::noop::NoopStartupHandler;
-use datafusion_postgres::pgwire::api::auth::sasl::SASLAuthStartupHandler;
-use datafusion_postgres::pgwire::api::auth::sasl::scram::ScramAuth;
-use datafusion_postgres::pgwire::api::auth::{
+use pgwire::api::auth::noop::NoopStartupHandler;
+use pgwire::api::auth::sasl::SASLAuthStartupHandler;
+use pgwire::api::auth::sasl::scram::ScramAuth;
+use pgwire::api::auth::{
     AuthSource, DefaultServerParameterProvider, LoginInfo, Password, ServerParameterProvider,
     StartupHandler,
 };
-use datafusion_postgres::pgwire::api::cancel::{CancelHandler, DefaultCancelHandler};
-use datafusion_postgres::pgwire::api::copy::CopyHandler;
-use datafusion_postgres::pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
-use datafusion_postgres::pgwire::api::{
-    ClientInfo, ConnectionManager, ErrorHandler, PgWireServerHandlers,
-};
-use datafusion_postgres::{DfSessionService, ServerOptions, serve_with_handlers};
+use pgwire::api::{ClientInfo, ConnectionManager, ErrorHandler, PgWireServerHandlers};
+use pgwire::tokio::process_socket;
+use rustls_pemfile::{certs, pkcs8_private_keys};
+use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
+use tokio_rustls::TlsAcceptor;
+use tokio_rustls::rustls::{self, ServerConfig};
 
-use crate::auth::{AccessRole, AuthConfig, AuthMode};
-use crate::catalog_compat::CatalogCompatHook;
-use crate::context::StoragePaths;
-use crate::ducklake_sql::{DuckLakeCopyHandler, DuckLakeSqlHook};
+use crate::auth::{AccessRole, AuthConfig};
 
-#[cfg(feature = "duckdb-adbc")]
 mod duckdb;
-#[cfg(feature = "duckdb-adbc")]
-pub use duckdb::serve_duckdb;
+pub use duckdb::{serve_duckdb, serve_duckdb_on_listener};
 
-pub async fn serve(
-    session_context: Arc<SessionContext>,
-    opts: &ServerOptions,
-    storage_paths: StoragePaths,
-) -> Result<(), std::io::Error> {
-    serve_with_auth(session_context, opts, storage_paths, AuthConfig::trust()).await
+#[derive(Clone, Debug)]
+pub struct ServerOptions {
+    host: String,
+    port: u16,
+    tls_cert_path: Option<String>,
+    tls_key_path: Option<String>,
+    max_connections: usize,
 }
 
-pub async fn serve_with_auth(
-    session_context: Arc<SessionContext>,
-    opts: &ServerOptions,
-    storage_paths: StoragePaths,
-    auth: AuthConfig,
-) -> Result<(), std::io::Error> {
-    let factory = Arc::new(QuackGisHandlerFactory::new(
-        session_context,
-        storage_paths,
-        auth,
-    ));
-    serve_with_handlers(factory, opts).await
-}
-
-struct QuackGisHandlerFactory {
-    session_service: Arc<DfSessionService>,
-    cancel_handler: Arc<DefaultCancelHandler>,
-    startup_handler: Arc<QuackGisStartupHandler>,
-    copy_handler: Arc<DuckLakeCopyHandler>,
-}
-
-impl QuackGisHandlerFactory {
-    fn new(
-        session_context: Arc<SessionContext>,
-        storage_paths: StoragePaths,
-        auth: AuthConfig,
-    ) -> Self {
-        let ducklake_hook = Arc::new(DuckLakeSqlHook::new_with_auth(
-            storage_paths.clone(),
-            auth.clone(),
-        ));
-        let hooks: Vec<Arc<dyn QueryHook>> = vec![
-            ducklake_hook,
-            Arc::new(CatalogCompatHook),
-            Arc::new(CursorStatementHook),
-            Arc::new(SetShowHook),
-            Arc::new(TransactionStatementHook),
-        ];
-        let session_service = Arc::new(DfSessionService::new_with_hooks(
-            Arc::clone(&session_context),
-            hooks,
-        ));
-        let connection_manager = Arc::new(ConnectionManager::new());
-        let startup_handler = match auth.mode() {
-            AuthMode::Trust => QuackGisStartupHandler::Trust(SimpleStartupHandler {
-                connection_manager: Arc::clone(&connection_manager),
-            }),
-            AuthMode::Password => {
-                QuackGisStartupHandler::Password(Box::new(PerConnectionScramStartupHandler::new(
-                    auth.clone(),
-                    Arc::clone(&connection_manager),
-                )))
-            }
-        };
+impl Default for ServerOptions {
+    fn default() -> Self {
         Self {
-            session_service,
-            cancel_handler: Arc::new(DefaultCancelHandler::new(Arc::clone(&connection_manager))),
-            startup_handler: Arc::new(startup_handler),
-            copy_handler: Arc::new(DuckLakeCopyHandler::new_with_auth(
-                storage_paths,
-                session_context,
-                auth,
-            )),
+            host: "127.0.0.1".to_string(),
+            port: 5432,
+            tls_cert_path: None,
+            tls_key_path: None,
+            max_connections: 0,
+        }
+    }
+}
+
+impl ServerOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_host(mut self, host: String) -> Self {
+        self.host = host;
+        self
+    }
+
+    pub fn with_port(mut self, port: u16) -> Self {
+        self.port = port;
+        self
+    }
+
+    pub fn with_tls_cert_path(mut self, path: Option<String>) -> Self {
+        self.tls_cert_path = path;
+        self
+    }
+
+    pub fn with_tls_key_path(mut self, path: Option<String>) -> Self {
+        self.tls_key_path = path;
+        self
+    }
+
+    pub fn with_max_connections(mut self, max_connections: usize) -> Self {
+        self.max_connections = max_connections;
+        self
+    }
+}
+
+fn setup_tls(cert_path: &str, key_path: &str) -> Result<TlsAcceptor, IoError> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let certificates = certs(&mut BufReader::new(File::open(cert_path)?))
+        .collect::<Result<Vec<CertificateDer<'static>>, IoError>>()?;
+    let key = pkcs8_private_keys(&mut BufReader::new(File::open(key_path)?))
+        .map(|key| key.map(PrivateKeyDer::from))
+        .collect::<Result<Vec<_>, IoError>>()?
+        .into_iter()
+        .next()
+        .ok_or_else(|| IoError::new(ErrorKind::InvalidInput, "No private key found"))?;
+    let config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certificates, key)
+        .map_err(|error| IoError::new(ErrorKind::InvalidInput, error))?;
+    Ok(TlsAcceptor::from(Arc::new(config)))
+}
+
+pub async fn serve_with_handlers<H>(
+    handlers: Arc<H>,
+    options: &ServerOptions,
+) -> Result<(), IoError>
+where
+    H: PgWireServerHandlers + Send + Sync + 'static,
+{
+    let address = format!("{}:{}", options.host, options.port);
+    let listener = TcpListener::bind(&address).await?;
+    serve_with_handlers_on_listener(handlers, listener, options).await
+}
+
+pub async fn serve_with_handlers_on_listener<H>(
+    handlers: Arc<H>,
+    listener: TcpListener,
+    options: &ServerOptions,
+) -> Result<(), IoError>
+where
+    H: PgWireServerHandlers + Send + Sync + 'static,
+{
+    let tls_acceptor = match (
+        options.tls_cert_path.as_deref(),
+        options.tls_key_path.as_deref(),
+    ) {
+        (Some(cert), Some(key)) => Some(setup_tls(cert, key).map_err(|error| {
+            IoError::new(
+                error.kind(),
+                format!("failed to configure requested TLS: {error}"),
+            )
+        })?),
+        (None, None) => None,
+        _ => {
+            return Err(IoError::new(
+                ErrorKind::InvalidInput,
+                "TLS certificate and key must be configured together",
+            ));
+        }
+    };
+    log::info!("quackgis pgwire listening on {}", listener.local_addr()?);
+    let limiter =
+        (options.max_connections > 0).then(|| Arc::new(Semaphore::new(options.max_connections)));
+    loop {
+        match listener.accept().await {
+            Ok((socket, peer)) => {
+                let handlers = Arc::clone(&handlers);
+                let tls_acceptor = tls_acceptor.clone();
+                let limiter = limiter.clone();
+                tokio::spawn(async move {
+                    let _permit = match limiter {
+                        Some(limiter) => match limiter.try_acquire_owned() {
+                            Ok(permit) => Some(permit),
+                            Err(_) => {
+                                log::warn!("pgwire connection rejected from {peer}: limit reached");
+                                return;
+                            }
+                        },
+                        None => None,
+                    };
+                    if let Err(error) = process_socket(socket, tls_acceptor, handlers).await {
+                        log::warn!("pgwire socket error from {peer}: {error}");
+                    }
+                });
+            }
+            Err(error) => log::warn!("pgwire accept error: {error}"),
         }
     }
 }
@@ -120,21 +171,14 @@ struct StaticPasswordAuthSource {
 
 #[async_trait]
 impl AuthSource for StaticPasswordAuthSource {
-    async fn get_password(
-        &self,
-        login: &LoginInfo,
-    ) -> datafusion_postgres::pgwire::error::PgWireResult<Password> {
+    async fn get_password(&self, login: &LoginInfo) -> pgwire::error::PgWireResult<Password> {
         let Some(username) = login.user() else {
-            return Err(
-                datafusion_postgres::pgwire::error::PgWireError::InvalidPassword(String::new()),
-            );
+            return Err(pgwire::error::PgWireError::InvalidPassword(String::new()));
         };
         let Some(user) = self.auth.user(username) else {
-            return Err(
-                datafusion_postgres::pgwire::error::PgWireError::InvalidPassword(
-                    username.to_string(),
-                ),
-            );
+            return Err(pgwire::error::PgWireError::InvalidPassword(
+                username.to_string(),
+            ));
         };
         Ok(Password::new(
             Some(user.scram_salt.clone()),
@@ -209,17 +253,13 @@ impl StartupHandler for PerConnectionScramStartupHandler {
     async fn on_startup<C>(
         &self,
         client: &mut C,
-        message: datafusion_postgres::pgwire::messages::PgWireFrontendMessage,
-    ) -> datafusion_postgres::pgwire::error::PgWireResult<()>
+        message: pgwire::messages::PgWireFrontendMessage,
+    ) -> pgwire::error::PgWireResult<()>
     where
-        C: ClientInfo
-            + futures::Sink<datafusion_postgres::pgwire::messages::PgWireBackendMessage>
-            + Unpin
-            + Send
-            + Sync,
+        C: ClientInfo + futures::Sink<pgwire::messages::PgWireBackendMessage> + Unpin + Send + Sync,
         C::Error: std::fmt::Debug,
-        datafusion_postgres::pgwire::error::PgWireError:
-            From<<C as futures::Sink<datafusion_postgres::pgwire::messages::PgWireBackendMessage>>::Error>,
+        pgwire::error::PgWireError:
+            From<<C as futures::Sink<pgwire::messages::PgWireBackendMessage>>::Error>,
     {
         let session = client
             .session_extensions()
@@ -238,48 +278,18 @@ impl StartupHandler for QuackGisStartupHandler {
     async fn on_startup<C>(
         &self,
         client: &mut C,
-        message: datafusion_postgres::pgwire::messages::PgWireFrontendMessage,
-    ) -> datafusion_postgres::pgwire::error::PgWireResult<()>
+        message: pgwire::messages::PgWireFrontendMessage,
+    ) -> pgwire::error::PgWireResult<()>
     where
-        C: ClientInfo
-            + futures::Sink<datafusion_postgres::pgwire::messages::PgWireBackendMessage>
-            + Unpin
-            + Send
-            + Sync,
+        C: ClientInfo + futures::Sink<pgwire::messages::PgWireBackendMessage> + Unpin + Send + Sync,
         C::Error: std::fmt::Debug,
-        datafusion_postgres::pgwire::error::PgWireError:
-            From<<C as futures::Sink<datafusion_postgres::pgwire::messages::PgWireBackendMessage>>::Error>,
+        pgwire::error::PgWireError:
+            From<<C as futures::Sink<pgwire::messages::PgWireBackendMessage>>::Error>,
     {
         match self {
             Self::Trust(handler) => handler.on_startup(client, message).await,
             Self::Password(handler) => handler.on_startup(client, message).await,
         }
-    }
-}
-
-impl PgWireServerHandlers for QuackGisHandlerFactory {
-    fn simple_query_handler(&self) -> Arc<impl SimpleQueryHandler> {
-        Arc::clone(&self.session_service)
-    }
-
-    fn extended_query_handler(&self) -> Arc<impl ExtendedQueryHandler> {
-        Arc::clone(&self.session_service)
-    }
-
-    fn startup_handler(&self) -> Arc<impl StartupHandler> {
-        Arc::clone(&self.startup_handler)
-    }
-
-    fn copy_handler(&self) -> Arc<impl CopyHandler> {
-        Arc::clone(&self.copy_handler)
-    }
-
-    fn error_handler(&self) -> Arc<impl ErrorHandler> {
-        Arc::new(LoggingErrorHandler)
-    }
-
-    fn cancel_handler(&self) -> Arc<impl CancelHandler> {
-        Arc::clone(&self.cancel_handler)
     }
 }
 
@@ -297,15 +307,15 @@ impl NoopStartupHandler for SimpleStartupHandler {
 struct LoggingErrorHandler;
 
 impl ErrorHandler for LoggingErrorHandler {
-    fn on_error<C>(&self, client: &C, error: &mut datafusion_postgres::pgwire::error::PgWireError)
+    fn on_error<C>(&self, client: &C, error: &mut pgwire::error::PgWireError)
     where
         C: ClientInfo,
     {
         let kind = match error {
-            datafusion_postgres::pgwire::error::PgWireError::InvalidPassword(_)
-            | datafusion_postgres::pgwire::error::PgWireError::UserNameRequired => "auth_failure",
-            datafusion_postgres::pgwire::error::PgWireError::UserError(_) => "user_error",
-            datafusion_postgres::pgwire::error::PgWireError::ApiError(_) => "api_error",
+            pgwire::error::PgWireError::InvalidPassword(_)
+            | pgwire::error::PgWireError::UserNameRequired => "auth_failure",
+            pgwire::error::PgWireError::UserError(_) => "user_error",
+            pgwire::error::PgWireError::ApiError(_) => "api_error",
             _ => "protocol_error",
         };
         let user = client

@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Experimental DuckDB/ADBC storage-authority boundary.
+//! DuckDB/ADBC storage kernel backed by official DuckLake.
 //!
 //! ADBC is the Arrow transport. DuckLake compatibility comes from executing
-//! writes through DuckDB's official `ducklake` extension. This module is kept
-//! behind `duckdb-adbc` until the persistence, concurrency, crash, and client
-//! parity gates in `docs/DUCKDB_ADBC_EVALUATION.md` pass.
+//! writes through DuckDB's official `ducklake` extension.
 
 use std::io::Read;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
@@ -27,7 +25,7 @@ use crate::engine_api::{
     EngineQueryResult, EngineResult, EngineSnapshot, EngineStatementDescription,
     EngineStorageKernel, EngineTableRef, EngineTransactionState, IngestDisposition,
 };
-use crate::storage_authority::{StorageAuthority, claim_local_root};
+use crate::storage_authority::claim_local_root;
 
 const DUCKDB_ADBC_ENTRYPOINT: &[u8] = b"duckdb_adbc_init";
 const SUPPORTED_DUCKDB_VERSION: &str = "v1.5.4";
@@ -57,12 +55,12 @@ pub struct DuckDbAdbcConfig {
     /// DuckDB control database URI. `:memory:` is sufficient when durable state
     /// lives in the attached DuckLake catalog and object path.
     pub database_uri: String,
-    /// DuckLake catalog URI, for example `ducklake:metadata.ducklake`,
-    /// `ducklake:sqlite:metadata.sqlite`, or a PostgreSQL catalog URI.
+    /// DuckLake catalog URI. The current server constructs this from a validated
+    /// local catalog path; shared catalog URIs are reserved for a future profile.
     pub ducklake_uri: String,
     /// Name used for the attached DuckLake catalog.
     pub catalog_name: String,
-    /// DuckLake data path. This may be a local path or object-store URI.
+    /// DuckLake data path. The current server accepts local paths only.
     pub data_path: String,
     /// Extension installation policy. Defaults to fail-closed `LOAD` only.
     pub extension_policy: ExtensionPolicy,
@@ -110,8 +108,10 @@ impl DuckDbAdbcConfig {
         };
         format!(
             "{extension_sql}\n\
+             {}\n\
              SET ducklake_default_data_inlining_row_limit = 0;\n\
              ATTACH {} AS {} (DATA_PATH {}, DATA_INLINING_ROW_LIMIT 0);",
+            crate::spatial_compat::DUCKDB_COMPATIBILITY_MACROS,
             quote_literal(&self.ducklake_uri),
             quote_identifier(&self.catalog_name),
             quote_literal(&self.data_path),
@@ -173,11 +173,8 @@ impl DuckDbAdbcStorage {
             .new_connection()
             .context("opening DuckDB ADBC connection")?;
         verify_runtime_version(&mut connection)?;
-        claim_local_root(
-            std::path::Path::new(&config.data_path),
-            StorageAuthority::DuckDbOfficialDuckLake,
-        )
-        .context("claiming local DuckDB official-DuckLake data root")?;
+        claim_local_root(std::path::Path::new(&config.data_path))
+            .context("claiming local DuckDB official-DuckLake data root")?;
         let bootstrap_sql = config.bootstrap_sql();
         execute_update_on(&mut connection, &bootstrap_sql)
             .context("loading and attaching the official DuckLake extension")?;
@@ -275,8 +272,8 @@ impl DuckDbAdbcStorage {
     /// Ingest Arrow batches directly into the attached DuckLake catalog.
     ///
     /// DuckDB ADBC's target-catalog option routes the operation through the
-    /// official DuckLake extension. Data inlining is disabled during bootstrap
-    /// so DataFusion comparison readers only need Parquet/delete-file support.
+    /// official DuckLake extension. Data inlining is disabled so durable rows
+    /// remain in independently inspectable Parquet files.
     pub fn ingest(
         &self,
         schema: &str,
@@ -932,6 +929,8 @@ mod tests {
 
         let sql = config.bootstrap_sql();
         assert!(sql.starts_with("LOAD ducklake;\nLOAD spatial;"));
+        assert!(sql.contains("quackgis_st_geomfromewkt"));
+        assert!(sql.contains("quackgis_st_geometry_type"));
         assert!(sql.contains("ducklake_default_data_inlining_row_limit = 0"));
         assert!(sql.contains("AS \"quack\"\"gis\""));
         assert!(sql.contains("DATA_PATH '/data/it''s-here'"));

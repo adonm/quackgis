@@ -5,5 +5,5 @@ The maintained compatibility document is
 
 That page is the source of truth for current client claims, wire-protocol
 coverage, DuckLake storage limitations, and known PostgreSQL/PostGIS deltas.
-Generated SedonaDB/PostGIS function inventory data lives in
-[docs/sedonadb_compat.json](./docs/sedonadb_compat.json).
+The maintained DuckDB spatial classification lives in
+[tests/duckdb_spatial_compat.json](./tests/duckdb_spatial_compat.json).

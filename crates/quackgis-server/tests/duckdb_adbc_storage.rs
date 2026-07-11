@@ -1,14 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-#![cfg(feature = "duckdb-adbc")]
-
 use std::sync::Arc;
 
 use adbc_core::options::IngestMode;
-use datafusion::arrow::array::{
-    Array, BinaryArray, Float64Array, Int32Array, Int64Array, StringArray,
+use arrow_array::{
+    Array, BinaryArray, Float64Array, Int32Array, Int64Array, RecordBatch, StringArray,
 };
-use datafusion::arrow::datatypes::{DataType, Field, Schema};
-use datafusion::arrow::record_batch::RecordBatch;
+use arrow_schema::{DataType, Field, Schema};
 use quackgis_server::duckdb_adbc_storage::{DuckDbAdbcConfig, DuckDbAdbcStorage, ExtensionPolicy};
 use quackgis_server::engine_api::{EngineMaintenanceRequest, EngineStorageKernel, EngineTableRef};
 

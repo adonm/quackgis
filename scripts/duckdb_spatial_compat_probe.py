@@ -17,7 +17,7 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
-REGRESS = ROOT / "crates/quackgis-server/tests/postgis_regress.rs"
+REGRESS = ROOT / "tests/fixtures/postgis_curated_cases.rs"
 DEFAULT_LEDGER = ROOT / "tests/duckdb_spatial_compat.json"
 CASE_RE = re.compile(
     r'Case\s*\{\s*name:\s*"(?P<name>[^"]+)",\s*'

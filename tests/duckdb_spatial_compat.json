@@ -1,8 +1,8 @@
 {
   "version": 1,
   "cases": [
-    {"name":"postgis_lib_version","disposition":"rust_edge"},
-    {"name":"postgis_version_marker","disposition":"rust_edge"},
+    {"name":"postgis_lib_version","disposition":"quackgis_macro","duckdb_sql":"SELECT '3.4.0'"},
+    {"name":"postgis_version_marker","disposition":"quackgis_macro","duckdb_sql":"SELECT '3.4.0 QUACKGIS'"},
     {"name":"geomfromtext_astext_point","disposition":"native_duckdb"},
     {"name":"geomfromewkt_astext_point","disposition":"sql_rewrite","duckdb_sql":"SELECT ST_AsText(ST_GeomFromText('POINT(1 2)'))"},
     {"name":"point_constructor","disposition":"native_duckdb"},

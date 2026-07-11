@@ -12,34 +12,35 @@ use arrow_array::{
     ArrayRef, BinaryArray, BooleanArray, Date32Array, Decimal128Array, Float32Array, Float64Array,
     Int16Array, Int32Array, Int64Array, RecordBatch, StringArray, TimestampMicrosecondArray,
 };
+use arrow_pg::datatypes::{arrow_schema_to_pg_fields, field_into_pg_type};
+use arrow_pg::encode_recordbatch;
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime};
-use datafusion::sql::sqlparser::ast::Statement;
-use datafusion::sql::sqlparser::dialect::PostgreSqlDialect;
-use datafusion::sql::sqlparser::parser::Parser;
-use datafusion_postgres::ServerOptions;
-use datafusion_postgres::arrow_pg::datatypes::{arrow_schema_to_pg_fields, field_into_pg_type};
-use datafusion_postgres::arrow_pg::encode_recordbatch;
-use datafusion_postgres::pgwire::api::cancel::{CancelHandler, DefaultCancelHandler};
-use datafusion_postgres::pgwire::api::copy::CopyHandler;
-use datafusion_postgres::pgwire::api::portal::{Format, Portal};
-use datafusion_postgres::pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
-use datafusion_postgres::pgwire::api::results::{CopyResponse, QueryResponse, Response, Tag};
-use datafusion_postgres::pgwire::api::stmt::QueryParser;
-use datafusion_postgres::pgwire::api::store::PortalStore;
-use datafusion_postgres::pgwire::api::{
+use futures::{Sink, SinkExt};
+use pgwire::api::cancel::{CancelHandler, DefaultCancelHandler};
+use pgwire::api::copy::CopyHandler;
+use pgwire::api::portal::{Format, Portal};
+use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
+use pgwire::api::results::{CopyResponse, QueryResponse, Response, Tag};
+use pgwire::api::stmt::QueryParser;
+use pgwire::api::store::PortalStore;
+use pgwire::api::{
     ClientInfo, ClientPortalStore, ConnectionManager, ErrorHandler, PgWireConnectionState,
     PgWireServerHandlers, Type,
 };
-use datafusion_postgres::pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
-use datafusion_postgres::pgwire::messages::PgWireBackendMessage;
-use datafusion_postgres::pgwire::messages::copy::{CopyData, CopyDone, CopyFail};
-use datafusion_postgres::serve_with_handlers;
-use futures::{Sink, SinkExt};
+use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
+use pgwire::messages::PgWireBackendMessage;
+use pgwire::messages::copy::{CopyData, CopyDone, CopyFail};
 use regex::Regex;
+use sqlparser::ast::Statement;
+use sqlparser::dialect::PostgreSqlDialect;
+use sqlparser::parser::Parser;
 
-use super::{LoggingErrorHandler, QuackGisStartupHandler, SimpleStartupHandler};
+use super::{
+    LoggingErrorHandler, QuackGisStartupHandler, ServerOptions, SimpleStartupHandler,
+    serve_with_handlers, serve_with_handlers_on_listener,
+};
 use crate::auth::{AuthConfig, AuthMode};
 use crate::duckdb_adbc_storage::DuckDbAdbcStorage;
 use crate::engine_api::{
@@ -54,6 +55,16 @@ pub async fn serve_duckdb(
 ) -> Result<(), std::io::Error> {
     let factory = Arc::new(DuckDbHandlerFactory::new(storage, auth));
     serve_with_handlers(factory, options).await
+}
+
+pub async fn serve_duckdb_on_listener(
+    storage: Arc<DuckDbAdbcStorage>,
+    listener: tokio::net::TcpListener,
+    options: &ServerOptions,
+    auth: AuthConfig,
+) -> Result<(), std::io::Error> {
+    let factory = Arc::new(DuckDbHandlerFactory::new(storage, auth));
+    serve_with_handlers_on_listener(factory, listener, options).await
 }
 
 struct DuckDbHandlerFactory {
@@ -92,7 +103,7 @@ impl PgWireServerHandlers for DuckDbHandlerFactory {
         Arc::clone(&self.service)
     }
 
-    fn startup_handler(&self) -> Arc<impl datafusion_postgres::pgwire::api::auth::StartupHandler> {
+    fn startup_handler(&self) -> Arc<impl pgwire::api::auth::StartupHandler> {
         Arc::clone(&self.startup)
     }
 
@@ -200,7 +211,7 @@ impl QueryParser for DuckDbParser {
         &self,
         statement: &Self::Statement,
         format: Option<&Format>,
-    ) -> PgWireResult<Vec<datafusion_postgres::pgwire::api::results::FieldInfo>> {
+    ) -> PgWireResult<Vec<pgwire::api::results::FieldInfo>> {
         let default_format = Format::UnifiedText;
         arrow_schema_to_pg_fields(
             statement.result_schema.as_ref(),
@@ -447,6 +458,7 @@ enum SimpleStatementKind {
 
 fn validate_statement(sql: &str, mode: ProtocolMode) -> PgWireResult<ValidatedStatement> {
     let sql = normalize_sql(sql)?;
+    let sql = crate::spatial_compat::rewrite_postgis_sql(&sql);
     let mut statements = Parser::parse_sql(&PostgreSqlDialect {}, &sql)
         .map_err(|error| user_error("42601", &error.to_string()))?;
     if statements.len() != 1 {
@@ -487,7 +499,7 @@ fn authorize_statement<C>(client: &C, auth: &AuthConfig, statement: &Statement) 
 where
     C: ClientInfo + ?Sized,
 {
-    crate::ducklake_sql::authorize_engine_statement(
+    crate::statement_policy::authorize_statement(
         auth,
         client.metadata().get("user").map(String::as_str),
         statement,
@@ -499,7 +511,7 @@ fn authorize_copy<C>(client: &C, auth: &AuthConfig, target: &CopyTarget) -> PgWi
 where
     C: ClientInfo + ?Sized,
 {
-    crate::ducklake_sql::authorize_engine_copy_target(
+    crate::statement_policy::authorize_copy_target(
         auth,
         client.metadata().get("user").map(String::as_str),
         &target.table.schema,

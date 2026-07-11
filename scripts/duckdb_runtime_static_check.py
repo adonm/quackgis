@@ -15,6 +15,7 @@ EXPECTED_COPIES = {
     "COPY libduckdb.so /opt/quackgis/lib/libduckdb.so",
     "COPY duckdb-home /opt/quackgis/duckdb",
     "COPY artifact-manifest.json /opt/quackgis/artifact-manifest.json",
+    "COPY licenses /opt/quackgis/licenses",
 }
 FORBIDDEN = ("install ", "curl", "wget", "dnf", "apt-get", "apk ", "ADD ")
 

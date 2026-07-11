@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
-#![cfg(feature = "duckdb-adbc")]
-
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use adbc_core::options::IngestMode;
 use arrow_array::{Int32Array, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use bytes::Bytes;
-use datafusion_postgres::ServerOptions;
 use futures::{SinkExt, stream};
 use quackgis_server::duckdb_adbc_storage::{DuckDbAdbcConfig, DuckDbAdbcStorage, ExtensionPolicy};
+use quackgis_server::pgwire_server::ServerOptions;
 use serde::Deserialize;
+use serde_json::json;
 
 struct ChildGuard(std::process::Child);
 
@@ -31,7 +32,6 @@ struct SpatialLedger {
 struct SpatialLedgerCase {
     name: String,
     disposition: String,
-    duckdb_sql: Option<String>,
     expected: Option<String>,
 }
 
@@ -41,7 +41,9 @@ fn executable_spatial_cases() -> Vec<(String, String, String)> {
     )
     .expect("spatial case regex");
     let regress = case_pattern
-        .captures_iter(include_str!("postgis_regress.rs"))
+        .captures_iter(include_str!(
+            "../../../tests/fixtures/postgis_curated_cases.rs"
+        ))
         .map(|captures| {
             (
                 captures["name"].to_owned(),
@@ -67,7 +69,7 @@ fn executable_spatial_cases() -> Vec<(String, String, String)> {
                 .unwrap_or_else(|| panic!("missing maintained spatial case {}", case.name));
             (
                 case.name,
-                case.duckdb_sql.unwrap_or_else(|| source_sql.clone()),
+                source_sql.clone(),
                 case.expected.unwrap_or_else(|| source_expected.clone()),
             )
         })
@@ -113,7 +115,6 @@ async fn cli_duckdb_backend_serves_an_official_local_catalog() {
 
     let mut server = ChildGuard(
         std::process::Command::new(env!("CARGO_BIN_EXE_quackgis-server"))
-            .arg("--engine-backend=duckdb")
             .arg("--duckdb-driver")
             .arg(&driver_path)
             .arg("--catalog-path")
@@ -130,7 +131,7 @@ async fn cli_duckdb_backend_serves_an_official_local_catalog() {
             .arg("--write-allowlist=cli_points,private_points")
             .arg("--read-allowlist=cli_points")
             .spawn()
-            .expect("start feature-gated DuckDB CLI backend"),
+            .expect("start DuckDB CLI backend"),
     );
 
     let mut connected = None;
@@ -302,14 +303,14 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
         .await
         .expect("ephemeral listener");
     let port = listener.local_addr().expect("address").port();
-    drop(listener);
     let options = ServerOptions::new()
         .with_host("127.0.0.1".to_owned())
         .with_port(port);
     let server_storage = Arc::clone(&storage);
     let task = tokio::spawn(async move {
-        let _ = quackgis_server::pgwire_server::serve_duckdb(
+        let _ = quackgis_server::pgwire_server::serve_duckdb_on_listener(
             server_storage,
+            listener,
             &options,
             quackgis_server::auth::AuthConfig::trust(),
         )
@@ -343,7 +344,7 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
     )));
 
     let spatial_cases = executable_spatial_cases();
-    assert_eq!(spatial_cases.len(), 40, "executable spatial ledger count");
+    assert_eq!(spatial_cases.len(), 42, "executable spatial ledger count");
     for (name, sql, expected) in spatial_cases {
         let row = client
             .query_one(&sql, &[])
@@ -819,4 +820,251 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
             .value(0),
         "010100000000000000000000000000000000000000"
     );
+}
+
+const BENCHMARK_ROWS: i64 = 100_000;
+const BENCHMARK_QUERY: &str = "SELECT count(*)::BIGINT, sum(id)::BIGINT, \
+    count(*) FILTER (WHERE grp = 7)::BIGINT, \
+    count(*) FILTER (WHERE x BETWEEN 100 AND 199 AND y BETWEEN 100 AND 199)::BIGINT, \
+    count(*) FILTER (WHERE ST_Intersects(ST_GeomFromWKB(geom_wkb), \
+        ST_MakeEnvelope(100, 100, 199, 199)))::BIGINT, \
+    sum(length(name))::BIGINT, sum(octet_length(geom_wkb))::BIGINT \
+    FROM quackgis.main.benchmark_points";
+
+#[tokio::test]
+#[ignore = "requires the pinned DuckDB CLI and ADBC runtime"]
+async fn current_duckdb_transport_profile() {
+    let started = Instant::now();
+    let driver_path = std::env::var_os("QUACKGIS_DUCKDB_ADBC_DRIVER").expect("set ADBC driver");
+    let duckdb_bin = std::env::var_os("DUCKDB_BIN").expect("set DUCKDB_BIN");
+    let output_path = std::env::var_os("QUACKGIS_BENCHMARK_OUT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| ".tmp/duckdb-current-benchmark/manifest.json".into());
+    let temp = tempfile::tempdir().expect("benchmark tempdir");
+    let catalog_path = temp.path().join("catalog.ducklake");
+    let data_path = temp.path().join("data");
+    std::fs::create_dir(&data_path).expect("benchmark data path");
+
+    let create_sql = format!(
+        "LOAD spatial; LOAD ducklake; SET threads=1; \
+         SET ducklake_default_data_inlining_row_limit=0; \
+         ATTACH 'ducklake:{}' AS quackgis (DATA_PATH '{}', DATA_INLINING_ROW_LIMIT 0); \
+         CREATE TABLE quackgis.main.benchmark_points AS \
+         SELECT i::INTEGER AS id, 'point-' || lpad(i::VARCHAR, 6, '0') AS name, \
+           (i % 32)::SMALLINT AS grp, ((i * 17) % 1000)::DOUBLE AS x, \
+           ((i * 31) % 1000)::DOUBLE AS y, \
+           ST_AsWKB(ST_Point(((i * 17) % 1000)::DOUBLE, ((i * 31) % 1000)::DOUBLE)) AS geom_wkb \
+         FROM range({BENCHMARK_ROWS}) AS r(i)",
+        sql_literal_path(&catalog_path),
+        sql_literal_path(&data_path),
+    );
+    let load_started = Instant::now();
+    run_duckdb(&duckdb_bin, &create_sql);
+    let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
+
+    let expected = benchmark_expected();
+    let direct_sql = format!(
+        "LOAD spatial; LOAD ducklake; ATTACH 'ducklake:{}' AS quackgis (DATA_PATH '{}'); {BENCHMARK_QUERY}",
+        sql_literal_path(&catalog_path),
+        sql_literal_path(&data_path),
+    );
+    let mut direct_samples = Vec::new();
+    for _ in 0..3 {
+        let sample_started = Instant::now();
+        let output = run_duckdb(&duckdb_bin, &direct_sql);
+        direct_samples.push(sample_started.elapsed().as_secs_f64() * 1000.0);
+        assert_eq!(parse_canonical_csv(&output), expected);
+    }
+
+    let config = DuckDbAdbcConfig {
+        driver_path: driver_path.into(),
+        database_uri: ":memory:".to_owned(),
+        ducklake_uri: format!("ducklake:{}", catalog_path.display()),
+        catalog_name: "quackgis".to_owned(),
+        data_path: data_path.display().to_string(),
+        extension_policy: ExtensionPolicy::LoadOnly,
+    };
+    let open_started = Instant::now();
+    let storage = Arc::new(DuckDbAdbcStorage::open(config).expect("benchmark ADBC storage"));
+    let adbc_open_ms = open_started.elapsed().as_secs_f64() * 1000.0;
+    let mut adbc_samples = Vec::new();
+    for _ in 0..3 {
+        let sample_started = Instant::now();
+        let batches = storage
+            .query(BENCHMARK_QUERY)
+            .expect("ADBC benchmark query");
+        adbc_samples.push(sample_started.elapsed().as_secs_f64() * 1000.0);
+        assert_eq!(canonical_batches(&batches), expected);
+    }
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("benchmark listener");
+    let port = listener.local_addr().expect("benchmark address").port();
+    let options = ServerOptions::new().with_max_connections(4);
+    let server_storage = Arc::clone(&storage);
+    let server_task = tokio::spawn(async move {
+        quackgis_server::pgwire_server::serve_duckdb_on_listener(
+            server_storage,
+            listener,
+            &options,
+            quackgis_server::auth::AuthConfig::trust(),
+        )
+        .await
+    });
+    let handshake_started = Instant::now();
+    let (client, connection) = tokio_postgres::connect(
+        &format!("host=127.0.0.1 port={port} user=postgres dbname=quackgis"),
+        tokio_postgres::NoTls,
+    )
+    .await
+    .expect("benchmark pgwire connect");
+    let handshake_ms = handshake_started.elapsed().as_secs_f64() * 1000.0;
+    let connection_task = tokio::spawn(connection);
+    let statement = client
+        .prepare(BENCHMARK_QUERY)
+        .await
+        .expect("prepare benchmark");
+    let mut pgwire_samples = Vec::new();
+    for _ in 0..3 {
+        let sample_started = Instant::now();
+        let row = client
+            .query_one(&statement, &[])
+            .await
+            .expect("pgwire benchmark query");
+        pgwire_samples.push(sample_started.elapsed().as_secs_f64() * 1000.0);
+        let actual = (0..7).map(|index| row.get(index)).collect::<Vec<i64>>();
+        assert_eq!(actual, expected);
+    }
+    drop(client);
+    connection_task.abort();
+    server_task.abort();
+
+    assert!(load_ms < 30_000.0, "smoke load exceeded 30 seconds");
+    assert!(
+        handshake_ms < 5_000.0,
+        "pgwire handshake exceeded 5 seconds"
+    );
+    for (path, samples, budget) in [
+        ("direct", &direct_samples, 15_000.0),
+        ("adbc", &adbc_samples, 10_000.0),
+        ("pgwire", &pgwire_samples, 10_000.0),
+    ] {
+        assert!(
+            samples.iter().all(|sample| *sample < budget),
+            "{path} smoke sample exceeded {budget} ms: {samples:?}"
+        );
+    }
+    assert!(started.elapsed() < Duration::from_secs(90));
+
+    let manifest = json!({
+        "schema_version": 1,
+        "profile_id": "duckdb-current-smoke-r100k-v1",
+        "status": "pass",
+        "rows": BENCHMARK_ROWS,
+        "correctness": {
+            "canonical_result": expected,
+            "bbox_equals_exact": expected[3] == expected[4],
+            "wkb_bytes": expected[6],
+        },
+        "load_ms": load_ms,
+        "adbc_open_ms": adbc_open_ms,
+        "pgwire_handshake_ms": handshake_ms,
+        "paths": {
+            "direct_duckdb_cli": sample_summary(&direct_samples),
+            "adbc": sample_summary(&adbc_samples),
+            "pgwire": sample_summary(&pgwire_samples),
+        },
+        "scope": "single-client warm scalar full-scan smoke; not a scale claim",
+    });
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent).expect("benchmark output parent");
+    }
+    std::fs::write(
+        &output_path,
+        serde_json::to_vec_pretty(&manifest).expect("benchmark JSON"),
+    )
+    .expect("write benchmark manifest");
+    println!("duckdb_current_benchmark_ok out={}", output_path.display());
+}
+
+fn sql_literal_path(path: &Path) -> String {
+    path.display().to_string().replace('\'', "''")
+}
+
+fn run_duckdb(binary: &std::ffi::OsStr, sql: &str) -> String {
+    let output = std::process::Command::new(binary)
+        .args(["-csv", "-noheader", ":memory:", "-c", sql])
+        .output()
+        .expect("run DuckDB CLI");
+    assert!(
+        output.status.success(),
+        "DuckDB CLI failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("DuckDB UTF-8 output")
+}
+
+fn parse_canonical_csv(output: &str) -> Vec<i64> {
+    output
+        .lines()
+        .rfind(|line| !line.trim().is_empty())
+        .expect("DuckDB result line")
+        .split(',')
+        .map(|value| value.parse().expect("integer benchmark result"))
+        .collect()
+}
+
+fn canonical_batches(batches: &[RecordBatch]) -> Vec<i64> {
+    assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
+    let batch = batches
+        .iter()
+        .find(|batch| batch.num_rows() == 1)
+        .expect("result batch");
+    (0..7)
+        .map(|index| {
+            batch
+                .column(index)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .expect("Int64 benchmark result")
+                .value(0)
+        })
+        .collect()
+}
+
+fn benchmark_expected() -> Vec<i64> {
+    let mut group = 0_i64;
+    let mut bbox = 0_i64;
+    for id in 0..BENCHMARK_ROWS {
+        if id % 32 == 7 {
+            group += 1;
+        }
+        let x = (id * 17) % 1000;
+        let y = (id * 31) % 1000;
+        if (100..=199).contains(&x) && (100..=199).contains(&y) {
+            bbox += 1;
+        }
+    }
+    vec![
+        BENCHMARK_ROWS,
+        BENCHMARK_ROWS * (BENCHMARK_ROWS - 1) / 2,
+        group,
+        bbox,
+        bbox,
+        BENCHMARK_ROWS * 12,
+        BENCHMARK_ROWS * 21,
+    ]
+}
+
+fn sample_summary(samples: &[f64]) -> serde_json::Value {
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    json!({
+        "samples_ms": samples,
+        "min_ms": sorted[0],
+        "p50_ms": sorted[sorted.len() / 2],
+        "max_ms": sorted[sorted.len() - 1],
+        "mean_ms": samples.iter().sum::<f64>() / samples.len() as f64,
+    })
 }

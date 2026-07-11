@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Run the first DuckDB engine feasibility probe.
+"""Run an independent out-of-process DuckDB runtime probe.
 
 The probe is intentionally out-of-process: it exercises DuckDB's `spatial` and
-`ducklake` extensions through the CLI without adding DuckDB to the QuackGIS server
-runtime. It can also run caller-provided attach SQL against a copied DuckLake
-catalog/prefix when a reference-readability experiment is available.
+`ducklake` extensions directly through the CLI, independently of pgwire and ADBC.
+It can also run operator-provided attach SQL for future interoperability drills.
 """
 
 from __future__ import annotations

@@ -3,89 +3,32 @@ set dotenv-load := true
 
 host := env_var_or_default("QUACKGIS_HOST", "127.0.0.1")
 port := env_var_or_default("QUACKGIS_PORT", "5434")
-smoke_host := env_var_or_default("QUACKGIS_SMOKE_HOST", "127.0.0.1")
-smoke_port := env_var_or_default("QUACKGIS_SMOKE_PORT", "15434")
-catalog := env_var_or_default("QUACKGIS_CATALOG_PATH", ".tmp/dev/quackgis.db")
+catalog := env_var_or_default("QUACKGIS_CATALOG_PATH", ".tmp/dev/quackgis.ducklake")
 data := env_var_or_default("QUACKGIS_DATA_PATH", ".tmp/dev/data")
-martin_bin := env_var_or_default("MARTIN_BIN", ".tmp/bin/martin")
-martin_version := env_var_or_default("MARTIN_VERSION", "1.11.0")
-martin_port := env_var_or_default("MARTIN_PORT", "3000")
-qgis_image := env_var_or_default("QGIS_IMAGE", "docker.io/qgis/qgis:ltr-questing")
-geoserver_image := env_var_or_default("GEOSERVER_IMAGE", "docker.osgeo.org/geoserver:3.0.0")
-postgis_image := env_var_or_default("POSTGIS_IMAGE", "docker.io/postgis/postgis:16-3.4")
-osm_extract_url := env_var_or_default("OSM_EXTRACT_URL", "https://download.geofabrik.de/europe/monaco-latest.osm.pbf")
-osm_point_limit := env_var_or_default("OSM_POINT_LIMIT", "50")
-osm_line_limit := env_var_or_default("OSM_LINE_LIMIT", "50")
-osm_polygon_limit := env_var_or_default("OSM_POLYGON_LIMIT", "50")
 container_engine := env_var_or_default("CONTAINER_ENGINE", "podman")
-kind_cluster := env_var_or_default("KIND_CLUSTER", "quackgis")
-quackgis_image := env_var_or_default("QUACKGIS_IMAGE", "localhost/quackgis:dev")
 duckdb_runtime_image := env_var_or_default("QUACKGIS_DUCKDB_RUNTIME_IMAGE", "localhost/quackgis-duckdb-runtime:dev")
-linkerd_iptables_mode := env_var_or_default("LINKERD_IPTABLES_MODE", "nft")
-qps_deep_factor := env_var_or_default("QPS_DEEP_FACTOR", "10000")
-qps_deep_workers := env_var_or_default("QPS_DEEP_WORKERS", "32")
-qps_deep_queries := env_var_or_default("QPS_DEEP_QUERIES", "640")
-qps_deep_replicas := env_var_or_default("QPS_DEEP_REPLICAS", "4")
-qps_deep_min_instances := env_var_or_default("QPS_DEEP_MIN_INSTANCES", "3")
-qps_deep_min_qps := env_var_or_default("QPS_DEEP_MIN_QPS", "1.0")
-qps_deep_disk_budget_gib := env_var_or_default("QPS_DEEP_DISK_BUDGET_GIB", "1024")
-qps_shared_catalog_refresh_ms := env_var_or_default("QPS_SHARED_CATALOG_REFRESH_MS", "60000")
-layoutbench_allow_exact_r100m := env_var_or_default("LAYOUTBENCH_ALLOW_EXACT_R100M", "false")
-layoutbench_max_rows := env_var_or_default("LAYOUTBENCH_MAX_ROWS", "100000000")
-layoutbench_hardware_profile := env_var_or_default("LAYOUTBENCH_HARDWARE_PROFILE", "kind-local-v1")
-layoutbench_object_bytes := env_var_or_default("LAYOUTBENCH_OBJECT_BYTES", "1")
-external_alpha_use_kind_emulators := env_var_or_default("EXTERNAL_ALPHA_USE_KIND_EMULATORS", "true")
-external_catalog_url := env_var_or_default("EXTERNAL_QUACKGIS_CATALOG_URL", "postgres://postgres:postgres@pg.quackgis.svc.cluster.local:5432/quackgis_external")
-external_ducklake_catalog_name := env_var_or_default("EXTERNAL_QUACKGIS_DUCKLAKE_CATALOG_NAME", "quackgis_external")
-external_data_path := env_var_or_default("EXTERNAL_QUACKGIS_DATA_PATH", "s3://quackgis/external-ducklake")
-external_s3_endpoint := env_var_or_default("EXTERNAL_QUACKGIS_S3_ENDPOINT", "http://s3.quackgis.svc.cluster.local:8014")
-external_s3_access_key_id := env_var_or_default("EXTERNAL_QUACKGIS_S3_ACCESS_KEY_ID", "quackgis")
-external_s3_secret_access_key := env_var_or_default("EXTERNAL_QUACKGIS_S3_SECRET_ACCESS_KEY", "quackgis")
-external_s3_region := env_var_or_default("EXTERNAL_QUACKGIS_S3_REGION", "us-east-1")
-external_s3_allow_http := env_var_or_default("EXTERNAL_QUACKGIS_S3_ALLOW_HTTP", "true")
 duckdb_bin := env_var_or_default("DUCKDB_BIN", "duckdb")
 duckdb_version := env_var_or_default("DUCKDB_VERSION", "1.5.4")
 duckdb_home := env_var_or_default("DUCKDB_HOME", ".tmp/duckdb/home")
 duckdb_adbc_driver := env_var_or_default("QUACKGIS_DUCKDB_ADBC_DRIVER", ".tmp/duckdb/v" + duckdb_version + "/lib/libduckdb.so")
-ref_datafusion_postgres_url := env_var_or_default("REF_DATAFUSION_POSTGRES_URL", "https://github.com/adonm/datafusion-postgres")
-ref_datafusion_postgres_branch := env_var_or_default("REF_DATAFUSION_POSTGRES_BRANCH", "quackgis/fixes")
-ref_datafusion_postgres_upstream_url := env_var_or_default("REF_DATAFUSION_POSTGRES_UPSTREAM_URL", "https://github.com/datafusion-contrib/datafusion-postgres")
-ref_datafusion_postgres_upstream_branch := env_var_or_default("REF_DATAFUSION_POSTGRES_UPSTREAM_BRANCH", "master")
-ref_sedona_url := env_var_or_default("REF_SEDONA_URL", "https://github.com/adonm/sedona-db.git")
-ref_sedona_branch := env_var_or_default("REF_SEDONA_BRANCH", "quackgis/df54")
-ref_sedona_upstream_url := env_var_or_default("REF_SEDONA_UPSTREAM_URL", "https://github.com/apache/sedona-db.git")
-ref_sedona_upstream_branch := env_var_or_default("REF_SEDONA_UPSTREAM_BRANCH", "main")
-ref_ducklake_url := env_var_or_default("REF_DUCKLAKE_URL", "https://github.com/adonm/datafusion-ducklake")
-ref_ducklake_branch := env_var_or_default("REF_DUCKLAKE_BRANCH", "main")
-ref_ducklake_upstream_url := env_var_or_default("REF_DUCKLAKE_UPSTREAM_URL", "https://github.com/datafusion-contrib/datafusion-ducklake")
-ref_ducklake_upstream_branch := env_var_or_default("REF_DUCKLAKE_UPSTREAM_BRANCH", "main")
-ref_martin_url := env_var_or_default("REF_MARTIN_URL", "https://github.com/maplibre/martin")
-ref_martin_branch := env_var_or_default("REF_MARTIN_BRANCH", "main")
 ref_qgis_url := env_var_or_default("REF_QGIS_URL", "https://github.com/qgis/QGIS")
 ref_qgis_branch := env_var_or_default("REF_QGIS_BRANCH", "release-3_44")
-ref_geoserver_url := env_var_or_default("REF_GEOSERVER_URL", "https://github.com/geoserver/geoserver")
-ref_geoserver_branch := env_var_or_default("REF_GEOSERVER_BRANCH", "2.26.x")
 ref_duckdb_url := env_var_or_default("REF_DUCKDB_URL", "https://github.com/duckdb/duckdb")
 ref_duckdb_branch := env_var_or_default("REF_DUCKDB_BRANCH", "main")
 ref_ducklake_spec_url := env_var_or_default("REF_DUCKLAKE_SPEC_URL", "https://github.com/duckdb/ducklake")
 ref_ducklake_spec_branch := env_var_or_default("REF_DUCKLAKE_SPEC_BRANCH", "main")
-ref_pg_ducklake_url := env_var_or_default("REF_PG_DUCKLAKE_URL", "https://github.com/duckdb/pg_ducklake")
-ref_pg_ducklake_branch := env_var_or_default("REF_PG_DUCKLAKE_BRANCH", "main")
 ref_postgis_url := env_var_or_default("REF_POSTGIS_URL", "https://github.com/postgis/postgis")
 ref_postgis_branch := env_var_or_default("REF_POSTGIS_BRANCH", "master")
 ref_gdal_url := env_var_or_default("REF_GDAL_URL", "https://github.com/OSGeo/gdal")
 ref_gdal_branch := env_var_or_default("REF_GDAL_BRANCH", "master")
-ref_sqlite_url := env_var_or_default("REF_SQLITE_URL", "https://github.com/sqlite/sqlite")
-ref_sqlite_branch := env_var_or_default("REF_SQLITE_BRANCH", "master")
 
 default:
     just --list
 
-# Install mise-managed tools and project-local native/helper binaries.
+# Install mise-managed tools and bootstrap project-local DuckDB artifacts.
 setup:
     mise install
     mise run duckdb-bootstrap
-    just install-martin
 
 # Verify the local development toolchain expected by repo recipes.
 doctor:
@@ -98,37 +41,30 @@ doctor:
     @test -f '{{duckdb_adbc_driver}}' || { printf '%s\n' 'DuckDB ADBC driver missing; run `just setup`.' >&2; exit 2; }
     @printf "QuackGIS dev toolchain looks usable. Run 'just smoke' for a quick server check.\n"
 
-# Smallest newcomer smoke: start the test server and run one spatial pgwire query.
-smoke:
-    cargo test -p quackgis-server --test wire_spatial wire_spatial_queries_execute -- --nocapture
+# Smallest newcomer smoke: run the real DuckDB pgwire workflow.
+smoke: duckdb-pgwire-workflow-test
 
 # Alias for a quick local demo that does not require external client binaries.
 demo: smoke
 
 # Clone/update all reference repos under ignored .tmp/ref (submodule-init equivalent).
-ref-init: ref-core ref-clients ref-duckdb-stack ref-postgis-stack ref-storage-refs
-
-# Clone/update Rust engine forks/upstreams used by QuackGIS.
-ref-core: ref-datafusion-postgres ref-datafusion-postgres-upstream ref-sedona ref-sedona-upstream ref-ducklake ref-ducklake-upstream
+ref-init: ref-clients ref-duckdb-stack ref-postgis-stack
 
 # Clone/update PostgreSQL/PostGIS client source used for trace-driven compatibility.
-ref-clients: ref-martin ref-qgis ref-geoserver ref-gdal
+ref-clients: ref-qgis ref-gdal
 
 # Clone/update DuckDB/DuckLake reference implementation/source.
-ref-duckdb-stack: ref-duckdb ref-ducklake-spec ref-pg-ducklake
+ref-duckdb-stack: ref-duckdb ref-ducklake-spec
 
 # Clone/update PostGIS reference implementation/source.
 ref-postgis-stack: ref-postgis
-
-# Clone/update storage-adjacent reference implementations.
-ref-storage-refs: ref-sqlite
 
 # Fast-forward/update all reference forks under ignored .tmp/ref.
 ref-update: ref-init
 
 # Show status for local reference forks.
 ref-status:
-    @for repo in datafusion-postgres datafusion-postgres-upstream sedona-db sedona-db-upstream datafusion-ducklake datafusion-ducklake-upstream martin qgis geoserver gdal duckdb ducklake pg-ducklake postgis sqlite; do \
+    @for repo in qgis gdal duckdb ducklake postgis; do \
         if [ -d ".tmp/ref/$repo/.git" ]; then \
             printf "== %s ==\n" "$repo"; \
             git -C ".tmp/ref/$repo" status --short --branch; \
@@ -137,41 +73,9 @@ ref-status:
         fi; \
     done
 
-# Clone/update the datafusion-postgres fork used by Cargo.toml.
-ref-datafusion-postgres:
-    @just _ref-clone-or-update datafusion-postgres "{{ref_datafusion_postgres_url}}" "{{ref_datafusion_postgres_branch}}"
-
-# Clone/update upstream datafusion-postgres for comparison/rebase context.
-ref-datafusion-postgres-upstream:
-    @just _ref-clone-or-update datafusion-postgres-upstream "{{ref_datafusion_postgres_upstream_url}}" "{{ref_datafusion_postgres_upstream_branch}}"
-
-# Clone/update the Sedona fork used by Cargo.toml.
-ref-sedona:
-    @just _ref-clone-or-update sedona-db "{{ref_sedona_url}}" "{{ref_sedona_branch}}"
-
-# Clone/update upstream SedonaDB for comparison/rebase context.
-ref-sedona-upstream:
-    @just _ref-clone-or-update sedona-db-upstream "{{ref_sedona_upstream_url}}" "{{ref_sedona_upstream_branch}}"
-
-# Clone/update the datafusion-ducklake fork used by Cargo.toml.
-ref-ducklake:
-    @just _ref-clone-or-update datafusion-ducklake "{{ref_ducklake_url}}" "{{ref_ducklake_branch}}"
-
-# Clone/update upstream datafusion-ducklake for comparison/rebase context.
-ref-ducklake-upstream:
-    @just _ref-clone-or-update datafusion-ducklake-upstream "{{ref_ducklake_upstream_url}}" "{{ref_ducklake_upstream_branch}}"
-
-# Clone/update Martin tile server source.
-ref-martin:
-    @just _ref-clone-or-update martin "{{ref_martin_url}}" "{{ref_martin_branch}}"
-
-# Clone/update QGIS source matching the default QGIS LTR probe image.
+# Clone/update QGIS source for future trace-driven compatibility work.
 ref-qgis:
     @just _ref-clone-or-update qgis "{{ref_qgis_url}}" "{{ref_qgis_branch}}"
-
-# Clone/update GeoServer source matching the default GeoServer probe image.
-ref-geoserver:
-    @just _ref-clone-or-update geoserver "{{ref_geoserver_url}}" "{{ref_geoserver_branch}}"
 
 # Clone/update GDAL/OGR source for PostgreSQL driver trace context.
 ref-gdal:
@@ -188,17 +92,9 @@ ref-duckdb:
 ref-ducklake-spec:
     @just _ref-clone-or-update ducklake "{{ref_ducklake_spec_url}}" "{{ref_ducklake_spec_branch}}"
 
-# Clone/update pg_ducklake source for v0.1/PG-catalog production comparison.
-ref-pg-ducklake:
-    @just _ref-clone-or-update pg-ducklake "{{ref_pg_ducklake_url}}" "{{ref_pg_ducklake_branch}}"
-
 # Clone/update PostGIS source/regression tests.
 ref-postgis:
     @just _ref-clone-or-update postgis "{{ref_postgis_url}}" "{{ref_postgis_branch}}"
-
-# Clone/update SQLite source (DuckLake dev catalog backend and SQL reference).
-ref-sqlite:
-    @just _ref-clone-or-update sqlite "{{ref_sqlite_url}}" "{{ref_sqlite_branch}}"
 
 _ref-clone-or-update name url branch:
     @mkdir -p .tmp/ref
@@ -236,33 +132,9 @@ clippy:
 test:
     cargo test --workspace
 
-# Faster local regression loop: only QuackGIS's non-ignored integration gates.
+# Faster local regression loop that compiles the native-runtime integration gates.
 test-fast:
-    cargo test -p quackgis-server --lib --test ducklake_persistence --test layoutbench_sf0 --test martin_compat --test multimodal_inventory --test orphan_inventory --test postgis_regress --test process_lifecycle --test wire_spatial
-
-# Validate tiny real raster/point-cloud artifacts and their sidecar inventory contract.
-multimodal-inventory-local:
-    cargo test -p quackgis-server --test multimodal_inventory -- --nocapture
-
-# Validate a copied COG/COPC/LAZ multi-modal inventory evidence manifest.
-multimodal-inventory-evidence-check manifest=".tmp/multimodal-inventory/manifest.json" out=".tmp/multimodal-inventory/README.md":
-    @set -eu; \
-    manifest_arg='{{manifest}}'; \
-    out_arg='{{out}}'; \
-    manifest_arg="${manifest_arg#manifest=}"; \
-    out_arg="${out_arg#out=}"; \
-    mkdir -p "$(dirname "${out_arg}")"; \
-    python3 scripts/multimodal_inventory_evidence_check.py --manifest "${manifest_arg}" --out "${out_arg}"
-
-# Validate a DuckDB/official-DuckLake reference-reader evidence manifest.
-duckdb-reference-evidence-check manifest=".tmp/duckdb-reference/manifest.json" out=".tmp/duckdb-reference/README.md":
-    @set -eu; \
-    manifest_arg='{{manifest}}'; \
-    out_arg='{{out}}'; \
-    manifest_arg="${manifest_arg#manifest=}"; \
-    out_arg="${out_arg#out=}"; \
-    mkdir -p "$(dirname "${out_arg}")"; \
-    python3 scripts/duckdb_reference_evidence_check.py --manifest "${manifest_arg}" --out "${out_arg}"
+    cargo test -p quackgis-server --lib --test duckdb_adbc_storage --test duckdb_wire_read
 
 # Install checksum-pinned libduckdb and signed extensions into ignored .tmp.
 duckdb-bootstrap duckdb_bin=duckdb_bin:
@@ -321,76 +193,35 @@ duckdb-adbc-storage-test driver=duckdb_adbc_driver:
     fi; \
     driver_arg="$(realpath "$driver_arg")"; \
     duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; \
-    HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" cargo test -p quackgis-server --features duckdb-adbc --test duckdb_adbc_storage -- --ignored --nocapture
+    HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" cargo test -p quackgis-server --test duckdb_adbc_storage -- --ignored --nocapture
 
 # Run the bounded local DuckDB pgwire create/COPY/query/mutation/transaction workflow.
 duckdb-pgwire-workflow-test driver=duckdb_adbc_driver:
     @set -eu; driver_arg='{{driver}}'; driver_arg="${driver_arg#driver=}"; \
     if [ ! -f "$driver_arg" ]; then echo 'DuckDB ADBC driver is missing; run `mise run duckdb-bootstrap`' >&2; exit 2; fi; \
-    driver_arg="$(realpath "$driver_arg")"; duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; \
-    HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" cargo test -p quackgis-server --features duckdb-adbc --test duckdb_wire_read -- --ignored --nocapture
+    driver_arg="$(realpath "$driver_arg")"; duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; duckdb_arg="$(command -v '{{duckdb_bin}}')"; benchmark_out="$(realpath -m '.tmp/duckdb-current-benchmark/manifest.json')"; \
+    HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" DUCKDB_BIN="$duckdb_arg" QUACKGIS_BENCHMARK_OUT="$benchmark_out" \
+      cargo test -p quackgis-server --test duckdb_wire_read -- --ignored --nocapture
+
+# Compare direct DuckDB CLI, ADBC, and pgwire on one deterministic 100k-row profile.
+duckdb-current-benchmark driver=duckdb_adbc_driver duckdb_bin=duckdb_bin out=".tmp/duckdb-current-benchmark/manifest.json":
+    @set -eu; driver_arg='{{driver}}'; duckdb_arg='{{duckdb_bin}}'; out_arg='{{out}}'; \
+    driver_arg="${driver_arg#driver=}"; duckdb_arg="${duckdb_arg#duckdb_bin=}"; out_arg="${out_arg#out=}"; \
+    if [ ! -f "$driver_arg" ]; then echo 'DuckDB ADBC driver is missing; run `mise run duckdb-bootstrap`' >&2; exit 2; fi; \
+    driver_arg="$(realpath "$driver_arg")"; duckdb_arg="$(command -v "$duckdb_arg")"; duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; out_arg="$(realpath -m "$out_arg")"; \
+    HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" DUCKDB_BIN="$duckdb_arg" QUACKGIS_BENCHMARK_OUT="$out_arg" \
+      cargo test -p quackgis-server --release --test duckdb_wire_read current_duckdb_transport_profile -- --ignored --exact --nocapture --test-threads=1
 
 # Compatibility alias for the original read-only checkpoint recipe.
 duckdb-pgwire-read-test: duckdb-pgwire-workflow-test
 
-# Compile and unit-test the feature-gated ADBC boundary without requiring libduckdb.
+# Compile and unit-test the DuckDB ADBC boundary without requiring libduckdb.
 duckdb-adbc-compile-check:
-    cargo test -p quackgis-server --features duckdb-adbc --lib
-    cargo test -p quackgis-server --features duckdb-adbc --test duckdb_adbc_storage --no-run
+    cargo test -p quackgis-server --lib
+    cargo test -p quackgis-server --test duckdb_adbc_storage --no-run
 
-# Run the starter curated PostGIS function regress subset and print pass-rate evidence.
-postgis-regress:
-    cargo test -p quackgis-server --test postgis_regress -- --nocapture
-
-# Summarize PostGIS conformance fixture coverage for docs/release notes.
-postgis-conformance-summary format="markdown":
-    @format_arg='{{format}}'; \
-    format_arg="${format_arg#format=}"; \
-    python3 scripts/postgis_conformance_summary.py --format "${format_arg}"
-
-# Run the deterministic LayoutBench sf0 oracle for spatial-layout work.
-layoutbench-sf0:
-    cargo test -p quackgis-server --test layoutbench_sf0 -- --nocapture
-
-# Validate exact benchmark profile arithmetic, naming, and required budgets.
-benchmark-profile-check:
-    python3 scripts/benchmark_profile_check.py benchmarks/profiles/*.json
-    python3 scripts/tests/test_benchmark_profile_check.py
-    python3 scripts/tests/test_layoutbench_catalog_kind_probe.py
-    python3 scripts/tests/test_layoutbench_catalog_report.py
-    python3 scripts/tests/test_metrics_budget_check.py
-    python3 scripts/tests/test_duckdb_authority_probe.py
-    python3 scripts/tests/test_duckdb_engine_probe.py
-    python3 scripts/tests/test_duckdb_reference_evidence_check.py
-    python3 scripts/tests/test_multimodal_inventory_evidence_check.py
-    python3 scripts/tests/test_render_compat_report.py
-    python3 scripts/tests/test_trend_metrics.py
-
-# Seed and run LayoutBench against an already-running local server.
-layoutbench-local scale="sf0" query_iters="3" ingest_order="generated" load_method="insert" compact="false":
-    @extra=""; \
-    if [ "{{compact}}" = "true" ]; then extra="--compact-and-rerun"; fi; \
-    cargo run -p quackgis-server --example layoutbench -- --host {{host}} --port {{port}} --scale {{scale}} --query-iters {{query_iters}} --ingest-order {{ingest_order}} --load-method {{load_method}} $extra
-
-# CI/local smoke for the LayoutBench runner: start a temporary server, run sf0, and exit.
-layoutbench-local-smoke:
-    @set -eu; \
-    rm -rf .tmp/layoutbench-smoke; \
-    mkdir -p .tmp/layoutbench-smoke/data; \
-    log=.tmp/layoutbench-smoke/quackgis-server.log; \
-    bench_log=.tmp/layoutbench-smoke/layoutbench.log; \
-    QUACKGIS_CATALOG_PATH=.tmp/layoutbench-smoke/quackgis.db QUACKGIS_DATA_PATH=.tmp/layoutbench-smoke/data cargo run -p quackgis-server -- --host {{smoke_host}} --port {{smoke_port}} > "$log" 2>&1 & \
-    server_pid=$!; \
-    trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT INT TERM; \
-    python3 scripts/wait_for_tcp.py {{smoke_host}} {{smoke_port}} "$server_pid" "$log"; \
-    if ! cargo run -p quackgis-server --example layoutbench -- --host {{smoke_host}} --port {{smoke_port}} --scale sf0 --query-iters 1 > "$bench_log" 2>&1; then \
-        python3 -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace"), end="")' "$bench_log"; \
-        exit 1; \
-    fi; \
-    python3 -c 'import pathlib, sys; text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace"); print(text, end=""); sys.exit(0 if "layoutbench_query label=aerial" in text and "layoutbench_pruning label=aerial" in text and "layoutbench_scan label=aerial" in text else 1)' "$bench_log"; \
-    kill "$server_pid" 2>/dev/null || true; \
-    wait "$server_pid" 2>/dev/null || true; \
-    trap - EXIT INT TERM
+# Run the curated PostGIS subset through the real DuckDB pgwire workflow.
+postgis-regress: duckdb-pgwire-workflow-test
 
 # Run nextest when installed by mise.
 nextest:
@@ -402,277 +233,37 @@ check: fmt-check clippy test
 # Faster local verification gate for edit/probe triage.
 check-fast: fmt-check clippy test-fast
 
-# Run the same fast gate used by GitHub Actions CI.
-ci: benchmark-profile-check check-fast duckdb-adbc-compile-check smoke-local-demo preview-smoke api-client-local-smoke probe-static-check runtime-static-check
+# Run the same gate used by GitHub Actions CI.
+ci: check-fast project-contract-check duckdb-adbc-compile-check duckdb-adbc-storage-test duckdb-pgwire-workflow-test probe-static-check runtime-static-check
 
 # Run the dev QuackGIS server on QUACKGIS_HOST/QUACKGIS_PORT.
 server:
     mkdir -p "$(dirname '{{catalog}}')" "{{data}}"
     cargo run -p quackgis-server -- --host {{host}} --port {{port}} --catalog-path "{{catalog}}" --data-path "{{data}}"
 
-# Offline, dry-run-only inventory of old unreferenced Parquet candidates.
-orphan-inventory min_age_seconds="3600" show_paths="false":
-    @extra=""; \
-    if [ "{{show_paths}}" = "true" ]; then extra="--orphan-show-paths"; fi; \
-    cargo run -p quackgis-server -- --catalog-path "{{catalog}}" --data-path "{{data}}" --orphan-inventory --orphan-min-age-seconds {{min_age_seconds}} $extra
-
-# Offline plan that maps old orphan candidates to a quarantine prefix outside live data.
-orphan-quarantine-plan prefix=".tmp/orphan-quarantine" min_age_seconds="3600" show_paths="false":
-    @extra=""; \
-    prefix_arg='{{prefix}}'; \
-    prefix_arg="${prefix_arg#prefix=}"; \
-    mkdir -p "$(dirname "$prefix_arg")"; \
-    if [ "{{show_paths}}" = "true" ]; then extra="--orphan-show-paths"; fi; \
-    cargo run -p quackgis-server -- --catalog-path "{{catalog}}" --data-path "{{data}}" --orphan-inventory --orphan-min-age-seconds {{min_age_seconds}} --orphan-quarantine-prefix "$prefix_arg" $extra
-
-# Offline apply of the quarantine plan: copy candidates outside live data, then remove still-orphaned sources.
-orphan-quarantine-apply prefix=".tmp/orphan-quarantine" min_age_seconds="3600" show_paths="false":
-    @extra=""; \
-    prefix_arg='{{prefix}}'; \
-    prefix_arg="${prefix_arg#prefix=}"; \
-    mkdir -p "$(dirname "$prefix_arg")"; \
-    if [ "{{show_paths}}" = "true" ]; then extra="--orphan-show-paths"; fi; \
-    cargo run -p quackgis-server -- --catalog-path "{{catalog}}" --data-path "{{data}}" --orphan-inventory --orphan-min-age-seconds {{min_age_seconds}} --orphan-quarantine-prefix "$prefix_arg" --orphan-quarantine-apply $extra
-
 # Connect with psql to a running dev server.
 psql:
     psql -h {{host}} -p {{port}} -U postgres -d quackgis
-
-# Seed stable demo layers in an already-running local server.
-seed-local-demo:
-    cargo run -p quackgis-server --example seed_demo -- --host {{host}} --port {{port}}
-
-# CI/local smoke: start a temporary server, seed stable demo layers, verify, and exit.
-smoke-local-demo:
-    @set -eu; \
-    rm -rf .tmp/demo-smoke; \
-    mkdir -p .tmp/demo-smoke/data; \
-    log=.tmp/demo-smoke/quackgis-server.log; \
-    seed_log=.tmp/demo-smoke/seed.log; \
-    QUACKGIS_CATALOG_PATH=.tmp/demo-smoke/quackgis.db QUACKGIS_DATA_PATH=.tmp/demo-smoke/data cargo run -p quackgis-server -- --host {{smoke_host}} --port {{smoke_port}} > "$log" 2>&1 & \
-    server_pid=$!; \
-    trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT INT TERM; \
-    python3 scripts/wait_for_tcp.py {{smoke_host}} {{smoke_port}} "$server_pid" "$log"; \
-    if ! QUACKGIS_HOST={{smoke_host}} QUACKGIS_PORT={{smoke_port}} cargo run -p quackgis-server --example seed_demo -- --host {{smoke_host}} --port {{smoke_port}} > "$seed_log" 2>&1; then \
-        python3 -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace"), end="")' "$seed_log"; \
-        exit 1; \
-    fi; \
-    python3 -c 'import pathlib, sys; text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace"); print(text, end=""); sys.exit(0 if "demo_ok True" in text else 1)' "$seed_log"; \
-    kill "$server_pid" 2>/dev/null || true; \
-    wait "$server_pid" 2>/dev/null || true; \
-    trap - EXIT INT TERM
-
-# Developer-preview acceptance smoke: start a temp server and exercise CREATE, COPY, query, compact.
-preview-smoke:
-    @set -eu; \
-    rm -rf .tmp/preview-smoke; \
-    mkdir -p .tmp/preview-smoke/data; \
-    log=.tmp/preview-smoke/quackgis-server.log; \
-    preview_log=.tmp/preview-smoke/preview.log; \
-    QUACKGIS_CATALOG_PATH=.tmp/preview-smoke/quackgis.db QUACKGIS_DATA_PATH=.tmp/preview-smoke/data cargo run -p quackgis-server -- --host {{smoke_host}} --port {{smoke_port}} > "$log" 2>&1 & \
-    server_pid=$!; \
-    trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT INT TERM; \
-    python3 scripts/wait_for_tcp.py {{smoke_host}} {{smoke_port}} "$server_pid" "$log"; \
-    if ! cargo run -p quackgis-server --example developer_preview -- --host {{smoke_host}} --port {{smoke_port}} > "$preview_log" 2>&1; then \
-        python3 -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace"), end="")' "$preview_log"; \
-        exit 1; \
-    fi; \
-    python3 -c 'import pathlib, sys; text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace"); print(text, end=""); sys.exit(0 if "developer_preview_ok True" in text else 1)' "$preview_log"; \
-    kill "$server_pid" 2>/dev/null || true; \
-    wait "$server_pid" 2>/dev/null || true; \
-    trap - EXIT INT TERM
-
-# Local API/client surface smoke for psycopg/SQLAlchemy/GeoPandas/pg_featureserv/BI/MVT probe work.
-api-client-local-smoke:
-    @set -eu; \
-    rm -rf .tmp/api-client-smoke; \
-    mkdir -p .tmp/api-client-smoke/data; \
-    log=.tmp/api-client-smoke/quackgis-server.log; \
-    probe_log=.tmp/api-client-smoke/api-client.log; \
-    QUACKGIS_CATALOG_PATH=.tmp/api-client-smoke/quackgis.db QUACKGIS_DATA_PATH=.tmp/api-client-smoke/data cargo run -p quackgis-server -- --host {{smoke_host}} --port {{smoke_port}} > "$log" 2>&1 & \
-    server_pid=$!; \
-    trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT INT TERM; \
-    python3 scripts/wait_for_tcp.py {{smoke_host}} {{smoke_port}} "$server_pid" "$log"; \
-    if ! cargo run -p quackgis-server --example api_client_probe -- --host {{smoke_host}} --port {{smoke_port}} > "$probe_log" 2>&1; then \
-        python3 -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace"), end="")' "$probe_log"; \
-        exit 1; \
-    fi; \
-    python3 -c 'import pathlib, sys; text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace"); print(text, end=""); sys.exit(0 if "api_client_probe_ok True" in text else 1)' "$probe_log"; \
-    kill "$server_pid" 2>/dev/null || true; \
-    wait "$server_pid" 2>/dev/null || true; \
-    trap - EXIT INT TERM
-
-# One-command host-local demo: start QuackGIS, seed stable layers, and keep it running.
-demo-local:
-    @set -eu; \
-    rm -rf .tmp/demo; \
-    mkdir -p .tmp/demo/data; \
-    log=.tmp/demo/quackgis-server.log; \
-    QUACKGIS_CATALOG_PATH=.tmp/demo/quackgis.db QUACKGIS_DATA_PATH=.tmp/demo/data cargo run -p quackgis-server -- --host {{host}} --port {{port}} > "$log" 2>&1 & \
-    server_pid=$!; \
-    trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT INT TERM; \
-    python3 scripts/wait_for_tcp.py {{host}} {{port}} "$server_pid" "$log"; \
-    QUACKGIS_HOST={{host}} QUACKGIS_PORT={{port}} cargo run -p quackgis-server --example seed_demo -- --host {{host}} --port {{port}}; \
-    printf '\nLocal demo is running on host={{host}} port={{port}}. Press Ctrl-C to stop.\n'; \
-    status=0; \
-    wait "$server_pid" || status=$?; \
-    if [ "$status" -eq 130 ] || [ "$status" -eq 143 ]; then exit 0; fi; \
-    exit "$status"
 
 # Remove local dev DuckLake catalog/data.
 clean-dev:
     rm -rf .tmp/dev
 
-# Download the static-ish Martin musl binary into .tmp/bin.
-install-martin:
-    mkdir -p .tmp/bin
-    curl -fsSL "https://github.com/maplibre/martin/releases/download/martin-v{{martin_version}}/martin-x86_64-unknown-linux-musl.tar.gz" -o .tmp/martin.tar.gz
-    tar -xzf .tmp/martin.tar.gz -C .tmp/bin martin
-    chmod +x .tmp/bin/martin
-    {{martin_bin}} --version
-
-# Run QuackGIS's passing Martin SQL compatibility gate.
-martin-sql:
-    cargo test -p quackgis-server --test martin_compat -- --nocapture
-
-# Run the real Martin binary E2E (ignored by default; requires MARTIN_BIN).
-martin-e2e: install-martin
-    MARTIN_BIN="{{martin_bin}}" cargo test -p quackgis-server --test martin_real_e2e -- --ignored --nocapture
-
-# Start Martin against an already-running QuackGIS server (auto-discovery path).
-martin:
-    {{martin_bin}} --listen-addresses {{host}}:{{martin_port}} --auto-bounds skip --default-srid 3857 "postgres://postgres@{{host}}:{{port}}/quackgis"
-
-# Pull the configured QGIS image for client-trace work.
-qgis-pull:
-    {{container_engine}} pull {{qgis_image}}
-
-# Open a shell in the configured QGIS image.
-qgis-shell:
-    {{container_engine}} run --rm -it --network host {{qgis_image}} bash
-
-# Pull the configured GeoServer image.
-geoserver-pull:
-    {{container_engine}} pull {{geoserver_image}}
-
-# Run GeoServer locally on http://127.0.0.1:8080/geoserver.
-geoserver:
-    {{container_engine}} run --rm -it --network host -e SKIP_DEMO_DATA=true -e GEOSERVER_ADMIN_PASSWORD=geoserver {{geoserver_image}}
-
-# Check host Podman plus mise-pinned Kind/kubectl before running in-cluster probes.
-kind-doctor:
-    mise --version
-    {{container_engine}} --version
-    {{container_engine}} info >/dev/null
-    KIND_EXPERIMENTAL_PROVIDER={{container_engine}} kind version
-    kubectl version --client=true
-    @printf "Podman/Kind tooling looks usable. Run 'just kind-up' to create/reuse the local cluster.\n"
-
-# Create or reuse the local Kind cluster for in-cluster client probes.
-kind-up:
-    @if KIND_EXPERIMENTAL_PROVIDER={{container_engine}} kind get clusters | grep -Fxq "{{kind_cluster}}"; then \
-        printf "Kind cluster {{kind_cluster}} already exists; reusing it.\n"; \
-    else \
-        KIND_EXPERIMENTAL_PROVIDER={{container_engine}} kind create cluster --name {{kind_cluster}} --config deploy/kind/cluster.yaml; \
-    fi
-
-# Show local Kind cluster and QuackGIS namespace state.
-kind-status:
-    KIND_EXPERIMENTAL_PROVIDER={{container_engine}} kind get clusters
-    kubectl cluster-info --context kind-{{kind_cluster}}
-    kubectl get nodes -o wide
-    kubectl -n quackgis get pods,jobs,svc,statefulset,deploy -o wide || true
-
-# One-command local cluster bootstrap/check for new shells and machines.
-kind-ready: kind-doctor kind-up kind-status
-
-# Build the QuackGIS development image for Kind using the host Cargo cache.
-kind-build-image:
-    cargo build -p quackgis-server --release
-    rm -rf .tmp/kind/runtime
-    mkdir -p .tmp/kind/runtime
-    cp target/release/quackgis-server .tmp/kind/runtime/quackgis-server
-    {{container_engine}} build -t {{quackgis_image}} -f deploy/Containerfile.runtime .tmp/kind/runtime
-
-# Faster Kind image for probe loops: optimized enough, no release thin-LTO.
-kind-build-image-fast:
-    cargo build -p quackgis-server --profile probe
-    rm -rf .tmp/kind/runtime
-    mkdir -p .tmp/kind/runtime
-    cp target/probe/quackgis-server .tmp/kind/runtime/quackgis-server
-    {{container_engine}} build -t {{quackgis_image}} -f deploy/Containerfile.runtime .tmp/kind/runtime
-
-# Build the QuackGIS development image entirely inside the container build.
-kind-build-image-container:
-    {{container_engine}} build -t {{quackgis_image}} -f deploy/Containerfile .
-
-# Load the QuackGIS development image into the Kind cluster.
-kind-load-image:
-    mkdir -p .tmp/kind
-    rm -f .tmp/kind/quackgis-image.tar
-    {{container_engine}} save {{quackgis_image}} -o .tmp/kind/quackgis-image.tar
-    KIND_EXPERIMENTAL_PROVIDER={{container_engine}} kind load image-archive .tmp/kind/quackgis-image.tar --name {{kind_cluster}}
-
-# Deploy QuackGIS into Kind behind service quackgis.quackgis.svc.cluster.local:5434.
-kind-deploy:
-    kubectl apply -f deploy/kind/quackgis.yaml
-    kubectl -n quackgis rollout restart statefulset/quackgis
-    kubectl -n quackgis rollout status statefulset/quackgis --timeout=180s
-    kubectl -n quackgis wait pod -l app=quackgis --for=condition=ready --timeout=180s
-
-# Publish shared Kind probe scripts as a ConfigMap consumed by all probe Jobs.
-kind-probe-scripts:
-    kubectl create namespace quackgis --dry-run=client -o yaml | kubectl apply -f -
-    kubectl -n quackgis create configmap quackgis-probe-scripts --from-file=deploy/kind/probes --dry-run=client -o yaml | kubectl apply -f -
-
-# Publish benchmark profile definitions consumed by manual Kind benchmark Jobs.
-kind-benchmark-profiles:
-    kubectl create namespace quackgis --dry-run=client -o yaml | kubectl apply -f -
-    kubectl -n quackgis create configmap quackgis-benchmark-profiles --from-file=benchmarks/profiles/layoutbench-regional-r100m-v1.json --dry-run=client -o yaml | kubectl apply -f -
-
-# Publish run metadata for LayoutBench regional catalog measurement Jobs.
-kind-layoutbench-run-config:
-    @set -eu; \
-    kubectl create namespace quackgis --dry-run=client -o yaml | kubectl apply -f -; \
-    source_sha="$(git rev-parse HEAD)"; \
-    run_started_at="$(python3 -c 'import datetime; print(datetime.datetime.now(datetime.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"))')"; \
-    kubectl -n quackgis create configmap layoutbench-run-config \
-        --from-literal=LAYOUTBENCH_SOURCE_SHA="$source_sha" \
-        --from-literal=LAYOUTBENCH_RUN_STARTED_AT="$run_started_at" \
-        --from-literal=LAYOUTBENCH_ALLOW_EXACT_R100M="{{layoutbench_allow_exact_r100m}}" \
-        --from-literal=LAYOUTBENCH_MAX_ROWS="{{layoutbench_max_rows}}" \
-        --from-literal=LAYOUTBENCH_HARDWARE_PROFILE="{{layoutbench_hardware_profile}}" \
-        --from-literal=LAYOUTBENCH_OBJECT_BYTES="{{layoutbench_object_bytes}}" \
-        --dry-run=client -o yaml | kubectl apply -f -
-
-# Static pre-Kind validation for probe scripts and Kubernetes manifests.
+# Static validation for maintained helper scripts.
 probe-static-check:
     mkdir -p .tmp/pycache
-    PYTHONPYCACHEPREFIX=.tmp/pycache python3 -m py_compile scripts/probe_static_check.py scripts/runtime_static_check.py scripts/duckdb_runtime_static_check.py scripts/prepare_duckdb_runtime.py scripts/trend_metrics.py scripts/metrics_budget_check.py scripts/layoutbench_catalog_report.py scripts/external_alpha_evidence_check.py scripts/bootstrap_duckdb.py scripts/duckdb_authority_probe.py scripts/duckdb_engine_probe.py scripts/duckdb_spatial_compat_probe.py scripts/duckdb_reference_evidence_check.py scripts/multimodal_inventory_evidence_check.py scripts/tests/test_duckdb_authority_probe.py scripts/tests/test_duckdb_engine_probe.py scripts/tests/test_duckdb_runtime_static_check.py scripts/tests/test_duckdb_spatial_compat_probe.py scripts/tests/test_duckdb_reference_evidence_check.py scripts/tests/test_multimodal_inventory_evidence_check.py scripts/tests/test_render_compat_report.py deploy/kind/render_compat_report.py deploy/kind/check_linkerd_injected.py deploy/kind/probes/*.py
-    bash -n deploy/kind/probes/*.sh
-    python3 scripts/probe_static_check.py deploy/kind
-    python3 scripts/probe_static_check.py deploy/kubernetes
-    python3 scripts/tests/test_external_alpha_evidence_check.py
+    PYTHONPYCACHEPREFIX=.tmp/pycache python3 -m py_compile scripts/*.py scripts/tests/test_duckdb_authority_probe.py scripts/tests/test_duckdb_engine_probe.py scripts/tests/test_duckdb_runtime_static_check.py scripts/tests/test_duckdb_spatial_compat_probe.py
     python3 scripts/tests/test_duckdb_authority_probe.py
     python3 scripts/tests/test_duckdb_engine_probe.py
     python3 scripts/tests/test_duckdb_spatial_compat_probe.py
     python3 scripts/tests/test_duckdb_runtime_static_check.py
-    python3 scripts/tests/test_duckdb_reference_evidence_check.py
 
-# Validate an external-service Alpha evidence manifest against collected metrics.
-external-alpha-evidence-check manifest=".tmp/external-alpha/manifest.json" metrics=".tmp/compatibility/metrics.json" out=".tmp/external-alpha/README.md":
-    @set -eu; \
-    manifest_arg='{{manifest}}'; \
-    metrics_arg='{{metrics}}'; \
-    out_arg='{{out}}'; \
-    manifest_arg="${manifest_arg#manifest=}"; \
-    metrics_arg="${metrics_arg#metrics=}"; \
-    out_arg="${out_arg#out=}"; \
-    python3 scripts/external_alpha_evidence_check.py --manifest "$manifest_arg" --metrics "$metrics_arg" --out "$out_arg"
+# Validate maintained documentation links, commands, and spatial claims.
+project-contract-check:
+    python3 scripts/project_contract_check.py
 
-# Static guard that the maintained runtime image remains one native-free Rust binary.
-runtime-static-check:
-    python3 scripts/runtime_static_check.py deploy/Containerfile.runtime
+# Compatibility alias for the sole maintained DuckDB runtime image guard.
+runtime-static-check: duckdb-runtime-static-check
 
 # Guard the separate native DuckDB runtime against online installs or missing artifacts.
 duckdb-runtime-static-check:
@@ -681,9 +272,10 @@ duckdb-runtime-static-check:
 
 # Assemble a verified Linux x86_64 DuckDB runtime context under ignored .tmp.
 duckdb-runtime-context:
-    cargo build -p quackgis-server --release --features duckdb-adbc
-    @duckdb_path="$(mise exec -- which duckdb)"; \
-    python3 scripts/prepare_duckdb_runtime.py --server target/release/quackgis-server --duckdb-bin "$duckdb_path"
+    cargo build -p quackgis-server --release
+    @duckdb_path="$(mise exec -- which duckdb)"; dirty_flag=""; \
+    if [ "${QUACKGIS_ALLOW_DIRTY_RUNTIME:-0}" = 1 ]; then dirty_flag="--allow-dirty"; fi; \
+    python3 scripts/prepare_duckdb_runtime.py $dirty_flag --server target/release/quackgis-server --duckdb-bin "$duckdb_path"
 
 # Build the immutable local DuckDB evaluation runtime image.
 duckdb-runtime-image: duckdb-runtime-static-check duckdb-runtime-context
@@ -692,420 +284,13 @@ duckdb-runtime-image: duckdb-runtime-static-check duckdb-runtime-context
 # Prove pinned extensions load with all container networking disabled.
 duckdb-runtime-offline-smoke: duckdb-runtime-image
     {{container_engine}} run --rm --network none --entrypoint /usr/local/bin/duckdb {{duckdb_runtime_image}} -csv -noheader :memory: -c "LOAD spatial; LOAD ducklake; SELECT ST_AsText(ST_Point(1, 2));"
-
-# Flatten one or more compatibility/storage metrics artifacts for trend analysis.
-metrics-trend path=".tmp/compatibility" format="csv":
     @set -eu; \
-    path_arg='{{path}}'; \
-    format_arg='{{format}}'; \
-    path_arg="${path_arg#path=}"; \
-    format_arg="${format_arg#format=}"; \
-    python3 scripts/trend_metrics.py --format "${format_arg}" "${path_arg}"
-
-# Render a Markdown metrics dashboard from one or more metrics artifacts.
-metrics-dashboard path=".tmp/compatibility" out=".tmp/metrics-dashboard.md":
-    @set -eu; \
-    path_arg='{{path}}'; \
-    out_arg='{{out}}'; \
-    path_arg="${path_arg#path=}"; \
-    out_arg="${out_arg#out=}"; \
-    mkdir -p "$(dirname "${out_arg}")"; \
-    python3 scripts/trend_metrics.py --format dashboard "${path_arg}" > "${out_arg}"; \
-    printf "wrote %s\n" "${out_arg}"
-
-# Fail closed when metrics artifacts report failed checks or exceed explicit budgets.
-metrics-budget-check path=".tmp/compatibility" require_budgeted="false" allow_not_run="false":
-    @set -eu; \
-    path_arg='{{path}}'; \
-    require_arg='{{require_budgeted}}'; \
-    allow_arg='{{allow_not_run}}'; \
-    path_arg="${path_arg#path=}"; \
-    if [ "${require_arg#allow_not_run=}" != "$require_arg" ]; then allow_arg="$require_arg"; require_arg="false"; fi; \
-    require_arg="${require_arg#require_budgeted=}"; \
-    allow_arg="${allow_arg#allow_not_run=}"; \
-    flags=""; \
-    if [ "$require_arg" = "true" ]; then flags="$flags --require-budgeted"; fi; \
-    if [ "$allow_arg" = "true" ]; then flags="$flags --allow-not-run"; fi; \
-    python3 scripts/metrics_budget_check.py $flags "$path_arg"
-
-# Build, load, and deploy QuackGIS into Kind.
-kind-refresh: kind-build-image kind-load-image kind-deploy
-
-# Faster build, load, and deploy loop for client-probe triage.
-kind-refresh-fast: kind-build-image-fast kind-load-image kind-deploy
-
-# Build, deploy, and run the maintained Kind client compatibility suite.
-kind-compatibility:
-    just kind-refresh-fast
-    just kind-probes
-
-# Install or upgrade Linkerd in Kind using Helm and repo-local ephemeral certs.
-kind-linkerd-up: kind-ready
-    mkdir -p .tmp/linkerd
-    @if [ ! -s .tmp/linkerd/ca.crt ] || [ ! -s .tmp/linkerd/ca.key ] || [ ! -s .tmp/linkerd/issuer.crt ] || [ ! -s .tmp/linkerd/issuer.key ]; then \
-        openssl ecparam -name prime256v1 -genkey -noout -out .tmp/linkerd/ca.key; \
-        openssl req -x509 -new -key .tmp/linkerd/ca.key -sha256 -days 365 -out .tmp/linkerd/ca.crt -subj "/CN=root.linkerd.cluster.local" -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign"; \
-        openssl ecparam -name prime256v1 -genkey -noout -out .tmp/linkerd/issuer.key; \
-        openssl req -new -key .tmp/linkerd/issuer.key -out .tmp/linkerd/issuer.csr -subj "/CN=identity.linkerd.cluster.local"; \
-        printf "basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\n" > .tmp/linkerd/issuer-ext.cnf; \
-        openssl x509 -req -in .tmp/linkerd/issuer.csr -CA .tmp/linkerd/ca.crt -CAkey .tmp/linkerd/ca.key -CAcreateserial -out .tmp/linkerd/issuer.crt -days 365 -sha256 -extfile .tmp/linkerd/issuer-ext.cnf; \
-    fi
-    helm repo add linkerd https://helm.linkerd.io/stable --force-update
-    helm repo update linkerd
-    kubectl create namespace linkerd --dry-run=client -o yaml | kubectl apply -f -
-    helm upgrade --install linkerd-crds linkerd/linkerd-crds -n linkerd --wait --timeout 5m
-    helm upgrade --install linkerd-control-plane linkerd/linkerd-control-plane -n linkerd --set-file identityTrustAnchorsPEM=.tmp/linkerd/ca.crt --set-file identity.issuer.tls.crtPEM=.tmp/linkerd/issuer.crt --set-file identity.issuer.tls.keyPEM=.tmp/linkerd/issuer.key --set proxyInit.iptablesMode={{linkerd_iptables_mode}} --wait --timeout 5m
-    kubectl -n linkerd wait deployment --all --for=condition=Available --timeout=300s
-
-# Deploy the lake profile: PostgreSQL DuckLake catalog + s3s-fs local S3.
-kind-lake-deploy:
-    kubectl create namespace quackgis --dry-run=client -o yaml | kubectl apply -f -
-    kubectl apply -f deploy/kind/lake.yaml
-    kubectl -n quackgis rollout status deployment/pg --timeout=180s
-    kubectl -n quackgis rollout status deployment/s3 --timeout=180s
-    kubectl -n quackgis wait pod -l app=pg --for=condition=ready --timeout=180s
-    kubectl -n quackgis wait pod -l app=s3 --for=condition=ready --timeout=180s
-    kubectl -n quackgis rollout restart deployment/lake
-    kubectl -n quackgis rollout status deployment/lake --timeout=180s
-    kubectl -n quackgis wait deployment/lake --for=condition=Available --timeout=180s
-
-# Build, load, and deploy the lake profile into Kind.
-kind-lake-refresh: kind-build-image-fast kind-load-image kind-lake-deploy
-
-# Deploy QuackGIS against env-driven external PostgreSQL/S3 endpoints.
-# Defaults point at the Kind pg/s3 emulators so the wiring is CI/local repeatable;
-# set EXTERNAL_ALPHA_USE_KIND_EMULATORS=false plus EXTERNAL_QUACKGIS_* for real services.
-kind-external-alpha-deploy:
-    kubectl create namespace quackgis --dry-run=client -o yaml | kubectl apply -f -
-    kubectl -n quackgis create secret generic external-storage --from-literal=catalog-url="{{external_catalog_url}}" --from-literal=ducklake-catalog-name="{{external_ducklake_catalog_name}}" --from-literal=data-path="{{external_data_path}}" --from-literal=s3-endpoint="{{external_s3_endpoint}}" --from-literal=s3-access-key-id="{{external_s3_access_key_id}}" --from-literal=s3-secret-access-key="{{external_s3_secret_access_key}}" --from-literal=s3-region="{{external_s3_region}}" --from-literal=s3-allow-http="{{external_s3_allow_http}}" --dry-run=client -o yaml | kubectl apply -f -
-    kubectl apply -f deploy/kind/external-lake.yaml
-    kubectl -n quackgis rollout restart deployment/external-lake
-    kubectl -n quackgis rollout status deployment/external-lake --timeout=180s
-    kubectl -n quackgis wait deployment/external-lake --for=condition=Available --timeout=180s
-
-# Run storage smoke through the env-driven external profile. By default, starts Kind pg/s3 emulators.
-kind-external-alpha-smoke: kind-ready kind-probe-scripts
-    @if [ "{{external_alpha_use_kind_emulators}}" = "true" ]; then \
-        just kind-lake-refresh; \
-        kubectl -n quackgis exec deployment/pg -c postgres -- sh -c 'createdb -U "$POSTGRES_USER" quackgis_external || psql -U "$POSTGRES_USER" -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '\''quackgis_external'\''" | grep -q 1'; \
-    else \
-        just kind-build-image-fast; \
-        just kind-load-image; \
-    fi
-    just kind-external-alpha-deploy
-    kubectl -n quackgis delete job external-lake-probe --ignore-not-found=true
-    kubectl apply -f deploy/kind/external-lake-probe.yaml
-    kubectl -n quackgis wait job/external-lake-probe --for=condition=complete --timeout=240s || (kubectl -n quackgis logs deployment/external-lake --tail=200 || true; kubectl -n quackgis logs job/external-lake-probe || true; false)
-    kubectl -n quackgis logs job/external-lake-probe
-
-# Run the lake storage smoke in Kind against PostgreSQL catalog + s3s-fs object storage.
-kind-lake-smoke: kind-ready kind-probe-scripts
-    just kind-lake-refresh
-    kubectl -n quackgis delete job lake-probe --ignore-not-found=true
-    kubectl apply -f deploy/kind/lake-probe.yaml
-    kubectl -n quackgis wait job/lake-probe --for=condition=complete --timeout=240s || (kubectl -n quackgis logs deployment/lake --tail=200 || true; kubectl -n quackgis logs job/lake-probe || true; false)
-    kubectl -n quackgis logs job/lake-probe
-
-# Run concurrent storage probes while QuackGIS is scaled to two pods.
-kind-lake-multipod-smoke: kind-ready kind-probe-scripts
-    just kind-lake-refresh
-    kubectl -n quackgis scale deployment/lake --replicas=2
-    kubectl -n quackgis rollout status deployment/lake --timeout=180s
-    kubectl -n quackgis wait deployment/lake --for=condition=Available --timeout=180s
-    kubectl -n quackgis delete job lake-multipod --ignore-not-found=true
-    kubectl apply -f deploy/kind/lake-multipod-probe.yaml
-    kubectl -n quackgis wait job/lake-multipod --for=condition=complete --timeout=300s || (kubectl -n quackgis get pods -l app=lake -o wide || true; kubectl -n quackgis logs deployment/lake --all-containers=true --tail=200 || true; kubectl -n quackgis logs -l job-name=lake-multipod --all-containers=true --prefix=true || true; false)
-    kubectl -n quackgis logs -l job-name=lake-multipod --all-containers=true --prefix=true
-
-# Prove the Kubernetes Service distributes fresh pgwire TCP connections across pods.
-kind-lb-smoke: kind-ready kind-probe-scripts
-    just kind-lake-refresh
-    kubectl -n quackgis scale deployment/lake --replicas=2
-    kubectl -n quackgis rollout status deployment/lake --timeout=180s
-    kubectl -n quackgis wait deployment/lake --for=condition=Available --timeout=180s
-    kubectl -n quackgis delete job lb-probe --ignore-not-found=true
-    kubectl apply -f deploy/kind/lb-probe.yaml
-    kubectl -n quackgis wait job/lb-probe --for=condition=complete --timeout=240s || (kubectl -n quackgis get pods -l app=lake -o wide || true; kubectl -n quackgis logs deployment/lake --all-containers=true --tail=200 || true; kubectl -n quackgis logs job/lb-probe || true; false)
-    kubectl -n quackgis logs job/lb-probe
-
-# Deploy an injected client pod used for Linkerd mTLS probes without Job sidecar hangs.
-kind-mesh-client-deploy: kind-probe-scripts
-    kubectl apply -f deploy/kind/mesh-client.yaml
-    kubectl -n quackgis rollout restart deployment/mesh-client
-    kubectl -n quackgis rollout status deployment/mesh-client --timeout=180s
-    kubectl -n quackgis wait pod -l app=mesh-client --for=condition=ready --timeout=180s
-
-# Run lake storage and load-balancing probes through Linkerd-injected pods.
-kind-mtls-smoke: kind-linkerd-up kind-probe-scripts
-    just kind-lake-refresh
-    kubectl -n quackgis rollout restart deployment/pg deployment/s3 deployment/lake
-    kubectl -n quackgis rollout status deployment/pg --timeout=180s
-    kubectl -n quackgis rollout status deployment/s3 --timeout=180s
-    kubectl -n quackgis rollout status deployment/lake --timeout=180s
-    kubectl -n quackgis scale deployment/lake --replicas=2
-    kubectl -n quackgis rollout status deployment/lake --timeout=180s
-    kubectl -n quackgis wait deployment/lake --for=condition=Available --timeout=180s
-    just kind-mesh-client-deploy
-    kubectl -n quackgis get pods -l 'app in (lake,pg,s3,mesh-client)' -o json | python3 deploy/kind/check_linkerd_injected.py lake pg s3 mesh-client
-    kubectl -n quackgis exec deployment/mesh-client -c mesh-client -- env PYTHONPATH=/opt/quackgis-probes QUACKGIS_HOST=lake.quackgis.svc.cluster.local QUACKGIS_PORT=5434 LB_CONNECTIONS=40 LB_MIN_INSTANCES=2 python3 /opt/quackgis-probes/mtls_probe.py
-
-# Run LayoutBench sf0 through the lake PostgreSQL catalog + S3 storage profile.
-kind-lake-layoutbench-smoke: kind-ready
-    @set -eu; \
-    just kind-lake-refresh; \
-    rm -rf .tmp/layoutbench-lake; \
-    mkdir -p .tmp/layoutbench-lake; \
-    log=.tmp/layoutbench-lake/port-forward.log; \
-    bench_log=.tmp/layoutbench-lake/layoutbench.log; \
-    kubectl -n quackgis port-forward service/lake {{smoke_port}}:5434 > "$log" 2>&1 & \
-    pf_pid=$!; \
-    trap 'kill "$pf_pid" 2>/dev/null || true; wait "$pf_pid" 2>/dev/null || true' EXIT INT TERM; \
-    python3 scripts/wait_for_tcp.py {{smoke_host}} {{smoke_port}} "$pf_pid" "$log"; \
-    if ! cargo run -p quackgis-server --example layoutbench -- --host {{smoke_host}} --port {{smoke_port}} --scale sf0 --query-iters 1 --prefix lake_layoutbench --load-method copy --compact-and-rerun > "$bench_log" 2>&1; then \
-        python3 -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace"), end="")' "$bench_log"; \
+    container_id="$({{container_engine}} run -d --network none {{duckdb_runtime_image}})"; \
+    trap '{{container_engine}} rm -f "$container_id" >/dev/null 2>&1 || true' EXIT; \
+    sleep 3; \
+    if ! {{container_engine}} exec "$container_id" /bin/sh -c 'kill -0 1'; then \
+        {{container_engine}} logs "$container_id"; \
         exit 1; \
     fi; \
-    python3 -c 'import pathlib, sys; text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace"); print(text, end=""); required = ["layoutbench_seed", "layoutbench_pruning label=aerial", "layoutbench_query label=aerial phase=before_compact", "layoutbench_scan label=aerial phase=after_compact", "layoutbench_compact"]; sys.exit(0 if all(item in text for item in required) else 1)' "$bench_log"; \
-    kill "$pf_pid" 2>/dev/null || true; \
-    wait "$pf_pid" 2>/dev/null || true; \
-    trap - EXIT INT TERM
-
-# Seed the exact regional 100M LayoutBench catalog profile into the Kind lake profile.
-# Requires LAYOUTBENCH_ALLOW_EXACT_R100M=true and enough local disk/time.
-kind-layoutbench-catalog-seed: kind-ready kind-probe-scripts kind-benchmark-profiles kind-layoutbench-run-config
-    @if [ "{{layoutbench_allow_exact_r100m}}" != "true" ]; then \
-        printf 'Refusing exact 100M seed: set LAYOUTBENCH_ALLOW_EXACT_R100M=true and LAYOUTBENCH_MAX_ROWS>=100000000.\n'; \
-        exit 1; \
-    fi
-    just kind-lake-refresh
-    kubectl -n quackgis set env deployment/lake QUACKGIS_DUCKLAKE_ROW_GROUP_ROWS=524288 QUACKGIS_SHARED_CATALOG_REFRESH_MS=86400000 QUACKGIS_SELECTIVE_READ_TARGET_PARTITIONS=1 QUACKGIS_TARGET_PARTITIONS-
-    kubectl -n quackgis scale deployment/lake --replicas=1
-    kubectl -n quackgis rollout status deployment/lake --timeout=180s
-    kubectl -n quackgis wait deployment/lake --for=condition=Available --timeout=180s
-    kubectl -n quackgis delete job layoutbench-catalog-seed --ignore-not-found=true
-    kubectl apply -f deploy/kind/layoutbench-catalog-seed.yaml
-    kubectl -n quackgis wait job/layoutbench-catalog-seed --for=condition=complete --timeout=24h || (kubectl -n quackgis logs deployment/lake --all-containers=true --tail=200 || true; kubectl -n quackgis logs job/layoutbench-catalog-seed || true; false)
-    kubectl -n quackgis logs job/layoutbench-catalog-seed
-
-# Measure catalog provider-call budgets for the preseeded regional 100M profile.
-kind-layoutbench-catalog-measure: kind-ready kind-probe-scripts kind-benchmark-profiles kind-layoutbench-run-config
-    @set -eu; \
-    just kind-lake-refresh; \
-    kubectl -n quackgis set env deployment/lake QUACKGIS_DUCKLAKE_ROW_GROUP_ROWS=524288 QUACKGIS_SHARED_CATALOG_REFRESH_MS=86400000 QUACKGIS_SELECTIVE_READ_TARGET_PARTITIONS=1 QUACKGIS_TARGET_PARTITIONS-; \
-    kubectl -n quackgis scale deployment/lake --replicas=1; \
-    kubectl -n quackgis rollout restart deployment/lake; \
-    kubectl -n quackgis rollout status deployment/lake --timeout=180s; \
-    kubectl -n quackgis wait deployment/lake --for=condition=Available --timeout=180s; \
-    kubectl -n quackgis delete job layoutbench-catalog-probe --ignore-not-found=true; \
-    kubectl apply -f deploy/kind/layoutbench-catalog-probe.yaml; \
-    mkdir -p .tmp/layoutbench-regional .tmp/compatibility; \
-    if ! kubectl -n quackgis wait job/layoutbench-catalog-probe --for=condition=complete --timeout=2h; then \
-        kubectl -n quackgis logs deployment/lake --all-containers=true --tail=200 || true; \
-        kubectl -n quackgis logs job/layoutbench-catalog-probe || true; \
-        exit 1; \
-    fi; \
-    kubectl -n quackgis logs job/layoutbench-catalog-probe | tee .tmp/layoutbench-regional/catalog.log; \
-    python3 scripts/layoutbench_catalog_report.py --profile benchmarks/profiles/layoutbench-regional-r100m-v1.json --log .tmp/layoutbench-regional/catalog.log --out .tmp/compatibility/metrics.json; \
-    cp .tmp/layoutbench-regional/catalog.log .tmp/compatibility/layoutbench-catalog-probe.log; \
-    python3 scripts/trend_metrics.py --format dashboard .tmp/compatibility > .tmp/compatibility/metrics-dashboard.md
-
-# Run an in-cluster concurrent read workload against the lake PostgreSQL/S3 profile.
-kind-read-smoke: kind-ready kind-probe-scripts
-    just kind-lake-refresh
-    kubectl -n quackgis scale deployment/lake --replicas=2
-    kubectl -n quackgis rollout status deployment/lake --timeout=180s
-    kubectl -n quackgis wait deployment/lake --for=condition=Available --timeout=180s
-    kubectl -n quackgis delete job read-seed read-probe --ignore-not-found=true
-    kubectl apply -f deploy/kind/read-seed.yaml
-    kubectl -n quackgis wait job/read-seed --for=condition=complete --timeout=600s || (kubectl -n quackgis logs deployment/lake --all-containers=true --tail=200 || true; kubectl -n quackgis logs job/read-seed || true; false)
-    kubectl -n quackgis logs job/read-seed
-    kubectl apply -f deploy/kind/read-probe.yaml
-    kubectl -n quackgis wait job/read-probe --for=condition=complete --timeout=600s || (kubectl -n quackgis get pods -l app=lake -o wide || true; kubectl -n quackgis logs deployment/lake --all-containers=true --tail=200 || true; kubectl -n quackgis logs job/read-probe || true; false)
-    kubectl -n quackgis logs job/read-probe
-
-# Run the high-concurrency parallel-reader gate against the lake PostgreSQL/S3 profile.
-kind-qps-smoke: kind-ready kind-probe-scripts
-    just kind-lake-refresh
-    kubectl -n quackgis set env deployment/lake QUACKGIS_SHARED_CATALOG_REFRESH_MS={{qps_shared_catalog_refresh_ms}} QUACKGIS_TARGET_PARTITIONS- QUACKGIS_SELECTIVE_READ_TARGET_PARTITIONS-
-    kubectl -n quackgis rollout status deployment/lake --timeout=180s
-    kubectl -n quackgis scale deployment/lake --replicas=3
-    kubectl -n quackgis rollout status deployment/lake --timeout=180s
-    kubectl -n quackgis wait deployment/lake --for=condition=Available --timeout=180s
-    kubectl -n quackgis delete job qps-seed qps-probe --ignore-not-found=true
-    kubectl apply -f deploy/kind/qps-seed.yaml
-    kubectl -n quackgis wait job/qps-seed --for=condition=complete --timeout=600s || (kubectl -n quackgis logs deployment/lake --all-containers=true --tail=200 || true; kubectl -n quackgis logs job/qps-seed || true; false)
-    kubectl -n quackgis logs job/qps-seed
-    kubectl apply -f deploy/kind/qps-probe.yaml
-    kubectl -n quackgis wait job/qps-probe --for=condition=complete --timeout=600s || (kubectl -n quackgis get pods -l app=lake -o wide || true; kubectl -n quackgis logs deployment/lake --all-containers=true --tail=200 || true; kubectl -n quackgis logs job/qps-probe || true; false)
-    kubectl -n quackgis logs job/qps-probe
-
-# Run the high-concurrency reader gate from a Linkerd-injected client and assert proxy TCP/TLS metrics.
-kind-qps-mtls-smoke: kind-linkerd-up kind-probe-scripts
-    just kind-lake-refresh
-    kubectl -n quackgis set env deployment/lake QUACKGIS_SHARED_CATALOG_REFRESH_MS={{qps_shared_catalog_refresh_ms}} QUACKGIS_TARGET_PARTITIONS- QUACKGIS_SELECTIVE_READ_TARGET_PARTITIONS-
-    kubectl -n quackgis rollout restart deployment/pg deployment/s3 deployment/lake
-    kubectl -n quackgis rollout status deployment/pg --timeout=180s
-    kubectl -n quackgis rollout status deployment/s3 --timeout=180s
-    kubectl -n quackgis rollout status deployment/lake --timeout=180s
-    kubectl -n quackgis scale deployment/lake --replicas=3
-    kubectl -n quackgis rollout status deployment/lake --timeout=180s
-    kubectl -n quackgis wait deployment/lake --for=condition=Available --timeout=180s
-    just kind-mesh-client-deploy
-    kubectl -n quackgis get pods -l 'app in (lake,pg,s3,mesh-client)' -o json | python3 deploy/kind/check_linkerd_injected.py lake pg s3 mesh-client
-    kubectl -n quackgis exec deployment/mesh-client -c mesh-client -- env PYTHONPATH=/opt/quackgis-probes QUACKGIS_HOST=lake.quackgis.svc.cluster.local QUACKGIS_PORT=5434 QPS_FACTOR=50 QPS_WORKERS=16 QPS_QUERIES=240 QPS_MIN_INSTANCES=2 QPS_MIN_QPS=1.0 QPS_TABLE=qps_aerial QPS_MODE=seed python3 /opt/quackgis-probes/qps_probe.py
-    kubectl -n quackgis exec deployment/mesh-client -c mesh-client -- env PYTHONPATH=/opt/quackgis-probes QUACKGIS_HOST=lake.quackgis.svc.cluster.local QUACKGIS_PORT=5434 QPS_FACTOR=50 QPS_WORKERS=16 QPS_QUERIES=240 QPS_MIN_INSTANCES=2 QPS_MIN_QPS=1.0 QPS_TABLE=qps_aerial QPS_MODE=probe QPS_LINKERD_METRICS_URL=http://127.0.0.1:4191/metrics QPS_REQUIRE_LINKERD=true python3 /opt/quackgis-probes/qps_probe.py
-
-# Guard the opt-in deep QPS run against accidental disk-budget overruns.
-qps-deep-disk-guard:
-    python3 -c 'import shutil, sys; factor=int(sys.argv[1]); budget_gib=int(sys.argv[2]); rows=factor*108; estimate=rows*1024; budget=budget_gib*1024**3; free=shutil.disk_usage(".").free; print(f"qps_deep_disk rows={rows} estimated_bytes={estimate} budget_bytes={budget} free_bytes={free}"); sys.exit(1 if estimate > budget or free < estimate * 2 else 0)' {{qps_deep_factor}} {{qps_deep_disk_budget_gib}}
-
-# Run a deeper Linkerd-observed QPS gate; tune QPS_DEEP_* env vars up to the disk budget.
-kind-qps-deep-smoke: kind-linkerd-up kind-probe-scripts qps-deep-disk-guard
-    just kind-lake-refresh
-    kubectl -n quackgis set env deployment/lake QUACKGIS_SHARED_CATALOG_REFRESH_MS={{qps_shared_catalog_refresh_ms}} QUACKGIS_TARGET_PARTITIONS- QUACKGIS_SELECTIVE_READ_TARGET_PARTITIONS-
-    kubectl -n quackgis rollout restart deployment/pg deployment/s3 deployment/lake
-    kubectl -n quackgis rollout status deployment/pg --timeout=180s
-    kubectl -n quackgis rollout status deployment/s3 --timeout=180s
-    kubectl -n quackgis rollout status deployment/lake --timeout=180s
-    kubectl -n quackgis scale deployment/lake --replicas={{qps_deep_replicas}}
-    kubectl -n quackgis rollout status deployment/lake --timeout=180s
-    kubectl -n quackgis wait deployment/lake --for=condition=Available --timeout=180s
-    just kind-mesh-client-deploy
-    kubectl -n quackgis get pods -l 'app in (lake,pg,s3,mesh-client)' -o json | python3 deploy/kind/check_linkerd_injected.py lake pg s3 mesh-client
-    kubectl -n quackgis exec deployment/mesh-client -c mesh-client -- env PYTHONPATH=/opt/quackgis-probes QUACKGIS_HOST=lake.quackgis.svc.cluster.local QUACKGIS_PORT=5434 QPS_FACTOR={{qps_deep_factor}} QPS_WORKERS={{qps_deep_workers}} QPS_QUERIES={{qps_deep_queries}} QPS_MIN_INSTANCES={{qps_deep_min_instances}} QPS_MIN_QPS={{qps_deep_min_qps}} QPS_TABLE=qps_deep_aerial QPS_MODE=seed python3 /opt/quackgis-probes/qps_probe.py
-    kubectl -n quackgis exec deployment/mesh-client -c mesh-client -- env PYTHONPATH=/opt/quackgis-probes QUACKGIS_HOST=lake.quackgis.svc.cluster.local QUACKGIS_PORT=5434 QPS_FACTOR={{qps_deep_factor}} QPS_WORKERS={{qps_deep_workers}} QPS_QUERIES={{qps_deep_queries}} QPS_MIN_INSTANCES={{qps_deep_min_instances}} QPS_MIN_QPS={{qps_deep_min_qps}} QPS_TABLE=qps_deep_aerial QPS_MODE=probe QPS_LINKERD_METRICS_URL=http://127.0.0.1:4191/metrics QPS_REQUIRE_LINKERD=true python3 /opt/quackgis-probes/qps_probe.py
-
-# Run concurrent write workloads plus deterministic snapshot conflict/retry evidence.
-kind-write-smoke: kind-ready kind-probe-scripts
-    just kind-lake-refresh
-    kubectl -n quackgis scale deployment/lake --replicas=2
-    kubectl -n quackgis rollout status deployment/lake --timeout=180s
-    kubectl -n quackgis wait deployment/lake --for=condition=Available --timeout=180s
-    kubectl -n quackgis delete job write-setup write-workers write-verify --ignore-not-found=true
-    kubectl apply -f deploy/kind/write-setup.yaml
-    kubectl -n quackgis wait job/write-setup --for=condition=complete --timeout=240s || (kubectl -n quackgis logs deployment/lake --all-containers=true --tail=200 || true; kubectl -n quackgis logs job/write-setup || true; false)
-    kubectl -n quackgis logs job/write-setup
-    kubectl apply -f deploy/kind/write-workers.yaml
-    kubectl -n quackgis wait job/write-workers --for=condition=complete --timeout=600s || (kubectl -n quackgis get pods -l job-name=write-workers -o wide || true; kubectl -n quackgis logs deployment/lake --all-containers=true --tail=200 || true; kubectl -n quackgis logs -l job-name=write-workers --all-containers=true --prefix=true || true; false)
-    kubectl -n quackgis logs -l job-name=write-workers --all-containers=true --prefix=true
-    kubectl apply -f deploy/kind/write-verify.yaml
-    kubectl -n quackgis wait job/write-verify --for=condition=complete --timeout=300s || (kubectl -n quackgis logs deployment/lake --all-containers=true --tail=200 || true; kubectl -n quackgis logs job/write-verify || true; false)
-    kubectl -n quackgis logs job/write-verify
-
-# Run an OLAP fanout workload: grouped stats, pruning evidence, exact recheck.
-kind-olap-smoke: kind-ready kind-probe-scripts
-    just kind-lake-refresh
-    kubectl -n quackgis scale deployment/lake --replicas=2
-    kubectl -n quackgis rollout status deployment/lake --timeout=180s
-    kubectl -n quackgis wait deployment/lake --for=condition=Available --timeout=180s
-    kubectl -n quackgis delete job olap-seed olap-probe --ignore-not-found=true
-    kubectl apply -f deploy/kind/olap-seed.yaml
-    kubectl -n quackgis wait job/olap-seed --for=condition=complete --timeout=600s || (kubectl -n quackgis logs deployment/lake --all-containers=true --tail=200 || true; kubectl -n quackgis logs job/olap-seed || true; false)
-    kubectl -n quackgis logs job/olap-seed
-    kubectl apply -f deploy/kind/olap-probe.yaml
-    kubectl -n quackgis wait job/olap-probe --for=condition=complete --timeout=600s || (kubectl -n quackgis get pods -l app=lake -o wide || true; kubectl -n quackgis logs deployment/lake --all-containers=true --tail=200 || true; kubectl -n quackgis logs job/olap-probe || true; false)
-    kubectl -n quackgis logs job/olap-probe
-
-# Run Alpha scaled-storage gates: storage, multi-pod, writer conflict/retry, QPS, and OLAP.
-kind-alpha-smoke: kind-lake-smoke kind-lake-multipod-smoke kind-write-smoke kind-qps-smoke kind-olap-smoke
-    @printf "kind-alpha-smoke complete\n"
-
-# Run all maintained in-cluster client probes in one Kubernetes wait.
-kind-probes: kind-probe-scripts
-    kubectl -n quackgis delete job qgis-probe qgis-edit-probe ogr-probe api-client-probe geoserver-probe --ignore-not-found=true
-    kubectl apply -f deploy/kind/qgis-probe.yaml -f deploy/kind/qgis-edit-probe.yaml -f deploy/kind/ogr-probe.yaml -f deploy/kind/api-client-probe.yaml -f deploy/kind/geoserver-probe.yaml
-    kubectl -n quackgis wait job/qgis-probe job/qgis-edit-probe job/ogr-probe job/api-client-probe job/geoserver-probe --for=condition=complete --timeout=600s || (kubectl -n quackgis logs job/qgis-probe || true; kubectl -n quackgis logs job/qgis-edit-probe || true; kubectl -n quackgis logs job/ogr-probe || true; kubectl -n quackgis logs job/api-client-probe || true; kubectl -n quackgis logs job/geoserver-probe || true; false)
-    kubectl -n quackgis logs job/qgis-probe
-    kubectl -n quackgis logs job/qgis-edit-probe
-    kubectl -n quackgis logs job/ogr-probe
-    kubectl -n quackgis logs job/api-client-probe
-    kubectl -n quackgis logs job/geoserver-probe
-
-# Run the headless QGIS client probe as an in-cluster Job.
-kind-qgis-probe: kind-probe-scripts
-    kubectl -n quackgis delete job qgis-probe --ignore-not-found=true
-    kubectl apply -f deploy/kind/qgis-probe.yaml
-    kubectl -n quackgis wait job/qgis-probe --for=condition=complete --timeout=180s || (kubectl -n quackgis logs job/qgis-probe; false)
-    kubectl -n quackgis logs job/qgis-probe
-
-# Run the headless QGIS edit/save probe as an in-cluster Job.
-kind-qgis-edit-probe: kind-probe-scripts
-    kubectl -n quackgis delete job qgis-edit-probe --ignore-not-found=true
-    kubectl apply -f deploy/kind/qgis-edit-probe.yaml
-    kubectl -n quackgis wait job/qgis-edit-probe --for=condition=complete --timeout=240s || (kubectl -n quackgis logs job/qgis-edit-probe; false)
-    kubectl -n quackgis logs job/qgis-edit-probe
-
-# Run the GDAL/OGR PostgreSQL-driver load/read probe as an in-cluster Job.
-kind-ogr-probe: kind-probe-scripts
-    kubectl -n quackgis delete job ogr-probe --ignore-not-found=true
-    kubectl apply -f deploy/kind/ogr-probe.yaml
-    kubectl -n quackgis wait job/ogr-probe --for=condition=complete --timeout=180s || (kubectl -n quackgis logs job/ogr-probe; false)
-    kubectl -n quackgis logs job/ogr-probe
-
-# Run the Python/API/BI-style pgwire surface probe as an in-cluster Job.
-kind-api-client-probe: kind-probe-scripts
-    kubectl -n quackgis delete job api-client-probe --ignore-not-found=true
-    kubectl apply -f deploy/kind/api-client-probe.yaml
-    kubectl -n quackgis wait job/api-client-probe --for=condition=complete --timeout=180s || (kubectl -n quackgis logs job/api-client-probe; false)
-    kubectl -n quackgis logs job/api-client-probe
-
-# Run the GeoServer PostGIS datastore/WFS/WMS/WFS-T probe as an in-cluster Job.
-kind-geoserver-probe: kind-probe-scripts
-    kubectl -n quackgis delete job geoserver-probe --ignore-not-found=true
-    kubectl apply -f deploy/kind/geoserver-probe.yaml
-    kubectl -n quackgis wait job/geoserver-probe --for=condition=complete --timeout=600s || (kubectl -n quackgis logs job/geoserver-probe; false)
-    kubectl -n quackgis logs job/geoserver-probe
-
-# Seed stable demo layers and print client connection hints.
-seed-kind-demo: kind-probe-scripts
-    kubectl -n quackgis delete job quackgis-demo --ignore-not-found=true
-    kubectl apply -f deploy/kind/demo.yaml
-    kubectl -n quackgis wait job/quackgis-demo --for=condition=complete --timeout=180s || (kubectl -n quackgis logs job/quackgis-demo; false)
-    kubectl -n quackgis logs job/quackgis-demo
-
-# One-command local demo: deploy, seed stable layers, and print client hints.
-demo-kind: kind-ready kind-refresh-fast seed-kind-demo
-
-# Start the opt-in real-OSM PostGIS reference deployment used by parity probes.
-kind-postgis-osm-up:
-    kubectl apply -f deploy/kind/postgis-osm.yaml
-    kubectl -n quackgis set image deployment/postgis-osm postgis={{postgis_image}}
-    kubectl -n quackgis rollout status deployment/postgis-osm --timeout=180s
-    kubectl -n quackgis wait pod -l app=postgis-osm --for=condition=ready --timeout=180s
-
-# Stop the opt-in real-OSM PostGIS reference deployment.
-kind-postgis-osm-down:
-    kubectl -n quackgis delete job osm-postgis-parity --ignore-not-found=true
-    kubectl -n quackgis delete configmap osm-parity-config --ignore-not-found=true
-    kubectl -n quackgis delete deployment postgis-osm --ignore-not-found=true
-    kubectl -n quackgis delete service postgis-osm --ignore-not-found=true
-
-# Run the opt-in real OSM PostGIS -> QuackGIS copy/read parity probe.
-kind-osm-postgis-parity: kind-postgis-osm-up
-    kubectl -n quackgis delete job osm-postgis-parity --ignore-not-found=true
-    kubectl -n quackgis delete configmap osm-parity-config --ignore-not-found=true
-    kubectl -n quackgis create configmap osm-parity-config --from-literal=OSM_EXTRACT_URL="{{osm_extract_url}}" --from-literal=OSM_POINT_LIMIT="{{osm_point_limit}}" --from-literal=OSM_LINE_LIMIT="{{osm_line_limit}}" --from-literal=OSM_POLYGON_LIMIT="{{osm_polygon_limit}}"
-    kubectl apply -f deploy/kind/osm-postgis-parity-probe.yaml
-    kubectl -n quackgis wait job/osm-postgis-parity --for=condition=complete --timeout=900s || (kubectl -n quackgis logs job/osm-postgis-parity; false)
-    kubectl -n quackgis logs job/osm-postgis-parity
-
-# Collect Kind compatibility logs for CI/local artifacts.
-kind-compat-report:
-    mkdir -p .tmp/compatibility
-    kubectl -n quackgis get pods,jobs,svc,deploy,statefulset -o wide > .tmp/compatibility/kubernetes.txt 2>&1 || true
-    kubectl -n quackgis logs statefulset/quackgis --tail=-1 > .tmp/compatibility/quackgis.log 2>&1 || true
-    @for job in qgis-probe qgis-edit-probe ogr-probe api-client-probe geoserver-probe osm-postgis-parity quackgis-demo lake-probe external-lake-probe lake-multipod lb-probe read-seed read-probe qps-seed qps-probe write-setup write-workers write-verify olap-seed olap-probe layoutbench-catalog-seed layoutbench-catalog-probe; do \
-        kubectl -n quackgis logs "job/${job}" --tail=-1 > ".tmp/compatibility/${job}.log" 2>&1 || true; \
-    done
-    kubectl -n quackgis logs deployment/external-lake --all-containers=true --tail=-1 > .tmp/compatibility/external-lake.log 2>&1 || true
-    kubectl -n quackgis logs deployment/mesh-client --all-containers=true --tail=-1 > .tmp/compatibility/mesh-client.log 2>&1 || true
-    kubectl -n linkerd logs deployment/linkerd-identity --all-containers=true --tail=-1 > .tmp/compatibility/linkerd-identity.log 2>&1 || true
-    python3 deploy/kind/render_compat_report.py .tmp/compatibility
-
-# Show QuackGIS and client-probe logs from Kind.
-kind-logs:
-    kubectl -n quackgis logs statefulset/quackgis --tail=200
-
-# Delete the local KinD cluster.
-kind-down:
-    KIND_EXPERIMENTAL_PROVIDER={{container_engine}} kind delete cluster --name {{kind_cluster}}
+    {{container_engine}} logs "$container_id"; \
+    printf 'duckdb_runtime_server_smoke_ok\n'

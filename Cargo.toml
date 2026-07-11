@@ -6,11 +6,6 @@
 [workspace]
 resolver = "2"
 members = ["crates/quackgis-server"]
-exclude = [
-    ".tmp/ref/datafusion-postgres",
-    "vendor/datafusion-ducklake",
-    "vendor/datafusion-postgres",
-]
 
 [workspace.package]
 version = "0.2.0"
@@ -20,70 +15,36 @@ license = "Apache-2.0"
 authors = ["QuackGIS contributors"]
 repository = "https://github.com/adonm/quackgis"
 homepage = "https://github.com/adonm/quackgis"
-description = "PostGIS-compatible Sedona-powered OLAP spatial lakehouse database on DuckLake"
+description = "PostGIS-compatible DuckDB spatial lakehouse server on official DuckLake"
 readme = "README.md"
-keywords = ["gis", "geospatial", "postgis", "datafusion", "sedona"]
+keywords = ["gis", "geospatial", "postgis", "duckdb", "ducklake"]
 categories = ["database", "science::geo"]
 publish = false
 
 [workspace.dependencies]
-# Wire layer — vendored snapshot of adonm/datafusion-postgres quackgis/fixes.
-# Tracks upstream master; rebases at milestone boundaries. Kept in-tree so
-# QuackGIS can extend the raw pgwire parse boundary before upstream PR split.
-# See DIVERGENCE.md for the patch ledger.
-datafusion-postgres = { path = "vendor/datafusion-postgres/datafusion-postgres" }
-
-# DataFusion itself, same major as the current stack (54):
-# datafusion-postgres fork + sedona fork + datafusion-ducklake main.
-datafusion = "54"
-datafusion-expr-common = "54"
-datafusion-functions-aggregate-common = "54"
-arrow-ord = "58"
-arrow-select = "58"
 arrow-array = "58"
 arrow-schema = "58"
+arrow-pg = { path = "vendor/arrow-pg", version = "0.14.0" }
+pgwire = { version = "0.40", default-features = false, features = ["server-api-ring", "pg-ext-types"] }
+sqlparser = "=0.62.0"
 
-# Spatial engine — use SedonaDB subcrates directly instead of the umbrella
-# `sedona` crate so QuackGIS does not compile unused GEOS/GDAL/raster/catalog
-# surface. Fork adonm/sedona-db@quackgis/df54 (commit 2f00283) bumps to DF 54
-# to align with datafusion-ducklake main. Upstream PR candidate; see
-# DIVERGENCE.md.
-sedona-functions = { git = "https://github.com/adonm/sedona-db.git", branch = "quackgis/df54", package = "sedona-functions" }
-sedona-geo = { git = "https://github.com/adonm/sedona-db.git", branch = "quackgis/df54", package = "sedona-geo" }
-sedona-proj = { git = "https://github.com/adonm/sedona-db.git", branch = "quackgis/df54", package = "sedona-proj", default-features = false, features = ["proj-rust"] }
-sedona-geometry = { git = "https://github.com/adonm/sedona-db.git", branch = "quackgis/df54", package = "sedona-geometry" }
-geo-traits = "0.3"
-
-# Storage — DuckLake 1.0+ target. The vendored fork snapshot is based on
-# adonm/datafusion-ducklake main (Cargo.lock previously pinned 117c0c5) with
-# QuackGIS atomic table-mutation patches; see vendor/datafusion-ducklake and
-# docs/NATIVE_DML_FORK_PLAN.md. It currently tracks DataFusion 54.
-# SQLite/local remains the default correctness profile; PostgreSQL catalog +
-# S3-compatible object storage is the Alpha scaled-storage profile.
-datafusion-ducklake = { path = "vendor/datafusion-ducklake", default-features = false, features = ["metadata-sqlite", "write-sqlite", "metadata-postgres", "write-postgres", "multicatalog-postgres"] }
-
-# Experimental storage-authority boundary. ADBC 0.23 accepts the Arrow 58
-# RecordBatches used by the current DataFusion stack. The DuckDB driver itself is
-# loaded at runtime from an operator-pinned libduckdb shared library.
+# ADBC 0.23 provides Arrow 58 RecordBatches. The DuckDB driver itself is loaded
+# at runtime from an operator-pinned libduckdb shared library.
 adbc_core = "=0.23.0"
 adbc_driver_manager = "=0.23.0"
 sha2 = "0.10"
 
-# Object-store plumbing — versions aligned with DF 54 / ducklake main.
-object_store = { version = "0.13", default-features = false, features = ["aws"] }
-url = "2.5"
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "tls-rustls-ring"] }
-
 # Generic runtime / utility crates.
-tokio = { version = "1.52", features = ["fs", "macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1.52", features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rustls-pemfile = "2.2"
+rustls-pki-types = "1.15"
 env_logger = "0.11"
 log = "0.4"
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 tempfile = "3"
 futures = "0.3"
-proj-wkt = "0.8"
-proj-core = "0.8"
 async-trait = "0.1"
 regex = "1"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
@@ -92,12 +53,3 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 strip = true
 lto = "thin"
 codegen-units = 1
-
-# Faster binary for local Kind probe loops. Keeps release-like optimization but
-# skips thin-LTO/single-codegen-unit, which dominates rebuild time during probe
-# triage. Production/release artifacts still use [profile.release] above.
-[profile.probe]
-inherits = "release"
-strip = false
-lto = false
-codegen-units = 16

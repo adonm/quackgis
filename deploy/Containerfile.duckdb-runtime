@@ -7,10 +7,11 @@ COPY duckdb /usr/local/bin/duckdb
 COPY libduckdb.so /opt/quackgis/lib/libduckdb.so
 COPY duckdb-home /opt/quackgis/duckdb
 COPY artifact-manifest.json /opt/quackgis/artifact-manifest.json
+COPY licenses /opt/quackgis/licenses
+RUN mkdir -p /var/lib/quackgis && chown -R 999:999 /var/lib/quackgis
 ENV HOME=/opt/quackgis/duckdb
 ENV QUACKGIS_DUCKDB_ADBC_DRIVER=/opt/quackgis/lib/libduckdb.so
 ENV LD_LIBRARY_PATH=/opt/quackgis/lib
 USER 999:999
-EXPOSE 5434
 ENTRYPOINT ["/usr/local/bin/quackgis-server"]
-CMD ["--host", "0.0.0.0", "--port", "5434", "--catalog-path", "/var/lib/quackgis/quackgis.db", "--data-path", "/var/lib/quackgis/data"]
+CMD ["--host", "127.0.0.1", "--port", "5434", "--catalog-path", "/var/lib/quackgis/quackgis.ducklake", "--data-path", "/var/lib/quackgis/data"]
