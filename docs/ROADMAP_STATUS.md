@@ -9,11 +9,11 @@ deployment profiles.
 | Area | Evidence | Current boundary |
 |---|---|---|
 | Engine/storage | `just duckdb-adbc-storage-test` | pinned DuckDB 1.5.4, official local DuckLake, Arrow ingest/query, transaction, snapshot inspection, adjacent-file merge, reopen, checksummed offline exact-path backup/restore |
-| Pgwire workflow | `just duckdb-pgwire-workflow-test` | structural statements/parameters, incremental >20 MiB/220k-row COPY with atomic abort paths, scalar/NULL/WKB reopen, fragmented-load compaction, independent sessions, failed-transaction rollback/reuse, streaming results/portals, restart |
+| Pgwire workflow | `just duckdb-pgwire-workflow-test` | structural statements/parameters, incremental >20 MiB/220k-row COPY with atomic abort paths, scalar/NULL/WKB reopen, geometry `pg_type`/RowDescription/text/binary/NULL identity, 15 stable spatial-gap dispositions, fragmented-load compaction, independent sessions, failed-transaction rollback/reuse, streaming results/portals, restart |
 | Auth/policy | real CLI SCRAM and table allowlist cases in pgwire workflow | trust or SCRAM; normalized read/write table policy before ADBC prepare |
 | Spatial | pgwire workflow + `tests/duckdb_spatial_compat.json` | 42 original PostGIS expressions: 31 native, 5 rewrites, 6 macros |
-| Spatial gaps | `docs/DUCKDB_SPATIAL_GAP_LEDGER.md` | 10 Rust/catalog-edge gaps and 5 extension candidates remain unsupported |
-| WKB/Arrow | storage/pgwire native tests + `just arrow-encoder-test` | maintained WKB bytes, `geom_wkb` identity, generated WKB/fixed-binary properties, Float16 and UInt32 OID scalar parity, advertised Float16/fixed-binary list parity, fail-closed unsupported list/invalid JSON handling, and panic-free nested errors; broad geometry discovery and generated temporal/decimal/dictionary/nested coverage remain open |
+| Spatial gaps | `docs/DUCKDB_SPATIAL_GAP_LEDGER.md` | 10 Rust/catalog-edge gaps and 5 extension candidates have ledger-pinned `0A000` simple/extended pgwire behavior; semantics remain unsupported |
+| WKB/Arrow | storage/pgwire native tests + `just arrow-encoder-test` | maintained WKB bytes, structural geometry sentinel `pg_type` lookup, RowDescription/text/binary/NULL identity, generated WKB/fixed-binary properties, scalar/list parity, fail-closed invalid shapes, and panic-free nested errors; broad client discovery and generated temporal/decimal/dictionary/nested coverage remain open |
 | Runtime supply chain | `just duckdb-runtime-offline-smoke` | verified context digests/licenses, preinstalled signed extensions, load-only image and server-start smoke |
 | Current performance smoke | `just duckdb-current-benchmark` | deterministic 100k-row direct DuckDB/ADBC/pgwire scalar full-scan comparison; correctness and broad liveness budgets only |
 | Storage authority | storage unit/native tests | atomic local authority marker; remote authority unsupported |
@@ -45,9 +45,11 @@ deployment profiles.
   suspended-portal native workload both prove the eight-operation admission
   ceiling.
 - Supported statement and parameter type surfaces are intentionally narrow.
-- Broad `pg_catalog`/`information_schema`, geometry/geography OID discovery, SRID,
-  dimension, geography, extent, MVT, and general `ST_GeometryN` behavior remain
-  incomplete.
+- Broad `pg_catalog`/`information_schema`, geography discovery, SRID, dimension,
+  geography, extent, MVT, and general `ST_GeometryN` behavior remain incomplete.
+  A narrow structural `pg_type` adapter resolves only the maintained geometry and
+  geography sentinel OIDs; geometry RowDescription/text/binary/NULL behavior is
+  proven through the current Rust pgwire client.
 - Named QGIS, GDAL/OGR, GeoServer, Martin, psycopg, ORM, and BI workflows have not
   been requalified against the DuckDB-only server.
 - Remote/shared catalog and object-storage paths fail closed.
@@ -67,7 +69,7 @@ deployment profiles.
 | M0 truthful repository | complete | `just project-contract-check` validates links/recipes/spatial counts; required CI publishes the deterministic transport-smoke manifest |
 | M1 bounded execution | active; implementation majority complete | ADBC streams retain ownership; pgwire pulls one batch under a fail-closed byte ceiling; only native EOF permits reuse; native cancel/deadlines use reserved control capacity; cancelled and partial streams explicitly quarantine the same client while independent sessions remain usable; failed-transaction rollback/reuse, global plus reader/writer/maintenance-class admission, an authorized maintenance path, autosized DuckDB resources, sampled memory/temporary storage, class metrics, and unit plus 32-client native eight-admission proofs are implemented. Remaining: write/commit cancellation, 1M/10M RSS, 100-cancel p95, mixed-class native concurrency, and overhead budget. |
 | M2 streaming ingest | active; implementation majority complete | incremental bounded parser, exact Arrow batch byte splitting, staging ADBC stream, atomic publication, text escapes, >20 MiB/220k-row regression, synchronous malformed-final-row and oversized-decoded-chunk cleanup, abort zero-row tests, scalar/NULL/WKB reopen, compaction, and metrics are implemented. Remaining: pre-decode pgwire frame ceiling, idle-wait error delivery, and reference-profile 10M/1 GiB RSS/throughput evidence. |
-| M3 focused compatibility | active foundation | maintained SET/SHOW, AST `public` mapping, parsed quoted COPY targets, `geom_wkb` sentinel identity, generated WKB/fixed-binary properties, focused scalar/list encoder parity, panic-free nested errors, and ledger-pinned `0A000` errors for all five extension-candidate spatial cases are verified; the encoder suite is an explicit CI prerequisite. Remaining: pinned named-client traces, DuckDB-derived catalog fixtures/OIDs, subtype/SRID/dimension metadata, Rust-edge spatial gaps, and broader generated temporal/decimal/dictionary/nested encoder coverage. |
+| M3 focused compatibility | active foundation | maintained SET/SHOW, AST `public` mapping, parsed quoted COPY targets, structural sentinel `pg_type` resolution, geometry RowDescription/text/binary/NULL identity, focused encoder parity, panic-free nested errors, and ledger-pinned `0A000` simple/extended behavior for all 15 non-executable spatial cases are verified. Remaining: pinned named-client traces, DuckDB-derived broad catalog fixtures, subtype/SRID/dimension metadata, implementing release-required Rust-edge semantics, geography evidence, and broader generated encoder coverage. |
 | M4 analytical performance | active foundation | fail-closed COPY bbox layout validation/maintenance, direct `INSERT`/`UPDATE` bypass rejection, pgwire rejection/reuse, and exact/reopen evidence are implemented; ordinary compaction already halves fragmented file count without scalar result changes. Remaining: schema-aware mutation/spatial-compaction refresh, safe AST predicate injection, conservative geometry matrix, scan-byte plans, and current 10M then 100M profiles. |
 | M5 Local 1.0 | active foundation | immutable load-only runtime smoke, opt-in process liveness and pgwire-bind/read-only DuckLake readiness with explicit startup/storage-failure/drain states, configured connection/transaction drain, authorized/audited adjacent-file compaction, and checksummed offline exact-path backup/restore with snapshot/count evidence exist. Remaining: write-capacity readiness SLO, published artifacts, online/relocated production recovery, upgrades, TLS rotation, write/commit interruption evidence, mixed workload, and 24-hour soak. |
 | M6 Shared DuckLake 1.x | deferred | begins only after Local 1.0 |

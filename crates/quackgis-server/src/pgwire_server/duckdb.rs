@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use arrow_array::{
     ArrayRef, BinaryArray, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array,
-    Int64Array, RecordBatch, RecordBatchReader, StringArray,
+    Int64Array, RecordBatch, RecordBatchReader, StringArray, UInt32Array,
 };
 use arrow_pg::datatypes::{arrow_schema_to_pg_fields, field_into_pg_type};
 use arrow_pg::encode_recordbatch;
@@ -249,6 +249,7 @@ impl QueryParser for DuckDbParser {
             });
         }
         let validated = validate_statement(sql, ProtocolMode::Extended)?;
+        let pg_type_lookup = is_pg_type_lookup(&validated.ast);
         authorize_statement(client, &self.auth, &validated.ast)?;
         let storage = client_session(
             client,
@@ -275,6 +276,9 @@ impl QueryParser for DuckDbParser {
                 .iter()
                 .enumerate()
                 .map(|(index, field)| {
+                    if pg_type_lookup && index == 0 {
+                        return Field::new("oid", DataType::UInt32, false);
+                    }
                     if field.data_type() == &DataType::Null
                         && let Some(Some(pg_type)) = types.get(index)
                     {
@@ -896,7 +900,15 @@ fn validate_statement(sql: &str, mode: ProtocolMode) -> PgWireResult<ValidatedSt
             ));
         }
     };
-    let execution_sql = if matches!(&statement, Statement::ShowVariable { variable } if is_search_path(variable))
+    let execution_sql = if is_pg_type_lookup(&statement) {
+        "SELECT CASE CAST($1 AS UINTEGER) \
+             WHEN 90001 THEN 'geometry' WHEN 90002 THEN 'geography' END::VARCHAR AS typname, \
+             'b'::VARCHAR AS typtype, 0::UINTEGER AS typelem, \
+             NULL::UINTEGER AS rngsubtype, 0::UINTEGER AS typbasetype, \
+             ''::VARCHAR AS nspname, 0::UINTEGER AS typrelid \
+         WHERE CAST($1 AS UINTEGER) IN (90001, 90002)"
+            .to_owned()
+    } else if matches!(&statement, Statement::ShowVariable { variable } if is_search_path(variable))
     {
         "SELECT 'public'::VARCHAR AS search_path".to_owned()
     } else {
@@ -911,7 +923,45 @@ fn validate_statement(sql: &str, mode: ProtocolMode) -> PgWireResult<ValidatedSt
     })
 }
 
+fn is_pg_type_lookup(statement: &Statement) -> bool {
+    if !matches!(statement, Statement::Query(_)) {
+        return false;
+    }
+    let mut statement = statement.clone();
+    let mut relations = Vec::new();
+    let _: ControlFlow<()> = visit_relations_mut(&mut statement, |name| {
+        if let Some(parts) = object_name_values(name) {
+            relations.push(parts);
+        }
+        ControlFlow::Continue(())
+    });
+    let is_catalog_relation = |parts: &[String], table: &str| matches!(parts, [schema, relation] if schema.eq_ignore_ascii_case("pg_catalog") && relation.eq_ignore_ascii_case(table));
+    relations
+        .iter()
+        .any(|parts| is_catalog_relation(parts, "pg_type"))
+        && relations
+            .iter()
+            .any(|parts| is_catalog_relation(parts, "pg_namespace"))
+        && relations.iter().all(|parts| {
+            is_catalog_relation(parts, "pg_type")
+                || is_catalog_relation(parts, "pg_namespace")
+                || is_catalog_relation(parts, "pg_range")
+        })
+}
+
 fn unsupported_spatial_function(statement: &Statement) -> Option<&'static str> {
+    const UNSUPPORTED: &[(&str, &str)] = &[
+        ("st_ndims", "ST_NDims"),
+        ("st_coorddim", "ST_CoordDim"),
+        ("st_geometryn", "ST_GeometryN"),
+        ("st_asewkt", "ST_AsEWKT"),
+        ("st_srid", "ST_SRID"),
+        ("st_zmflag", "ST_Zmflag"),
+        ("st_xmax", "ST_XMax"),
+        ("st_ymax", "ST_YMax"),
+        ("st_extent", "ST_Extent"),
+        ("find_srid", "Find_SRID"),
+    ];
     let mut unsupported = None;
     let _: ControlFlow<()> = visit_expressions(statement, |expression| {
         let Expr::Function(function) = expression else {
@@ -923,15 +973,9 @@ fn unsupported_spatial_function(statement: &Statement) -> Option<&'static str> {
         }) else {
             return ControlFlow::Continue(());
         };
-        unsupported = if name.eq_ignore_ascii_case("st_ndims") {
-            Some("ST_NDims")
-        } else if name.eq_ignore_ascii_case("st_coorddim") {
-            Some("ST_CoordDim")
-        } else if name.eq_ignore_ascii_case("st_geometryn") {
-            Some("ST_GeometryN")
-        } else {
-            None
-        };
+        unsupported = UNSUPPORTED
+            .iter()
+            .find_map(|(candidate, label)| name.eq_ignore_ascii_case(candidate).then_some(*label));
         if unsupported.is_some() {
             ControlFlow::Break(())
         } else {
@@ -1309,6 +1353,9 @@ fn parameter_batch(
             ])),
             DataType::Int64 => Arc::new(Int64Array::from(vec![
                 portal.parameter::<i64>(index, pg_type)?,
+            ])),
+            DataType::UInt32 => Arc::new(UInt32Array::from(vec![
+                portal.parameter::<u32>(index, pg_type)?,
             ])),
             DataType::Float32 => Arc::new(Float32Array::from(vec![
                 portal.parameter::<f32>(index, pg_type)?,
@@ -1994,6 +2041,13 @@ mod tests {
                 "ST_GeometryN",
                 "SELECT ST_AsText(ST_GeometryN(ST_Point(1, 2), 1))",
             ),
+            ("ST_AsEWKT", "SELECT ST_AsEWKT(ST_Point(1, 2))"),
+            ("ST_SRID", "SELECT ST_SRID(ST_Point(1, 2))"),
+            ("ST_Zmflag", "SELECT ST_Zmflag(ST_Point(1, 2))"),
+            ("ST_XMax", "SELECT ST_XMax(ST_Extent(geom)) FROM points"),
+            ("ST_YMax", "SELECT ST_YMax(ST_Extent(geom)) FROM points"),
+            ("ST_Extent", "SELECT ST_Extent(geom) FROM points"),
+            ("Find_SRID", "SELECT Find_SRID('public', 'points', 'geom')"),
         ] {
             let error = match validate_statement(sql, ProtocolMode::Simple) {
                 Ok(_) => panic!("unsupported spatial function {function}"),
@@ -2010,6 +2064,28 @@ mod tests {
             validate_statement(sql, ProtocolMode::Simple)
                 .unwrap_or_else(|error| panic!("supported SQL {sql}: {error}"));
         }
+    }
+
+    #[test]
+    fn geometry_type_lookup_is_a_narrow_catalog_adapter() {
+        let lookup = validate_statement(
+            "SELECT t.typname, t.typtype, t.typelem, r.rngsubtype, t.typbasetype, \
+             n.nspname, t.typrelid FROM pg_catalog.pg_type t \
+             LEFT JOIN pg_catalog.pg_range r ON r.rngtypid = t.oid \
+             INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid \
+             WHERE t.oid = $1",
+            ProtocolMode::Extended,
+        )
+        .expect("structural pg_type lookup");
+        assert!(lookup.sql.contains("90001"));
+        assert!(lookup.sql.contains("90002"));
+
+        let ordinary = validate_statement(
+            "SELECT typname FROM pg_catalog.pg_type",
+            ProtocolMode::Extended,
+        )
+        .expect("ordinary catalog query");
+        assert!(!ordinary.sql.contains("90001"));
     }
 
     #[test]

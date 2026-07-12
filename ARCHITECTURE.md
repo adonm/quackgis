@@ -147,8 +147,10 @@ statement and remains table-structural.
 
 WKB/EWKB is the current transport/interchange format. A binary field may advertise
 a maintained geometry/geography sentinel OID through explicit Arrow metadata or a
-conservative name convention, but broad `pg_type` discovery and durable subtype/
-SRID/dimension identity remain open.
+conservative name convention. A narrow structural `pg_type` adapter resolves those
+two sentinel OIDs, and the native workflow proves geometry RowDescription plus
+text, binary, and NULL transport. Broad catalog discovery, named-client evidence,
+and durable subtype/SRID/dimension identity remain open.
 
 ## Spatial performance
 

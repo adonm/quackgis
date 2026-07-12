@@ -20,7 +20,7 @@ in required pull-request CI.
 | Native DuckDB spatial | 31 | The maintained SQL executes directly with the expected scalar result. |
 | Mechanical SQL rewrite | 5 | A recorded DuckDB SQL spelling produces the same maintained result. |
 | QuackGIS macro | 6 | A small explicit compatibility expression is required and executable. |
-| Rust pgwire/catalog edge | 10 | SRID/EWKB identity, extent metadata, or catalog behavior remains owned by the compatibility edge. |
+| Rust pgwire/catalog edge | 10 | SRID/EWKB identity, extent metadata, or catalog behavior remains owned by the compatibility edge; each currently returns a ledger-pinned `0A000`. |
 | Extension candidate | 5 | `ST_NDims`/`ST_CoordDim` and `ST_GeometryN` family gaps return ledger-pinned `0A000` errors until a real macro/extension implementation is promoted. |
 | Explicit unsupported | 0 | No case in the current claimed subset is intentionally dropped. |
 
@@ -35,8 +35,9 @@ This closes classification for the current 57-case subset. The pinned CLI probe
 executes the classified DuckDB expressions, while `duckdb-pgwire-workflow-test`
 sends all 42 original PostGIS expressions through the server-owned rewrite/macro
 edge with maintained scalar results. The pgwire test reads this ledger and the
-curated regress source so the lists cannot drift silently. The five extension
-candidates also pass through simple and extended pgwire to prove stable errors and
-session reuse. It does not yet route the 10 Rust-edge cases, prove
-geometry/geography OIDs, or classify the broader SQL-portability and client-trace
-corpus. Those remain M3 work.
+curated regress source so the lists cannot drift silently. All 15 non-executable
+cases pass through simple and extended pgwire to prove ledger-pinned errors and
+session reuse. The maintained workflow also proves the geometry sentinel's narrow
+structural `pg_type` lookup plus RowDescription, binary WKB, text hex-WKB, and NULL
+behavior with `tokio-postgres`. Implementing the 10 Rust-edge semantics, broader
+catalog discovery, geography, and named-client traces remains M3 work.

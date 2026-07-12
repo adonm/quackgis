@@ -30,7 +30,8 @@ planner/executor and official DuckLake is the sole writer for new storage.
 - explicitly authorized adjacent-file compaction through a server-owned call;
 - SCRAM and parsed read/write table policy; and
 - 42 curated spatial cases using original PostGIS spellings through DuckDB native
-  functions or bounded QuackGIS rewrites/macros.
+  functions or bounded QuackGIS rewrites/macros, with stable `0A000` behavior for
+  all 15 classified gaps.
 
 Important limits:
 
@@ -43,6 +44,10 @@ Important limits:
   evidence remains roadmap work;
 - broad PostgreSQL catalogs and named GIS-client parity are incomplete; and
 - remote/shared catalog and object-storage profiles fail closed.
+
+The maintained Rust pgwire client also resolves the geometry sentinel through a
+narrow structural `pg_type` adapter and verifies RowDescription plus text, binary,
+and NULL WKB transport. This is not yet QGIS/OGR discovery evidence.
 
 When `QUACKGIS_METRICS_PORT` is configured, the same loopback HTTP listener serves
 `/healthz`, startup/drain-aware readiness at `/readyz`, and Prometheus data at

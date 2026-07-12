@@ -30,12 +30,12 @@ Disposition:
 | 31 native spatial cases | native | real pgwire corpus | client-driven expansion only |
 | 5 spatial aliases | macro/rewrite | real pgwire corpus | delete when native contract matches |
 | 6 compatibility macros | macro/rewrite | real pgwire corpus | NULL/empty/overload/property coverage |
-| 10 spatial/catalog gaps | blocked/Rust edge | classified ledger | prioritize only release-client requirements |
-| `ST_NDims`/`ST_CoordDim`/`ST_GeometryN` | extension candidate | classified only | proposal requires workload + vector benchmark |
+| 10 spatial/catalog gaps | blocked/Rust edge | classified ledger + stable simple/extended `0A000` | prioritize only release-client requirements |
+| `ST_NDims`/`ST_CoordDim`/`ST_GeometryN` | extension candidate | classified + stable simple/extended `0A000` | proposal requires workload + vector benchmark |
 | exact bbox recheck | native query | small storage oracle | safe injection plus holes/invalid/scale plans |
 | layout/locality maintenance | partial native SQL | COPY computes the four explicit hidden bbox columns in DuckDB; NULL/exact/reopen workflow | safe AST predicate injection, mutation maintenance, compaction/layout scale evidence |
 | PostgreSQL catalogs | blocked/Rust edge | broad metadata denied | captured psql/psycopg/OGR/QGIS surfaces |
-| geometry OID discovery | partial Rust edge | encoder sentinel tests | `pg_type`/RowDescription in named clients |
+| geometry OID discovery | partial Rust edge | structural sentinel `pg_type` lookup + RowDescription/text/binary/NULL pgwire test | named QGIS/OGR discovery and subtype/SRID/dimension identity |
 | psql/psycopg | partial | tokio-postgres is maintained test client | version-pinned named workflows |
 | GDAL/OGR | blocked | prior traces only | read + streaming COPY copied-data test |
 | QGIS read-only | blocked | prior traces only | discovery/filter/identify/render test |

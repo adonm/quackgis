@@ -14,6 +14,22 @@ use quackgis_server::pgwire_server::ServerOptions;
 use serde::Deserialize;
 use serde_json::json;
 
+#[derive(Debug, Eq, PartialEq)]
+struct GeometryBytes(Vec<u8>);
+
+impl<'a> tokio_postgres::types::FromSql<'a> for GeometryBytes {
+    fn from_sql(
+        _ty: &tokio_postgres::types::Type,
+        raw: &'a [u8],
+    ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        Ok(Self(raw.to_vec()))
+    }
+
+    fn accepts(ty: &tokio_postgres::types::Type) -> bool {
+        ty.oid() == 90_001
+    }
+}
+
 struct ChildGuard(std::process::Child);
 
 fn first_i64(batch: &RecordBatch, column: usize) -> i64 {
@@ -710,7 +726,7 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
         );
     }
     let unsupported_spatial = unsupported_spatial_cases();
-    assert_eq!(unsupported_spatial.len(), 5, "unsupported spatial cases");
+    assert_eq!(unsupported_spatial.len(), 15, "unsupported spatial cases");
     for (name, sql, expected) in unsupported_spatial {
         for error in [
             client
@@ -938,6 +954,43 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
         .await
         .expect("stream COPY rows");
     assert_eq!(copy_sink.finish().await.expect("finish COPY"), 2);
+    let geometry_statement = client
+        .prepare("SELECT geom_wkb FROM quackgis.main.wire_copy ORDER BY id")
+        .await
+        .expect("describe maintained geometry column");
+    assert_eq!(geometry_statement.columns().len(), 1);
+    assert_eq!(geometry_statement.columns()[0].type_().oid(), 90_001);
+    assert_eq!(geometry_statement.columns()[0].type_().name(), "geometry");
+    let geometry_rows = client
+        .query(&geometry_statement, &[])
+        .await
+        .expect("query binary geometry values");
+    assert_eq!(geometry_rows[0].get::<_, GeometryBytes>(0).0.len(), 21);
+    assert_eq!(
+        geometry_rows[1].get::<_, GeometryBytes>(0).0,
+        vec![
+            1_u8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xf0, 0x3f, 0, 0, 0, 0, 0, 0, 0xf0, 0x3f,
+        ]
+    );
+    let null_geometry = client
+        .query_one("SELECT NULL::BLOB AS geom_wkb", &[])
+        .await
+        .expect("query NULL geometry value");
+    assert_eq!(null_geometry.get::<_, Option<GeometryBytes>>(0), None);
+    let geometry_text = client
+        .simple_query("SELECT geom_wkb FROM quackgis.main.wire_copy WHERE id = 1")
+        .await
+        .expect("query text geometry value")
+        .into_iter()
+        .find_map(|message| match message {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::to_owned),
+            _ => None,
+        })
+        .expect("text geometry row");
+    assert_eq!(
+        geometry_text,
+        "\\x010100000000000000000000000000000000000000"
+    );
     let copied = client
         .query_one(
             "SELECT count(*)::BIGINT, \
@@ -1556,7 +1609,6 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
         cancellation_error.code(),
         Some(&tokio_postgres::error::SqlState::QUERY_CANCELED)
     );
-    drop(cancel_rows);
     let quarantined_error = client
         .query_one("SELECT 1", &[])
         .await

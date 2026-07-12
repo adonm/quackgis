@@ -79,6 +79,11 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 - Explicit CI execution of the vendored Arrow encoder suite; Float16 and UInt32
   OID scalar parity, Float16/fixed-binary list parity, fail-closed unsupported time
   units, and panic-free nested error propagation now have focused regressions.
+- Narrow structural `pg_type` resolution for the maintained geometry/geography
+  sentinel OIDs, with geometry RowDescription, binary WKB, text hex-WKB, and NULL
+  evidence through the native pgwire client.
+- Ledger-pinned `0A000` simple/extended protocol behavior and session-reuse
+  evidence for all 10 deferred Rust-edge and five extension-candidate spatial gaps.
 
 ### Changed
 

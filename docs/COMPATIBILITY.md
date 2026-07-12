@@ -58,9 +58,10 @@ function spellings without touching quoted SQL text or comments:
 
 The 57-case ledger currently classifies 31 native DuckDB cases, five rewrites,
 six macros, 10 Rust/catalog-edge gaps, and five extension candidates. The first
-42 execute through pgwire. SRID-preserving EWKB behavior, geography, dimensions,
-general `ST_GeometryN`, extent/catalog helpers, MVT, and broad PostGIS catalog
-surfaces remain open unless a focused test says otherwise.
+42 execute through pgwire; the remaining 15 have ledger-pinned `0A000` behavior
+through simple and extended protocol. SRID-preserving EWKB behavior, geography,
+dimensions, general `ST_GeometryN`, extent/catalog helpers, MVT, and broad PostGIS
+catalog surfaces remain open unless a focused test says otherwise.
 
 ## Deliberate runtime limits
 
@@ -93,11 +94,13 @@ surfaces remain open unless a focused test says otherwise.
 - Direct `INSERT` and `UPDATE` on a table containing maintained bbox columns return
   `0A000`; use COPY until schema-aware DML recomputation is implemented. `DELETE`
   does not create stale surviving rows and remains supported.
-- `pg_catalog`, `information_schema`, geometry/geography OID discovery, and GIS
-  client-specific metadata are incomplete.
+- `pg_catalog`, `information_schema`, geography discovery, and GIS client-specific
+  metadata are incomplete. One structural `pg_type` lookup resolves the maintained
+  geometry/geography sentinel OIDs and nothing broader.
 - Binary columns named `geom_wkb` use the same geometry sentinel OID as the
-  maintained COPY bbox layout; subtype/SRID/dimension catalog identity remains
-  open.
+  maintained COPY bbox layout. RowDescription plus text hex-WKB, binary WKB, and
+  NULL transport are tested through pgwire; subtype/SRID/dimension catalog
+  identity remains open.
 - Arrow schema mapping and encoding are tested together for Float16, UInt32 OID
   aliases, Float16/fixed-binary lists, WKB, fixed binary, NULLs, invalid JSON, and
   nested error propagation. Unsupported list layouts fail during schema mapping;
