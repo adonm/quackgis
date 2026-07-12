@@ -336,6 +336,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
+ "half",
  "pg_interval",
  "pgwire",
  "postgres-types",
