@@ -4,6 +4,22 @@ This is the current evidence floor for the DuckDB-only runtime. It intentionally
 does not inherit claims from retired DataFusion/Sedona or unsupported shared
 deployment profiles.
 
+## Local-first closure program
+
+The roadmap now separates smoke, local, reference, and external evidence. Direct
+host/container profiles own performance budgets; a new minimal DuckDB-only Kind
+topology will own packaged client/lifecycle/recovery evidence. The retired broad
+Kind tree will not be restored. Current iteration state:
+
+| Work package | State | Next executable result |
+|---|---|---|
+| E0 evidence harness | active | common evidence envelope/host fingerprint, then split gate-oriented native scenarios |
+| E1 M1/M2 local profiles | queued behind E0 | reduced local result/cancel/COPY profiles using the same reference oracle |
+| K0 minimal Kind topology | queued | one runtime workload, durable local volume, TLS secret, pinned client job image |
+| C0 focused clients | queued behind K0/catalog fixtures | psql and psycopg first, then OGR and headless QGIS |
+| P0 M4 host profiles | queued behind E0/layout implementation | 10M twice before 100M |
+| K1 operations/shared rehearsal | deferred by dependency | Local 1.0 operations first; PostgreSQL/MinIO is rehearsal, not managed evidence |
+
 ## Current verified floor
 
 | Area | Evidence | Current boundary |
@@ -67,12 +83,12 @@ deployment profiles.
 
 | Milestone | State | Next closure work |
 |---|---|---|
-| M0 truthful repository | complete | `just project-contract-check` validates links/recipes/spatial counts; required CI publishes the deterministic transport-smoke manifest |
-| M1 bounded execution | active; implementation majority complete | ADBC streams retain ownership; pgwire pulls one batch under a fail-closed byte ceiling; only native EOF permits reuse; native cancel/deadlines use reserved control capacity; cancelled and partial streams explicitly quarantine the same client while independent sessions remain usable; failed-transaction rollback/reuse, global plus reader/writer/maintenance-class admission, an authorized maintenance path, autosized DuckDB resources, sampled memory/temporary storage, class metrics, and unit plus 32-client native eight-admission proofs are implemented. Remaining: write/commit cancellation, 1M/10M RSS, 100-cancel p95, mixed-class native concurrency, and overhead budget. |
-| M2 streaming ingest | active; implementation majority complete | incremental bounded parser, exact Arrow batch byte splitting, staging ADBC stream, atomic publication, text escapes, >20 MiB/220k-row regression, synchronous malformed-final-row and oversized-decoded-chunk cleanup, abort zero-row tests, scalar/NULL/WKB reopen, compaction, and metrics are implemented. Remaining: pre-decode pgwire frame ceiling, idle-wait error delivery, and reference-profile 10M/1 GiB RSS/throughput evidence. |
+| M0 truthful repository | complete | `just project-contract-check` validates links/recipes/spatial counts; any future CI must invoke maintained Justfile gates rather than duplicate them |
+| M1 bounded execution | active; implementation majority complete | ADBC streams retain ownership; pgwire pulls one batch under a fail-closed byte ceiling; only native EOF permits reuse; native cancel/deadlines use reserved control capacity; cancelled and partial streams explicitly quarantine the same client while independent sessions remain usable; failed-transaction rollback/reuse, global plus reader/writer/maintenance-class admission, an authorized maintenance path, autosized DuckDB resources, sampled memory/temporary storage, class metrics, and unit plus 32-client native eight-admission proofs are implemented. E0/E1 now own the local/reference evidence path. Remaining: write/commit cancellation, 1M/10M RSS, 100-cancel p95, mixed-class native concurrency, and overhead budget. |
+| M2 streaming ingest | active; implementation majority complete | incremental bounded parser, exact Arrow batch byte splitting, staging ADBC stream, atomic publication, text escapes, >20 MiB/220k-row regression, synchronous malformed-final-row and oversized-decoded-chunk cleanup, abort zero-row tests, scalar/NULL/WKB reopen, compaction, and metrics are implemented. E1 will run one oracle at reduced local and exact 10M/1 GiB reference scales. Remaining: pre-decode pgwire frame ceiling, idle-wait error delivery, and RSS/throughput evidence. |
 | M3 focused compatibility | active foundation | maintained SET/SHOW, AST `public` mapping, parsed quoted COPY targets, structural sentinel `pg_type` resolution, geometry RowDescription/text/binary/NULL identity, focused encoder parity, panic-free nested errors, and ledger-pinned `0A000` simple/extended behavior for all 15 non-executable spatial cases are verified. Remaining: pinned named-client traces, DuckDB-derived broad catalog fixtures, subtype/SRID/dimension metadata, implementing release-required Rust-edge semantics, geography evidence, and broader generated encoder coverage. |
 | M4 analytical performance | active foundation | fail-closed COPY bbox maintenance, direct INSERT and geometry/reserved UPDATE rejection, safe ordinary-column bound UPDATEs with unchanged bbox/WKB reopen evidence, and ordinary file compaction are implemented. Remaining: geometry mutation/spatial-compaction refresh, safe AST predicate injection, conservative geometry matrix, scan-byte plans, and current 10M then 100M profiles. |
-| M5 Local 1.0 | active foundation | immutable load-only runtime smoke, opt-in process liveness and pgwire-bind/read-only DuckLake readiness, configured drain, authorized/audited compaction, checksummed offline exact-path backup/restore, and an explicit TLS-required startup policy exist. Remaining: encrypted-client/plaintext-denial and rotation evidence, write-capacity readiness SLO, published artifacts, online/relocated production recovery, upgrades, write/commit interruption evidence, mixed workload, and 24-hour soak. |
+| M5 Local 1.0 | active foundation | immutable load-only runtime smoke, opt-in process liveness and pgwire-bind/read-only DuckLake readiness, configured drain, authorized/audited compaction, checksummed offline exact-path backup/restore, and an explicit TLS-required startup policy exist. K0 will provide the minimal packaged topology; host profiles remain authoritative for performance. Remaining: encrypted-client/plaintext-denial and rotation evidence, write-capacity readiness SLO, published artifacts, online/relocated production recovery, upgrades, write/commit interruption evidence, mixed workload, and 24-hour soak. |
 | M6 Shared DuckLake 1.x | deferred | begins only after Local 1.0 |
 | M7 dataset lifecycle | deferred | official snapshot protection/promotion after shared/local operations mature |
 

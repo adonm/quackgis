@@ -16,6 +16,52 @@ A milestone closes only when:
 Retired-engine behavior, unregistered tests, design documents, and static profile
 validation do not close milestones.
 
+## Local-first execution model
+
+Most functional M1–M5 work must be reproducible on one developer workstation.
+The same scenario and correctness oracle advance through four evidence levels;
+only scale, duration, topology, and budget strictness change:
+
+| Level | Typical duration | Purpose | Claim boundary |
+|---|---:|---|---|
+| smoke | seconds | code and contract regression | no scale or operational claim |
+| local | minutes | full scenario/oracle at reduced scale | functional evidence only |
+| reference | minutes to 24 hours | exact roadmap scale/budgets on a named host | may close local performance/soak gates |
+| external | scheduled | publication or managed-service proof | required only where the gate explicitly says published or managed |
+
+Environment ownership is deliberate:
+
+- direct host processes or one resource-constrained container own RSS, latency,
+  throughput, spill, and scan-byte budgets;
+- a minimal DuckDB-only Kind cluster owns immutable-image startup, pinned client
+  jobs, TLS/rotation, drain/restart, backup/restore, upgrade, and mixed-workload
+  topology evidence;
+- Kind PostgreSQL/MinIO services may rehearse M6 behavior after Local 1.0, but do
+  not replace the two required managed-service runs; and
+- the old DataFusion/Sedona/Linkerd/shared-profile deployment tree remains retired.
+
+Every profile emits one common evidence envelope containing source/dirty state,
+profile ID and level, native artifact digests, host/cgroup capacity, data shape,
+budgets, exact-result oracles, measurements, and pass/fail status. A reduced local
+run must use the same implementation and oracle as its reference counterpart.
+
+## Ordered closure program
+
+1. **E0 — evidence harness:** split reusable runtime/client/fixture/oracle/evidence
+   support from monolithic native scenarios; add smoke/local/reference entrypoints.
+2. **E1 — M1/M2 local profiles:** result RSS/first-row, 100 cancellations,
+   mixed-class admission, ADBC/pgwire overhead, and COPY RSS/throughput/atomicity.
+3. **K0 — minimal Local 1.0 Kind topology:** one QuackGIS workload, local durable
+   volume, TLS secret, and pinned psql/psycopg/GDAL client jobs; no service mesh or
+   deferred clients.
+4. **C0 — focused clients:** capture client-neutral catalog fixtures, then qualify
+   psql, psycopg, OGR, and headless QGIS against copied data.
+5. **P0 — M4 host profiles:** conservative predicate/layout work followed by two
+   10M runs; introduce 100M only after those runs pass.
+6. **K1 — operations and shared rehearsal:** termination, rotation, upgrade,
+   recovery, mixed workload and soak locally; PostgreSQL/MinIO rehearsal only after
+   Local 1.0 functional gates are green.
+
 ## Baseline
 
 | Area | Current floor | Important limit |
@@ -71,7 +117,9 @@ Deliver:
 - configure DuckDB threads, memory, temporary storage, and spill at startup;
 - add query queue/lifecycle, memory, spill, timeout, cancellation, and quarantine
   metrics; and
-- define disconnect, partial-delivery, and uncertain-cleanup behavior.
+- define disconnect, partial-delivery, and uncertain-cleanup behavior; and
+- register smoke/local/reference result, cancellation, concurrency, and transport
+  profiles using the common evidence envelope.
 
 Exit gates:
 
@@ -96,7 +144,9 @@ Deliver:
 - support PostgreSQL escaping, NULL, WKB/EWKB, and release-required scalars;
 - add cancellation, timeout, disconnect, malformed-row, and rollback tests;
 - report rows, bytes, batches, throughput, and commit latency; and
-- exercise official DuckLake compaction after fragmented loads.
+- exercise official DuckLake compaction after fragmented loads; and
+- run the same COPY correctness oracle at smoke, local, and exact 10M/1 GiB
+  reference scales.
 
 Exit gates:
 
@@ -127,6 +177,8 @@ Deliver:
   DuckDB extension, or unsupported;
 - replace text signatures with reusable AST/catalog/protocol rules;
 - add fuzz/property coverage for the Arrow-to-pgwire encoder; and
+- run version-pinned psql, psycopg, OGR, and headless QGIS jobs in the minimal Kind
+  topology while keeping catalog fixtures client-neutral; and
 - keep GeoServer, editing, Martin, BI, and broad ORM compatibility deferred unless
   they fit without materially widening the first-release surface.
 
@@ -182,7 +234,9 @@ Deliver:
 - backup, restore, compaction, capacity, spill, and incident procedures;
 - supported DuckDB/extension upgrade and reopen tests;
 - TLS and secret-rotation evidence; and
-- mixed read/COPY/mutation/cancel/compaction/restart/restore workloads.
+- mixed read/COPY/mutation/cancel/compaction/restart/restore workloads; and
+- maintain a minimal Kind topology for packaged functional evidence while keeping
+  performance budgets on the host/reference profile.
 
 Exit gates:
 

@@ -15,8 +15,23 @@ one exact DuckDB/extension bundle.
 | `.tmp/duckdb/manifest.json` | native library/extension paths and SHA-256 values |
 | `.tmp/duckdb-current-benchmark/manifest.json` | deterministic direct DuckDB/ADBC/pgwire correctness and liveness comparison |
 
-`just ci` is the required aggregate local/CI gate after native bootstrap.
-CI uploads runtime verification manifests, not redistributable native binaries.
+`just ci` is the required aggregate local gate after native bootstrap. There is no
+active hosted workflow; a future CI workflow must call the same Justfile recipes
+and may upload verification manifests, not redistributable native binaries.
+
+## Evidence levels
+
+| Level | Use |
+|---|---|
+| smoke | fast code/contract regression; never a scale claim |
+| local | complete functional scenario and oracle at reduced scale |
+| reference | exact scale/duration/budgets on a named host; may close local gates |
+| external | published-artifact or managed-service proof explicitly required by a gate |
+
+Performance evidence runs directly on the named host or one constrained
+container. Minimal Kind runs provide packaged topology, client, TLS, lifecycle,
+recovery, upgrade, mixed-workload, and soak evidence; they are not primary
+performance evidence. PostgreSQL/MinIO in Kind is M6 rehearsal only.
 
 ## Local 1.0 release packet
 
@@ -36,6 +51,7 @@ The release packet must include:
 ## Evidence rules
 
 - Artifacts identify exact source SHA and native bundle.
+- Artifacts identify their evidence level and execution environment.
 - Performance claims identify rows, bytes, files, row groups, load method,
   hardware, concurrency, plans, and budget outcome.
 - Result checks use counts/checksums/exact spatial oracles, not successful exit

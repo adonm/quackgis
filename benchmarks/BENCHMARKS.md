@@ -24,9 +24,22 @@ time and in-process client wall time have different scopes.
 This proves deterministic current-path comparison, not streaming, concurrency,
 memory, spill, selective pruning, COPY throughput, or scale.
 
+## Evidence levels and execution environments
+
+Profiles use the roadmap's `smoke`, `local`, `reference`, and `external` levels.
+Reduced local profiles must execute the same scenario and exact-result oracle as
+their reference form. Host processes or one constrained container own performance
+budgets; Kind runs are topology/packaging companion evidence and cannot satisfy
+RSS, latency, throughput, spill, or scan-byte budgets.
+
+All new profiles use one evidence envelope with source/dirty state, profile ID and
+level, native versions/digests, host and cgroup capacity, rows/bytes/files/row
+groups, correctness results, measurements, budgets, and status.
+
 ## Next profiles
 
-M1–M4 must add time-to-first-row, bounded RSS/batches, cancellation, COPY,
+E0 first adds the common evidence envelope and gate-oriented scenario support.
+E1 then adds time-to-first-row, bounded RSS/batches, cancellation, COPY,
 selective scans, grouped aggregates, bounded spatial joins, fragmented-file
 compaction, plans, bytes scanned, spill, and configured-concurrency evidence. The
 exact 10M profile must pass twice before introducing 100M.
