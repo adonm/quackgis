@@ -12,6 +12,7 @@ use quackgis_server::auth::AuthConfig;
 use quackgis_server::engine_api::{EngineTableRef, IngestDisposition};
 use quackgis_server::pgwire_server::ServerOptions;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 #[path = "support/runtime.rs"]
 mod runtime;
@@ -890,6 +891,193 @@ async fn termination_atomicity_profile() {
 
 #[tokio::test]
 #[ignore = "requires the pinned DuckDB ADBC runtime"]
+async fn tls_required_rotation_profile() {
+    let profile = TlsRotationProfile::from_environment();
+    let output_path = std::env::var_os("QUACKGIS_PROFILE_OUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| ".tmp/duckdb-tls-rotation/manifest.json".into());
+    let driver =
+        PathBuf::from(std::env::var_os("QUACKGIS_DUCKDB_ADBC_DRIVER").expect("set ADBC driver"));
+    let temp = tempfile::tempdir().expect("TLS rotation profile tempdir");
+    let catalog = temp.path().join("catalog.ducklake");
+    let data = temp.path().join("data");
+    let cert_path = temp.path().join("server.pem");
+    let key_path = temp.path().join("server.key");
+    let first_identity = TestTlsIdentity::new();
+    let second_identity = TestTlsIdentity::new();
+    assert_ne!(first_identity.fingerprint, second_identity.fingerprint);
+    first_identity.write(&cert_path, &key_path);
+
+    let first_port = unused_local_port().await;
+    let mut first_server = spawn_tls_profile_server(
+        &driver,
+        &catalog,
+        &data,
+        first_port,
+        &cert_path,
+        &key_path,
+        "first-password",
+    );
+    let (first_client, first_connection) = connect_tls_profile_server(
+        first_port,
+        "first-password",
+        &first_identity,
+        &mut first_server,
+    )
+    .await;
+    first_client
+        .batch_execute("CREATE TABLE quackgis.main.tls_rotation_profile(id BIGINT, phase VARCHAR)")
+        .await
+        .expect("create baseline table through TLS and SCRAM");
+    first_client
+        .batch_execute("INSERT INTO quackgis.main.tls_rotation_profile VALUES (1, 'before')")
+        .await
+        .expect("write baseline through TLS and SCRAM");
+
+    let plaintext_error = match tokio_postgres::connect(
+        &format!(
+            "host=127.0.0.1 port={first_port} user=postgres password=first-password \
+             dbname=quackgis sslmode=disable"
+        ),
+        tokio_postgres::NoTls,
+    )
+    .await
+    {
+        Ok(_) => panic!("TLS-required server accepted plaintext startup"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        plaintext_error.as_db_error().map(|error| error.code()),
+        Some(&tokio_postgres::error::SqlState::INVALID_AUTHORIZATION_SPECIFICATION)
+    );
+    connect_tls_profile_client(first_port, "first-password", &second_identity)
+        .await
+        .expect_err("untrusted server certificate must fail");
+
+    drop(first_client);
+    first_connection.abort();
+    let signal_result = unsafe { libc::kill(first_server.0.id() as i32, libc::SIGTERM) };
+    assert_eq!(signal_result, 0, "stop first TLS server");
+    assert!(
+        wait_for_child(&mut first_server, Duration::from_secs(10))
+            .await
+            .success()
+    );
+
+    second_identity.write(&cert_path, &key_path);
+    let rotation_started = Instant::now();
+    let second_port = unused_local_port().await;
+    let mut second_server = spawn_tls_profile_server(
+        &driver,
+        &catalog,
+        &data,
+        second_port,
+        &cert_path,
+        &key_path,
+        "second-password",
+    );
+    let (second_client, second_connection) = connect_tls_profile_server(
+        second_port,
+        "second-password",
+        &second_identity,
+        &mut second_server,
+    )
+    .await;
+    let rotation_to_queryable_ms = rotation_started.elapsed().as_secs_f64() * 1000.0;
+
+    connect_tls_profile_client(second_port, "second-password", &first_identity)
+        .await
+        .expect_err("old certificate trust must fail after rotation");
+    let old_password_error =
+        connect_tls_profile_client(second_port, "first-password", &second_identity)
+            .await
+            .expect_err("old password must fail after rotation");
+    assert_eq!(
+        old_password_error.as_db_error().map(|error| error.code()),
+        Some(&tokio_postgres::error::SqlState::INVALID_PASSWORD)
+    );
+
+    let recovered = second_client
+        .query_one(
+            "SELECT count(*)::BIGINT, sum(id)::BIGINT \
+             FROM quackgis.main.tls_rotation_profile",
+            &[],
+        )
+        .await
+        .expect("read committed state after TLS rotation");
+    assert_eq!(
+        (recovered.get::<_, i64>(0), recovered.get::<_, i64>(1)),
+        (1, 1)
+    );
+    second_client
+        .batch_execute("INSERT INTO quackgis.main.tls_rotation_profile VALUES (2, 'after')")
+        .await
+        .expect("post-rotation write");
+    let final_count = second_client
+        .query_one(
+            "SELECT count(*)::BIGINT FROM quackgis.main.tls_rotation_profile",
+            &[],
+        )
+        .await
+        .expect("post-rotation count")
+        .get::<_, i64>(0);
+    assert_eq!(final_count, 2);
+    drop(second_client);
+    second_connection.abort();
+    let signal_result = unsafe { libc::kill(second_server.0.id() as i32, libc::SIGTERM) };
+    assert_eq!(signal_result, 0, "stop rotated TLS server");
+    assert!(
+        wait_for_child(&mut second_server, Duration::from_secs(10))
+            .await
+            .success()
+    );
+
+    let evidence = EvidenceEnvelope::collect(
+        EvidenceProfile::new(
+            format!("duckdb-tls-rotation-{}-v1", profile.level.as_str()),
+            profile.level,
+            profile.environment,
+            "actual server processes require TLS and SCRAM, reject plaintext and untrusted certificates, then restart on the same DuckLake paths with a replacement certificate and password",
+        ),
+        json!({
+            "baseline_rows": 1,
+            "rotation_mode": "process_restart",
+            "server_name": "127.0.0.1",
+            "first_certificate_sha256": first_identity.fingerprint,
+            "second_certificate_sha256": second_identity.fingerprint,
+        }),
+        json!({
+            "tls_scram_before_rotation": true,
+            "plaintext_rejected_sqlstate": "28000",
+            "untrusted_certificate_rejected": true,
+            "old_certificate_trust_rejected": true,
+            "old_password_rejected_sqlstate": "28P01",
+            "committed_rows_preserved": 1,
+            "post_rotation_write_succeeded": true,
+            "final_count": final_count,
+        }),
+        json!({
+            "rotation_to_queryable_ms": rotation_to_queryable_ms,
+        }),
+        json!({
+            "plaintext_connections_allowed_max": 0,
+            "old_credentials_allowed_max": 0,
+            "committed_rows_lost_max": 0,
+        }),
+    )
+    .expect("collect TLS rotation evidence");
+    evidence
+        .write(&output_path)
+        .expect("write TLS rotation evidence");
+    println!(
+        "duckdb_tls_rotation_profile_ok rotation_ms={:.3} out={}",
+        rotation_to_queryable_ms,
+        output_path.display()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires the pinned DuckDB ADBC runtime"]
 async fn copy_ingest_profile() {
     let profile = CopyProfile::from_environment();
     let output_path = std::env::var_os("QUACKGIS_PROFILE_OUT")
@@ -1208,6 +1396,31 @@ struct TerminationProfile {
     restart_budget_ms: f64,
 }
 
+struct TlsRotationProfile {
+    level: EvidenceLevel,
+    environment: ExecutionEnvironment,
+}
+
+impl TlsRotationProfile {
+    fn from_environment() -> Self {
+        let level = EvidenceLevel::parse(
+            &std::env::var("QUACKGIS_EVIDENCE_LEVEL").unwrap_or_else(|_| "smoke".to_owned()),
+        )
+        .expect("valid evidence level");
+        assert_ne!(
+            level,
+            EvidenceLevel::External,
+            "external evidence is not local"
+        );
+        let environment = ExecutionEnvironment::parse(
+            &std::env::var("QUACKGIS_EXECUTION_ENVIRONMENT")
+                .unwrap_or_else(|_| "host_process".to_owned()),
+        )
+        .expect("valid execution environment");
+        Self { level, environment }
+    }
+}
+
 impl TerminationProfile {
     fn from_environment() -> Self {
         let level = EvidenceLevel::parse(
@@ -1506,6 +1719,45 @@ fn prometheus_labeled_u64(
 
 struct ChildGuard(std::process::Child);
 
+struct TestTlsIdentity {
+    certificate_pem: String,
+    private_key_pem: String,
+    certificate_der: rustls::pki_types::CertificateDer<'static>,
+    fingerprint: String,
+}
+
+impl TestTlsIdentity {
+    fn new() -> Self {
+        let rcgen::CertifiedKey { cert, signing_key } =
+            rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_owned()])
+                .expect("generate test TLS identity");
+        let certificate_der = cert.der().clone();
+        let fingerprint = format!("{:x}", Sha256::digest(certificate_der.as_ref()));
+        Self {
+            certificate_pem: cert.pem(),
+            private_key_pem: signing_key.serialize_pem(),
+            certificate_der,
+            fingerprint,
+        }
+    }
+
+    fn write(&self, certificate: &std::path::Path, private_key: &std::path::Path) {
+        std::fs::write(certificate, &self.certificate_pem).expect("write test certificate");
+        std::fs::write(private_key, &self.private_key_pem).expect("write test private key");
+    }
+
+    fn connector(&self) -> tokio_postgres_rustls::MakeRustlsConnect {
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(self.certificate_der.clone())
+            .expect("trust test certificate");
+        let config = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        tokio_postgres_rustls::MakeRustlsConnect::new(config)
+    }
+}
+
 impl Drop for ChildGuard {
     fn drop(&mut self) {
         if self.0.try_wait().ok().flatten().is_none() {
@@ -1537,6 +1789,42 @@ fn spawn_profile_server(
             .stderr(std::process::Stdio::null())
             .spawn()
             .expect("spawn profile server"),
+    )
+}
+
+fn spawn_tls_profile_server(
+    driver: &std::path::Path,
+    catalog: &std::path::Path,
+    data: &std::path::Path,
+    port: u16,
+    certificate: &std::path::Path,
+    private_key: &std::path::Path,
+    password: &str,
+) -> ChildGuard {
+    ChildGuard(
+        std::process::Command::new(env!("CARGO_BIN_EXE_quackgis-server"))
+            .arg("--duckdb-driver")
+            .arg(driver)
+            .arg("--catalog-path")
+            .arg(catalog)
+            .arg("--data-path")
+            .arg(data)
+            .arg("--host=127.0.0.1")
+            .arg(format!("--port={port}"))
+            .arg("--shutdown-timeout-ms=100")
+            .arg("--statement-timeout-ms=30000")
+            .arg("--tls-mode=required")
+            .arg("--tls-cert")
+            .arg(certificate)
+            .arg("--tls-key")
+            .arg(private_key)
+            .arg("--auth-mode=password")
+            .arg("--readwrite-user=postgres")
+            .env("QUACKGIS_READWRITE_PASSWORD", password)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn TLS profile server"),
     )
 }
 
@@ -1584,6 +1872,55 @@ async fn connect_profile_server(
         }
     }
     panic!("profile server did not become ready")
+}
+
+async fn connect_tls_profile_client(
+    port: u16,
+    password: &str,
+    identity: &TestTlsIdentity,
+) -> Result<
+    (
+        tokio_postgres::Client,
+        tokio::task::JoinHandle<Result<(), tokio_postgres::Error>>,
+    ),
+    tokio_postgres::Error,
+> {
+    let (client, connection) = tokio_postgres::connect(
+        &format!(
+            "host=127.0.0.1 port={port} user=postgres password={password} \
+             dbname=quackgis sslmode=require"
+        ),
+        identity.connector(),
+    )
+    .await?;
+    Ok((client, tokio::spawn(connection)))
+}
+
+async fn connect_tls_profile_server(
+    port: u16,
+    password: &str,
+    identity: &TestTlsIdentity,
+    child: &mut ChildGuard,
+) -> (
+    tokio_postgres::Client,
+    tokio::task::JoinHandle<Result<(), tokio_postgres::Error>>,
+) {
+    for _ in 0..400 {
+        match connect_tls_profile_client(port, password, identity).await {
+            Ok(connection) => return connection,
+            Err(_)
+                if child
+                    .0
+                    .try_wait()
+                    .expect("TLS profile server status")
+                    .is_none() =>
+            {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(error) => panic!("TLS profile server exited before readiness: {error}"),
+        }
+    }
+    panic!("TLS profile server did not become ready")
 }
 
 async fn wait_for_child(child: &mut ChildGuard, timeout: Duration) -> std::process::ExitStatus {

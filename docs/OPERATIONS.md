@@ -165,8 +165,25 @@ QUACKGIS_TLS_KEY=/run/secrets/quackgis.key \
 mise exec -- just server
 ```
 
-Certificate/client verification and restart-based rotation evidence remain Local
-1.0 gates; required mode alone is not that evidence.
+`just duckdb-tls-rotation-profile` starts the actual binary twice and proves
+client-side certificate/hostname verification, SCRAM, plaintext denial, wrong-CA
+denial, committed-state preservation, old-certificate-trust rejection, old-password
+rejection, and a post-rotation write. The current server loads TLS and password
+material only at process startup; it does not hot reload files or environment.
+
+Rotate local credentials as one restart operation:
+
+1. stage a replacement certificate/key and password without modifying the live
+   files;
+2. stop the singleton through its normal drain path;
+3. atomically replace the certificate/key and password source;
+4. restart, wait for `/readyz`, and verify the new trust/password; then
+5. verify both the old certificate trust and old password are rejected.
+
+For the minimal Kind topology, update both Secrets and run
+`kubectl rollout restart statefulset/quackgis -n quackgis`; changing a Secret alone
+does not reload the process. The smoke profile proves host-process behavior, not a
+completed Kind rotation drill, mTLS, or certificate revocation infrastructure.
 
 ## Shutdown, backup, and recovery
 

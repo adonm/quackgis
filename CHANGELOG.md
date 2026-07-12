@@ -134,6 +134,10 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   evidence for all 10 deferred Rust-edge and five extension-candidate spatial gaps.
 - Explicit `preferred`/`required` TLS policy: required mode needs paired valid
   material and rejects insecure startup before trust or SCRAM authentication.
+- Actual-process TLS/SCRAM evidence with generated client trust: valid encrypted
+  access succeeds, plaintext and an untrusted certificate fail, committed data
+  survives restart-based certificate/password rotation, old trust and password
+  fail afterward, and a post-rotation write succeeds.
 
 ### Changed
 

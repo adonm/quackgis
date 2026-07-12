@@ -12,13 +12,15 @@ QuackGIS currently implements a small service-identity model, not PostgreSQL RBA
 | normalized read/write table allowlists | structural policy unit + denied real cases |
 | separate opt-in maintenance identity and table policy | auth/parser unit + real pgwire compaction workflow |
 | fail-closed TLS material configuration | startup validation |
-| explicit TLS-required policy | startup rejects insecure clients; configuration unit tests |
+| explicit TLS-required policy | actual-process encrypted-client and plaintext-denial profile |
+| certificate/password rotation | actual-process restart profile rejects old trust/password and preserves exact state |
 | bounded/redacted auth and authorization audit events | audit/policy tests |
 | optional private metrics endpoint | metrics unit tests |
 | native driver digest/version validation | storage unit/native tests |
 
-Broad catalog filtering, administrative permissions, encrypted-client evidence,
-channel binding, secret rotation, and production failure drills remain open.
+Broad catalog filtering, administrative permissions, explicit channel-binding
+policy, packaged secret rotation, revocation infrastructure, and production
+failure drills remain open.
 
 ## Trust boundaries
 
@@ -51,10 +53,12 @@ channel binding, secret rotation, and production failure drills remain open.
 
 - malformed/half-configured TLS fails startup;
 - wrong password never falls back to trust;
-- a real encrypted client and plaintext-denial workflow is verified;
+- a real encrypted client and plaintext-denial workflow is verified by
+  `just duckdb-tls-rotation-profile`;
 - read-only and allowlist denials return stable SQLSTATE `42501` before ADBC;
 - query timeout/cancel and connection quarantine do not bypass policy;
-- secret rotation and revocation have a documented deployment behavior;
+- restart-based certificate/password rotation has host-process evidence;
+  packaged rotation and revocation remain required;
 - online backup/restore and all maintenance actions emit redacted administrative
   events (the current offline backup tool runs outside the server audit stream); and
 - metadata visible to restricted identities is trace-tested and filtered.

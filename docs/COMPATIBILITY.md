@@ -10,6 +10,8 @@ The required real-driver workflow proves:
 
 - PostgreSQL simple and extended query framing through `pgwire`;
 - SCRAM-SHA-256 startup and normalized read/write table allowlists;
+- required TLS with client-side certificate/hostname verification, plaintext
+  denial, and restart-based certificate/password rotation;
 - one structurally parsed `SELECT`, `CREATE TABLE`, `INSERT`, `UPDATE`, `DELETE`,
   `BEGIN`, `COMMIT`, or `ROLLBACK` statement;
 - parameterized reads and mutations without SQL interpolation;

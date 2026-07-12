@@ -72,7 +72,7 @@ run must use the same implementation and oracle as its reference counterpart.
 | COPY | incremental bounded text decoding to one ADBC stream and atomic DuckLake publication | 1 GiB/RSS/throughput evidence and pre-decode pgwire frame bound open; accepted wire chunks are bounded after dependency decoding |
 | Transactions | independent sessions, commit/rollback/isolation and failed-transaction `25P02` enforcement | write/commit cancellation policy incomplete |
 | Spatial | 42 native/rewrite/macro cases through pgwire | 10 edge gaps and 5 extension candidates |
-| Security | SCRAM and read/write table allowlists | incomplete metadata filtering/TLS evidence |
+| Security | SCRAM, read/write table allowlists, and actual-process required-TLS/restart-rotation evidence | incomplete metadata filtering and packaged rotation/revocation drills |
 | Operations | restart/reopen, snapshot inspection, adjacent-file merge, checksummed offline exact-path backup/restore | no online/relocated production recovery or shared profile |
 | Performance | fixture-level bbox/exact-recheck oracle | no current scale or layout-maintenance claim |
 | Metrics/status | policy, classed admission, lifecycle, cancellation, timeout, quarantine, COPY rows/bytes/batches/latency, sampled DuckDB memory/temporary storage, liveness, and DuckLake-probed readiness/drain state | probe is local/read-only; no write-capacity SLO |
