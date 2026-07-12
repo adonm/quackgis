@@ -21,6 +21,7 @@ use rustls::RootCertStore;
 use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
+use tokio_postgres::config::SslMode;
 use tokio_postgres::types::{ToSql, Type};
 use tokio_postgres::{Client, Config, NoTls};
 use tokio_postgres_rustls::MakeRustlsConnect;
@@ -104,8 +105,9 @@ fn build_router(state: Arc<AppState>) -> Router {
 }
 
 async fn connect_database(database_url: &str, ca: Option<&Path>) -> Result<Client> {
-    let config: Config = database_url.parse().context("parse database URL")?;
+    let mut config: Config = database_url.parse().context("parse database URL")?;
     if let Some(ca) = ca {
+        config.ssl_mode(SslMode::Require);
         let _ = rustls::crypto::ring::default_provider().install_default();
         let mut reader = std::io::BufReader::new(
             std::fs::File::open(ca)
@@ -130,6 +132,10 @@ async fn connect_database(database_url: &str, ca: Option<&Path>) -> Result<Clien
         });
         Ok(client)
     } else {
+        if config.get_ssl_mode() == SslMode::Require {
+            bail!("database URL requires TLS but --database-ca is not configured");
+        }
+        config.ssl_mode(SslMode::Disable);
         let (client, connection) = config.connect(NoTls).await?;
         tokio::spawn(async move {
             if let Err(error) = connection.await {

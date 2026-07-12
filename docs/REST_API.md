@@ -21,8 +21,9 @@ PostgREST compatibility or of upstream's 1,013-case PostgreSQL result.
   the REST process does not emulate PostgreSQL role switching or RLS.
 - The HTTP listener defaults to `127.0.0.1`. Terminate public TLS and enforce
   request/rate limits at the load balancer before binding it more broadly.
-- A CA file enables hostname-verified rustls for the pgwire connection. Omitting
-  it selects plaintext and is suitable only for a same-host/private-loopback
+- A CA file forces TLS and enables hostname-verified rustls for the pgwire
+  connection. A URL that requires TLS is rejected if the CA is absent. Omitting
+  both selects plaintext and is suitable only for a same-host/private-loopback
   development connection.
 - `QUACKGIS_REST_TABLES` is a required explicit comma-separated table allowlist.
   Startup and reload fail if an entry is absent from DuckDB's `main` schema. User
