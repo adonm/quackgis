@@ -31,6 +31,8 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 - Parameterized nullable VARCHAR/BLOB result profiling with every-row value/NULL
   checks, native batch counts, first-row timing, throughput, and RSS; its first
   dirty-tree 100k local run crosses 49 batches at 9 MiB RSS delta.
+- The clean 1M wide-result reference on source `b240507e` checks every value over
+  489 native batches with one in flight, zero rejections, and 19.17 MiB RSS delta.
 - Parameterized direct streaming ADBC versus bounded pgwire COPY profiling with
   exact count/sum/WKB publication, RSS, rows/bytes/batches, commit timing, and
   throughput ratio; its first dirty-tree 1M local run passes at 64 MiB RSS delta

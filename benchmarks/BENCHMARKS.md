@@ -101,9 +101,11 @@ mise exec -- just duckdb-wide-result-profile \
   out=.tmp/duckdb-wide-result/local-r100k.json
 ```
 
-The first dirty-tree local run crossed 49 native batches with one batch in flight,
-zero batch-limit rejections, exact values, and 9 MiB RSS delta. A clean 1M-row
-reference run remains the claim gate.
+The clean 1M-row reference run on source `b240507e` crossed 489 native batches
+with one batch in flight, zero batch-limit rejections, exact values and NULLs,
+19.17 MiB RSS delta, 19.25 ms to first row, and 799.43 ms total time. This closes
+the M1 wide variable-width/native-batch result gate on the recorded reference
+host.
 
 ## Cancellation profile
 
@@ -143,7 +145,9 @@ The first dirty-tree 1M-row local run accepted 59.87 MiB of wire data with 64 Mi
 RSS delta and a 0.272 pgwire/direct row-throughput ratio, passing the reduced
 384 MiB and 0.25 budgets. The clean 10M-row reference gate remains open; it uses
 the identical generator, publication path, and oracle with 256 MiB and 0.50
-budgets.
+budgets. A first clean 10M attempt measured a 0.200 ratio and correctly failed the
+required 0.50 reference budget, so COPY throughput remains an open M2 gate rather
+than a performance claim.
 
 ## Next profiles
 
