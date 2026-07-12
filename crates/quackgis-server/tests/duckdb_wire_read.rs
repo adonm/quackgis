@@ -1948,7 +1948,7 @@ async fn current_duckdb_transport_profile() {
          ATTACH 'ducklake:{}' AS quackgis (DATA_PATH '{}', DATA_INLINING_ROW_LIMIT 0); \
          CREATE TABLE quackgis.main.benchmark_points AS \
          SELECT i::INTEGER AS id, \
-           'point-' || lpad(i::VARCHAR, greatest(6, length(i::VARCHAR)), '0') AS name, \
+           'point-' || lpad(i::VARCHAR, greatest(6, length(i::VARCHAR))::INTEGER, '0') AS name, \
            (i % 32)::SMALLINT AS grp, ((i * 17) % 1000)::DOUBLE AS x, \
            ((i * 31) % 1000)::DOUBLE AS y, \
            ST_AsWKB(ST_Point(((i * 17) % 1000)::DOUBLE, ((i * 31) % 1000)::DOUBLE)) AS geom_wkb \
