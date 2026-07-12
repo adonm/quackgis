@@ -178,7 +178,8 @@ tasks are aborted; their active transaction sessions roll back on drop where the
 native connection remains usable. `just duckdb-termination-profile` exercises the
 actual process with an uncommitted row at the forced deadline, restarts the same
 local DuckLake paths, proves the row is absent, and proves a new write succeeds.
-Its smoke run becomes queryable in 272 ms against the 60-second budget. This is
+Its clean smoke run on source `59c1a381` becomes queryable in 135 ms against the
+60-second budget. This is
 explicit-transaction atomicity evidence, not yet proof that every native write or
 commit can be interrupted.
 

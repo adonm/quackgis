@@ -184,9 +184,9 @@ mise exec -- just duckdb-termination-profile \
   level=local out=.tmp/duckdb-termination/local.json
 ```
 
-The first smoke run terminated in 156 ms and became queryable after restart in
-272 ms, below the 60-second M5 budget. The reduced fixture does not establish
-release-catalog recovery timing, relocated recovery, or general write/commit
+The clean smoke run on source `59c1a381` terminated in 122 ms and became queryable
+after restart in 135 ms, below the 60-second M5 budget. The reduced fixture does
+not establish release-catalog recovery timing, relocated recovery, or general write/commit
 interruption behavior.
 
 ## Next profiles
