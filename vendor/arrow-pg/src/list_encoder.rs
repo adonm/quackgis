@@ -4,12 +4,12 @@ use arrow::{
     array::{
         Array, BinaryArray, BinaryViewArray, BooleanArray, Date32Array, Date64Array,
         Decimal128Array, Decimal256Array, DurationMicrosecondArray, DurationMillisecondArray,
-        DurationNanosecondArray, DurationSecondArray, IntervalDayTimeArray,
-        IntervalMonthDayNanoArray, IntervalYearMonthArray, LargeBinaryArray, LargeListArray,
-        LargeStringArray, ListArray, MapArray, PrimitiveArray, StringArray, StringViewArray,
-        Time32MillisecondArray, Time32SecondArray, Time64MicrosecondArray, Time64NanosecondArray,
-        TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-        TimestampSecondArray, timezone::Tz,
+        DurationNanosecondArray, DurationSecondArray, FixedSizeBinaryArray, Float16Array,
+        IntervalDayTimeArray, IntervalMonthDayNanoArray, IntervalYearMonthArray, LargeBinaryArray,
+        LargeListArray, LargeStringArray, ListArray, MapArray, PrimitiveArray, StringArray,
+        StringViewArray, Time32MillisecondArray, Time32SecondArray, Time64MicrosecondArray,
+        Time64NanosecondArray, TimestampMicrosecondArray, TimestampMillisecondArray,
+        TimestampNanosecondArray, TimestampSecondArray, timezone::Tz,
     },
     datatypes::{
         DataType, Date32Type, Date64Type, Float32Type, Float64Type, Int8Type, Int16Type, Int32Type,
@@ -127,6 +127,17 @@ pub fn encode_list<T: Encoder>(
             encoder.encode_field(&get_f32_list_value(&arr), pg_field)?;
             Ok(())
         }
+        DataType::Float16 => {
+            let value: Vec<Option<f32>> = arr
+                .as_any()
+                .downcast_ref::<Float16Array>()
+                .expect("Arrow field and array type must agree")
+                .iter()
+                .map(|value| value.map(|value| value.to_f32()))
+                .collect();
+            encoder.encode_field(&value, pg_field)?;
+            Ok(())
+        }
         DataType::Float64 => {
             encoder.encode_field(&get_f64_list_value(&arr), pg_field)?;
             Ok(())
@@ -182,6 +193,15 @@ pub fn encode_list<T: Encoder>(
                 .as_any()
                 .downcast_ref::<BinaryViewArray>()
                 .unwrap()
+                .iter()
+                .collect();
+            encoder.encode_field(&value, pg_field)
+        }
+        DataType::FixedSizeBinary(_) => {
+            let value: Vec<Option<_>> = arr
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .expect("Arrow field and array type must agree")
                 .iter()
                 .collect();
             encoder.encode_field(&value, pg_field)
@@ -599,10 +619,85 @@ pub fn encode_list<T: Encoder>(
             encoder.encode_field(&value, pg_field)?;
             Ok(())
         }
-        // TODO: add support for more advanced types (fixed size lists, etc.)
         list_type => Err(PgWireError::ApiError(ToSqlError::from(format!(
             "Unsupported List Datatype {} and array {:?}",
             list_type, &arr
         )))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::BytesMut;
+    use pgwire::api::results::FieldFormat;
+    use pgwire::types::ToSqlText;
+    use pgwire::types::format::FormatOptions;
+    use postgres_types::{ToSql, Type};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct TextCaptureEncoder {
+        fields: Vec<Vec<u8>>,
+    }
+
+    impl Encoder for TextCaptureEncoder {
+        type Item = Vec<Vec<u8>>;
+
+        fn encode_field<T>(&mut self, value: &T, pg_field: &FieldInfo) -> PgWireResult<()>
+        where
+            T: ToSql + ToSqlText + Sized,
+        {
+            let mut bytes = BytesMut::new();
+            value
+                .to_sql_text(pg_field.datatype(), &mut bytes, &FormatOptions::default())
+                .map_err(PgWireError::ApiError)?;
+            self.fields.push(bytes.to_vec());
+            Ok(())
+        }
+
+        fn take_row(&mut self) -> Self::Item {
+            std::mem::take(&mut self.fields)
+        }
+    }
+
+    #[test]
+    fn advertised_float16_and_fixed_binary_lists_encode() {
+        let float_values: Arc<dyn Array> = Arc::new(Float16Array::from(vec![
+            Some(half::f16::from_f32(1.5)),
+            None,
+        ]));
+        let float_field = FieldInfo::new(
+            "values".to_owned(),
+            None,
+            None,
+            Type::FLOAT4_ARRAY,
+            FieldFormat::Text,
+        );
+        let mut float_encoder = TextCaptureEncoder::default();
+        encode_list(&mut float_encoder, float_values, &float_field)
+            .expect("Float16 list advertised as FLOAT4[] must encode");
+        assert_eq!(float_encoder.fields.len(), 1);
+
+        let binary_values: Arc<dyn Array> = Arc::new(
+            FixedSizeBinaryArray::try_from_sparse_iter_with_size(
+                [Some([1_u8, 2]), None]
+                    .iter()
+                    .map(|value| value.as_ref().map(|value| value.as_slice())),
+                2,
+            )
+            .expect("fixed binary list values"),
+        );
+        let binary_field = FieldInfo::new(
+            "values".to_owned(),
+            None,
+            None,
+            Type::BYTEA_ARRAY,
+            FieldFormat::Text,
+        );
+        let mut binary_encoder = TextCaptureEncoder::default();
+        encode_list(&mut binary_encoder, binary_values, &binary_field)
+            .expect("FixedSizeBinary list advertised as BYTEA[] must encode");
+        assert_eq!(binary_encoder.fields.len(), 1);
     }
 }

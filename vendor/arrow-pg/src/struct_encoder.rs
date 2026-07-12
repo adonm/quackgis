@@ -100,7 +100,7 @@ pub(crate) fn encode_structs<T: Encoder>(
                         FieldInfo::new(field.name().to_string(), None, None, type_.clone(), format);
                     pg_field = pg_field.with_format_options(format_options);
 
-                    encode_value(&mut row_encoder, arr, row, arrow_field, &pg_field).unwrap();
+                    encode_value(&mut row_encoder, arr, row, arrow_field, &pg_field)?;
                 }
 
                 Ok(Some(BytesWrapper(row_encoder.take_buffer(), quote_wrapper)))
@@ -144,7 +144,7 @@ pub(crate) fn encode_struct<T: Encoder>(
         );
         pg_field = pg_field.with_format_options(parent_pg_field_info.format_options().clone());
 
-        encode_value(&mut row_encoder, arr, idx, arrow_field, &pg_field).unwrap();
+        encode_value(&mut row_encoder, arr, idx, arrow_field, &pg_field)?;
     }
     let encoded_value = BytesWrapper(row_encoder.row_buffer, false);
     encoder.encode_field(&encoded_value, parent_pg_field_info)

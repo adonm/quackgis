@@ -76,6 +76,9 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   with zero-row observer evidence and exact Arrow batch-memory splitting tests.
 - Native pgwire evidence that a cancelled streaming client is explicitly
   quarantined while an independent session remains usable.
+- Explicit CI execution of the vendored Arrow encoder suite; Float16 and UInt32
+  OID scalar parity, Float16/fixed-binary list parity, fail-closed unsupported time
+  units, and panic-free nested error propagation now have focused regressions.
 
 ### Changed
 

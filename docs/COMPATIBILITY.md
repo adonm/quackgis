@@ -98,6 +98,10 @@ surfaces remain open unless a focused test says otherwise.
 - Binary columns named `geom_wkb` use the same geometry sentinel OID as the
   maintained COPY bbox layout; subtype/SRID/dimension catalog identity remains
   open.
+- Arrow schema mapping and encoding are tested together for Float16, UInt32 OID
+  aliases, Float16/fixed-binary lists, WKB, fixed binary, NULLs, invalid JSON, and
+  nested error propagation. Unsupported list layouts fail during schema mapping;
+  broader generated temporal/decimal/dictionary/nested coverage remains open.
 - Shared PostgreSQL/object-storage DuckLake, multi-writer recovery, migration,
   production packaging, soak, and disaster-recovery evidence remain open.
 

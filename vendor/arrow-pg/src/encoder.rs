@@ -144,6 +144,15 @@ get_primitive_value!(get_u64_value, UInt64Type, u64);
 fn get_u64_as_decimal_value(arr: &Arc<dyn Array>, idx: usize) -> Option<Decimal> {
     get_u64_value(arr, idx).map(Decimal::from)
 }
+fn get_f16_value(arr: &Arc<dyn Array>, idx: usize) -> Option<f32> {
+    (!arr.is_null(idx)).then(|| {
+        arr.as_any()
+            .downcast_ref::<Float16Array>()
+            .expect("Arrow field and array type must agree")
+            .value(idx)
+            .to_f32()
+    })
+}
 get_primitive_value!(get_f32_value, Float32Type, f32);
 get_primitive_value!(get_f64_value, Float64Type, f64);
 
@@ -346,10 +355,14 @@ pub fn encode_value<T: Encoder>(
         DataType::UInt16 => {
             encoder.encode_field(&(get_u16_value(arr, idx).map(|x| x as i32)), pg_field)?
         }
+        DataType::UInt32 if *pg_field.datatype() == Type::OID => {
+            encoder.encode_field(&get_u32_value(arr, idx), pg_field)?
+        }
         DataType::UInt32 => {
             encoder.encode_field(&get_u32_value(arr, idx).map(|x| x as i64), pg_field)?
         }
         DataType::UInt64 => encoder.encode_field(&get_u64_as_decimal_value(arr, idx), pg_field)?,
+        DataType::Float16 => encoder.encode_field(&get_f16_value(arr, idx), pg_field)?,
         DataType::Float32 => encoder.encode_field(&get_f32_value(arr, idx), pg_field)?,
         DataType::Float64 => encoder.encode_field(&get_f64_value(arr, idx), pg_field)?,
         DataType::Decimal128(_, s) => {
@@ -408,7 +421,11 @@ pub fn encode_value<T: Encoder>(
             TimeUnit::Millisecond => {
                 encoder.encode_field(&get_time32_millisecond_value(arr, idx), pg_field)?
             }
-            _ => {}
+            unsupported => {
+                return Err(PgWireError::ApiError(ToSqlError::from(format!(
+                    "Unsupported Time32 unit {unsupported:?}"
+                ))));
+            }
         },
         DataType::Time64(unit) => match unit {
             TimeUnit::Microsecond => {
@@ -417,7 +434,11 @@ pub fn encode_value<T: Encoder>(
             TimeUnit::Nanosecond => {
                 encoder.encode_field(&get_time64_nanosecond_value(arr, idx), pg_field)?
             }
-            _ => {}
+            unsupported => {
+                return Err(PgWireError::ApiError(ToSqlError::from(format!(
+                    "Unsupported Time64 unit {unsupported:?}"
+                ))));
+            }
         },
         DataType::Timestamp(unit, timezone) => match unit {
             TimeUnit::Second => {
@@ -763,6 +784,38 @@ mod tests {
     }
 
     #[test]
+    fn advertised_float16_and_uint32_oid_values_encode() {
+        let float_array: Arc<dyn Array> = Arc::new(Float16Array::from(vec![
+            Some(half::f16::from_f32(1.5)),
+            None,
+        ]));
+        let float_field = Field::new("value", DataType::Float16, true);
+        let float_pg = FieldInfo::new(
+            "value".to_owned(),
+            None,
+            None,
+            Type::FLOAT4,
+            FieldFormat::Text,
+        );
+        for index in 0..float_array.len() {
+            let mut encoder = TextCaptureEncoder::default();
+            encode_value(&mut encoder, &float_array, index, &float_field, &float_pg)
+                .expect("Float16 advertised as FLOAT4 must encode");
+            assert_eq!(encoder.encoded.len(), 1);
+        }
+
+        let oid_array: Arc<dyn Array> = Arc::new(UInt32Array::from(vec![Some(u32::MAX), None]));
+        let oid_field = Field::new("oid", DataType::UInt32, true);
+        let oid_pg = FieldInfo::new("oid".to_owned(), None, None, Type::OID, FieldFormat::Text);
+        for index in 0..oid_array.len() {
+            let mut encoder = TextCaptureEncoder::default();
+            encode_value(&mut encoder, &oid_array, index, &oid_field, &oid_pg)
+                .expect("UInt32 OID alias must encode as OID");
+            assert_eq!(encoder.encoded.len(), 1);
+        }
+    }
+
+    #[test]
     fn null_intervals_emit_one_null_field() {
         let array: Arc<dyn Array> = Arc::new(IntervalYearMonthArray::from(vec![None]));
         let arrow_field = Field::new(
@@ -880,6 +933,44 @@ mod tests {
             encoder.call_count, 1,
             "encode_field must be called exactly once for a NULL struct to emit a NULL indicator"
         );
+    }
+
+    #[test]
+    fn nested_struct_encoding_propagates_errors_without_panicking() {
+        let timezone = Arc::<str>::from("Not/A-Timezone");
+        let timestamp_field = Arc::new(Field::new(
+            "observed_at",
+            DataType::Timestamp(TimeUnit::Second, Some(Arc::clone(&timezone))),
+            true,
+        ));
+        let timestamp: Arc<dyn Array> =
+            Arc::new(TimestampSecondArray::from(vec![Some(0)]).with_timezone(timezone));
+        let struct_array: Arc<dyn Array> = Arc::new(
+            StructArray::try_new(
+                vec![Arc::clone(&timestamp_field)].into(),
+                vec![timestamp],
+                None,
+            )
+            .expect("struct array"),
+        );
+        let struct_field = Field::new(
+            "value",
+            DataType::Struct(vec![timestamp_field].into()),
+            false,
+        );
+        let pg_field = FieldInfo::new(
+            "value".to_owned(),
+            None,
+            None,
+            Type::RECORD,
+            FieldFormat::Text,
+        );
+        let mut encoder = TextCaptureEncoder::default();
+
+        let error = encode_value(&mut encoder, &struct_array, 0, &struct_field, &pg_field)
+            .expect_err("invalid nested timezone must fail closed");
+        assert!(matches!(error, PgWireError::ApiError(_)));
+        assert!(encoder.encoded.is_empty());
     }
 
     #[test]

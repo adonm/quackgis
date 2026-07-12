@@ -133,8 +133,12 @@ test:
     cargo test --workspace
 
 # Faster local regression loop that compiles the native-runtime integration gates.
-test-fast:
+test-fast: arrow-encoder-test
     cargo test -p quackgis-server --lib --test duckdb_adbc_storage --test duckdb_wire_read
+
+# Execute the maintained vendored Arrow-to-pgwire properties and regressions.
+arrow-encoder-test:
+    cargo test -p arrow-pg
 
 # Install checksum-pinned libduckdb and signed extensions into ignored .tmp.
 duckdb-bootstrap duckdb_bin=duckdb_bin:

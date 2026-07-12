@@ -16,15 +16,19 @@ Local ownership:
   column-name fallback;
 - WKB/EWKB remains raw binary in PostgreSQL binary format and hex in text format;
 - generated properties prove geometry sentinel payload identity and fixed-size
-  binary/null encoding; unsupported list layouts fail during schema mapping;
+  binary/null encoding; Float16, UInt32 OID aliases, and advertised Float16/fixed
+  binary lists have parity regressions; unsupported list layouts fail during
+  schema mapping;
 - invalid JSON fails closed instead of silently becoming JSON `null`; and
-- the crate is built and linted as a normal member of the root dependency graph.
+- nested struct failures propagate without panicking; and
+- the crate's tests are an explicit `just ci` prerequisite.
 
 This encoder should eventually become a QuackGIS-owned crate with focused
-property/fuzz coverage for every advertised Arrow type. Initial generated WKB and
-fixed-binary properties are maintained; the complete advertised-type matrix
-remains open. Until then, Arrow and pgwire versions are pinned together with the
-server.
+property/fuzz coverage for every advertised Arrow type. Generated WKB and
+fixed-binary properties plus focused scalar/list/struct parity regressions are
+maintained; broader generated temporal, decimal, dictionary, and nested-type
+coverage remains open. Until then, Arrow and pgwire versions are pinned together
+with the server.
 
 ## Retired forks
 
