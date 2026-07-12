@@ -63,6 +63,25 @@ mise exec -- just duckdb-transport-profile \
   out=.tmp/duckdb-transport-profile/reference-r10m.json
 ```
 
+## Streaming-result profile
+
+The first E1 profile streams generated BIGINT rows through pgwire, samples process
+RSS every two milliseconds, and records idle/peak/delta RSS, time to first row,
+completion time, throughput, exact row/sum results, and Arrow batch in-flight high
+water. The server and test client share one process, which is stated in the
+evidence scope.
+
+```sh
+mise exec -- just duckdb-result-stream-profile \
+  level=local rows=1000000 \
+  out=.tmp/duckdb-result-stream/local-r1m.json
+```
+
+The current dirty-tree 1M local run observed one in-flight batch, first row before
+completion, and approximately 1.7 MiB RSS growth. This is functional local
+evidence; the clean 1M and 10M reference runs under the 128 MiB budget remain the
+M1 exit evidence.
+
 ## Next profiles
 
 E0 first adds the common evidence envelope and gate-oriented scenario support.

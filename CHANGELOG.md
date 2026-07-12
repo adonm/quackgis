@@ -15,6 +15,9 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 - A parameterized smoke/local/reference transport entrypoint that runs one
   deterministic DuckDB/ADBC/pgwire scenario and exact-result oracle from 100k
   through the configured row count; the first dirty-tree 1M local run passes.
+- A separately registered result-stream profile with two-millisecond process RSS
+  sampling, time-to-first-row, throughput, row/sum oracle, and Arrow batch
+  high-water evidence; its first 1M local run passes with one in-flight batch.
 - Owned Rust pgwire/TLS/SCRAM edge over DuckDB ADBC.
 - Official local DuckLake create, Arrow ingest/query, transaction, snapshot
   inspection, adjacent-file merge, and reopen workflows.

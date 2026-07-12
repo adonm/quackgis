@@ -14,6 +14,7 @@ one exact DuckDB/extension bundle.
 | `just duckdb-runtime-static-check` | immutable load-only runtime-image contract |
 | `just evidence-manifest-check` | common evidence envelope, source/runtime/host metadata, and claim-level validation |
 | `just duckdb-transport-profile` | parameterized smoke/local/reference scalar transport scenario using one correctness oracle |
+| `just duckdb-result-stream-profile` | parameterized result RSS/first-row/cardinality profile; 1M/10M reference runs close the M1 scale gate |
 | `.tmp/duckdb/manifest.json` | native library/extension paths and SHA-256 values |
 | `.tmp/duckdb-current-benchmark/manifest.json` | deterministic direct DuckDB/ADBC/pgwire correctness and liveness comparison |
 

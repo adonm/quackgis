@@ -134,7 +134,7 @@ test:
 
 # Faster local regression loop that compiles the native-runtime integration gates.
 test-fast: arrow-encoder-test
-    cargo test -p quackgis-server --lib --test duckdb_adbc_storage --test duckdb_wire_read
+    cargo test -p quackgis-server --lib --test duckdb_adbc_storage --test duckdb_wire_read --test roadmap_profiles
 
 # Execute the maintained vendored Arrow-to-pgwire properties and regressions.
 arrow-encoder-test:
@@ -227,6 +227,21 @@ duckdb-transport-profile level="local" rows="1000000" out=".tmp/duckdb-transport
       cargo test -p quackgis-server --release --test duckdb_wire_read current_duckdb_transport_profile -- --ignored --exact --nocapture --test-threads=1; \
     python3 scripts/evidence_manifest_check.py "$out_arg"
 
+# Prove bounded pgwire result streaming with RSS and first-row evidence.
+duckdb-result-stream-profile level="smoke" rows="100000" out=".tmp/duckdb-result-stream/manifest.json" environment="host_process" driver=duckdb_adbc_driver:
+    @set -eu; level_arg='{{level}}'; rows_arg='{{rows}}'; out_arg='{{out}}'; environment_arg='{{environment}}'; driver_arg='{{driver}}'; \
+    level_arg="${level_arg#level=}"; rows_arg="${rows_arg#rows=}"; out_arg="${out_arg#out=}"; environment_arg="${environment_arg#environment=}"; driver_arg="${driver_arg#driver=}"; \
+    if [ ! -f "$driver_arg" ]; then echo 'DuckDB ADBC driver is missing; run `mise run duckdb-bootstrap`' >&2; exit 2; fi; \
+    driver_arg="$(realpath "$driver_arg")"; duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; out_arg="$(realpath -m "$out_arg")"; \
+    HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" QUACKGIS_PROFILE_OUT="$out_arg" \
+      QUACKGIS_EVIDENCE_LEVEL="$level_arg" QUACKGIS_EXECUTION_ENVIRONMENT="$environment_arg" QUACKGIS_PROFILE_ROWS="$rows_arg" \
+      cargo test -p quackgis-server --release --test roadmap_profiles result_stream_profile -- --ignored --exact --nocapture --test-threads=1; \
+    python3 scripts/evidence_manifest_check.py "$out_arg"
+
+# Required fast native result-stream evidence.
+duckdb-result-stream-smoke:
+    just duckdb-result-stream-profile level=smoke rows=100000 out=.tmp/duckdb-result-stream/smoke-r100k.json
+
 # Create an offline, exact-path local DuckLake backup with a checksum manifest.
 duckdb-local-backup catalog=catalog data=data out=".tmp/duckdb-backup":
     python3 scripts/duckdb_local_backup.py backup --catalog "{{catalog}}" --data-root "{{data}}" --destination "{{out}}"
@@ -261,7 +276,7 @@ check: fmt-check clippy test
 check-fast: fmt-check clippy test-fast
 
 # Run the same gate used by GitHub Actions CI.
-ci: check-fast project-contract-check duckdb-adbc-compile-check duckdb-adbc-storage-test duckdb-pgwire-workflow-test evidence-manifest-check probe-static-check runtime-static-check
+ci: check-fast project-contract-check duckdb-adbc-compile-check duckdb-adbc-storage-test duckdb-pgwire-workflow-test duckdb-result-stream-smoke evidence-manifest-check probe-static-check runtime-static-check
 
 # Run the dev QuackGIS server on QUACKGIS_HOST/QUACKGIS_PORT.
 server:
