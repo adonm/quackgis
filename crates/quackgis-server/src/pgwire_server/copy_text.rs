@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Incremental, bounded PostgreSQL text COPY decoding.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use arrow_array::{
-    ArrayRef, BinaryArray, BooleanArray, Date32Array, Decimal128Array, Float32Array, Float64Array,
-    Int16Array, Int32Array, Int64Array, RecordBatch, StringArray, TimestampMicrosecondArray,
+    ArrayRef, BooleanArray, Date32Array, Decimal128Array, Float32Array, Float64Array, Int16Array,
+    Int32Array, Int64Array, RecordBatch, TimestampMicrosecondArray,
+    builder::{BinaryBuilder, StringBuilder},
 };
 use arrow_schema::{DataType, SchemaRef, TimeUnit};
 use chrono::{NaiveDate, NaiveDateTime};
@@ -25,15 +27,114 @@ pub struct CopyDecodeError {
     pub message: String,
 }
 
-type CopyValue = Option<Vec<u8>>;
-type CopyRow = Vec<CopyValue>;
+#[derive(Clone, Copy)]
+struct FieldRange {
+    start: u32,
+    end: u32,
+}
+
+impl FieldRange {
+    const NULL: Self = Self {
+        start: u32::MAX,
+        end: u32::MAX,
+    };
+
+    fn new(start: usize, end: usize) -> Self {
+        Self {
+            start: u32::try_from(start).expect("COPY batch data is bounded below 4 GiB"),
+            end: u32::try_from(end).expect("COPY batch data is bounded below 4 GiB"),
+        }
+    }
+
+    fn is_null(self) -> bool {
+        self.start == u32::MAX
+    }
+
+    fn len(self) -> usize {
+        (self.end - self.start) as usize
+    }
+}
+
+struct CopyRows {
+    data: Vec<u8>,
+    fields: Vec<FieldRange>,
+    row_ends: Vec<usize>,
+    columns: usize,
+}
+
+impl CopyRows {
+    fn new(columns: usize) -> Self {
+        Self {
+            data: Vec::new(),
+            fields: Vec::new(),
+            row_ends: vec![0],
+            columns,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.row_ends.len() - 1
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn value(&self, row: usize, column: usize) -> Option<&[u8]> {
+        let range = self.fields[row * self.columns + column];
+        (!range.is_null()).then(|| &self.data[range.start as usize..range.end as usize])
+    }
+
+    fn split_off(&mut self, row: usize) -> Self {
+        let byte_offset = self.row_ends[row];
+        let data = self.data.split_off(byte_offset);
+        let mut fields = self.fields.split_off(row * self.columns);
+        let field_offset = u32::try_from(byte_offset).expect("COPY batch offset");
+        for range in fields.iter_mut().filter(|range| !range.is_null()) {
+            range.start -= field_offset;
+            range.end -= field_offset;
+        }
+        let mut row_ends = self.row_ends.split_off(row);
+        for end in &mut row_ends {
+            *end -= byte_offset;
+        }
+        self.row_ends.push(byte_offset);
+        Self {
+            data,
+            fields,
+            row_ends,
+            columns: self.columns,
+        }
+    }
+
+    #[cfg(test)]
+    fn from_owned(rows: Vec<Vec<Option<Vec<u8>>>>) -> Self {
+        let columns = rows.first().map_or(0, Vec::len);
+        let mut output = Self::new(columns);
+        for row in rows {
+            assert_eq!(row.len(), columns);
+            for value in row {
+                output.fields.push(match value {
+                    Some(value) => {
+                        let start = output.data.len();
+                        output.data.extend_from_slice(&value);
+                        FieldRange::new(start, output.data.len())
+                    }
+                    None => FieldRange::NULL,
+                });
+            }
+            output.row_ends.push(output.data.len());
+        }
+        output
+    }
+}
 
 pub struct CopyTextDecoder {
     schema: SchemaRef,
     limits: CopyBatchLimits,
-    field: Vec<u8>,
-    row: CopyRow,
-    rows: Vec<CopyRow>,
+    rows: CopyRows,
+    field_start: usize,
+    row_fields: usize,
     row_bytes: usize,
     batch_bytes: usize,
     row_number: usize,
@@ -45,12 +146,13 @@ impl CopyTextDecoder {
         if limits.max_rows == 0 || limits.max_bytes == 0 || limits.max_row_bytes == 0 {
             return Err(copy_error("22023", "COPY batch limits must be positive"));
         }
+        let columns = schema.fields().len();
         Ok(Self {
             schema,
             limits,
-            field: Vec::new(),
-            row: Vec::new(),
-            rows: Vec::new(),
+            rows: CopyRows::new(columns),
+            field_start: 0,
+            row_fields: 0,
             row_bytes: 0,
             batch_bytes: 0,
             row_number: 1,
@@ -80,11 +182,13 @@ impl CopyTextDecoder {
             match byte {
                 b'\t' => self.finish_field()?,
                 b'\n' => {
-                    if self.field.last() == Some(&b'\r') {
-                        self.field.pop();
+                    if self.rows.data.len() > self.field_start
+                        && self.rows.data.last() == Some(&b'\r')
+                    {
+                        self.rows.data.pop();
                     }
-                    if self.row.is_empty() && self.field == br"\." {
-                        self.field.clear();
+                    if self.row_fields == 0 && self.rows.data[self.field_start..] == *br"\." {
+                        self.rows.data.truncate(self.field_start);
                         self.row_bytes = 0;
                         self.terminated = true;
                         continue;
@@ -100,41 +204,47 @@ impl CopyTextDecoder {
                         }
                     }
                 }
-                _ => self.field.push(byte),
+                _ => self.rows.data.push(byte),
             }
         }
         Ok(batches)
     }
 
     pub fn finish(&mut self) -> Result<Vec<RecordBatch>, CopyDecodeError> {
-        if !self.terminated && (!self.field.is_empty() || !self.row.is_empty()) {
+        if !self.terminated && (self.rows.data.len() > self.field_start || self.row_fields > 0) {
             self.finish_row()?;
         }
         self.flush()
     }
 
     fn finish_field(&mut self) -> Result<(), CopyDecodeError> {
-        if self.row.len() >= self.schema.fields().len() {
+        if self.row_fields >= self.schema.fields().len() {
             return Err(copy_error(
                 "22P04",
                 &format!("COPY row {} has too many columns", self.row_number),
             ));
         }
-        let field = std::mem::take(&mut self.field);
-        let value = if field == br"\N" { None } else { Some(field) };
-        self.row.push(value);
+        let value = if self.rows.data[self.field_start..] == *br"\N" {
+            self.rows.data.truncate(self.field_start);
+            FieldRange::NULL
+        } else {
+            FieldRange::new(self.field_start, self.rows.data.len())
+        };
+        self.rows.fields.push(value);
+        self.field_start = self.rows.data.len();
+        self.row_fields += 1;
         Ok(())
     }
 
     fn finish_row(&mut self) -> Result<(), CopyDecodeError> {
         self.finish_field()?;
-        if self.row.len() != self.schema.fields().len() {
+        if self.row_fields != self.schema.fields().len() {
             return Err(copy_error(
                 "22P04",
                 &format!(
                     "COPY row {} has {} columns; expected {}",
                     self.row_number,
-                    self.row.len(),
+                    self.row_fields,
                     self.schema.fields().len()
                 ),
             ));
@@ -142,7 +252,9 @@ impl CopyTextDecoder {
         self.batch_bytes = self.batch_bytes.saturating_add(self.row_bytes);
         self.row_bytes = 0;
         self.row_number += 1;
-        self.rows.push(std::mem::take(&mut self.row));
+        self.rows.row_ends.push(self.rows.data.len());
+        self.field_start = self.rows.data.len();
+        self.row_fields = 0;
         Ok(())
     }
 
@@ -155,9 +267,10 @@ impl CopyTextDecoder {
             return Ok(Vec::new());
         }
         self.batch_bytes = 0;
+        self.field_start = 0;
         bounded_batches(
             Arc::clone(&self.schema),
-            std::mem::take(&mut self.rows),
+            std::mem::replace(&mut self.rows, CopyRows::new(self.schema.fields().len())),
             self.limits.max_bytes,
         )
     }
@@ -165,7 +278,7 @@ impl CopyTextDecoder {
 
 fn bounded_batches(
     schema: SchemaRef,
-    rows: Vec<CopyRow>,
+    rows: CopyRows,
     max_bytes: usize,
 ) -> Result<Vec<RecordBatch>, CopyDecodeError> {
     let batch = build_batch(Arc::clone(&schema), &rows)?;
@@ -185,7 +298,7 @@ fn bounded_batches(
     Ok(batches)
 }
 
-fn build_batch(schema: SchemaRef, rows: &[CopyRow]) -> Result<RecordBatch, CopyDecodeError> {
+fn build_batch(schema: SchemaRef, rows: &CopyRows) -> Result<RecordBatch, CopyDecodeError> {
     let arrays = schema
         .fields()
         .iter()
@@ -198,7 +311,7 @@ fn build_batch(schema: SchemaRef, rows: &[CopyRow]) -> Result<RecordBatch, CopyD
 
 fn copy_array(
     data_type: &DataType,
-    rows: &[CopyRow],
+    rows: &CopyRows,
     column: usize,
 ) -> Result<ArrayRef, CopyDecodeError> {
     match data_type {
@@ -230,35 +343,48 @@ fn copy_array(
                 .map(|values| Arc::new(TimestampMicrosecondArray::from(values)) as ArrayRef)
         }
         DataType::Utf8 => {
-            let values = rows
+            let value_bytes = rows
+                .fields
                 .iter()
-                .map(|row| {
-                    row[column]
-                        .as_deref()
-                        .map(|value| {
-                            decode_copy_field(value, false)
-                                .and_then(|value| field_text(&value).map(str::to_owned))
-                        })
-                        .transpose()
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(Arc::new(StringArray::from(values)) as ArrayRef)
+                .skip(column)
+                .step_by(rows.columns)
+                .filter(|range| !range.is_null())
+                .map(|range| range.len())
+                .sum();
+            let mut builder = StringBuilder::with_capacity(rows.len(), value_bytes);
+            for row in 0..rows.len() {
+                match rows.value(row, column) {
+                    Some(raw) => {
+                        let value = decode_copy_field(raw, false)?;
+                        builder.append_value(field_text(&value)?);
+                    }
+                    None => builder.append_null(),
+                }
+            }
+            Ok(Arc::new(builder.finish()) as ArrayRef)
         }
         DataType::Binary => {
-            let values = rows
+            let value_bytes = rows
+                .fields
                 .iter()
-                .map(|row| {
-                    row[column]
-                        .as_deref()
-                        .map(|value| {
-                            decode_copy_field(value, true).and_then(|value| parse_hex(&value))
-                        })
-                        .transpose()
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(Arc::new(BinaryArray::from_opt_vec(
-                values.iter().map(|value| value.as_deref()).collect(),
-            )) as ArrayRef)
+                .skip(column)
+                .step_by(rows.columns)
+                .filter(|range| !range.is_null())
+                .map(|range| range.len() / 2)
+                .sum();
+            let mut builder = BinaryBuilder::with_capacity(rows.len(), value_bytes);
+            let mut decoded = Vec::new();
+            for row in 0..rows.len() {
+                match rows.value(row, column) {
+                    Some(raw) => {
+                        let value = decode_copy_field(raw, true)?;
+                        parse_hex_into(&value, &mut decoded)?;
+                        builder.append_value(&decoded);
+                    }
+                    None => builder.append_null(),
+                }
+            }
+            Ok(Arc::new(builder.finish()) as ArrayRef)
         }
         unsupported => Err(copy_error(
             "0A000",
@@ -268,14 +394,13 @@ fn copy_array(
 }
 
 fn typed_values<T>(
-    rows: &[CopyRow],
+    rows: &CopyRows,
     column: usize,
     parse: impl Fn(&[u8]) -> Result<T, CopyDecodeError>,
 ) -> Result<Vec<Option<T>>, CopyDecodeError> {
-    rows.iter()
+    (0..rows.len())
         .map(|row| {
-            row[column]
-                .as_deref()
+            rows.value(row, column)
                 .map(|value| decode_copy_field(value, false).and_then(|value| parse(&value)))
                 .transpose()
         })
@@ -346,35 +471,53 @@ fn parse_timestamp(value: &[u8]) -> Result<i64, CopyDecodeError> {
         .map_err(|_| copy_error("22007", "invalid COPY Timestamp value"))
 }
 
-fn parse_hex(value: &[u8]) -> Result<Vec<u8>, CopyDecodeError> {
+fn parse_hex_into(value: &[u8], output: &mut Vec<u8>) -> Result<(), CopyDecodeError> {
     let hex = value
         .strip_prefix(br"\x")
         .ok_or_else(|| copy_error("22P02", "COPY binary value must use \\x hex format"))?;
-    if !hex.len().is_multiple_of(2) || !hex.iter().all(u8::is_ascii_hexdigit) {
+    if !hex.len().is_multiple_of(2) {
         return Err(copy_error(
             "22P02",
             "COPY binary value contains invalid hex",
         ));
     }
-    hex.chunks_exact(2)
-        .map(|pair| {
-            let text = std::str::from_utf8(pair).expect("ASCII hex pair");
-            u8::from_str_radix(text, 16)
-                .map_err(|_| copy_error("22P02", "COPY binary value contains invalid hex"))
-        })
-        .collect()
+    output.clear();
+    output.reserve(hex.len() / 2);
+    for pair in hex.chunks_exact(2) {
+        let high = hex_nibble(pair[0])
+            .ok_or_else(|| copy_error("22P02", "COPY binary value contains invalid hex"))?;
+        let low = hex_nibble(pair[1])
+            .ok_or_else(|| copy_error("22P02", "COPY binary value contains invalid hex"))?;
+        output.push((high << 4) | low);
+    }
+    Ok(())
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn field_text(value: &[u8]) -> Result<&str, CopyDecodeError> {
     std::str::from_utf8(value).map_err(|_| copy_error("22021", "COPY text must be valid UTF-8"))
 }
 
-fn decode_copy_field(raw: &[u8], preserve_single_hex: bool) -> Result<Vec<u8>, CopyDecodeError> {
+fn decode_copy_field(
+    raw: &[u8],
+    preserve_single_hex: bool,
+) -> Result<Cow<'_, [u8]>, CopyDecodeError> {
     // Keep the legacy single-backslash bytea form intact. Standard COPY clients
     // send `\\x...`, which the general escape decoder below turns into `\x...`.
     if preserve_single_hex && raw.starts_with(br"\x") && raw[2..].iter().all(u8::is_ascii_hexdigit)
     {
-        return Ok(raw.to_vec());
+        return Ok(Cow::Borrowed(raw));
+    }
+    if !raw.contains(&b'\\') {
+        return Ok(Cow::Borrowed(raw));
     }
     let mut decoded = Vec::with_capacity(raw.len());
     let mut index = 0;
@@ -425,7 +568,7 @@ fn decode_copy_field(raw: &[u8], preserve_single_hex: bool) -> Result<Vec<u8>, C
         }
         index += 1;
     }
-    Ok(decoded)
+    Ok(Cow::Owned(decoded))
 }
 
 fn copy_error(sqlstate: &'static str, message: &str) -> CopyDecodeError {
@@ -438,7 +581,7 @@ fn copy_error(sqlstate: &'static str, message: &str) -> CopyDecodeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_array::{Array, Int32Array};
+    use arrow_array::{Array, BinaryArray, Int32Array, StringArray};
     use arrow_schema::{Field, Schema};
 
     fn schema() -> SchemaRef {
@@ -494,6 +637,42 @@ mod tests {
     }
 
     #[test]
+    fn contiguous_rows_preserve_empty_null_and_crlf_fields() {
+        assert_eq!(std::mem::size_of::<FieldRange>(), 8);
+        let mut decoder = CopyTextDecoder::new(
+            schema(),
+            CopyBatchLimits {
+                max_rows: 8,
+                max_bytes: 65_536,
+                max_row_bytes: 256,
+            },
+        )
+        .expect("decoder");
+        assert!(
+            decoder
+                .push(b"1\t\t\\N\r\n2\tname\t\\x00\n")
+                .expect("empty/null/CRLF rows")
+                .is_empty()
+        );
+        let batches = decoder.finish().expect("finish rows");
+        let batch = &batches[0];
+        let names = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("names");
+        assert_eq!(names.value(0), "");
+        assert_eq!(names.value(1), "name");
+        let payloads = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .expect("payloads");
+        assert!(payloads.is_null(0));
+        assert_eq!(payloads.value(1), &[0]);
+    }
+
+    #[test]
     fn enforces_row_and_arrow_batch_limits() {
         let mut decoder = CopyTextDecoder::new(
             schema(),
@@ -511,27 +690,36 @@ mod tests {
         assert!(batches.iter().all(|batch| batch.num_rows() == 1));
         assert!(decoder.push(b"3\tthis-row-is-too-large").is_err());
         assert_eq!(
-            decode_copy_field(br"\x41", false).expect("text hex escape"),
+            decode_copy_field(br"\x41", false)
+                .expect("text hex escape")
+                .as_ref(),
             b"A"
         );
         assert_eq!(
-            decode_copy_field(br"\x41", true).expect("legacy binary hex"),
+            decode_copy_field(br"\x41", true)
+                .expect("legacy binary hex")
+                .as_ref(),
             br"\x41"
         );
     }
 
     #[test]
     fn recursively_splits_batches_to_the_arrow_byte_limit() {
-        let rows = (0..8)
-            .map(|id| vec![Some(id.to_string().into_bytes()), Some(vec![b'x'; 40])])
-            .collect::<Vec<_>>();
+        let rows = CopyRows::from_owned(
+            (0..8)
+                .map(|id| vec![Some(id.to_string().into_bytes()), Some(vec![b'x'; 40])])
+                .collect(),
+        );
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Int32, false),
             Field::new("name", DataType::Utf8, false),
         ]));
-        let one_row = build_batch(Arc::clone(&schema), &rows[..1])
-            .expect("one-row batch")
-            .get_array_memory_size();
+        let one_row = build_batch(
+            Arc::clone(&schema),
+            &CopyRows::from_owned(vec![vec![Some(b"0".to_vec()), Some(vec![b'x'; 40])]]),
+        )
+        .expect("one-row batch")
+        .get_array_memory_size();
         let full = build_batch(Arc::clone(&schema), &rows)
             .expect("full batch")
             .get_array_memory_size();
