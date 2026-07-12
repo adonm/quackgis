@@ -86,8 +86,24 @@ Clean serial reference runs on source `12817bcd` and pinned DuckDB 1.5.4 produce
 
 Both exact count/sum oracles pass and remain below the +128 MiB reference budget
 on the recorded Ryzen 7 7700X/64 GiB Bazzite host. This closes the cardinality
-independence, first-row, and measured 1M/10M BIGINT-stream portions of M1. Wider
-variable-width/native-batch shapes remain open.
+independence, first-row, and measured 1M/10M BIGINT-stream portions of M1.
+
+### Wide variable-width results
+
+The companion wide-result profile returns ordered BIGINT, nullable VARCHAR up to
+the configured 256-byte payload, and nullable BLOB up to 128 bytes. It checks every
+row, NULL disposition, text value, and binary byte pattern while recording native
+Arrow batch count, one-batch high water, first-row latency, throughput, and RSS.
+
+```sh
+mise exec -- just duckdb-wide-result-profile \
+  level=local rows=100000 \
+  out=.tmp/duckdb-wide-result/local-r100k.json
+```
+
+The first dirty-tree local run crossed 49 native batches with one batch in flight,
+zero batch-limit rejections, exact values, and 9 MiB RSS delta. A clean 1M-row
+reference run remains the claim gate.
 
 ## Cancellation profile
 
@@ -109,10 +125,31 @@ zero failures, 100 explicit quarantines, and a usable fresh session. This closes
 the M1 100-cancel/500 ms p95 gate for sequential long-query cancellation on the
 recorded reference host.
 
+## COPY ingest profile
+
+The COPY profile generates the same BIGINT/VARCHAR/WKB rows through direct
+streaming ADBC and bounded 60 KiB pgwire text chunks, then verifies exact counts,
+ID sums, and WKB bytes in both published tables. It records pgwire RSS,
+rows/bytes/batches, publication latency, both throughputs, and the pgwire/direct
+throughput ratio.
+
+```sh
+mise exec -- just duckdb-copy-profile \
+  level=local rows=1000000 \
+  out=.tmp/duckdb-copy/local-r1m.json
+```
+
+The first dirty-tree 1M-row local run accepted 59.87 MiB of wire data with 64 MiB
+RSS delta and a 0.272 pgwire/direct row-throughput ratio, passing the reduced
+384 MiB and 0.25 budgets. The clean 10M-row reference gate remains open; it uses
+the identical generator, publication path, and oracle with 256 MiB and 0.50
+budgets.
+
 ## Next profiles
 
 E0 first adds the common evidence envelope and gate-oriented scenario support.
-E1 then adds time-to-first-row, bounded RSS/batches, cancellation, COPY,
-selective scans, grouped aggregates, bounded spatial joins, fragmented-file
+E1 then adds transport overhead and mixed-class concurrency after the completed
+profile implementations for result RSS, wide results, cancellation, and COPY.
+Later profiles cover selective scans, grouped aggregates, bounded spatial joins, fragmented-file
 compaction, plans, bytes scanned, spill, and configured-concurrency evidence. The
 exact 10M profile must pass twice before introducing 100M.

@@ -28,6 +28,13 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 - A clean 100-sample cancellation reference on source `8b0d1e46` passes the 500 ms
   M1 budget at 1.51 ms p95 with 100 completed native calls, zero failures, and
   deterministic quarantine/fresh-session behavior.
+- Parameterized nullable VARCHAR/BLOB result profiling with every-row value/NULL
+  checks, native batch counts, first-row timing, throughput, and RSS; its first
+  dirty-tree 100k local run crosses 49 batches at 9 MiB RSS delta.
+- Parameterized direct streaming ADBC versus bounded pgwire COPY profiling with
+  exact count/sum/WKB publication, RSS, rows/bytes/batches, commit timing, and
+  throughput ratio; its first dirty-tree 1M local run passes at 64 MiB RSS delta
+  and a 0.272 pgwire/direct ratio.
 - Owned Rust pgwire/TLS/SCRAM edge over DuckDB ADBC.
 - Official local DuckLake create, Arrow ingest/query, transaction, snapshot
   inspection, adjacent-file merge, and reopen workflows.

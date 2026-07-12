@@ -242,6 +242,21 @@ duckdb-result-stream-profile level="smoke" rows="100000" out=".tmp/duckdb-result
 duckdb-result-stream-smoke:
     just duckdb-result-stream-profile level=smoke rows=100000 out=.tmp/duckdb-result-stream/smoke-r100k.json
 
+# Exercise nullable variable-width VARCHAR/BLOB results across native batches.
+duckdb-wide-result-profile level="smoke" rows="10000" out=".tmp/duckdb-wide-result/manifest.json" environment="host_process" driver=duckdb_adbc_driver:
+    @set -eu; level_arg='{{level}}'; rows_arg='{{rows}}'; out_arg='{{out}}'; environment_arg='{{environment}}'; driver_arg='{{driver}}'; \
+    level_arg="${level_arg#level=}"; rows_arg="${rows_arg#rows=}"; out_arg="${out_arg#out=}"; environment_arg="${environment_arg#environment=}"; driver_arg="${driver_arg#driver=}"; \
+    if [ ! -f "$driver_arg" ]; then echo 'DuckDB ADBC driver is missing; run `mise run duckdb-bootstrap`' >&2; exit 2; fi; \
+    driver_arg="$(realpath "$driver_arg")"; duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; out_arg="$(realpath -m "$out_arg")"; \
+    HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" QUACKGIS_PROFILE_OUT="$out_arg" \
+      QUACKGIS_EVIDENCE_LEVEL="$level_arg" QUACKGIS_EXECUTION_ENVIRONMENT="$environment_arg" QUACKGIS_PROFILE_ROWS="$rows_arg" \
+      cargo test -p quackgis-server --release --test roadmap_profiles wide_result_stream_profile -- --ignored --exact --nocapture --test-threads=1; \
+    python3 scripts/evidence_manifest_check.py "$out_arg"
+
+# Required fast native variable-width result evidence.
+duckdb-wide-result-smoke:
+    just duckdb-wide-result-profile level=smoke rows=10000 out=.tmp/duckdb-wide-result/smoke-r10k.json
+
 # Measure long-query cancellation latency and explicit session quarantine.
 duckdb-cancellation-profile level="smoke" iterations="5" out=".tmp/duckdb-cancellation/manifest.json" environment="host_process" driver=duckdb_adbc_driver:
     @set -eu; level_arg='{{level}}'; iterations_arg='{{iterations}}'; out_arg='{{out}}'; environment_arg='{{environment}}'; driver_arg='{{driver}}'; \
@@ -256,6 +271,21 @@ duckdb-cancellation-profile level="smoke" iterations="5" out=".tmp/duckdb-cancel
 # Required fast native cancellation evidence.
 duckdb-cancellation-smoke:
     just duckdb-cancellation-profile level=smoke iterations=5 out=.tmp/duckdb-cancellation/smoke-n5.json
+
+# Compare direct streaming ADBC ingest with bounded pgwire text COPY.
+duckdb-copy-profile level="smoke" rows="10000" out=".tmp/duckdb-copy/manifest.json" environment="host_process" driver=duckdb_adbc_driver:
+    @set -eu; level_arg='{{level}}'; rows_arg='{{rows}}'; out_arg='{{out}}'; environment_arg='{{environment}}'; driver_arg='{{driver}}'; \
+    level_arg="${level_arg#level=}"; rows_arg="${rows_arg#rows=}"; out_arg="${out_arg#out=}"; environment_arg="${environment_arg#environment=}"; driver_arg="${driver_arg#driver=}"; \
+    if [ ! -f "$driver_arg" ]; then echo 'DuckDB ADBC driver is missing; run `mise run duckdb-bootstrap`' >&2; exit 2; fi; \
+    driver_arg="$(realpath "$driver_arg")"; duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; out_arg="$(realpath -m "$out_arg")"; \
+    HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" QUACKGIS_PROFILE_OUT="$out_arg" \
+      QUACKGIS_EVIDENCE_LEVEL="$level_arg" QUACKGIS_EXECUTION_ENVIRONMENT="$environment_arg" QUACKGIS_PROFILE_ROWS="$rows_arg" \
+      cargo test -p quackgis-server --release --test roadmap_profiles copy_ingest_profile -- --ignored --exact --nocapture --test-threads=1; \
+    python3 scripts/evidence_manifest_check.py "$out_arg"
+
+# Required fast native COPY evidence.
+duckdb-copy-smoke:
+    just duckdb-copy-profile level=smoke rows=10000 out=.tmp/duckdb-copy/smoke-r10k.json
 
 # Create an offline, exact-path local DuckLake backup with a checksum manifest.
 duckdb-local-backup catalog=catalog data=data out=".tmp/duckdb-backup":
@@ -291,7 +321,7 @@ check: fmt-check clippy test
 check-fast: fmt-check clippy test-fast
 
 # Run the same gate used by GitHub Actions CI.
-ci: check-fast project-contract-check duckdb-adbc-compile-check duckdb-adbc-storage-test duckdb-pgwire-workflow-test duckdb-result-stream-smoke duckdb-cancellation-smoke evidence-manifest-check probe-static-check runtime-static-check
+ci: check-fast project-contract-check duckdb-adbc-compile-check duckdb-adbc-storage-test duckdb-pgwire-workflow-test duckdb-result-stream-smoke duckdb-wide-result-smoke duckdb-cancellation-smoke duckdb-copy-smoke evidence-manifest-check probe-static-check runtime-static-check
 
 # Run the dev QuackGIS server on QUACKGIS_HOST/QUACKGIS_PORT.
 server:

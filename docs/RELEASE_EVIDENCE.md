@@ -15,7 +15,9 @@ one exact DuckDB/extension bundle.
 | `just evidence-manifest-check` | common evidence envelope, source/runtime/host metadata, and claim-level validation |
 | `just duckdb-transport-profile` | parameterized smoke/local/reference scalar transport scenario using one correctness oracle |
 | `just duckdb-result-stream-profile` | parameterized result RSS/first-row/cardinality profile; 1M/10M reference runs close the M1 scale gate |
+| `just duckdb-wide-result-profile` | nullable variable-width VARCHAR/BLOB RSS, exact-value, and native-batch profile |
 | `just duckdb-cancellation-profile` | sequential long-query cancel latency, SQLSTATE, quarantine, fresh-session, and native counter evidence |
+| `just duckdb-copy-profile` | direct ADBC versus pgwire COPY RSS, throughput, publication metrics, and exact WKB/count/sum oracle |
 | `.tmp/duckdb/manifest.json` | native library/extension paths and SHA-256 values |
 | `.tmp/duckdb-current-benchmark/manifest.json` | deterministic direct DuckDB/ADBC/pgwire correctness and liveness comparison |
 
