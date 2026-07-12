@@ -9,6 +9,12 @@ pub enum CliAuthMode {
     Password,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum, Eq, PartialEq)]
+pub enum CliTlsMode {
+    Preferred,
+    Required,
+}
+
 #[derive(Debug, Clone, Parser)]
 #[command(
     name = "quackgis-server",
@@ -85,6 +91,8 @@ pub struct Cli {
     pub tls_cert: Option<String>,
     #[arg(long, env = "QUACKGIS_TLS_KEY")]
     pub tls_key: Option<String>,
+    #[arg(long, env = "QUACKGIS_TLS_MODE", value_enum, default_value_t = CliTlsMode::Preferred)]
+    pub tls_mode: CliTlsMode,
     #[arg(long, env = "QUACKGIS_AUTH_MODE", value_enum, default_value_t = CliAuthMode::Trust)]
     pub auth_mode: CliAuthMode,
     #[arg(long, env = "QUACKGIS_READWRITE_USER", default_value = "postgres")]
@@ -111,4 +119,21 @@ pub struct Cli {
     pub metrics_host: String,
     #[arg(long, env = "QUACKGIS_METRICS_PORT")]
     pub metrics_port: Option<u16>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_required_tls_mode() {
+        let cli = Cli::try_parse_from([
+            "quackgis-server",
+            "--tls-mode=required",
+            "--tls-cert=server.pem",
+            "--tls-key=server.key",
+        ])
+        .expect("required TLS CLI");
+        assert_eq!(cli.tls_mode, CliTlsMode::Required);
+    }
 }

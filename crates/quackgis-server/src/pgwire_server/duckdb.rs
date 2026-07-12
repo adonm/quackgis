@@ -135,13 +135,17 @@ impl DuckDbHandlerFactory {
             },
             result_batch_bytes: options.result_batch_bytes(),
         });
-        let startup = match auth.mode() {
-            AuthMode::Trust => QuackGisStartupHandler::Trust(SimpleStartupHandler {
+        let startup_auth = match auth.mode() {
+            AuthMode::Trust => super::StartupAuthHandler::Trust(SimpleStartupHandler {
                 connection_manager: Arc::clone(&manager),
             }),
-            AuthMode::Password => QuackGisStartupHandler::Password(Box::new(
+            AuthMode::Password => super::StartupAuthHandler::Password(Box::new(
                 super::PerConnectionScramStartupHandler::new(auth.clone(), Arc::clone(&manager)),
             )),
+        };
+        let startup = QuackGisStartupHandler {
+            auth: startup_auth,
+            tls_required: options.tls_required(),
         };
         Self {
             service: Arc::new(DuckDbService::new(storage, auth, Arc::clone(&control))),

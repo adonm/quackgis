@@ -61,6 +61,7 @@ DuckDB home. The server defaults to `127.0.0.1:5434`.
 | `QUACKGIS_WRITE_ALLOWLIST` / `QUACKGIS_READ_ALLOWLIST` | unset | comma-separated normalized table policy |
 | `QUACKGIS_MAINTENANCE_USER` | unset | existing read/write identity allowed to invoke bounded maintenance; disabled when unset |
 | `QUACKGIS_TLS_CERT` / `QUACKGIS_TLS_KEY` | unset | optional PEM certificate and PKCS#8 key; configure together |
+| `QUACKGIS_TLS_MODE` | `preferred` | `preferred` permits plaintext; `required` needs both TLS paths and rejects plaintext startup |
 | `QUACKGIS_METRICS_HOST` / `QUACKGIS_METRICS_PORT` | `127.0.0.1` / unset | optional `/healthz`, `/readyz`, and `/metrics` HTTP listener |
 | `QUACKGIS_LOG` | `info` | log filter |
 
@@ -145,12 +146,24 @@ separate root; never copy a retired writer's authority marker.
 - Trust mode is development-only.
 - Password mode uses SCRAM-SHA-256.
 - TLS configuration fails startup if only one path is supplied or material is
-  malformed; deployments must still enforce network policy because TLS is not
-  currently mandatory when configured.
+  malformed. Set `QUACKGIS_TLS_MODE=required` with both paths to reject plaintext
+  startup; the default `preferred` mode preserves the local development behavior.
 - Read/write allowlists are enforced against parsed statements before ADBC
   prepare or schema lookup.
 - The native driver path is an operator-controlled code-loading trust boundary and
   is verified against the committed SHA-256 before opening storage.
+
+Production-style local deployments should use all three TLS settings together:
+
+```sh
+QUACKGIS_TLS_MODE=required \
+QUACKGIS_TLS_CERT=/run/secrets/quackgis.crt \
+QUACKGIS_TLS_KEY=/run/secrets/quackgis.key \
+mise exec -- just server
+```
+
+Certificate/client verification and restart-based rotation evidence remain Local
+1.0 gates; required mode alone is not that evidence.
 
 ## Shutdown, backup, and recovery
 

@@ -45,6 +45,9 @@ Important limits:
 - broad PostgreSQL catalogs and named GIS-client parity are incomplete; and
 - remote/shared catalog and object-storage profiles fail closed.
 
+TLS remains optional for local development. Set `QUACKGIS_TLS_MODE=required` with
+`QUACKGIS_TLS_CERT` and `QUACKGIS_TLS_KEY` to fail closed on plaintext startup.
+
 The maintained Rust pgwire client also resolves the geometry sentinel through a
 narrow structural `pg_type` adapter and verifies RowDescription plus text, binary,
 and NULL WKB transport. This is not yet QGIS/OGR discovery evidence.

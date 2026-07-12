@@ -84,6 +84,8 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   evidence through the native pgwire client.
 - Ledger-pinned `0A000` simple/extended protocol behavior and session-reuse
   evidence for all 10 deferred Rust-edge and five extension-candidate spatial gaps.
+- Explicit `preferred`/`required` TLS policy: required mode needs paired valid
+  material and rejects insecure startup before trust or SCRAM authentication.
 
 ### Changed
 

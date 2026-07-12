@@ -15,7 +15,7 @@ Disposition:
 | Capability | Owner/disposition | Current evidence | Next gate |
 |---|---|---|---|
 | simple/extended pgwire | Rust edge | native workflow; maintained SET/SHOW; AST `public` mapping; quoted COPY targets | wider parameters and catalog-backed client discovery |
-| TLS/SCRAM/startup | Rust edge | unit + real SCRAM workflow | TLS-required mode, rotation/client evidence |
+| TLS/SCRAM/startup | Rust edge | fail-closed material checks, explicit TLS-required startup policy, real SCRAM workflow | encrypted client, plaintext-denial, and restart-rotation evidence |
 | parsed read/write policy | Rust edge | unit + denied real-client cases | filtered metadata/admin permissions |
 | portals/fetch paging | Rust edge | live ADBC stream plus three-page native workflow; native partial-drop quarantine proof | realistic fetch sizes and memory profile |
 | query cancellation | native + Rust edge | cancel token interrupts active DuckDB stream with SQLSTATE `57014`; uncertain stream cleanup is quarantined | 100-cancel p95 and same-client cancellation disposition |

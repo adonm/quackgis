@@ -8,7 +8,7 @@ use tokio::net::TcpListener;
 use tokio::signal;
 
 use quackgis_server::auth::{AuthConfig, AuthMode, parse_read_allowlist, parse_write_allowlist};
-use quackgis_server::cli::{Cli, CliAuthMode};
+use quackgis_server::cli::{Cli, CliAuthMode, CliTlsMode};
 use quackgis_server::duckdb_adbc_storage::{
     DuckDbAdbcConfig, DuckDbAdbcStorage, DuckDbResourceConfig, ExtensionPolicy,
 };
@@ -23,6 +23,9 @@ async fn main() -> anyhow::Result<()> {
 
     if cli.tls_cert.is_some() != cli.tls_key.is_some() {
         anyhow::bail!("--tls-cert and --tls-key must be specified together");
+    }
+    if cli.tls_mode == CliTlsMode::Required && cli.tls_cert.is_none() {
+        anyhow::bail!("--tls-mode=required requires --tls-cert and --tls-key");
     }
     if cli.catalog_url.is_some()
         || cli.catalog_path.contains("://")
@@ -138,7 +141,8 @@ async fn main() -> anyhow::Result<()> {
         .with_copy_batch_bytes(cli.copy_batch_bytes)
         .with_copy_max_row_bytes(cli.copy_max_row_bytes)
         .with_tls_cert_path(cli.tls_cert.clone())
-        .with_tls_key_path(cli.tls_key.clone());
+        .with_tls_key_path(cli.tls_key.clone())
+        .with_tls_required(cli.tls_mode == CliTlsMode::Required);
 
     let pgwire_listener = TcpListener::bind(format!("{}:{}", cli.host, cli.port)).await?;
     let pgwire_address = pgwire_listener.local_addr()?;
@@ -174,8 +178,10 @@ async fn main() -> anyhow::Result<()> {
         "quackgis-server listening on {}:{} ({}; {}); engine=DuckDB; storage=official-DuckLake",
         pgwire_address.ip(),
         pgwire_address.port(),
-        if cli.tls_cert.is_some() {
-            "TLS enabled"
+        if cli.tls_mode == CliTlsMode::Required {
+            "TLS required"
+        } else if cli.tls_cert.is_some() {
+            "TLS available"
         } else {
             "no TLS (dev mode)"
         },

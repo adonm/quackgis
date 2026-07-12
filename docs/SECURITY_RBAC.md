@@ -12,17 +12,19 @@ QuackGIS currently implements a small service-identity model, not PostgreSQL RBA
 | normalized read/write table allowlists | structural policy unit + denied real cases |
 | separate opt-in maintenance identity and table policy | auth/parser unit + real pgwire compaction workflow |
 | fail-closed TLS material configuration | startup validation |
+| explicit TLS-required policy | startup rejects insecure clients; configuration unit tests |
 | bounded/redacted auth and authorization audit events | audit/policy tests |
 | optional private metrics endpoint | metrics unit tests |
 | native driver digest/version validation | storage unit/native tests |
 
-Broad catalog filtering, administrative permissions, mandatory TLS, channel
-binding, secret rotation, and production failure drills remain open.
+Broad catalog filtering, administrative permissions, encrypted-client evidence,
+channel binding, secret rotation, and production failure drills remain open.
 
 ## Trust boundaries
 
-1. **Client → pgwire:** use SCRAM and deployment-enforced TLS/network policy outside
-   local development. Configuring TLS does not currently forbid plaintext.
+1. **Client → pgwire:** use SCRAM and `QUACKGIS_TLS_MODE=required` outside local
+   development. `preferred` mode permits plaintext for development; required mode
+   needs paired certificate/key material and rejects insecure startup before auth.
 2. **Server → native DuckDB:** the driver path loads native code and must remain
    operator-controlled; startup verifies exact digest/version.
 3. **SQL → ADBC:** exactly one structurally parsed statement is authorized before
@@ -49,7 +51,7 @@ binding, secret rotation, and production failure drills remain open.
 
 - malformed/half-configured TLS fails startup;
 - wrong password never falls back to trust;
-- deployment plaintext-denial is verified;
+- a real encrypted client and plaintext-denial workflow is verified;
 - read-only and allowlist denials return stable SQLSTATE `42501` before ADBC;
 - query timeout/cancel and connection quarantine do not bypass policy;
 - secret rotation and revocation have a documented deployment behavior;

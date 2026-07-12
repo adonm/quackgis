@@ -15,6 +15,7 @@ use pgwire::api::auth::{
     StartupHandler,
 };
 use pgwire::api::{ClientInfo, ConnectionManager, ErrorHandler, PgWireServerHandlers};
+use pgwire::error::ErrorInfo;
 use pgwire::tokio::process_socket;
 use rustls_pemfile::{certs, pkcs8_private_keys};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
@@ -39,6 +40,7 @@ pub struct ServerOptions {
     port: u16,
     tls_cert_path: Option<String>,
     tls_key_path: Option<String>,
+    tls_required: bool,
     max_connections: usize,
     max_active_queries: usize,
     max_reader_queries: usize,
@@ -61,6 +63,7 @@ impl Default for ServerOptions {
             port: 5432,
             tls_cert_path: None,
             tls_key_path: None,
+            tls_required: false,
             max_connections: 64,
             max_active_queries: 8,
             max_reader_queries: 8,
@@ -100,6 +103,11 @@ impl ServerOptions {
 
     pub fn with_tls_key_path(mut self, path: Option<String>) -> Self {
         self.tls_key_path = path;
+        self
+    }
+
+    pub fn with_tls_required(mut self, required: bool) -> Self {
+        self.tls_required = required;
         self
     }
 
@@ -215,6 +223,10 @@ impl ServerOptions {
     fn copy_max_row_bytes(&self) -> usize {
         self.copy_max_row_bytes
     }
+
+    fn tls_required(&self) -> bool {
+        self.tls_required
+    }
 }
 
 fn setup_tls(cert_path: &str, key_path: &str) -> Result<TlsAcceptor, IoError> {
@@ -232,6 +244,34 @@ fn setup_tls(cert_path: &str, key_path: &str) -> Result<TlsAcceptor, IoError> {
         .with_single_cert(certificates, key)
         .map_err(|error| IoError::new(ErrorKind::InvalidInput, error))?;
     Ok(TlsAcceptor::from(Arc::new(config)))
+}
+
+fn configure_tls(options: &ServerOptions) -> Result<Option<TlsAcceptor>, IoError> {
+    let tls_acceptor = match (
+        options.tls_cert_path.as_deref(),
+        options.tls_key_path.as_deref(),
+    ) {
+        (Some(cert), Some(key)) => Some(setup_tls(cert, key).map_err(|error| {
+            IoError::new(
+                error.kind(),
+                format!("failed to configure requested TLS: {error}"),
+            )
+        })?),
+        (None, None) => None,
+        _ => {
+            return Err(IoError::new(
+                ErrorKind::InvalidInput,
+                "TLS certificate and key must be configured together",
+            ));
+        }
+    };
+    if options.tls_required && tls_acceptor.is_none() {
+        return Err(IoError::new(
+            ErrorKind::InvalidInput,
+            "TLS-required mode needs a certificate and private key",
+        ));
+    }
+    Ok(tls_acceptor)
 }
 
 pub async fn serve_with_handlers<H>(
@@ -267,24 +307,7 @@ pub async fn serve_with_handlers_on_listener_until<H>(
 where
     H: PgWireServerHandlers + Send + Sync + 'static,
 {
-    let tls_acceptor = match (
-        options.tls_cert_path.as_deref(),
-        options.tls_key_path.as_deref(),
-    ) {
-        (Some(cert), Some(key)) => Some(setup_tls(cert, key).map_err(|error| {
-            IoError::new(
-                error.kind(),
-                format!("failed to configure requested TLS: {error}"),
-            )
-        })?),
-        (None, None) => None,
-        _ => {
-            return Err(IoError::new(
-                ErrorKind::InvalidInput,
-                "TLS certificate and key must be configured together",
-            ));
-        }
-    };
+    let tls_acceptor = configure_tls(options)?;
     log::info!("quackgis pgwire listening on {}", listener.local_addr()?);
     let limiter =
         (options.max_connections > 0).then(|| Arc::new(Semaphore::new(options.max_connections)));
@@ -434,9 +457,14 @@ impl StartupHandler for PerConnectionScramStartupHandler {
     }
 }
 
-enum QuackGisStartupHandler {
+enum StartupAuthHandler {
     Trust(SimpleStartupHandler),
     Password(Box<PerConnectionScramStartupHandler>),
+}
+
+struct QuackGisStartupHandler {
+    auth: StartupAuthHandler,
+    tls_required: bool,
 }
 
 #[async_trait]
@@ -452,9 +480,18 @@ impl StartupHandler for QuackGisStartupHandler {
         pgwire::error::PgWireError:
             From<<C as futures::Sink<pgwire::messages::PgWireBackendMessage>>::Error>,
     {
-        match self {
-            Self::Trust(handler) => handler.on_startup(client, message).await,
-            Self::Password(handler) => handler.on_startup(client, message).await,
+        if self.tls_required && !client.is_secure() {
+            return Err(pgwire::error::PgWireError::UserError(Box::new(
+                ErrorInfo::new(
+                    "FATAL".to_owned(),
+                    "28000".to_owned(),
+                    "TLS is required for this QuackGIS endpoint".to_owned(),
+                ),
+            )));
+        }
+        match &self.auth {
+            StartupAuthHandler::Trust(handler) => handler.on_startup(client, message).await,
+            StartupAuthHandler::Password(handler) => handler.on_startup(client, message).await,
         }
     }
 }
@@ -493,5 +530,29 @@ impl ErrorHandler for LoggingErrorHandler {
         if kind == "auth_failure" {
             crate::audit::log_auth_failure(user, kind);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tls_required_mode_fails_without_material() {
+        let error = configure_tls(&ServerOptions::new().with_tls_required(true))
+            .err()
+            .expect("required TLS without material");
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("TLS-required"));
+    }
+
+    #[test]
+    fn tls_material_must_be_paired() {
+        let error =
+            configure_tls(&ServerOptions::new().with_tls_cert_path(Some("server.pem".to_owned())))
+                .err()
+                .expect("certificate without key");
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("configured together"));
     }
 }
