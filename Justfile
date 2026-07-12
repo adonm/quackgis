@@ -5,8 +5,9 @@ host := env_var_or_default("QUACKGIS_HOST", "127.0.0.1")
 port := env_var_or_default("QUACKGIS_PORT", "5434")
 catalog := env_var_or_default("QUACKGIS_CATALOG_PATH", ".tmp/dev/quackgis.ducklake")
 data := env_var_or_default("QUACKGIS_DATA_PATH", ".tmp/dev/data")
-container_engine := env_var_or_default("CONTAINER_ENGINE", "podman")
+container_engine := env_var_or_default("CONTAINER_ENGINE", "")
 duckdb_runtime_image := env_var_or_default("QUACKGIS_DUCKDB_RUNTIME_IMAGE", "localhost/quackgis-duckdb-runtime:dev")
+kind_client_image := env_var_or_default("QUACKGIS_KIND_CLIENT_IMAGE", "localhost/quackgis-kind-clients:dev")
 duckdb_bin := env_var_or_default("DUCKDB_BIN", "duckdb")
 duckdb_version := env_var_or_default("DUCKDB_VERSION", "1.5.4")
 duckdb_home := env_var_or_default("DUCKDB_HOME", ".tmp/duckdb/home")
@@ -32,14 +33,19 @@ setup:
 
 # Verify the local development toolchain expected by repo recipes.
 doctor:
-    mise --version
-    just --version
-    cargo --version
+    python3 scripts/project_doctor.py
+    @test -f '{{duckdb_adbc_driver}}' || printf '%s\n' 'note: DuckDB ADBC driver missing; run `just setup`.'
+
+# Fail unless the core build/test toolchain is installed.
+doctor-core:
+    python3 scripts/project_doctor.py --check core
     cargo fmt --version
     cargo clippy --version
-    mise exec -- duckdb --version
     @test -f '{{duckdb_adbc_driver}}' || { printf '%s\n' 'DuckDB ADBC driver missing; run `just setup`.' >&2; exit 2; }
-    @printf "QuackGIS dev toolchain looks usable. Run 'just smoke' for a quick server check.\n"
+
+# Fail unless Kind, kubectl, TLS tooling, and one usable container engine are installed.
+doctor-kind: doctor-core
+    python3 scripts/project_doctor.py --check kind
 
 # Smallest newcomer smoke: run the real DuckDB pgwire workflow.
 smoke: duckdb-pgwire-workflow-test
@@ -404,6 +410,42 @@ probe-static-check:
 kind-static-check:
     python3 deploy/kind/render.py --check
     python3 scripts/tests/test_kind_render.py
+    sh -n deploy/kind/up.sh deploy/kind/down.sh
+
+# Build the non-root psql/psycopg/OGR qualification image with the selected engine.
+kind-client-image:
+    @set -eu; engine="$(CONTAINER_ENGINE='{{container_engine}}' python3 scripts/project_doctor.py --container-engine)"; \
+    "$engine" build -t {{kind_client_image}} -f deploy/Containerfile.kind-clients .; \
+    "$engine" run --rm --entrypoint /bin/sh {{kind_client_image}} -c \
+      'set -eu; id; psql --version; python3 -c "import psycopg; print(\"psycopg \" + psycopg.__version__)"; ogrinfo --version; ogrinfo --formats | grep -F "PostgreSQL -vector-"'
+
+# Build both images used by the local Kind qualification topology.
+kind-local-images: duckdb-runtime-image kind-client-image
+
+# Create/update the local Kind cluster, load both local images, and wait for QuackGIS.
+kind-up-local: doctor-kind kind-local-images
+    @set -eu; engine="$(CONTAINER_ENGINE='{{container_engine}}' python3 scripts/project_doctor.py --container-engine)"; \
+    CONTAINER_ENGINE="$engine" \
+    QUACKGIS_RUNTIME_LOAD_IMAGE='{{duckdb_runtime_image}}' \
+    QUACKGIS_CLIENT_LOAD_IMAGE='{{kind_client_image}}' \
+    deploy/kind/up.sh
+
+# Run all rendered psql, psycopg, and OGR jobs against the local Kind service.
+kind-client-gates:
+    @set -eu; export KUBECONFIG="${KUBECONFIG:-$PWD/.tmp/kind/kubeconfig}"; \
+    kubectl delete -f .tmp/kind/rendered/clients.yaml --ignore-not-found >/dev/null; \
+    kubectl apply -f .tmp/kind/rendered/clients.yaml; \
+    for job in quackgis-psql quackgis-psycopg quackgis-ogr; do \
+      if ! kubectl -n quackgis wait --for=condition=complete "job/$job" --timeout=2m; then \
+        kubectl -n quackgis logs "job/$job" --all-containers=true || true; exit 1; \
+      fi; \
+      kubectl -n quackgis logs "job/$job" --all-containers=true; \
+    done
+
+# Delete the named local Kind cluster using the auto-selected provider.
+kind-down:
+    @set -eu; engine="$(CONTAINER_ENGINE='{{container_engine}}' python3 scripts/project_doctor.py --container-engine)"; \
+    CONTAINER_ENGINE="$engine" deploy/kind/down.sh
 
 # Validate maintained documentation links, commands, and spatial claims.
 project-contract-check:
@@ -426,18 +468,20 @@ duckdb-runtime-context:
 
 # Build the immutable local DuckDB evaluation runtime image.
 duckdb-runtime-image: duckdb-runtime-static-check duckdb-runtime-context
-    {{container_engine}} build -t {{duckdb_runtime_image}} -f deploy/Containerfile.duckdb-runtime .tmp/duckdb-runtime
+    @set -eu; engine="$(CONTAINER_ENGINE='{{container_engine}}' python3 scripts/project_doctor.py --container-engine)"; \
+    "$engine" build -t {{duckdb_runtime_image}} -f deploy/Containerfile.duckdb-runtime .tmp/duckdb-runtime
 
 # Prove pinned extensions load with all container networking disabled.
 duckdb-runtime-offline-smoke: duckdb-runtime-image
-    {{container_engine}} run --rm --network none --entrypoint /usr/local/bin/duckdb {{duckdb_runtime_image}} -csv -noheader :memory: -c "LOAD spatial; LOAD ducklake; SELECT ST_AsText(ST_Point(1, 2));"
     @set -eu; \
-    container_id="$({{container_engine}} run -d --network none {{duckdb_runtime_image}})"; \
-    trap '{{container_engine}} rm -f "$container_id" >/dev/null 2>&1 || true' EXIT; \
+    engine="$(CONTAINER_ENGINE='{{container_engine}}' python3 scripts/project_doctor.py --container-engine)"; \
+    "$engine" run --rm --network none --entrypoint /usr/local/bin/duckdb {{duckdb_runtime_image}} -csv -noheader :memory: -c "LOAD spatial; LOAD ducklake; SELECT ST_AsText(ST_Point(1, 2));"; \
+    container_id="$("$engine" run -d --network none {{duckdb_runtime_image}})"; \
+    trap '"$engine" rm -f "$container_id" >/dev/null 2>&1 || true' EXIT; \
     sleep 3; \
-    if ! {{container_engine}} exec "$container_id" /bin/sh -c 'kill -0 1'; then \
-        {{container_engine}} logs "$container_id"; \
+    if ! "$engine" exec "$container_id" /bin/sh -c 'kill -0 1'; then \
+        "$engine" logs "$container_id"; \
         exit 1; \
     fi; \
-    {{container_engine}} logs "$container_id"; \
+    "$engine" logs "$container_id"; \
     printf 'duckdb_runtime_server_smoke_ok\n'

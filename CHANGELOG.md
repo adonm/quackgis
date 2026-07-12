@@ -52,6 +52,10 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 - The clean 10M-row COPY reference on source `9e4611ed` processes 647,777,780
   wire bytes with 126 MiB RSS delta and a 0.528 pgwire/direct throughput ratio,
   passing the 256 MiB and 0.50 M2 budgets with exact count/sum/WKB publication.
+- Project tooling now reports installed/missing core, Kind, container, and named
+  client tools through `just doctor`, auto-selects usable Podman before Docker
+  unless explicitly overridden, and provides a pinned rootless local Kind flow
+  that builds and loads digest-addressed runtime and psql/psycopg/OGR images.
 - The initial minimal DuckDB-only Kind topology: one TLS-required StatefulSet,
   retained node-local PV/PVC, generated TLS/auth Secrets, health probes, and
   opt-in psql/psycopg/OGR Jobs that reject mutable image references at render time.

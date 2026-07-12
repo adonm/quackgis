@@ -23,6 +23,8 @@ one exact DuckDB/extension bundle.
 | `just duckdb-tls-rotation-profile` | actual-process TLS/SCRAM, certificate/hostname verification, plaintext and wrong-trust denial, restart rotation, old-password rejection, and exact-state evidence |
 | `just duckdb-copy-profile` | direct ADBC versus pgwire COPY RSS, throughput, publication metrics, and exact WKB/count/sum oracle |
 | `just kind-static-check` | minimal DuckDB-only topology shape, immutable image input, secret rendering, and client-job contract |
+| `just doctor` / `just doctor-kind` | installed/missing project tools, selected container engine, and local Kind prerequisites |
+| `just kind-up-local` / `just kind-client-gates` | rootless Podman-or-Docker Kind execution with node-local digest-addressed runtime and psql/psycopg/OGR images |
 | `.tmp/duckdb/manifest.json` | native library/extension paths and SHA-256 values |
 | `.tmp/duckdb-current-benchmark/manifest.json` | deterministic direct DuckDB/ADBC/pgwire correctness and liveness comparison |
 

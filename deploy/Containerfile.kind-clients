@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+# Local qualification clients. The built image is deployed by immutable digest.
+
+FROM registry.fedoraproject.org/fedora-minimal@sha256:2c4da1ad397ed87d015b4f1c69247dfd3e879c35ab721169834d108e741f843b
+RUN microdnf install -y \
+      gdal \
+      postgresql \
+      python3 \
+      python3-psycopg3 \
+      python3-psycopg3_c \
+    && microdnf clean all
+ENV HOME=/tmp
+USER 65532:65532
+WORKDIR /tmp

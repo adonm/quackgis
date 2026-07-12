@@ -18,6 +18,20 @@ SPEC.loader.exec_module(kind_render)
 
 def main() -> None:
     kind_render.check_templates()
+    cluster = (ROOT / "deploy/kind/cluster.yaml").read_text(encoding="utf-8")
+    up = (ROOT / "deploy/kind/up.sh").read_text(encoding="utf-8")
+    clients_image = (ROOT / "deploy/Containerfile.kind-clients").read_text(
+        encoding="utf-8"
+    )
+    assert "kindest/node:v1.36.1@sha256:" in cluster
+    assert "KIND_EXPERIMENTAL_PROVIDER" in up
+    assert "kind load docker-image" in up
+    assert "QUACKGIS_RUNTIME_LOAD_IMAGE" in up
+    assert "QUACKGIS_CLIENT_LOAD_IMAGE" in up
+    assert "FROM registry.fedoraproject.org/fedora-minimal@sha256:" in clients_image
+    for client in ["postgresql", "python3-psycopg3", "gdal"]:
+        assert client in clients_image
+    assert "USER 65532:65532" in clients_image
     digest = "example.invalid/image@sha256:" + "a" * 64
     assert kind_render.pinned_image(digest, "image") == digest
     try:
