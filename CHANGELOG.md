@@ -20,6 +20,9 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   overhead limits.
 - Scale-safe transport fixture names retain complete IDs above six digits; the
   exact byte-count oracle now has boundary coverage through 10M rows.
+- A clean 50M-row transport reference on source `fc0b6069` records a 1200.05 ms
+  direct-ADBC p50 and 0.999 pgwire/ADBC p50 ratio, passing the one-second
+  eligibility floor and 1.15 overhead ceiling on the named reference host.
 - A separately registered result-stream profile with two-millisecond process RSS
   sampling, time-to-first-row, throughput, row/sum oracle, and Arrow batch
   high-water evidence; its first 1M local run passes with one in-flight batch.

@@ -63,9 +63,15 @@ streaming-result or M4 selective-scan evidence:
 ```sh
 QUACKGIS_PROFILE_STORAGE='local NVMe model/filesystem' \
 mise exec -- just duckdb-transport-profile \
-  level=reference rows=10000000 \
-  out=.tmp/duckdb-transport-profile/reference-r10m.json
+  level=reference rows=50000000 \
+  out=.tmp/duckdb-transport-profile/reference-r50m.json
 ```
+
+The clean 50M-row run on source `fc0b6069` used pinned DuckDB 1.5.4 on the
+recorded Ryzen 7 7700X/64 GiB/HP FX700 NVMe host. Its exact seven-value oracle
+passed on every path; direct ADBC p50 was 1200.05 ms, pgwire p50 was 1198.48 ms,
+and the 0.999 ratio passed the 1.15 ceiling. This closes the eligible M1 transport
+overhead gate for the reference host; it is not an M4 selective-scan claim.
 
 ## Streaming-result profile
 
@@ -191,9 +197,7 @@ interruption behavior.
 
 ## Next profiles
 
-E0 first adds the common evidence envelope and gate-oriented scenario support.
-E1 then adds transport overhead after the completed profile implementations for
-result RSS, wide results, cancellation, mixed-class concurrency, and COPY.
-Later profiles cover selective scans, grouped aggregates, bounded spatial joins, fragmented-file
+The remaining E1 performance gate is COPY reference throughput. Later profiles
+cover selective scans, grouped aggregates, bounded spatial joins, fragmented-file
 compaction, plans, bytes scanned, spill, and configured-concurrency evidence. The
-exact 10M profile must pass twice before introducing 100M.
+exact M4 10M profile must pass twice before introducing 100M.
