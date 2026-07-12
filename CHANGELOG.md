@@ -37,6 +37,9 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   exact count/sum/WKB publication, RSS, rows/bytes/batches, commit timing, and
   throughput ratio; its first dirty-tree 1M local run passes at 64 MiB RSS delta
   and a 0.272 pgwire/direct ratio.
+- The initial minimal DuckDB-only Kind topology: one TLS-required StatefulSet,
+  retained node-local PV/PVC, generated TLS/auth Secrets, health probes, and
+  opt-in psql/psycopg/OGR Jobs that reject mutable image references at render time.
 - Owned Rust pgwire/TLS/SCRAM edge over DuckDB ADBC.
 - Official local DuckLake create, Arrow ingest/query, transaction, snapshot
   inspection, adjacent-file merge, and reopen workflows.

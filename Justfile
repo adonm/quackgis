@@ -321,7 +321,7 @@ check: fmt-check clippy test
 check-fast: fmt-check clippy test-fast
 
 # Run the same gate used by GitHub Actions CI.
-ci: check-fast project-contract-check duckdb-adbc-compile-check duckdb-adbc-storage-test duckdb-pgwire-workflow-test duckdb-result-stream-smoke duckdb-wide-result-smoke duckdb-cancellation-smoke duckdb-copy-smoke evidence-manifest-check probe-static-check runtime-static-check
+ci: check-fast project-contract-check duckdb-adbc-compile-check duckdb-adbc-storage-test duckdb-pgwire-workflow-test duckdb-result-stream-smoke duckdb-wide-result-smoke duckdb-cancellation-smoke duckdb-copy-smoke evidence-manifest-check probe-static-check runtime-static-check kind-static-check
 
 # Run the dev QuackGIS server on QUACKGIS_HOST/QUACKGIS_PORT.
 server:
@@ -339,13 +339,18 @@ clean-dev:
 # Static validation for maintained helper scripts.
 probe-static-check:
     mkdir -p .tmp/pycache
-    PYTHONPYCACHEPREFIX=.tmp/pycache python3 -m py_compile scripts/*.py scripts/tests/test_duckdb_authority_probe.py scripts/tests/test_duckdb_engine_probe.py scripts/tests/test_duckdb_runtime_static_check.py scripts/tests/test_duckdb_spatial_compat_probe.py scripts/tests/test_evidence_manifest_check.py
+    PYTHONPYCACHEPREFIX=.tmp/pycache python3 -m py_compile scripts/*.py deploy/kind/render.py scripts/tests/test_duckdb_authority_probe.py scripts/tests/test_duckdb_engine_probe.py scripts/tests/test_duckdb_runtime_static_check.py scripts/tests/test_duckdb_spatial_compat_probe.py scripts/tests/test_evidence_manifest_check.py scripts/tests/test_kind_render.py
     python3 scripts/tests/test_duckdb_authority_probe.py
     python3 scripts/tests/test_duckdb_engine_probe.py
     python3 scripts/tests/test_duckdb_spatial_compat_probe.py
     python3 scripts/tests/test_duckdb_runtime_static_check.py
     python3 scripts/tests/test_duckdb_local_backup.py
     python3 scripts/tests/test_evidence_manifest_check.py
+
+# Validate digest pinning, generated secrets, and the DuckDB-only Kind shape.
+kind-static-check:
+    python3 deploy/kind/render.py --check
+    python3 scripts/tests/test_kind_render.py
 
 # Validate maintained documentation links, commands, and spatial claims.
 project-contract-check:
