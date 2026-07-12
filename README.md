@@ -40,17 +40,21 @@ Important limits:
 - query cancellation/deadlines, global and reader/writer-class admission, DuckDB
   resource controls, and query lifecycle/batch metrics are implemented; result
   batches fail closed at a configured byte ceiling, and native calls use a fixed
-  worker budget with a reserved cancellation slot; clean 1M/10M BIGINT-stream RSS
-  and 100-cancel p95 evidence passes, while wider result, COPY RSS, write/commit
-  cancellation, and mixed concurrency remain roadmap work;
+  worker budget with a reserved cancellation slot; clean 1M/10M BIGINT-stream,
+  1M nullable wide-result, 100-cancel, and mixed-class admission evidence passes,
+  while the COPY reference throughput budget, write/commit cancellation, and the
+  eligible transport-overhead reference remain roadmap work;
 - broad PostgreSQL catalogs and named GIS-client parity are incomplete; and
 - remote/shared catalog and object-storage profiles fail closed.
 
 TLS remains optional for local development. Set `QUACKGIS_TLS_MODE=required` with
 `QUACKGIS_TLS_CERT` and `QUACKGIS_TLS_KEY` to fail closed on plaintext startup.
+The actual-process TLS profile verifies encrypted SCRAM, hostname/trust checking,
+plaintext denial, and restart-based certificate/password rotation; packaged Kind
+rotation remains open.
 
-The maintained Rust pgwire client also resolves the geometry sentinel through a
-narrow structural `pg_type` adapter and verifies RowDescription plus text, binary,
+The maintained Rust pgwire client also resolves spatial sentinels through a
+narrow exact-shape `pg_type` adapter and verifies RowDescription plus text, binary,
 and NULL WKB transport. This is not yet QGIS/OGR discovery evidence.
 
 When `QUACKGIS_METRICS_PORT` is configured, the same loopback HTTP listener serves

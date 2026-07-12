@@ -82,8 +82,8 @@ Kind tree will not be restored. Current iteration state:
   reduced smoke run measures 1.040 but is deliberately ineligible to close the
   budget; a clean eligible reference run remains open.
 - Supported statement and parameter type surfaces are intentionally narrow.
-- Broad `pg_catalog`/`information_schema`, geography discovery, SRID, dimension,
-  geography, extent, MVT, and general `ST_GeometryN` behavior remain incomplete.
+- Broad `pg_catalog`/`information_schema`, spatial discovery, SRID, dimension,
+  extent, MVT, and general `ST_GeometryN` behavior remain incomplete.
   A narrow structural `pg_type` adapter resolves only the maintained geometry and
   geography sentinel OIDs; both families' RowDescription/text/binary/NULL behavior
   is proven through the current Rust pgwire client.
