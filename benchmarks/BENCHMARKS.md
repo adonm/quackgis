@@ -89,6 +89,23 @@ on the recorded Ryzen 7 7700X/64 GiB Bazzite host. This closes the cardinality
 independence, first-row, and measured 1M/10M BIGINT-stream portions of M1. Wider
 variable-width/native-batch shapes remain open.
 
+## Cancellation profile
+
+The cancellation profile opens a long generated query, observes its first row,
+sends a PostgreSQL cancel request, drains to SQLSTATE `57014`, proves that same
+session is explicitly quarantined, and verifies a fresh session remains usable.
+Each sample uses a fresh session and records request-to-error latency. Reference
+evidence requires exactly 100 samples and p95 at or below 500 ms.
+
+```sh
+mise exec -- just duckdb-cancellation-profile \
+  level=local iterations=25 \
+  out=.tmp/duckdb-cancellation/local-n25.json
+```
+
+The first dirty-tree 25-sample local run passed with 1.41 ms p95. The clean
+100-sample reference run remains the exit gate.
+
 ## Next profiles
 
 E0 first adds the common evidence envelope and gate-oriented scenario support.

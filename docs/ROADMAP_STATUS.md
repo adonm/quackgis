@@ -13,8 +13,8 @@ Kind tree will not be restored. Current iteration state:
 
 | Work package | State | Next executable result |
 |---|---|---|
-| E0 evidence harness | active; envelope + first parameterized scenario complete | smoke/local/reference transport entrypoint emits validated source/runtime/host/cgroup/data/oracle/measurement/budget metadata; next split reusable runtime/client fixtures from the monolithic workflow |
-| E1 M1/M2 local profiles | active | clean serial 1M/10M generated-BIGINT result reference runs pass; next 100-cancel p95, wider result shape, transport overhead, and COPY profiles |
+| E0 evidence harness | active; shared fixture established | common evidence envelope plus reusable fresh DuckLake/server/client runtime now support separately registered profiles; continue extracting fixtures only when the next profile needs them |
+| E1 M1/M2 local profiles | active | clean 1M/10M result references pass; cancellation smoke and 25-sample local profile pass at 1.41 ms p95; next clean 100-cancel reference, wider result shape, overhead, and COPY profiles |
 | K0 minimal Kind topology | queued | one runtime workload, durable local volume, TLS secret, pinned client job image |
 | C0 focused clients | queued behind K0/catalog fixtures | psql and psycopg first, then OGR and headless QGIS |
 | P0 M4 host profiles | queued behind E0/layout implementation | 10M twice before 100M |

@@ -21,6 +21,10 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 - Clean serial 1M and 10M generated-BIGINT reference runs on source `12817bcd`
   pass exact cardinality/sum, first-row-before-completion, one-batch high water,
   and the +128 MiB RSS budget with approximately 1.72/2.36 MiB RSS growth.
+- A reusable fresh DuckLake/server/client profile fixture and cancellation profile
+  covering request-to-`57014` latency, native counters, explicit same-session
+  quarantine, and fresh-session reuse; the first 25-sample local run passes at
+  1.41 ms p95.
 - Owned Rust pgwire/TLS/SCRAM edge over DuckDB ADBC.
 - Official local DuckLake create, Arrow ingest/query, transaction, snapshot
   inspection, adjacent-file merge, and reopen workflows.

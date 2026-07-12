@@ -5,11 +5,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
-use quackgis_server::duckdb_adbc_storage::{DuckDbAdbcConfig, DuckDbAdbcStorage, ExtensionPolicy};
 use quackgis_server::pgwire_server::ServerOptions;
 use serde_json::json;
 
+#[path = "support/runtime.rs"]
+mod runtime;
 mod support;
+use runtime::TestRuntime;
 use support::evidence::{EvidenceEnvelope, EvidenceLevel, EvidenceProfile, ExecutionEnvironment};
 
 const MIB: u64 = 1024 * 1024;
@@ -21,47 +23,11 @@ async fn result_stream_profile() {
     let output_path = std::env::var_os("QUACKGIS_PROFILE_OUT")
         .map(PathBuf::from)
         .unwrap_or_else(|| ".tmp/duckdb-result-stream/manifest.json".into());
-    let temp = tempfile::tempdir().expect("profile tempdir");
-    let catalog_path = temp.path().join("catalog.ducklake");
-    let data_path = temp.path().join("data");
-    std::fs::create_dir(&data_path).expect("profile data path");
-    let storage = Arc::new(
-        DuckDbAdbcStorage::open(DuckDbAdbcConfig {
-            driver_path: std::env::var_os("QUACKGIS_DUCKDB_ADBC_DRIVER")
-                .expect("set ADBC driver")
-                .into(),
-            database_uri: ":memory:".to_owned(),
-            ducklake_uri: format!("ducklake:{}", catalog_path.display()),
-            catalog_name: "quackgis".to_owned(),
-            data_path: data_path.display().to_string(),
-            extension_policy: ExtensionPolicy::LoadOnly,
-        })
-        .expect("profile storage"),
-    );
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .expect("profile listener");
-    let port = listener.local_addr().expect("profile address").port();
-    let server_storage = Arc::clone(&storage);
     let options = ServerOptions::new()
         .with_max_connections(4)
         .with_result_batch_bytes(8 * 1024 * 1024);
-    let server = tokio::spawn(async move {
-        quackgis_server::pgwire_server::serve_duckdb_on_listener(
-            server_storage,
-            listener,
-            &options,
-            quackgis_server::auth::AuthConfig::trust(),
-        )
-        .await
-    });
-    let (client, connection) = tokio_postgres::connect(
-        &format!("host=127.0.0.1 port={port} user=postgres dbname=quackgis"),
-        tokio_postgres::NoTls,
-    )
-    .await
-    .expect("profile pgwire connection");
-    let connection = tokio::spawn(connection);
+    let runtime = TestRuntime::start(options).await;
+    let (client, connection) = runtime.connect().await;
     client
         .query_one("SELECT 1::INTEGER", &[])
         .await
@@ -112,7 +78,8 @@ async fn result_stream_profile() {
     let peak_rss = peak_rss.load(Ordering::Relaxed);
     let rss_delta = peak_rss.saturating_sub(idle_rss);
     let expected_sum = i128::from(profile.rows) * i128::from(profile.rows - 1) / 2;
-    let metrics = quackgis_server::metrics::render_prometheus(storage.lifecycle().as_ref());
+    let metrics =
+        quackgis_server::metrics::render_prometheus(runtime.storage().lifecycle().as_ref());
     let batch_high_water = prometheus_u64(&metrics, "quackgis_query_batches_inflight_high_water")
         .expect("batch high-water metric");
 
@@ -130,7 +97,6 @@ async fn result_stream_profile() {
 
     drop(client);
     connection.abort();
-    server.abort();
     let evidence = EvidenceEnvelope::collect(
         EvidenceProfile::new(
             format!(
@@ -183,6 +149,154 @@ async fn result_stream_profile() {
     );
 }
 
+#[tokio::test]
+#[ignore = "requires the pinned DuckDB ADBC runtime"]
+async fn cancellation_profile() {
+    let profile = CancellationProfile::from_environment();
+    let output_path = std::env::var_os("QUACKGIS_PROFILE_OUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| ".tmp/duckdb-cancellation/manifest.json".into());
+    let runtime = TestRuntime::start(
+        ServerOptions::new()
+            .with_max_connections(8)
+            .with_max_active_queries(4)
+            .with_max_reader_queries(4)
+            .with_max_blocking_workers(5)
+            .with_statement_timeout(Duration::from_secs(30)),
+    )
+    .await;
+    let mut latencies_ms = Vec::with_capacity(profile.iterations);
+    let mut quarantined = 0_usize;
+    for iteration in 0..profile.iterations {
+        let (client, connection) = runtime.connect().await;
+        let cancel = client.cancel_token();
+        let rows = client
+            .query_raw(
+                "SELECT i::BIGINT FROM range(1000000000) AS cancel_rows(i)",
+                std::iter::empty::<&i32>(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("open cancellation sample {iteration}: {error}"));
+        futures::pin_mut!(rows);
+        rows.next()
+            .await
+            .unwrap_or_else(|| panic!("cancellation sample {iteration} has no first row"))
+            .unwrap_or_else(|error| panic!("cancellation sample {iteration} first row: {error}"));
+        let cancel_started = Instant::now();
+        cancel
+            .cancel_query(tokio_postgres::NoTls)
+            .await
+            .unwrap_or_else(|error| panic!("send cancellation sample {iteration}: {error}"));
+        let error = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match rows.next().await {
+                    Some(Ok(_)) => continue,
+                    Some(Err(error)) => break error,
+                    None => panic!("cancellation sample {iteration} completed"),
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("cancellation sample {iteration} exceeded 5 seconds"));
+        let latency_ms = cancel_started.elapsed().as_secs_f64() * 1000.0;
+        assert_eq!(
+            error.code(),
+            Some(&tokio_postgres::error::SqlState::QUERY_CANCELED),
+            "cancellation sample {iteration}"
+        );
+        let quarantine = client
+            .query_one("SELECT 1::INTEGER", &[])
+            .await
+            .expect_err("cancelled session must be quarantined");
+        assert_eq!(
+            quarantine.code(),
+            Some(&tokio_postgres::error::SqlState::INTERNAL_ERROR)
+        );
+        quarantined += 1;
+        latencies_ms.push(latency_ms);
+        drop(client);
+        connection.abort();
+    }
+    let (fresh, fresh_connection) = runtime.connect().await;
+    assert_eq!(
+        fresh
+            .query_one("SELECT 1::INTEGER", &[])
+            .await
+            .expect("fresh session after cancellation profile")
+            .get::<_, i32>(0),
+        1
+    );
+    drop(fresh);
+    fresh_connection.abort();
+
+    let summary = latency_summary(&latencies_ms);
+    assert!(
+        summary.p95_ms <= profile.p95_budget_ms,
+        "cancellation p95 {:.3} ms exceeded {:.3} ms",
+        summary.p95_ms,
+        profile.p95_budget_ms
+    );
+    let metrics =
+        quackgis_server::metrics::render_prometheus(runtime.storage().lifecycle().as_ref());
+    let requested = prometheus_u64(&metrics, "quackgis_cancellations_requested_total")
+        .expect("requested cancellations");
+    let completed = prometheus_u64(&metrics, "quackgis_cancellations_completed_total")
+        .expect("completed cancellations");
+    let failed = prometheus_u64(&metrics, "quackgis_cancellations_failed_total")
+        .expect("failed cancellations");
+    assert_eq!(requested, profile.iterations as u64);
+    assert_eq!(completed, profile.iterations as u64);
+    assert_eq!(failed, 0);
+
+    let evidence = EvidenceEnvelope::collect(
+        EvidenceProfile::new(
+            format!(
+                "duckdb-cancellation-{}-n{}-v1",
+                profile.level.as_str(),
+                profile.iterations
+            ),
+            profile.level,
+            profile.environment,
+            "sequential long-query cancellation through pgwire; each cancelled session is explicitly quarantined and replaced",
+        ),
+        json!({
+            "iterations": profile.iterations,
+            "query_rows": 1_000_000_000_u64,
+        }),
+        json!({
+            "query_canceled_sqlstate": "57014",
+            "cancelled_sessions_quarantined": quarantined,
+            "fresh_session_usable": true,
+            "requested": requested,
+            "completed": completed,
+            "failed": failed,
+        }),
+        json!({
+            "latencies_ms": latencies_ms,
+            "min_ms": summary.min_ms,
+            "p50_ms": summary.p50_ms,
+            "p95_ms": summary.p95_ms,
+            "p99_ms": summary.p99_ms,
+            "max_ms": summary.max_ms,
+        }),
+        json!({
+            "p95_max_ms": profile.p95_budget_ms,
+            "failed_cancellations_max": 0,
+            "quarantined_sessions": profile.iterations,
+        }),
+    )
+    .expect("collect cancellation evidence");
+    evidence
+        .write(&output_path)
+        .expect("write cancellation evidence");
+    println!(
+        "duckdb_cancellation_profile_ok iterations={} p95_ms={:.3} out={}",
+        profile.iterations,
+        summary.p95_ms,
+        output_path.display()
+    );
+}
+
 struct ResultStreamProfile {
     level: EvidenceLevel,
     environment: ExecutionEnvironment,
@@ -228,6 +342,88 @@ impl ResultStreamProfile {
     }
 }
 
+struct CancellationProfile {
+    level: EvidenceLevel,
+    environment: ExecutionEnvironment,
+    iterations: usize,
+    p95_budget_ms: f64,
+}
+
+impl CancellationProfile {
+    fn from_environment() -> Self {
+        let level = EvidenceLevel::parse(
+            &std::env::var("QUACKGIS_EVIDENCE_LEVEL").unwrap_or_else(|_| "smoke".to_owned()),
+        )
+        .expect("valid evidence level");
+        assert_ne!(
+            level,
+            EvidenceLevel::External,
+            "external evidence is not local"
+        );
+        let environment = ExecutionEnvironment::parse(
+            &std::env::var("QUACKGIS_EXECUTION_ENVIRONMENT")
+                .unwrap_or_else(|_| "host_process".to_owned()),
+        )
+        .expect("valid execution environment");
+        let default_iterations = match level {
+            EvidenceLevel::Smoke => 5,
+            EvidenceLevel::Local => 25,
+            EvidenceLevel::Reference => 100,
+            EvidenceLevel::External => unreachable!("external rejected above"),
+        };
+        let iterations = std::env::var("QUACKGIS_PROFILE_ITERATIONS")
+            .map(|value| value.parse::<usize>().expect("integer profile iterations"))
+            .unwrap_or(default_iterations);
+        assert!(
+            (1..=100).contains(&iterations),
+            "cancellation iterations must be between 1 and 100"
+        );
+        if level == EvidenceLevel::Reference {
+            assert_eq!(
+                iterations, 100,
+                "reference cancellation profile requires 100 samples"
+            );
+        }
+        let p95_budget_ms = match level {
+            EvidenceLevel::Smoke => 2_000.0,
+            EvidenceLevel::Local => 1_000.0,
+            EvidenceLevel::Reference => 500.0,
+            EvidenceLevel::External => unreachable!("external rejected above"),
+        };
+        Self {
+            level,
+            environment,
+            iterations,
+            p95_budget_ms,
+        }
+    }
+}
+
+struct LatencySummary {
+    min_ms: f64,
+    p50_ms: f64,
+    p95_ms: f64,
+    p99_ms: f64,
+    max_ms: f64,
+}
+
+fn latency_summary(samples: &[f64]) -> LatencySummary {
+    assert!(!samples.is_empty(), "latency samples must not be empty");
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let percentile = |percent: f64| {
+        let rank = (sorted.len() as f64 * percent).ceil() as usize;
+        sorted[rank.saturating_sub(1).min(sorted.len() - 1)]
+    };
+    LatencySummary {
+        min_ms: sorted[0],
+        p50_ms: percentile(0.50),
+        p95_ms: percentile(0.95),
+        p99_ms: percentile(0.99),
+        max_ms: sorted[sorted.len() - 1],
+    }
+}
+
 fn process_rss_bytes() -> Option<u64> {
     let contents = std::fs::read_to_string("/proc/self/status").ok()?;
     let kib = contents.lines().find_map(|line| {
@@ -249,4 +445,9 @@ fn parses_process_rss_and_prometheus_values() {
     assert!(process_rss_bytes().is_some_and(|rss| rss > 0));
     assert_eq!(prometheus_u64("metric 7\n", "metric"), Some(7));
     assert_eq!(prometheus_u64("metric 7\n", "missing"), None);
+    let summary = latency_summary(&[5.0, 1.0, 4.0, 2.0, 3.0]);
+    assert_eq!(summary.min_ms, 1.0);
+    assert_eq!(summary.p50_ms, 3.0);
+    assert_eq!(summary.p95_ms, 5.0);
+    assert_eq!(summary.max_ms, 5.0);
 }
