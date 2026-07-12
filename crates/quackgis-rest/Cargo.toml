@@ -1,0 +1,32 @@
+[package]
+name = "quackgis-rest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+description = "Read-only PostgREST-compatible HTTP interface for QuackGIS"
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true }
+clap = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+serde_json = { workspace = true }
+subtle = { workspace = true }
+tokio = { workspace = true }
+tokio-postgres = { workspace = true }
+tokio-postgres-rustls = { workspace = true }
+url = { workspace = true }
+
+# QuackGIS extends the parser/query contract from this exact upstream source.
+pg-query-engine = { git = "https://github.com/joshburgess/pg-rest-server", rev = "b7915d3c3361f0fee45de6e292e62f6f6186375f", package = "pg-query-engine" }
+pg-schema-cache-types = { git = "https://github.com/joshburgess/pg-rest-server", rev = "b7915d3c3361f0fee45de6e292e62f6f6186375f", package = "pg-schema-cache-types" }
+
+[dev-dependencies]
+quackgis-server = { path = "../quackgis-server" }
+tempfile = { workspace = true }

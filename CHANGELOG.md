@@ -62,6 +62,11 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   Jobs with psql 18.3, psycopg 3.2.13, and GDAL/OGR 3.11.5. The pgwire adapter
   handles those clients' bounded encoding and string-mode SET/SHOW probes without
   executing PostgreSQL session syntax in DuckDB.
+- Added the authenticated, stateless `quackgis-rest` preview as a separate
+  read-only pgwire client. It pins and extends `pg-rest-server`'s parser/query
+  engine, supports PostgREST-style projection/filter/order/pagination, OpenAPI and
+  schema reload, uses typed text parameters and bounded errors/timeouts, and has
+  an actual DuckDB/DuckLake pgwire suite covering auth, reads, denials, and WKB.
 - The initial minimal DuckDB-only Kind topology: one TLS-required StatefulSet,
   retained node-local PV/PVC, generated TLS/auth Secrets, health probes, and
   opt-in psql/psycopg/OGR Jobs that reject mutable image references at render time.

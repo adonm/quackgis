@@ -380,12 +380,25 @@ check: fmt-check clippy test
 check-fast: fmt-check clippy test-fast
 
 # Run the same gate used by GitHub Actions CI.
-ci: check-fast project-contract-check duckdb-adbc-compile-check duckdb-adbc-storage-test duckdb-pgwire-workflow-test duckdb-catalog-contract-test duckdb-result-stream-smoke duckdb-wide-result-smoke duckdb-cancellation-smoke duckdb-mixed-concurrency-smoke duckdb-termination-smoke duckdb-tls-rotation-smoke duckdb-copy-smoke evidence-manifest-check probe-static-check runtime-static-check kind-static-check
+ci: check-fast project-contract-check duckdb-adbc-compile-check duckdb-adbc-storage-test duckdb-pgwire-workflow-test rest-postgrest-smoke duckdb-catalog-contract-test duckdb-result-stream-smoke duckdb-wide-result-smoke duckdb-cancellation-smoke duckdb-mixed-concurrency-smoke duckdb-termination-smoke duckdb-tls-rotation-smoke duckdb-copy-smoke evidence-manifest-check probe-static-check runtime-static-check kind-static-check
 
 # Run the dev QuackGIS server on QUACKGIS_HOST/QUACKGIS_PORT.
 server:
     mkdir -p "$(dirname '{{catalog}}')" "{{data}}"
     cargo run -p quackgis-server -- --host {{host}} --port {{port}} --catalog-path "{{catalog}}" --data-path "{{data}}"
+
+# Run the authenticated read-only PostgREST-compatible sidecar from its environment configuration.
+rest-server:
+    cargo run -p quackgis-rest
+
+# Verify the pinned pg-rest-server parser/query extension without native DuckDB.
+rest-check:
+    cargo test -p quackgis-rest
+
+# Exercise the PostgREST read subset and QuackGIS WKB extension through actual pgwire.
+rest-postgrest-smoke:
+    HOME='{{duckdb_home}}' QUACKGIS_DUCKDB_ADBC_DRIVER='{{duckdb_adbc_driver}}' \
+      cargo test -p quackgis-rest tests::actual_postgrest_compat_and_quackgis_extensions -- --ignored --exact
 
 # Connect with psql to a running dev server.
 psql:

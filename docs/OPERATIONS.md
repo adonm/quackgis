@@ -69,6 +69,15 @@ DuckDB home. The server defaults to `127.0.0.1:5434`.
 `QUACKGIS_CATALOG_URL` and remote/object-store data paths are reserved and fail
 closed. S3 credentials and the retired engine selector are not runtime options.
 
+The optional `quackgis-rest` process has a separate configuration and failure
+domain. It requires `QUACKGIS_REST_DATABASE_URL`,
+`QUACKGIS_REST_BEARER_TOKEN_FILE`, and the explicit comma-separated
+`QUACKGIS_REST_TABLES` allowlist. `QUACKGIS_REST_DATABASE_CA` enables
+hostname-verified pgwire TLS; `QUACKGIS_REST_HOST`, `QUACKGIS_REST_PORT`, and
+`QUACKGIS_REST_STATEMENT_TIMEOUT_MS` default to `127.0.0.1`, `3000`, and `30000`.
+See [REST_API.md](REST_API.md) for the read-only contract and load-balancer trust
+boundary.
+
 The pgwire socket is bound and the configured local DuckLake snapshot surface is
 queried before `/readyz` can return `200 ready`. The endpoint returns `503
 starting`, `503 storage_unavailable`, or `503 draining` for those explicit states;

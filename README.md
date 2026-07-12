@@ -13,6 +13,10 @@ Rust edge: protocol · TLS/SCRAM · policy · PostGIS compatibility
 DuckDB: SQL · Spatial · official DuckLake · Parquet
 ```
 
+An optional authenticated, read-only [`quackgis-rest`](docs/REST_API.md) sidecar
+extends a pinned `pg-rest-server` query contract and exposes a load-balanceable
+PostgREST-style HTTP read interface through the same pgwire boundary.
+
 There is no PostgreSQL, DataFusion, or Sedona query engine. DuckDB is the sole
 planner/executor and official DuckLake is the sole writer for new storage.
 

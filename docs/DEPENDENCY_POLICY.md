@@ -28,6 +28,12 @@ encode Arrow/PostgreSQL fields and rows; it may not regain DataFusion, catalog,
 planner, or GeoArrow engine responsibilities. The pgwire patch may enforce the
 frontend frame trust boundary but may not add protocol or authentication policy.
 
+The REST interface uses two unmodified crates from
+`joshburgess/pg-rest-server` at one full Git revision recorded in
+`DIVERGENCE.md` and `Cargo.lock`. They are extension inputs, not an authority for
+storage, authentication, or PostgreSQL emulation. Revision changes require the
+same license/source review and both REST gates.
+
 New vendor/fork acceptance requires:
 
 1. an upstream gap blocking a maintained release requirement;

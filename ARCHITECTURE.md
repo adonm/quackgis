@@ -200,6 +200,17 @@ Overload queues or fails with a stable PostgreSQL error. Capacity is reserved fo
 cancellation, health, rollback, and shutdown. Metrics exclude SQL text,
 parameters, credentials, and object paths.
 
+## Optional REST edge
+
+`quackgis-rest` is a separate, stateless, read-only HTTP process. It reuses an
+immutable revision of `pg-rest-server`'s URL parser/query engine but reaches data
+only through the maintained QuackGIS pgwire boundary. It does not link ADBC,
+publish DuckLake state, emulate PostgreSQL roles, or become a second catalog
+authority. Each replica has an independently reloadable `information_schema`
+cache, requires bearer authentication for data/discovery routes, and is intended
+to sit behind a TLS-terminating load balancer. Unsupported PostgREST behavior
+fails closed until an actual-pgwire compatibility case exists.
+
 ## Deployment model
 
 The only maintained runtime image is the verified DuckDB image containing the

@@ -25,6 +25,8 @@ one exact DuckDB/extension bundle.
 | `just kind-static-check` | minimal DuckDB-only topology shape, immutable image input, secret rendering, and client-job contract |
 | `just doctor` / `just doctor-kind` | installed/missing project tools, selected container engine, and local Kind prerequisites |
 | `just kind-up-local` / `just kind-client-gates` | rootless Podman-or-Docker Kind execution with node-local digest-addressed runtime and psql/psycopg/OGR images |
+| `just rest-check` | pinned pg-rest-server parser/query contract and REST trust-boundary unit tests |
+| `just rest-postgrest-smoke` | authenticated read-only PostgREST subset plus WKB extension through an actual DuckDB/DuckLake pgwire server |
 | `.tmp/duckdb/manifest.json` | native library/extension paths and SHA-256 values |
 | `.tmp/duckdb-current-benchmark/manifest.json` | deterministic direct DuckDB/ADBC/pgwire correctness and liveness comparison |
 

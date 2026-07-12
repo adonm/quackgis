@@ -51,6 +51,23 @@ does not grow its buffer. Retire this vendor as soon as upstream exposes an
 equivalent pre-body configurable server limit, after the pgwire workflow, TLS,
 COPY, and Arrow encoder gates pass on the released replacement.
 
+### `joshburgess/pg-rest-server`
+
+`quackgis-rest` extends the upstream `pg-query-engine` and
+`pg-schema-cache-types` crates at exact Git revision
+`b7915d3c3361f0fee45de6e292e62f6f6186375f` (MIT OR Apache-2.0). The source is
+not copied or silently patched. QuackGIS owns a separate read-only backend because
+upstream's data paths assume PostgreSQL catalogs, roles/RLS, LISTEN/NOTIFY, and
+PostgreSQL-side JSON.
+
+Local divergence is limited to DuckDB `information_schema` discovery, omission of
+PostgreSQL role switching, explicit text parameter typing for pgwire, and exact
+generated-function adaptation from `json_agg`/`to_jsonb` to DuckDB
+`json_group_array`/`to_json`. The native compatibility smoke crosses real pgwire
+and fails closed for mutations. Upstream updates require reviewing the parser,
+SQL generator, schema types, license, and compatibility cases before changing the
+pinned revision.
+
 ## Retired forks
 
 The following forks/vendors are no longer compiled or retained in the repository:

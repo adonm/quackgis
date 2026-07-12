@@ -33,6 +33,7 @@ TOOLS = (
     Tool("kubectl", "Kubernetes API/client jobs", "mise install", "kind"),
     Tool("podman", "rootless container/Kind provider", "host package", "container"),
     Tool("docker", "alternative container/Kind provider", "host package", "container"),
+    Tool("curl", "optional REST manual client", "host package", "client"),
     Tool("psql", "optional host PostgreSQL client", "Kind client image or host package", "client"),
     Tool("ogrinfo", "optional host GDAL/OGR client", "Kind client image or host package", "client"),
     Tool("qgis_process", "optional headless QGIS qualification", "future QGIS client image or host package", "client"),
