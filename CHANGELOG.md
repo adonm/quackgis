@@ -77,6 +77,9 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 - Bounded SIGINT/SIGTERM connection drain that stops acceptance, rejects new
   transactions, permits established work to finish, and aborts at a configured
   deadline.
+- Actual-process forced-drain/restart profiling that proves an explicit
+  uncommitted transaction publishes zero rows, committed state remains exact,
+  restart meets the 60-second smoke budget, and post-restart writes succeed.
 - Checksummed offline local backup/restore with symlink/source-change rejection,
   exact-path enforcement, staged publication, and native snapshot/count recovery
   evidence.

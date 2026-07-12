@@ -121,6 +121,10 @@ catalog surfaces remain open unless a focused test says otherwise.
   broader generated temporal/decimal/dictionary/nested coverage remains open.
 - Shared PostgreSQL/object-storage DuckLake, multi-writer recovery, migration,
   production packaging, soak, and disaster-recovery evidence remain open.
+- Forced drain of an explicit uncommitted transaction has process-level evidence:
+  same-path restart preserves the committed row, exposes none of the uncommitted
+  row, and accepts a new write. General write/commit interruption, relocated
+  recovery, and release-catalog recovery timing remain open.
 
 See [DUCKDB_SPATIAL_GAP_LEDGER.md](./DUCKDB_SPATIAL_GAP_LEDGER.md) and
 [ENGINE_CAPABILITY_LEDGER.md](./ENGINE_CAPABILITY_LEDGER.md) for detailed gaps.

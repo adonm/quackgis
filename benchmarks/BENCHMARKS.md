@@ -171,6 +171,24 @@ Together with the maintained 32-client/eight-reader native workflow, it closes t
 open M1 mixed-class admission evidence slice; write/commit interruption and the
 Local 1.0 mixed-workload soak remain separate gates.
 
+## Termination and restart profile
+
+The process-level termination profile starts the actual server binary, commits a
+baseline row, leaves a second row uncommitted in an explicit transaction, sends
+SIGTERM, and lets the configured 100 ms drain deadline force connection cleanup.
+It restarts against the same local DuckLake paths, checks the exact committed
+count/sum and zero visibility for the uncommitted row, then commits a fresh write.
+
+```sh
+mise exec -- just duckdb-termination-profile \
+  level=local out=.tmp/duckdb-termination/local.json
+```
+
+The first smoke run terminated in 156 ms and became queryable after restart in
+272 ms, below the 60-second M5 budget. The reduced fixture does not establish
+release-catalog recovery timing, relocated recovery, or general write/commit
+interruption behavior.
+
 ## Next profiles
 
 E0 first adds the common evidence envelope and gate-oriented scenario support.

@@ -295,6 +295,21 @@ duckdb-mixed-concurrency-profile level="smoke" out=".tmp/duckdb-mixed-concurrenc
 duckdb-mixed-concurrency-smoke:
     just duckdb-mixed-concurrency-profile level=smoke out=.tmp/duckdb-mixed-concurrency/smoke.json
 
+# Prove forced-drain rollback and exact restart state through the actual server process.
+duckdb-termination-profile level="smoke" out=".tmp/duckdb-termination/manifest.json" environment="host_process" driver=duckdb_adbc_driver:
+    @set -eu; level_arg='{{level}}'; out_arg='{{out}}'; environment_arg='{{environment}}'; driver_arg='{{driver}}'; \
+    level_arg="${level_arg#level=}"; out_arg="${out_arg#out=}"; environment_arg="${environment_arg#environment=}"; driver_arg="${driver_arg#driver=}"; \
+    if [ ! -f "$driver_arg" ]; then echo 'DuckDB ADBC driver is missing; run `mise run duckdb-bootstrap`' >&2; exit 2; fi; \
+    driver_arg="$(realpath "$driver_arg")"; duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; out_arg="$(realpath -m "$out_arg")"; \
+    HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" QUACKGIS_PROFILE_OUT="$out_arg" \
+      QUACKGIS_EVIDENCE_LEVEL="$level_arg" QUACKGIS_EXECUTION_ENVIRONMENT="$environment_arg" \
+      cargo test -p quackgis-server --release --test roadmap_profiles termination_atomicity_profile -- --ignored --exact --nocapture --test-threads=1; \
+    python3 scripts/evidence_manifest_check.py "$out_arg"
+
+# Required fast process-level forced-drain/restart evidence.
+duckdb-termination-smoke:
+    just duckdb-termination-profile level=smoke out=.tmp/duckdb-termination/smoke.json
+
 # Compare direct streaming ADBC ingest with bounded pgwire text COPY.
 duckdb-copy-profile level="smoke" rows="10000" out=".tmp/duckdb-copy/manifest.json" environment="host_process" driver=duckdb_adbc_driver:
     @set -eu; level_arg='{{level}}'; rows_arg='{{rows}}'; out_arg='{{out}}'; environment_arg='{{environment}}'; driver_arg='{{driver}}'; \
@@ -344,7 +359,7 @@ check: fmt-check clippy test
 check-fast: fmt-check clippy test-fast
 
 # Run the same gate used by GitHub Actions CI.
-ci: check-fast project-contract-check duckdb-adbc-compile-check duckdb-adbc-storage-test duckdb-pgwire-workflow-test duckdb-catalog-contract-test duckdb-result-stream-smoke duckdb-wide-result-smoke duckdb-cancellation-smoke duckdb-mixed-concurrency-smoke duckdb-copy-smoke evidence-manifest-check probe-static-check runtime-static-check kind-static-check
+ci: check-fast project-contract-check duckdb-adbc-compile-check duckdb-adbc-storage-test duckdb-pgwire-workflow-test duckdb-catalog-contract-test duckdb-result-stream-smoke duckdb-wide-result-smoke duckdb-cancellation-smoke duckdb-mixed-concurrency-smoke duckdb-termination-smoke duckdb-copy-smoke evidence-manifest-check probe-static-check runtime-static-check kind-static-check
 
 # Run the dev QuackGIS server on QUACKGIS_HOST/QUACKGIS_PORT.
 server:

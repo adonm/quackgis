@@ -730,6 +730,166 @@ async fn mixed_class_concurrency_profile() {
 
 #[tokio::test]
 #[ignore = "requires the pinned DuckDB ADBC runtime"]
+async fn termination_atomicity_profile() {
+    let profile = TerminationProfile::from_environment();
+    let output_path = std::env::var_os("QUACKGIS_PROFILE_OUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| ".tmp/duckdb-termination/manifest.json".into());
+    let driver =
+        PathBuf::from(std::env::var_os("QUACKGIS_DUCKDB_ADBC_DRIVER").expect("set ADBC driver"));
+    let temp = tempfile::tempdir().expect("termination profile tempdir");
+    let catalog = temp.path().join("catalog.ducklake");
+    let data = temp.path().join("data");
+    let first_port = unused_local_port().await;
+    let mut first_server = spawn_profile_server(&driver, &catalog, &data, first_port);
+    let (client, client_connection) = connect_profile_server(first_port, &mut first_server).await;
+    client
+        .batch_execute("CREATE TABLE quackgis.main.termination_profile(id BIGINT, name VARCHAR)")
+        .await
+        .expect("create termination table");
+    client
+        .batch_execute("INSERT INTO quackgis.main.termination_profile VALUES (1, 'committed')")
+        .await
+        .expect("commit baseline row");
+    client
+        .batch_execute("BEGIN")
+        .await
+        .expect("begin transaction");
+    client
+        .batch_execute("INSERT INTO quackgis.main.termination_profile VALUES (2, 'uncommitted')")
+        .await
+        .expect("insert uncommitted row");
+    assert_eq!(
+        client
+            .query_one(
+                "SELECT count(*)::BIGINT FROM quackgis.main.termination_profile",
+                &[],
+            )
+            .await
+            .expect("transaction sees own row")
+            .get::<_, i64>(0),
+        2
+    );
+    let (observer, observer_connection) = connect_profile_client(first_port).await;
+    assert_eq!(
+        observer
+            .query_one(
+                "SELECT count(*)::BIGINT FROM quackgis.main.termination_profile",
+                &[],
+            )
+            .await
+            .expect("observer isolation before termination")
+            .get::<_, i64>(0),
+        1
+    );
+
+    let termination_started = Instant::now();
+    let signal_result = unsafe { libc::kill(first_server.0.id() as i32, libc::SIGTERM) };
+    assert_eq!(signal_result, 0, "send termination signal");
+    let first_status = wait_for_child(&mut first_server, Duration::from_secs(10)).await;
+    let termination_ms = termination_started.elapsed().as_secs_f64() * 1000.0;
+    assert!(first_status.success(), "first server exit: {first_status}");
+    drop((client, observer));
+    client_connection.abort();
+    observer_connection.abort();
+
+    let restart_started = Instant::now();
+    let second_port = unused_local_port().await;
+    let mut second_server = spawn_profile_server(&driver, &catalog, &data, second_port);
+    let (restarted, restarted_connection) =
+        connect_profile_server(second_port, &mut second_server).await;
+    let restart_ms = restart_started.elapsed().as_secs_f64() * 1000.0;
+    assert!(
+        restart_ms <= profile.restart_budget_ms,
+        "restart {restart_ms:.3} ms exceeded {:.3} ms",
+        profile.restart_budget_ms
+    );
+    let recovered = restarted
+        .query_one(
+            "SELECT count(*)::BIGINT, sum(id)::BIGINT, \
+             count(*) FILTER (WHERE id = 2)::BIGINT \
+             FROM quackgis.main.termination_profile",
+            &[],
+        )
+        .await
+        .expect("recovered exact state");
+    let recovered_count = recovered.get::<_, i64>(0);
+    let recovered_sum = recovered.get::<_, i64>(1);
+    let uncommitted_rows = recovered.get::<_, i64>(2);
+    assert_eq!(
+        (recovered_count, recovered_sum, uncommitted_rows),
+        (1, 1, 0)
+    );
+    restarted
+        .batch_execute("INSERT INTO quackgis.main.termination_profile VALUES (3, 'after-restart')")
+        .await
+        .expect("post-restart write");
+    let final_state = restarted
+        .query_one(
+            "SELECT count(*)::BIGINT, sum(id)::BIGINT \
+             FROM quackgis.main.termination_profile",
+            &[],
+        )
+        .await
+        .expect("post-restart exact state");
+    let final_count = final_state.get::<_, i64>(0);
+    let final_sum = final_state.get::<_, i64>(1);
+    assert_eq!((final_count, final_sum), (2, 4));
+    drop(restarted);
+    restarted_connection.abort();
+    let signal_result = unsafe { libc::kill(second_server.0.id() as i32, libc::SIGTERM) };
+    assert_eq!(signal_result, 0, "stop restarted server");
+    let second_status = wait_for_child(&mut second_server, Duration::from_secs(10)).await;
+    assert!(
+        second_status.success(),
+        "second server exit: {second_status}"
+    );
+
+    let evidence = EvidenceEnvelope::collect(
+        EvidenceProfile::new(
+            format!("duckdb-termination-{}-v1", profile.level.as_str()),
+            profile.level,
+            profile.environment,
+            "actual server process receives SIGTERM with one explicit uncommitted transaction, reaches its forced drain deadline, restarts on the same local DuckLake paths, and verifies exact committed state",
+        ),
+        json!({
+            "baseline_rows": 1,
+            "uncommitted_rows_attempted": 1,
+            "shutdown_timeout_ms": 100,
+        }),
+        json!({
+            "recovered_count": recovered_count,
+            "recovered_sum": recovered_sum,
+            "uncommitted_rows_visible": uncommitted_rows,
+            "post_restart_write_succeeded": true,
+            "final_count": final_count,
+            "final_sum": final_sum,
+        }),
+        json!({
+            "termination_ms": termination_ms,
+            "restart_to_queryable_ms": restart_ms,
+            "first_exit_success": first_status.success(),
+            "second_exit_success": second_status.success(),
+        }),
+        json!({
+            "restart_to_queryable_max_ms": profile.restart_budget_ms,
+            "uncommitted_rows_visible_max": 0,
+        }),
+    )
+    .expect("collect termination evidence");
+    evidence
+        .write(&output_path)
+        .expect("write termination evidence");
+    println!(
+        "duckdb_termination_profile_ok termination_ms={:.3} restart_ms={:.3} out={}",
+        termination_ms,
+        restart_ms,
+        output_path.display()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires the pinned DuckDB ADBC runtime"]
 async fn copy_ingest_profile() {
     let profile = CopyProfile::from_environment();
     let output_path = std::env::var_os("QUACKGIS_PROFILE_OUT")
@@ -1042,6 +1202,36 @@ struct MixedConcurrencyProfile {
     environment: ExecutionEnvironment,
 }
 
+struct TerminationProfile {
+    level: EvidenceLevel,
+    environment: ExecutionEnvironment,
+    restart_budget_ms: f64,
+}
+
+impl TerminationProfile {
+    fn from_environment() -> Self {
+        let level = EvidenceLevel::parse(
+            &std::env::var("QUACKGIS_EVIDENCE_LEVEL").unwrap_or_else(|_| "smoke".to_owned()),
+        )
+        .expect("valid evidence level");
+        assert_ne!(
+            level,
+            EvidenceLevel::External,
+            "external evidence is not local"
+        );
+        let environment = ExecutionEnvironment::parse(
+            &std::env::var("QUACKGIS_EXECUTION_ENVIRONMENT")
+                .unwrap_or_else(|_| "host_process".to_owned()),
+        )
+        .expect("valid execution environment");
+        Self {
+            level,
+            environment,
+            restart_budget_ms: 60_000.0,
+        }
+    }
+}
+
 impl MixedConcurrencyProfile {
     fn from_environment() -> Self {
         let level = EvidenceLevel::parse(
@@ -1312,6 +1502,101 @@ fn prometheus_labeled_u64(
 ) -> Option<u64> {
     let metric_name = format!("{name}{{{label}=\"{label_value}\"}}");
     prometheus_u64(metrics, &metric_name)
+}
+
+struct ChildGuard(std::process::Child);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
+fn spawn_profile_server(
+    driver: &std::path::Path,
+    catalog: &std::path::Path,
+    data: &std::path::Path,
+    port: u16,
+) -> ChildGuard {
+    ChildGuard(
+        std::process::Command::new(env!("CARGO_BIN_EXE_quackgis-server"))
+            .arg("--duckdb-driver")
+            .arg(driver)
+            .arg("--catalog-path")
+            .arg(catalog)
+            .arg("--data-path")
+            .arg(data)
+            .arg("--host=127.0.0.1")
+            .arg(format!("--port={port}"))
+            .arg("--shutdown-timeout-ms=100")
+            .arg("--statement-timeout-ms=30000")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn profile server"),
+    )
+}
+
+async fn unused_local_port() -> u16 {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("ephemeral profile listener");
+    listener.local_addr().expect("profile address").port()
+}
+
+async fn connect_profile_client(
+    port: u16,
+) -> (
+    tokio_postgres::Client,
+    tokio::task::JoinHandle<Result<(), tokio_postgres::Error>>,
+) {
+    let (client, connection) = tokio_postgres::connect(
+        &format!("host=127.0.0.1 port={port} user=postgres dbname=quackgis"),
+        tokio_postgres::NoTls,
+    )
+    .await
+    .expect("connect profile client");
+    (client, tokio::spawn(connection))
+}
+
+async fn connect_profile_server(
+    port: u16,
+    child: &mut ChildGuard,
+) -> (
+    tokio_postgres::Client,
+    tokio::task::JoinHandle<Result<(), tokio_postgres::Error>>,
+) {
+    for _ in 0..400 {
+        match tokio_postgres::connect(
+            &format!("host=127.0.0.1 port={port} user=postgres dbname=quackgis"),
+            tokio_postgres::NoTls,
+        )
+        .await
+        {
+            Ok((client, connection)) => return (client, tokio::spawn(connection)),
+            Err(_) if child.0.try_wait().expect("profile server status").is_none() => {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(error) => panic!("profile server exited before readiness: {error}"),
+        }
+    }
+    panic!("profile server did not become ready")
+}
+
+async fn wait_for_child(child: &mut ChildGuard, timeout: Duration) -> std::process::ExitStatus {
+    tokio::time::timeout(timeout, async {
+        loop {
+            if let Some(status) = child.0.try_wait().expect("profile server status") {
+                return status;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("profile server exit timeout")
 }
 
 #[test]

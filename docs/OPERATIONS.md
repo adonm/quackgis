@@ -175,8 +175,12 @@ rejects new explicit transactions on existing sockets, and lets established
 connections finish for `QUACKGIS_SHUTDOWN_TIMEOUT_MS`. Active transaction count is
 exported as `quackgis_transactions_active`. At the deadline, remaining connection
 tasks are aborted; their active transaction sessions roll back on drop where the
-native connection remains usable. This is a bounded cooperative drain, not yet a
-proof that every native write or commit can be interrupted.
+native connection remains usable. `just duckdb-termination-profile` exercises the
+actual process with an uncommitted row at the forced deadline, restarts the same
+local DuckLake paths, proves the row is absent, and proves a new write succeeds.
+Its smoke run becomes queryable in 272 ms against the 60-second budget. This is
+explicit-transaction atomicity evidence, not yet proof that every native write or
+commit can be interrupted.
 
 Within an explicit transaction, an ordinary simple/extended statement error moves
 pgwire to the failed transaction state. Subsequent simple or extended work returns
