@@ -241,11 +241,17 @@ pub struct OperationDeadline {
 }
 
 impl OperationDeadline {
-    pub fn start(duration: Duration, cancellation: Arc<dyn EngineCancellation>) -> Self {
+    pub fn start(
+        duration: Duration,
+        cancellation: Arc<dyn EngineCancellation>,
+        blocking_workers: Arc<BlockingWorkerPool>,
+    ) -> Self {
         let task = tokio::spawn(async move {
             tokio::time::sleep(duration).await;
             STATEMENT_TIMEOUTS.fetch_add(1, Ordering::Relaxed);
-            let _ = cancellation.cancel();
+            let _ = blocking_workers
+                .run_control(move || cancellation.cancel())
+                .await;
         });
         Self { task }
     }
@@ -489,6 +495,16 @@ pub fn blocking_workers_high_water() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    struct TestCancellation(Arc<AtomicBool>);
+
+    impl EngineCancellation for TestCancellation {
+        fn cancel(&self) -> EngineResult<()> {
+            self.0.store(true, Ordering::Release);
+            Ok(())
+        }
+    }
 
     #[tokio::test]
     async fn bounds_active_and_queue_slots() {
@@ -588,6 +604,31 @@ mod tests {
         .expect("reserved control slot")
         .expect("control worker");
         assert_eq!(control, "control-completed");
+        release_tx.send(()).expect("release regular worker");
+        regular.await.expect("join regular worker");
+    }
+
+    #[tokio::test]
+    async fn deadline_uses_reserved_control_capacity() {
+        let pool = Arc::new(BlockingWorkerPool::new(2));
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let regular = pool
+            .spawn_regular(move || release_rx.recv().expect("regular release"))
+            .await
+            .expect("regular worker");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancellation: Arc<dyn EngineCancellation> =
+            Arc::new(TestCancellation(Arc::clone(&cancelled)));
+        let _deadline =
+            OperationDeadline::start(Duration::from_millis(1), cancellation, Arc::clone(&pool));
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !cancelled.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("deadline cancellation uses the reserved worker");
         release_tx.send(()).expect("release regular worker");
         regular.await.expect("join regular worker");
     }

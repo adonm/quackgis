@@ -103,15 +103,18 @@ still required before this is a complete untrusted-wire memory bound.
 
 The blocking-worker limit must be greater than the active-query limit. Regular
 ADBC work can use at most `max_blocking_workers - 1`; the final slot is reserved
-for native cancellation and control cleanup. Worker active/queued/high-water and
-regular/control gauges are exported when metrics are enabled.
+for native cancellation and control cleanup. Both client cancellation and
+statement-deadline cancellation use that reserved blocking slot rather than a
+Tokio executor thread. Worker active/queued/high-water and regular/control gauges
+are exported when metrics are enabled.
 
 Reader, writer, and maintenance limits must be positive and no larger than the
 global active-query limit. Admission acquires both a class permit and a global
 permit under the same bounded queue deadline. Metrics expose active, queued, and
 high-water values by class. A deterministic 32-contender unit gate proves that an
-eight-operation global limit never admits nine; the roadmap's 32-client native
-workload evidence remains a separate open gate.
+eight-operation global limit never admits nine. The native pgwire workflow above
+proves the same ceiling for readers; mixed reader/writer/maintenance concurrency
+remains a separate open gate.
 
 Adjacent-file compaction is the only server-exposed maintenance operation. It is
 available through simple protocol only, requires the explicitly configured

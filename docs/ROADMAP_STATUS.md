@@ -25,14 +25,19 @@ deployment profiles.
 - Query results stream one driver-produced Arrow batch at a time and fail closed
   before pgwire encoding when the configured byte ceiling is exceeded. Only
   native EOF permits connection reuse; partial delivery, failure, and cancellation
-  quarantine uncertain stream state. Native allocation and 1M/10M RSS evidence
+  quarantine uncertain stream state. The native pgwire cancellation regression
+  proves the cancelled client receives a stable quarantine error while an
+  independent session remains usable. Native allocation and 1M/10M RSS evidence
   remains open.
 - COPY incrementally decodes bounded Arrow batches into one staging ADBC stream;
   1 GiB/RSS/throughput evidence and a configurable pre-decode pgwire frame bound
-  are still open. The current chunk ceiling applies after pgwire decoding.
+  are still open. The current chunk ceiling applies after pgwire decoding; native
+  regressions prove oversized decoded chunks and malformed final rows synchronously
+  clean up staging with zero visible rows.
 - Native cancellation/deadlines abort active query and COPY workers. Pgwire 0.40
   cannot asynchronously deliver a COPY error while the client sends no frames;
-  general write/commit cancellation also remains open.
+  general write/commit cancellation also remains open. Deadline-triggered native
+  cancellation uses the reserved control worker rather than a Tokio executor.
 - Connection, queue, global active-query, reader/writer/maintenance-class, fixed
   blocking-worker, and DuckDB memory/thread/temp/spill controls are productized.
   Aggregate DuckDB memory and temporary storage are sampled on an independent
@@ -60,8 +65,8 @@ deployment profiles.
 | Milestone | State | Next closure work |
 |---|---|---|
 | M0 truthful repository | complete | `just project-contract-check` validates links/recipes/spatial counts; required CI publishes the deterministic transport-smoke manifest |
-| M1 bounded execution | active; implementation majority complete | ADBC streams retain ownership; pgwire pulls one batch under a fail-closed byte ceiling; only native EOF permits reuse and a native regression proves partial-drop quarantine; native cancel, deadlines, failed-transaction rollback/reuse, global plus reader/writer/maintenance-class admission, an explicitly authorized server maintenance path, autosized DuckDB resources, sampled DuckDB memory/temporary storage, a fixed native worker pool with reserved control capacity, class metrics, and unit plus 32-client native eight-admission proofs are implemented. Remaining: write/commit cancellation, same-client cancellation disposition, 1M/10M RSS, 100-cancel p95, mixed-class native concurrency, and overhead budget. |
-| M2 streaming ingest | active; implementation majority complete | incremental bounded parser, staging ADBC stream, atomic publication, text escapes, >20 MiB/220k-row regression, abort zero-row tests, scalar/NULL/WKB reopen, compaction, and metrics are implemented. Remaining: pre-decode pgwire frame ceiling, idle-wait error delivery, and reference-profile 10M/1 GiB RSS/throughput evidence. |
+| M1 bounded execution | active; implementation majority complete | ADBC streams retain ownership; pgwire pulls one batch under a fail-closed byte ceiling; only native EOF permits reuse; native cancel/deadlines use reserved control capacity; cancelled and partial streams explicitly quarantine the same client while independent sessions remain usable; failed-transaction rollback/reuse, global plus reader/writer/maintenance-class admission, an authorized maintenance path, autosized DuckDB resources, sampled memory/temporary storage, class metrics, and unit plus 32-client native eight-admission proofs are implemented. Remaining: write/commit cancellation, 1M/10M RSS, 100-cancel p95, mixed-class native concurrency, and overhead budget. |
+| M2 streaming ingest | active; implementation majority complete | incremental bounded parser, exact Arrow batch byte splitting, staging ADBC stream, atomic publication, text escapes, >20 MiB/220k-row regression, synchronous malformed-final-row and oversized-decoded-chunk cleanup, abort zero-row tests, scalar/NULL/WKB reopen, compaction, and metrics are implemented. Remaining: pre-decode pgwire frame ceiling, idle-wait error delivery, and reference-profile 10M/1 GiB RSS/throughput evidence. |
 | M3 focused compatibility | active foundation | maintained SET/SHOW, AST `public` mapping, parsed quoted COPY targets, `geom_wkb` sentinel identity, initial generated WKB/fixed-binary encoder properties, and ledger-pinned `0A000` errors for all five extension-candidate spatial cases are verified through simple/extended pgwire with session reuse. Remaining: pinned named-client traces, DuckDB-derived catalog fixtures/OIDs, subtype/SRID/dimension metadata, Rust-edge spatial gaps, and the complete advertised-type property matrix. |
 | M4 analytical performance | active foundation | fail-closed COPY bbox layout validation/maintenance, direct `INSERT`/`UPDATE` bypass rejection, pgwire rejection/reuse, and exact/reopen evidence are implemented; ordinary compaction already halves fragmented file count without scalar result changes. Remaining: schema-aware mutation/spatial-compaction refresh, safe AST predicate injection, conservative geometry matrix, scan-byte plans, and current 10M then 100M profiles. |
 | M5 Local 1.0 | active foundation | immutable load-only runtime smoke, opt-in process liveness and pgwire-bind/read-only DuckLake readiness with explicit startup/storage-failure/drain states, configured connection/transaction drain, authorized/audited adjacent-file compaction, and checksummed offline exact-path backup/restore with snapshot/count evidence exist. Remaining: write-capacity readiness SLO, published artifacts, online/relocated production recovery, upgrades, TLS rotation, write/commit interruption evidence, mixed workload, and 24-hour soak. |

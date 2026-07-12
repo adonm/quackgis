@@ -521,6 +521,34 @@ mod tests {
     }
 
     #[test]
+    fn recursively_splits_batches_to_the_arrow_byte_limit() {
+        let rows = (0..8)
+            .map(|id| vec![Some(id.to_string().into_bytes()), Some(vec![b'x'; 40])])
+            .collect::<Vec<_>>();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, false),
+        ]));
+        let one_row = build_batch(Arc::clone(&schema), &rows[..1])
+            .expect("one-row batch")
+            .get_array_memory_size();
+        let full = build_batch(Arc::clone(&schema), &rows)
+            .expect("full batch")
+            .get_array_memory_size();
+        assert!(one_row < full);
+        let max_bytes = one_row + 16;
+
+        let batches = bounded_batches(schema, rows, max_bytes).expect("bounded batches");
+        assert!(batches.len() > 1);
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 8);
+        assert!(
+            batches
+                .iter()
+                .all(|batch| batch.get_array_memory_size() <= max_bytes)
+        );
+    }
+
+    #[test]
     fn end_marker_rejects_trailing_data_in_the_same_chunk() {
         let mut decoder = CopyTextDecoder::new(
             schema(),

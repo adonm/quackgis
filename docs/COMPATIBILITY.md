@@ -74,7 +74,9 @@ surfaces remain open unless a focused test says otherwise.
   allocation and 1M/10M RSS evidence remain open.
 - A fully exhausted result returns its native connection. Closing a suspended
   portal or otherwise dropping a partially delivered result quarantines that
-  session; independent sessions remain isolated.
+  session. After cancellation, the same client receives a stable internal error
+  rather than silently reusing uncertain native state; independent sessions remain
+  usable.
 - Pgwire cancellation interrupts active DuckDB result and COPY workers. A COPY
   client that sends no further frame does not receive its error until it resumes
   or disconnects; broader write/commit cancellation and latency evidence remain
@@ -83,6 +85,7 @@ surfaces remain open unless a focused test says otherwise.
 - COPY has no total request ceiling, incrementally decodes PostgreSQL text escapes,
   and enforces configured row, Arrow-batch, and post-decode wire-chunk limits. The
   pinned pgwire dependency may allocate a declared frame before that check;
+  oversized decoded chunks and malformed final rows abort staging synchronously.
   CSV/binary COPY options, arrays, JSON, time zones, and every scalar type remain
   unsupported.
 - Reserved bbox layouts are validated before COPY staging; clients cannot provide

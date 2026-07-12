@@ -1189,6 +1189,75 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
         .expect("observe malformed COPY rollback");
     assert_eq!(failed_rows.get::<_, i64>(0), 0);
 
+    client
+        .batch_execute("CREATE TABLE quackgis.main.final_row_copy(id INTEGER, name VARCHAR)")
+        .await
+        .expect("create incomplete final-row COPY target");
+    let mut final_row_copy = Box::pin(
+        client
+            .copy_in("COPY quackgis.main.final_row_copy (id, name) FROM STDIN")
+            .await
+            .expect("start incomplete final-row COPY"),
+    );
+    final_row_copy
+        .send(flushed_copy_rows(64))
+        .await
+        .expect("send complete batches before incomplete final row");
+    final_row_copy
+        .send(Bytes::from_static(b"999"))
+        .await
+        .expect("send incomplete final row");
+    let final_row_error = final_row_copy
+        .as_mut()
+        .finish()
+        .await
+        .expect_err("incomplete final COPY row must fail");
+    assert_eq!(
+        final_row_error.code(),
+        Some(&tokio_postgres::error::SqlState::BAD_COPY_FILE_FORMAT)
+    );
+    let final_row_rows = observer
+        .query_one(
+            "SELECT count(*)::BIGINT FROM quackgis.main.final_row_copy",
+            &[],
+        )
+        .await
+        .expect("incomplete final-row cleanup is synchronous");
+    assert_eq!(final_row_rows.get::<_, i64>(0), 0);
+
+    client
+        .batch_execute("CREATE TABLE quackgis.main.oversized_chunk_copy(id INTEGER, name VARCHAR)")
+        .await
+        .expect("create oversized chunk COPY target");
+    let mut oversized_chunk_copy = Box::pin(
+        client
+            .copy_in("COPY quackgis.main.oversized_chunk_copy (id, name) FROM STDIN")
+            .await
+            .expect("start oversized chunk COPY"),
+    );
+    let oversized_chunk = Bytes::from(vec![b'\n'; 65_537]);
+    let oversized_send = oversized_chunk_copy.send(oversized_chunk).await;
+    let oversized_error = match oversized_send {
+        Err(error) => error,
+        Ok(()) => oversized_chunk_copy
+            .as_mut()
+            .finish()
+            .await
+            .expect_err("oversized COPY chunk must fail"),
+    };
+    assert_eq!(
+        oversized_error.code(),
+        Some(&tokio_postgres::error::SqlState::PROGRAM_LIMIT_EXCEEDED)
+    );
+    let oversized_rows = observer
+        .query_one(
+            "SELECT count(*)::BIGINT FROM quackgis.main.oversized_chunk_copy",
+            &[],
+        )
+        .await
+        .expect("oversized COPY chunk cleanup is synchronous");
+    assert_eq!(oversized_rows.get::<_, i64>(0), 0);
+
     observer
         .batch_execute("CREATE TABLE quackgis.main.disconnected_copy(id INTEGER, name VARCHAR)")
         .await
@@ -1487,6 +1556,19 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
         cancellation_error.code(),
         Some(&tokio_postgres::error::SqlState::QUERY_CANCELED)
     );
+    drop(cancel_rows);
+    let quarantined_error = client
+        .query_one("SELECT 1", &[])
+        .await
+        .expect_err("cancelled streaming session must be explicitly quarantined");
+    assert_eq!(
+        quarantined_error.code(),
+        Some(&tokio_postgres::error::SqlState::INTERNAL_ERROR)
+    );
+    observer
+        .query_one("SELECT 1", &[])
+        .await
+        .expect("a fresh session remains usable after cancellation quarantine");
 
     drop(client);
     drop(observer);

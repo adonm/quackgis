@@ -437,6 +437,7 @@ impl SimpleQueryHandler for DuckDbService {
                     result = result.with_guard(Box::new(OperationDeadline::start(
                         self.control.statement_timeout,
                         deadline_cancellation,
+                        Arc::clone(&self.control.blocking_workers),
                     )));
                 }
                 Ok(vec![Response::Query(query_response(
@@ -724,6 +725,7 @@ impl ExtendedQueryHandler for DuckDbService {
                     result = result.with_guard(Box::new(OperationDeadline::start(
                         self.control.statement_timeout,
                         deadline_cancellation,
+                        Arc::clone(&self.control.blocking_workers),
                     )));
                 }
                 Ok(Response::Query(query_response(
@@ -1692,7 +1694,11 @@ where
         secret.to_bytes().to_vec(),
         Arc::clone(&cancellation_trait),
     );
-    let deadline = OperationDeadline::start(control.statement_timeout, cancellation_trait);
+    let deadline = OperationDeadline::start(
+        control.statement_timeout,
+        cancellation_trait,
+        Arc::clone(&control.blocking_workers),
+    );
     let guards: Vec<Box<dyn Send>> =
         vec![Box::new(permit), Box::new(active_guard), Box::new(deadline)];
     let started_at = std::time::Instant::now();
@@ -1878,7 +1884,13 @@ impl CopyHandler for DuckDbCopyHandler {
             .map_err(|_| user_error("XX000", "DuckDB COPY state is poisoned"))?
             .take()
             .ok_or_else(|| user_error("55000", "no DuckDB COPY operation is active"))?;
-        let batches = request.decoder.finish().map_err(copy_decode_error)?;
+        let batches = match request.decoder.finish() {
+            Ok(batches) => batches,
+            Err(error) => {
+                cleanup_aborted_copy(request).await;
+                return Err(copy_decode_error(error));
+            }
+        };
         request.batches = request.batches.saturating_add(batches.len());
         request.rows = request
             .rows
@@ -1890,15 +1902,15 @@ impl CopyHandler for DuckDbCopyHandler {
             .ok_or_else(|| user_error("55000", "DuckDB COPY input is already closed"))?;
         let commit_started = std::time::Instant::now();
         for batch in batches {
-            sender
-                .send(CopyBatchMessage::Batch(batch))
-                .await
-                .map_err(|_| user_error("57014", "DuckDB COPY ingestion was aborted"))?;
+            if sender.send(CopyBatchMessage::Batch(batch)).await.is_err() {
+                cleanup_aborted_copy(request).await;
+                return Err(user_error("57014", "DuckDB COPY ingestion was aborted"));
+            }
         }
-        sender
-            .send(CopyBatchMessage::Finish)
-            .await
-            .map_err(|_| user_error("57014", "DuckDB COPY ingestion was aborted"))?;
+        if sender.send(CopyBatchMessage::Finish).await.is_err() {
+            cleanup_aborted_copy(request).await;
+            return Err(user_error("57014", "DuckDB COPY ingestion was aborted"));
+        }
         drop(sender);
         request
             .worker

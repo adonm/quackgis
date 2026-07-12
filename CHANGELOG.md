@@ -70,6 +70,12 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   recomputation is available.
 - A deterministic 32-client native pgwire admission regression: suspended portals
   retain eight reader permits and no ninth reader enters before release.
+- Statement deadlines run native cancellation through reserved blocking-worker
+  capacity, including a regression with all regular worker capacity occupied.
+- Synchronous COPY cleanup for malformed final rows and oversized decoded chunks,
+  with zero-row observer evidence and exact Arrow batch-memory splitting tests.
+- Native pgwire evidence that a cancelled streaming client is explicitly
+  quarantined while an independent session remains usable.
 
 ### Changed
 
