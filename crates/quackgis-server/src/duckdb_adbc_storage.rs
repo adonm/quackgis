@@ -34,7 +34,7 @@ use crate::engine_api::{
     EngineBatchStream, EngineCancellation, EngineError, EngineErrorKind, EngineMaintenanceReport,
     EngineMaintenanceRequest, EngineQueryResult, EngineQueryStream, EngineResourceSample,
     EngineResult, EngineSnapshot, EngineStatementDescription, EngineStorageKernel, EngineTableRef,
-    EngineTransactionState, IngestDisposition,
+    EngineTransactionState, IngestDisposition, TransactionOutcome,
 };
 use crate::lifecycle::RuntimeLifecycle;
 use crate::storage_authority::claim_local_root;
@@ -294,6 +294,12 @@ pub struct DuckDbIngestOperation {
     cancellation: Arc<DuckDbCancelHandle>,
 }
 
+pub struct DuckDbUpdateOperation {
+    owner: Arc<DuckDbAdbcStorage>,
+    connection: Option<ManagedConnection>,
+    cancellation: Arc<DuckDbCancelHandle>,
+}
+
 struct DuckDbBatchStream {
     owner: Arc<DuckDbAdbcStorage>,
     reader: Option<Box<dyn RecordBatchReader + Send>>,
@@ -313,11 +319,18 @@ enum BatchStreamState {
 struct DuckDbCancelHandle {
     connection: Mutex<ManagedConnection>,
     requested: AtomicBool,
+    closed: AtomicBool,
 }
 
 impl EngineCancellation for DuckDbCancelHandle {
     fn cancel(&self) -> EngineResult<()> {
+        if self.closed.load(Ordering::Acquire) {
+            return Ok(());
+        }
         self.requested.store(true, Ordering::Release);
+        if self.closed.load(Ordering::Acquire) {
+            return Ok(());
+        }
         self.connection
             .lock()
             .map_err(|_| {
@@ -328,6 +341,12 @@ impl EngineCancellation for DuckDbCancelHandle {
             })?
             .cancel()
             .map_err(engine_error)
+    }
+}
+
+impl DuckDbCancelHandle {
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
     }
 }
 
@@ -589,6 +608,7 @@ impl DuckDbAdbcStorage {
         let cancellation = Arc::new(DuckDbCancelHandle {
             connection: Mutex::new(connection.clone()),
             requested: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
         });
         let setup: EngineResult<_> = (|| {
             let mut statement = connection.new_statement().map_err(engine_error)?;
@@ -626,8 +646,23 @@ impl DuckDbAdbcStorage {
         let cancellation = Arc::new(DuckDbCancelHandle {
             connection: Mutex::new(connection.clone()),
             requested: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
         });
         Ok(DuckDbIngestOperation {
+            owner: Arc::clone(self),
+            connection: Some(connection),
+            cancellation,
+        })
+    }
+
+    pub fn start_update_operation(self: &Arc<Self>) -> EngineResult<DuckDbUpdateOperation> {
+        let connection = self.take_connection_engine()?;
+        let cancellation = Arc::new(DuckDbCancelHandle {
+            connection: Mutex::new(connection.clone()),
+            requested: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+        });
+        Ok(DuckDbUpdateOperation {
             owner: Arc::clone(self),
             connection: Some(connection),
             cancellation,
@@ -836,6 +871,137 @@ impl DuckDbAdbcStorage {
                 EngineErrorKind::Busy,
                 "DuckDB ADBC connection is busy with another native operation",
             )
+        }
+    }
+}
+
+impl DuckDbUpdateOperation {
+    pub fn cancellation(&self) -> Arc<dyn EngineCancellation> {
+        self.cancellation.clone()
+    }
+
+    pub fn execute(
+        mut self,
+        sql: &str,
+        parameters: Option<RecordBatch>,
+    ) -> EngineResult<Option<i64>> {
+        let mut connection = self.connection.take().ok_or_else(|| {
+            EngineError::new(
+                EngineErrorKind::Quarantined,
+                "DuckDB update connection is unavailable",
+            )
+        })?;
+        let explicit_transaction = self.owner.transaction_state() == EngineTransactionState::Active;
+        if !explicit_transaction
+            && let Err(error) = connection.set_option(OptionConnection::AutoCommit, "false".into())
+        {
+            let _ = self.owner.return_connection(connection);
+            return Err(engine_error(error));
+        }
+
+        let result = (|| {
+            let sql = prepare_maintained_bbox_mutation(&mut connection, sql)?;
+            match parameters {
+                Some(parameters) => {
+                    execute_update_engine_on_bound(&mut connection, &sql, parameters)
+                }
+                None => execute_update_engine_on(&mut connection, &sql),
+            }
+        })();
+        self.cancellation.close();
+
+        if self.cancellation.requested.load(Ordering::Acquire) {
+            let rolled_back =
+                connection.rollback().is_ok() && restore_autocommit(&mut connection).is_ok();
+            if explicit_transaction {
+                let _ = self
+                    .owner
+                    .set_transaction_state(EngineTransactionState::Quarantined);
+            } else if rolled_back && self.owner.return_connection(connection).is_ok() {
+                return Err(EngineError::new(
+                    EngineErrorKind::Cancelled,
+                    "DuckDB write was cancelled and rolled back",
+                )
+                .with_transaction_outcome(TransactionOutcome::RolledBack));
+            } else {
+                let _ = self
+                    .owner
+                    .set_transaction_state(EngineTransactionState::Quarantined);
+            }
+            return Err(EngineError::new(
+                if rolled_back {
+                    EngineErrorKind::Cancelled
+                } else {
+                    EngineErrorKind::Quarantined
+                },
+                if rolled_back {
+                    "DuckDB transactional write was cancelled and rolled back; the session was quarantined"
+                } else {
+                    "DuckDB write cancellation cleanup was uncertain; the session was quarantined"
+                },
+            )
+            .with_transaction_outcome(if rolled_back {
+                TransactionOutcome::RolledBack
+            } else {
+                TransactionOutcome::Indeterminate
+            }));
+        }
+
+        if explicit_transaction {
+            self.owner.return_connection(connection).map_err(|error| {
+                EngineError::new(EngineErrorKind::Quarantined, error.to_string())
+            })?;
+            return result;
+        }
+
+        match result {
+            Ok(affected) => {
+                if let Err(error) = connection.commit() {
+                    let _ = self
+                        .owner
+                        .set_transaction_state(EngineTransactionState::Quarantined);
+                    return Err(EngineError::new(
+                        EngineErrorKind::IndeterminateCommit,
+                        format!(
+                            "DuckDB ADBC commit failed; outcome is indeterminate and the session was quarantined: {error}"
+                        ),
+                    )
+                    .with_transaction_outcome(TransactionOutcome::Indeterminate));
+                }
+                if let Err(error) = restore_autocommit(&mut connection) {
+                    let _ = self
+                        .owner
+                        .set_transaction_state(EngineTransactionState::Quarantined);
+                    return Err(EngineError::new(
+                        EngineErrorKind::Quarantined,
+                        format!(
+                            "DuckDB write committed but autocommit restoration failed; the session was quarantined: {error}"
+                        ),
+                    )
+                    .with_transaction_outcome(TransactionOutcome::Committed));
+                }
+                self.owner.return_connection(connection).map_err(|error| {
+                    EngineError::new(EngineErrorKind::Quarantined, error.to_string())
+                })?;
+                Ok(affected)
+            }
+            Err(error) => {
+                let clean = connection.rollback().is_ok()
+                    && restore_autocommit(&mut connection).is_ok()
+                    && self.owner.return_connection(connection).is_ok();
+                if !clean {
+                    let _ = self
+                        .owner
+                        .set_transaction_state(EngineTransactionState::Quarantined);
+                    return Err(EngineError::new(
+                        EngineErrorKind::Quarantined,
+                        format!(
+                            "DuckDB write failed and rollback cleanup was uncertain; the session was quarantined: {error}"
+                        ),
+                    ));
+                }
+                Err(error)
+            }
         }
     }
 }

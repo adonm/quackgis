@@ -68,6 +68,11 @@ impl EngineError {
     pub fn message(&self) -> &str {
         &self.message
     }
+
+    pub fn with_transaction_outcome(mut self, outcome: TransactionOutcome) -> Self {
+        self.transaction_outcome = outcome;
+        self
+    }
 }
 
 impl fmt::Display for EngineError {
@@ -222,8 +227,10 @@ mod tests {
 
     #[test]
     fn engine_errors_bound_untrusted_native_messages() {
-        let error = EngineError::new(EngineErrorKind::Internal, "x".repeat(2048));
+        let error = EngineError::new(EngineErrorKind::Internal, "x".repeat(2048))
+            .with_transaction_outcome(TransactionOutcome::Indeterminate);
         assert_eq!(error.message().chars().count(), 1025);
         assert!(error.message().ends_with('…'));
+        assert_eq!(error.transaction_outcome, TransactionOutcome::Indeterminate);
     }
 }

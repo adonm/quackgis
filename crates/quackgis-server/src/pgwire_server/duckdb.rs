@@ -462,10 +462,23 @@ impl SimpleQueryHandler for DuckDbService {
                     .acquire(OperationClass::Writer)
                     .await
                     .map_err(admission_error)?;
+                let operation = storage.start_update_operation().map_err(engine_error)?;
+                let cancellation = operation.cancellation();
+                let (pid, secret) = client.pid_and_secret_key();
+                let _cancellation_guard = self.control.active_queries.register(
+                    pid,
+                    secret.to_bytes().to_vec(),
+                    Arc::clone(&cancellation),
+                );
+                let _deadline = OperationDeadline::start(
+                    self.control.statement_timeout,
+                    cancellation,
+                    Arc::clone(&self.control.blocking_workers),
+                );
                 let affected = self
                     .control
                     .blocking_workers
-                    .run_regular(move || storage.execute_update_contract(&sql))
+                    .run_regular(move || operation.execute(&sql, None))
                     .await
                     .map_err(blocking_worker_error)?
                     .map_err(engine_error)?;
@@ -750,16 +763,23 @@ impl ExtendedQueryHandler for DuckDbService {
                     .acquire(OperationClass::Writer)
                     .await
                     .map_err(admission_error)?;
+                let operation = storage.start_update_operation().map_err(engine_error)?;
+                let cancellation = operation.cancellation();
+                let (pid, secret) = client.pid_and_secret_key();
+                let _cancellation_guard = self.control.active_queries.register(
+                    pid,
+                    secret.to_bytes().to_vec(),
+                    Arc::clone(&cancellation),
+                );
+                let _deadline = OperationDeadline::start(
+                    self.control.statement_timeout,
+                    cancellation,
+                    Arc::clone(&self.control.blocking_workers),
+                );
                 let affected = self
                     .control
                     .blocking_workers
-                    .run_regular(move || {
-                        if let Some(parameters) = parameters {
-                            storage.execute_update_bound(&sql, parameters)
-                        } else {
-                            storage.execute_update_contract(&sql)
-                        }
-                    })
+                    .run_regular(move || operation.execute(&sql, parameters))
                     .await
                     .map_err(blocking_worker_error)?
                     .map_err(engine_error)?;

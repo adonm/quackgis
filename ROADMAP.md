@@ -70,7 +70,7 @@ run must use the same implementation and oracle as its reference counterpart.
 | Protocol | bounded simple/extended pgwire | narrow statements and parameter types |
 | Results | one driver Arrow batch at a time through pgwire with fail-closed byte ceiling; clean 1M/10M generated-BIGINT reference profile stays below the +128 MiB budget | wider variable-width/native-batch RSS profiles open |
 | COPY | pre-body bounded pgwire frames, incremental bounded text decoding to one ADBC stream, atomic DuckLake publication, and a clean passing 10M RSS/throughput reference | total COPY remains unbounded while each frame/chunk/row/Arrow batch is bounded; idle clients observe cancellation when they resume or disconnect |
-| Transactions | independent sessions, commit/rollback/isolation and failed-transaction `25P02` enforcement | write/commit cancellation policy incomplete |
+| Transactions | independent sessions, commit/rollback/isolation, failed-transaction `25P02`, cancellable pre-commit writes, and a non-cancellable indeterminate-failure commit boundary | commit response-loss reconciliation remains a Local 1.0 operations gate |
 | Spatial | 42 native/rewrite/macro cases through pgwire | 10 edge gaps and 5 extension candidates |
 | Security | SCRAM, read/write table allowlists, and actual-process required-TLS/restart-rotation evidence | incomplete metadata filtering and packaged rotation/revocation drills |
 | Operations | restart/reopen, snapshot inspection, adjacent-file merge, checksummed offline exact-path backup/restore | no online/relocated production recovery or shared profile |

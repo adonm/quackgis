@@ -91,7 +91,10 @@ catalog surfaces remain open unless a focused test says otherwise.
   usable.
 - Pgwire cancellation interrupts active DuckDB result and COPY workers. A COPY
   client that sends no further frame does not receive its error until it resumes
-  or disconnects; broader write/commit cancellation remains a gap. A clean
+  or disconnects. Writes run in a cancellable pre-commit transaction: autocommit
+  cancellation rolls back and keeps the session reusable, while cancellation in
+  an explicit transaction rolls back and quarantines that session. Commit is
+  non-cancellable once entered and failures are indeterminate. A clean
   100-sample long-query reference run passes the 500 ms budget at 1.51 ms p95;
   every cancelled session is quarantined and a fresh session remains usable. When
   a COPY client resumes, deadline cancellation returns `57014` and the target

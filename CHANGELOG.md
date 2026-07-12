@@ -141,6 +141,11 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   defense in depth.
 - Native pgwire evidence that a cancelled streaming client is explicitly
   quarantined while an independent session remains usable.
+- Pgwire writes now execute in a cancellable pre-commit transaction. Cancelled
+  autocommit writes roll back with `57014` and remain reusable; cancelled writes
+  inside explicit transactions roll back and quarantine the session. Cancellation
+  closes before commit begins, commit is deliberately non-cancellable, and commit
+  failures are classified as indeterminate.
 - Explicit CI execution of the vendored Arrow encoder suite; Float16 and UInt32
   OID scalar parity, Float16/fixed-binary list parity, fail-closed unsupported time
   units, and panic-free nested error propagation now have focused regressions.

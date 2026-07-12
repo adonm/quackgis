@@ -43,8 +43,9 @@ Important limits:
   worker budget with a reserved cancellation slot; clean 1M/10M BIGINT-stream,
   1M nullable wide-result, 100-cancel, and mixed-class admission evidence passes,
   a clean eligible 50M transport reference passes the pgwire overhead budget, and
-  the clean 10M COPY reference passes RSS/throughput/atomicity budgets;
-  write/commit cancellation remains roadmap work;
+  the clean 10M COPY reference passes RSS/throughput/atomicity budgets; writes are
+  cancellable before the non-cancellable commit boundary with explicit
+  rollback/quarantine outcomes;
 - broad PostgreSQL catalogs and named GIS-client parity are incomplete; and
 - remote/shared catalog and object-storage profiles fail closed.
 

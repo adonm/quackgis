@@ -211,7 +211,14 @@ stable `25P02` until `ROLLBACK`; `COMMIT` performs rollback and ends the block
 without publishing prior writes. The maintained workflow proves the session is
 reusable and an independent observer sees no rows from the failed transaction.
 COPY's dependency-owned ReadyForQuery edge, general in-flight write/commit
-cancellation, and indeterminate acknowledgment classification remain open.
+COPY's dependency-owned ReadyForQuery edge remains documented. Ordinary writes
+run behind a cancellable transaction boundary. Cancellation before commit returns
+`57014`; an autocommit write is rolled back and its session remains reusable,
+while an explicit transaction is rolled back and quarantined. The cancellation
+handle closes before commit starts. Commit is intentionally non-cancellable
+because interruption can make durable outcome indeterminate; commit failure is
+reported as indeterminate and the native session is never reused. Response-loss
+reconciliation remains an operations gate.
 Back up the official DuckLake catalog, data root, and authority marker together.
 The maintained local procedure is offline and exact-path only:
 

@@ -18,11 +18,11 @@ Disposition:
 | TLS/SCRAM/startup | Rust edge | actual-process encrypted client, hostname/trust verification, SCRAM, plaintext denial, and restart-based certificate/password rotation profile | packaged Kind rotation and production failure drill |
 | parsed read/write policy | Rust edge | unit + denied real-client cases | filtered metadata/admin permissions |
 | portals/fetch paging | Rust edge | live ADBC stream plus three-page native workflow; native partial-drop quarantine proof | realistic fetch sizes and memory profile |
-| query cancellation | native + Rust edge | `57014`, explicit quarantine/fresh reuse, and clean 100-cancel reference at 1.51 ms p95 with zero native failures | write/commit cancellation disposition |
+| query/write cancellation | native + Rust edge | query `57014`, explicit quarantine/fresh reuse, clean 100-cancel reference at 1.51 ms p95, autocommit-write rollback/reuse, and explicit-transaction write rollback/quarantine | commit is non-cancellable; response-loss reconciliation remains operational work |
 | query admission/resources | Rust edge + native settings | bounded connection/active/queued queries; fixed native worker pool with reserved control slot; queue timeout; DuckDB threads/memory/temp/spill config; 32-client/eight-reader suspended-portal proof plus all-class queue/completion profile | write/commit interruption and mixed-workload soak |
 | Arrow result encoding | Rust edge | one ADBC batch at a time; configured ceiling/metrics; clean 1M/10M generated-BIGINT reference RSS/first-row profiles | wider variable-width/native-batch RSS and type fuzzing |
 | COPY FROM STDIN | Rust edge + native ingest | pre-body frontend-frame ceiling; incremental bounded chunks/rows/Arrow batches; >20 MiB/220k-row stream; atomic malformed/cancel/disconnect/timeout behavior; scalar/NULL/WKB reopen; compaction; clean 10M reference at 126 MiB RSS delta and 0.528 pgwire/direct ratio | dependency-limited idle-wait error delivery remains documented |
-| transactions/session isolation | native + Rust ownership | commit/rollback/disconnect workflow | timeout/cancel/uncertain cleanup and pool reuse |
+| transactions/session isolation | native + Rust ownership | commit/rollback/disconnect workflow; failed `25P02`; cancellable pre-commit writes; non-cancellable commit with indeterminate-failure classification | commit response-loss reconciliation and soak |
 | local official DuckLake | native | create/ingest/query/snapshot/merge/reopen | backup/restore/upgrade/soak |
 | shared DuckLake | blocked | startup fails closed | after Local 1.0: official managed profile evidence |
 | storage authority | Rust edge | local marker tests | shared credentials/authority design |

@@ -1398,6 +1398,119 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
     .expect("observer pgwire connect");
     let observer_task = tokio::spawn(observer_connection);
 
+    observer
+        .batch_execute("CREATE TABLE quackgis.main.cancelled_write(id BIGINT)")
+        .await
+        .expect("create cancelled write target");
+    let (write_client, write_connection) = tokio_postgres::connect(
+        &format!("host=127.0.0.1 port={port} user=postgres dbname=quackgis"),
+        tokio_postgres::NoTls,
+    )
+    .await
+    .expect("cancelled write client connect");
+    let write_connection = tokio::spawn(write_connection);
+    write_client
+        .batch_execute("BEGIN")
+        .await
+        .expect("begin cancellable write transaction");
+    let write_cancel = write_client.cancel_token();
+    let write_task = tokio::spawn(async move {
+        let result = write_client
+            .batch_execute(
+                "INSERT INTO quackgis.main.cancelled_write \
+                 SELECT i::BIGINT FROM range(1000000000) AS rows(i)",
+            )
+            .await;
+        (write_client, result)
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    write_cancel
+        .cancel_query(tokio_postgres::NoTls)
+        .await
+        .expect("cancel transactional write");
+    let (write_client, write_result) = tokio::time::timeout(Duration::from_secs(5), write_task)
+        .await
+        .expect("cancelled write deadline")
+        .expect("cancelled write task");
+    let write_error = write_result.expect_err("transactional write must be cancelled");
+    assert_eq!(
+        write_error.code(),
+        Some(&tokio_postgres::error::SqlState::QUERY_CANCELED)
+    );
+    assert!(
+        write_client.simple_query("SELECT 1").await.is_err(),
+        "cancelled transactional writer must be quarantined"
+    );
+    drop(write_client);
+    write_connection.abort();
+    let cancelled_write_rows = observer
+        .query_one(
+            "SELECT count(*)::BIGINT FROM quackgis.main.cancelled_write",
+            &[],
+        )
+        .await
+        .expect("cancelled write rollback is visible to observer");
+    assert_eq!(cancelled_write_rows.get::<_, i64>(0), 0);
+
+    observer
+        .batch_execute("CREATE TABLE quackgis.main.cancelled_autocommit_write(id BIGINT)")
+        .await
+        .expect("create autocommit cancellation target");
+    let (autocommit_client, autocommit_connection) = tokio_postgres::connect(
+        &format!("host=127.0.0.1 port={port} user=postgres dbname=quackgis"),
+        tokio_postgres::NoTls,
+    )
+    .await
+    .expect("autocommit cancellation client");
+    let autocommit_connection = tokio::spawn(autocommit_connection);
+    let autocommit_cancel = autocommit_client.cancel_token();
+    let autocommit_task = tokio::spawn(async move {
+        let result = autocommit_client
+            .batch_execute(
+                "INSERT INTO quackgis.main.cancelled_autocommit_write \
+                 SELECT i::BIGINT FROM range(1000000000) AS rows(i)",
+            )
+            .await;
+        (autocommit_client, result)
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    autocommit_cancel
+        .cancel_query(tokio_postgres::NoTls)
+        .await
+        .expect("cancel autocommit write");
+    let (autocommit_client, autocommit_result) =
+        tokio::time::timeout(Duration::from_secs(5), autocommit_task)
+            .await
+            .expect("autocommit cancellation deadline")
+            .expect("autocommit cancellation task");
+    assert_eq!(
+        autocommit_result
+            .expect_err("autocommit write must be cancelled")
+            .code(),
+        Some(&tokio_postgres::error::SqlState::QUERY_CANCELED)
+    );
+    assert_eq!(
+        autocommit_client
+            .query_one("SELECT 1::INTEGER", &[])
+            .await
+            .expect("rolled-back autocommit writer remains reusable")
+            .get::<_, i32>(0),
+        1
+    );
+    drop(autocommit_client);
+    autocommit_connection.abort();
+    assert_eq!(
+        observer
+            .query_one(
+                "SELECT count(*)::BIGINT FROM quackgis.main.cancelled_autocommit_write",
+                &[],
+            )
+            .await
+            .expect("autocommit cancellation publishes zero rows")
+            .get::<_, i64>(0),
+        0
+    );
+
     client
         .batch_execute("CREATE TABLE quackgis.main.failed_copy(id INTEGER, name VARCHAR)")
         .await
