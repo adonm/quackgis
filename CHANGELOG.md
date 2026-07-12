@@ -25,6 +25,9 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   covering request-to-`57014` latency, native counters, explicit same-session
   quarantine, and fresh-session reuse; the first 25-sample local run passes at
   1.41 ms p95.
+- A clean 100-sample cancellation reference on source `8b0d1e46` passes the 500 ms
+  M1 budget at 1.51 ms p95 with 100 completed native calls, zero failures, and
+  deterministic quarantine/fresh-session behavior.
 - Owned Rust pgwire/TLS/SCRAM edge over DuckDB ADBC.
 - Official local DuckLake create, Arrow ingest/query, transaction, snapshot
   inspection, adjacent-file merge, and reopen workflows.

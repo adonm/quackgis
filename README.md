@@ -41,8 +41,8 @@ Important limits:
   resource controls, and query lifecycle/batch metrics are implemented; result
   batches fail closed at a configured byte ceiling, and native calls use a fixed
   worker budget with a reserved cancellation slot; clean 1M/10M BIGINT-stream RSS
-  evidence passes, while wider result, COPY RSS, and mixed concurrency remain
-  roadmap work;
+  and 100-cancel p95 evidence passes, while wider result, COPY RSS, write/commit
+  cancellation, and mixed concurrency remain roadmap work;
 - broad PostgreSQL catalogs and named GIS-client parity are incomplete; and
 - remote/shared catalog and object-storage profiles fail closed.
 

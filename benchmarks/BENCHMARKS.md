@@ -103,8 +103,11 @@ mise exec -- just duckdb-cancellation-profile \
   out=.tmp/duckdb-cancellation/local-n25.json
 ```
 
-The first dirty-tree 25-sample local run passed with 1.41 ms p95. The clean
-100-sample reference run remains the exit gate.
+The clean 100-sample serial reference run on source `8b0d1e46` passed with 1.18 ms
+p50, 1.51 ms p95, 1.67 ms p99, 1.79 ms maximum, 100 completed native cancel calls,
+zero failures, 100 explicit quarantines, and a usable fresh session. This closes
+the M1 100-cancel/500 ms p95 gate for sequential long-query cancellation on the
+recorded reference host.
 
 ## Next profiles
 

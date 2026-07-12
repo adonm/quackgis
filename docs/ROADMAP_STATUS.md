@@ -14,7 +14,7 @@ Kind tree will not be restored. Current iteration state:
 | Work package | State | Next executable result |
 |---|---|---|
 | E0 evidence harness | active; shared fixture established | common evidence envelope plus reusable fresh DuckLake/server/client runtime now support separately registered profiles; continue extracting fixtures only when the next profile needs them |
-| E1 M1/M2 local profiles | active | clean 1M/10M result references pass; cancellation smoke and 25-sample local profile pass at 1.41 ms p95; next clean 100-cancel reference, wider result shape, overhead, and COPY profiles |
+| E1 M1/M2 local profiles | active | clean 1M/10M result references and clean 100-cancel reference pass; next wider result shape, transport overhead, mixed-class concurrency, and COPY profiles |
 | K0 minimal Kind topology | queued | one runtime workload, durable local volume, TLS secret, pinned client job image |
 | C0 focused clients | queued behind K0/catalog fixtures | psql and psycopg first, then OGR and headless QGIS |
 | P0 M4 host profiles | queued behind E0/layout implementation | 10M twice before 100M |
@@ -55,7 +55,10 @@ Kind tree will not be restored. Current iteration state:
 - Native cancellation/deadlines abort active query and COPY workers. Pgwire 0.40
   cannot asynchronously deliver a COPY error while the client sends no frames;
   general write/commit cancellation also remains open. Deadline-triggered native
-  cancellation uses the reserved control worker rather than a Tokio executor.
+  cancellation uses the reserved control worker rather than a Tokio executor. A
+  clean serial 100-sample reference run on source `8b0d1e46` records 1.51 ms p95,
+  100 completed native calls, zero failures, explicit quarantine for every
+  cancelled session, and a usable fresh session against the 500 ms M1 budget.
 - Connection, queue, global active-query, reader/writer/maintenance-class, fixed
   blocking-worker, and DuckDB memory/thread/temp/spill controls are productized.
   Aggregate DuckDB memory and temporary storage are sampled on an independent
@@ -86,7 +89,7 @@ Kind tree will not be restored. Current iteration state:
 | Milestone | State | Next closure work |
 |---|---|---|
 | M0 truthful repository | complete | `just project-contract-check` validates links/recipes/spatial counts; required CI invokes maintained Justfile gates and publishes the deterministic transport-smoke manifest |
-| M1 bounded execution | active; implementation majority complete | ADBC streams retain ownership; pgwire pulls one batch under a fail-closed byte ceiling; only native EOF permits reuse; native cancel/deadlines use reserved control capacity; cancelled and partial streams quarantine explicitly; failed-transaction rollback/reuse, classed admission, autosized resources, and sampled memory/temp storage are implemented. Clean serial 1M/10M generated-BIGINT reference profiles on `12817bcd` pass exact count/sum, first-row-before-completion, one-batch high water, and +128 MiB RSS budgets. Remaining: wider result shapes, write/commit cancellation, 100-cancel p95, mixed-class native concurrency, and overhead budget. |
+| M1 bounded execution | active; implementation majority complete | ADBC streams retain ownership; pgwire pulls one batch under a fail-closed byte ceiling; only native EOF permits reuse; native cancel/deadlines use reserved control capacity; cancelled and partial streams quarantine explicitly; failed-transaction rollback/reuse, classed admission, autosized resources, and sampled memory/temp storage are implemented. Clean 1M/10M generated-BIGINT references pass RSS/first-row/one-batch gates, and a clean 100-cancel reference passes at 1.51 ms p95 with zero native failures. Remaining: wider result shapes, write/commit cancellation, mixed-class native concurrency, and overhead budget. |
 | M2 streaming ingest | active; implementation majority complete | incremental bounded parser, exact Arrow batch byte splitting, staging ADBC stream, atomic publication, text escapes, >20 MiB/220k-row regression, synchronous malformed-final-row and oversized-decoded-chunk cleanup, abort zero-row tests, scalar/NULL/WKB reopen, compaction, and metrics are implemented. E1 will run one oracle at reduced local and exact 10M/1 GiB reference scales. Remaining: pre-decode pgwire frame ceiling, idle-wait error delivery, and RSS/throughput evidence. |
 | M3 focused compatibility | active foundation | maintained SET/SHOW, AST `public` mapping, parsed quoted COPY targets, structural sentinel `pg_type` resolution, geometry RowDescription/text/binary/NULL identity, focused encoder parity, panic-free nested errors, and ledger-pinned `0A000` simple/extended behavior for all 15 non-executable spatial cases are verified. Remaining: pinned named-client traces, DuckDB-derived broad catalog fixtures, subtype/SRID/dimension metadata, implementing release-required Rust-edge semantics, geography evidence, and broader generated encoder coverage. |
 | M4 analytical performance | active foundation | fail-closed COPY bbox maintenance, direct INSERT and geometry/reserved UPDATE rejection, safe ordinary-column bound UPDATEs with unchanged bbox/WKB reopen evidence, and ordinary file compaction are implemented. Remaining: geometry mutation/spatial-compaction refresh, safe AST predicate injection, conservative geometry matrix, scan-byte plans, and current 10M then 100M profiles. |
