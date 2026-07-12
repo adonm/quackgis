@@ -134,7 +134,7 @@ test:
 
 # Faster local regression loop that compiles the native-runtime integration gates.
 test-fast: arrow-encoder-test
-    cargo test -p quackgis-server --lib --test duckdb_adbc_storage --test duckdb_wire_read --test roadmap_profiles
+    cargo test -p quackgis-server --lib --test duckdb_adbc_storage --test duckdb_wire_read --test roadmap_profiles --test catalog_contract
 
 # Execute the maintained vendored Arrow-to-pgwire properties and regressions.
 arrow-encoder-test:
@@ -206,6 +206,14 @@ duckdb-pgwire-workflow-test driver=duckdb_adbc_driver:
     driver_arg="$(realpath "$driver_arg")"; duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; duckdb_arg="$(command -v '{{duckdb_bin}}')"; benchmark_out="$(realpath -m '.tmp/duckdb-current-benchmark/manifest.json')"; \
     HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" DUCKDB_BIN="$duckdb_arg" QUACKGIS_BENCHMARK_OUT="$benchmark_out" \
       cargo test -p quackgis-server --test duckdb_wire_read -- --ignored --nocapture
+
+# Execute the client-neutral DuckDB-derived catalog and geometry identity fixture.
+duckdb-catalog-contract-test driver=duckdb_adbc_driver:
+    @set -eu; driver_arg='{{driver}}'; driver_arg="${driver_arg#driver=}"; \
+    if [ ! -f "$driver_arg" ]; then echo 'DuckDB ADBC driver is missing; run `mise run duckdb-bootstrap`' >&2; exit 2; fi; \
+    driver_arg="$(realpath "$driver_arg")"; duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; \
+    HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" \
+      cargo test -p quackgis-server --test catalog_contract client_neutral_catalog_contract -- --ignored --exact --nocapture --test-threads=1
 
 # Compare direct DuckDB CLI, ADBC, and pgwire on one deterministic 100k-row profile.
 duckdb-current-benchmark driver=duckdb_adbc_driver duckdb_bin=duckdb_bin out=".tmp/duckdb-current-benchmark/manifest.json":
@@ -336,7 +344,7 @@ check: fmt-check clippy test
 check-fast: fmt-check clippy test-fast
 
 # Run the same gate used by GitHub Actions CI.
-ci: check-fast project-contract-check duckdb-adbc-compile-check duckdb-adbc-storage-test duckdb-pgwire-workflow-test duckdb-result-stream-smoke duckdb-wide-result-smoke duckdb-cancellation-smoke duckdb-mixed-concurrency-smoke duckdb-copy-smoke evidence-manifest-check probe-static-check runtime-static-check kind-static-check
+ci: check-fast project-contract-check duckdb-adbc-compile-check duckdb-adbc-storage-test duckdb-pgwire-workflow-test duckdb-catalog-contract-test duckdb-result-stream-smoke duckdb-wide-result-smoke duckdb-cancellation-smoke duckdb-mixed-concurrency-smoke duckdb-copy-smoke evidence-manifest-check probe-static-check runtime-static-check kind-static-check
 
 # Run the dev QuackGIS server on QUACKGIS_HOST/QUACKGIS_PORT.
 server:

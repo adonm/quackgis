@@ -35,6 +35,10 @@ path = "tests/duckdb_wire_read.rs"
 name = "roadmap_profiles"
 path = "tests/roadmap_profiles.rs"
 
+[[test]]
+name = "catalog_contract"
+path = "tests/catalog_contract.rs"
+
 [dependencies]
 arrow-pg = { workspace = true }
 pgwire = { workspace = true }

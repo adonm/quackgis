@@ -8,6 +8,10 @@ direct DuckDB/ADBC/pgwire benchmark smoke and writes its manifest under `.tmp`.
 
 - `duckdb_spatial_compat.json` is the maintained 57-case disposition ledger; 42
   cases currently execute through pgwire.
+- `fixtures/duckdb_catalog_contract.json` is the client-neutral executable
+  catalog/type fixture. It covers DuckDB-derived table/column metadata, bounded
+  spatial sentinel lookup, geometry RowDescription, binary/text WKB, NULL, and
+  ordinary native catalog behavior through pgwire.
 - `fixtures/postgis_curated_cases.rs` is the deliberately bounded expected-value
   source parsed by the native CLI and pgwire gates, not a Cargo integration test.
 

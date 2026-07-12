@@ -19,7 +19,7 @@ Disposition:
 | parsed read/write policy | Rust edge | unit + denied real-client cases | filtered metadata/admin permissions |
 | portals/fetch paging | Rust edge | live ADBC stream plus three-page native workflow; native partial-drop quarantine proof | realistic fetch sizes and memory profile |
 | query cancellation | native + Rust edge | `57014`, explicit quarantine/fresh reuse, and clean 100-cancel reference at 1.51 ms p95 with zero native failures | write/commit cancellation disposition |
-| query admission/resources | Rust edge + native settings | bounded connection/active/queued queries; fixed native worker pool with reserved control slot; queue timeout; DuckDB threads/memory/temp/spill config; 32-client/eight-reader suspended-portal proof | mixed-class native concurrency evidence |
+| query admission/resources | Rust edge + native settings | bounded connection/active/queued queries; fixed native worker pool with reserved control slot; queue timeout; DuckDB threads/memory/temp/spill config; 32-client/eight-reader suspended-portal proof plus all-class queue/completion profile | write/commit interruption and mixed-workload soak |
 | Arrow result encoding | Rust edge | one ADBC batch at a time; configured ceiling/metrics; clean 1M/10M generated-BIGINT reference RSS/first-row profiles | wider variable-width/native-batch RSS and type fuzzing |
 | COPY FROM STDIN | Rust edge + native ingest | incremental bounded batches; >20 MiB/220k-row stream; atomic malformed/cancel/disconnect/timeout behavior; scalar/NULL/WKB reopen; compaction | idle-wait error delivery and 10M/1 GiB RSS/throughput gates |
 | transactions/session isolation | native + Rust ownership | commit/rollback/disconnect workflow | timeout/cancel/uncertain cleanup and pool reuse |
@@ -34,8 +34,8 @@ Disposition:
 | `ST_NDims`/`ST_CoordDim`/`ST_GeometryN` | extension candidate | classified + stable simple/extended `0A000` | proposal requires workload + vector benchmark |
 | exact bbox recheck | native query | small storage oracle | safe injection plus holes/invalid/scale plans |
 | layout/locality maintenance | partial native SQL | COPY computes four reserved bbox columns; spatial/reserved DML fails closed; ordinary-column bound UPDATE preserves WKB/bbox through reopen | safe AST predicate injection, geometry mutation maintenance, compaction/layout scale evidence |
-| PostgreSQL catalogs | blocked/Rust edge | broad metadata denied | captured psql/psycopg/OGR/QGIS surfaces |
-| geometry OID discovery | partial Rust edge | structural sentinel `pg_type` lookup + RowDescription/text/binary/NULL pgwire test | named QGIS/OGR discovery and subtype/SRID/dimension identity |
+| PostgreSQL catalogs | blocked/Rust edge | client-neutral fixture for DuckDB-derived table/column metadata and ordinary native catalog behavior; broad metadata denied | captured psql/psycopg/OGR/QGIS surfaces |
+| geometry OID discovery | partial Rust edge | client-neutral structural sentinel lookup + RowDescription/text/binary/NULL pgwire fixture | named QGIS/OGR discovery and subtype/SRID/dimension identity |
 | psql/psycopg | partial | tokio-postgres is maintained test client | version-pinned named workflows |
 | GDAL/OGR | blocked | prior traces only | read + streaming COPY copied-data test |
 | QGIS read-only | blocked | prior traces only | discovery/filter/identify/render test |

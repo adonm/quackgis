@@ -107,8 +107,10 @@ catalog surfaces remain open unless a focused test says otherwise.
   recomputation is implemented. UPDATEs of ordinary columns preserve existing
   geometry/bounds, and `DELETE` remains supported.
 - `pg_catalog`, `information_schema`, geography discovery, and GIS client-specific
-  metadata are incomplete. One structural `pg_type` lookup resolves the maintained
-  geometry/geography sentinel OIDs and nothing broader.
+  metadata are incomplete. A client-neutral executable fixture covers native
+  DuckDB table/column metadata and one structural `pg_type` lookup for the
+  maintained geometry/geography sentinel OIDs; it does not claim broader catalog
+  compatibility or named-client qualification.
 - Binary columns named `geom_wkb` use the same geometry sentinel OID as the
   maintained COPY bbox layout. RowDescription plus text hex-WKB, binary WKB, and
   NULL transport are tested through pgwire; subtype/SRID/dimension catalog

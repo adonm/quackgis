@@ -85,6 +85,9 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 - Structural compatibility for maintained PostgreSQL session settings,
   `SHOW search_path`, `public`→`quackgis.main` relation mapping, and quoted
   one-/two-/three-part COPY targets.
+- A registered client-neutral catalog fixture for DuckDB-derived table/column
+  metadata, bounded geometry/geography sentinel lookup, and exact geometry
+  RowDescription/text/binary/NULL behavior.
 - DuckDB-computed bbox maintenance during COPY for the explicit reserved-column
   layout contract, including NULL, exact-recheck, and reopen evidence.
 - Fail-closed bbox layout validation rejects partial, wrong-type, caller-supplied,

@@ -10,6 +10,7 @@ one exact DuckDB/extension bundle.
 | `just check-fast` | Rust formatting, clippy, unit and compile-time integration targets |
 | `just duckdb-adbc-storage-test` | native Arrow/DuckLake write/query/transaction/reopen behavior |
 | `just duckdb-pgwire-workflow-test` | real server protocol, auth, policy, COPY, transaction, spatial, restart behavior |
+| `just duckdb-catalog-contract-test` | client-neutral DuckDB-derived metadata plus bounded geometry type/transport contract |
 | `just duckdb-spatial-compat-probe` | maintained spatial disposition/result classification |
 | `just duckdb-runtime-static-check` | immutable load-only runtime-image contract |
 | `just evidence-manifest-check` | common evidence envelope, source/runtime/host metadata, and claim-level validation |
