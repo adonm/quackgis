@@ -43,6 +43,26 @@ mise exec -- just evidence-manifest-check \
   manifest=.tmp/duckdb-current-benchmark/manifest.json
 ```
 
+Run the same deterministic transport scenario and correctness oracle at reduced
+local scale:
+
+```sh
+mise exec -- just duckdb-transport-profile \
+  level=local rows=1000000 \
+  out=.tmp/duckdb-transport-profile/local-r1m.json
+```
+
+Reference runs use the identical scenario, require a clean tree and storage
+description, and still remain scalar transport evidence rather than M1
+streaming-result or M4 selective-scan evidence:
+
+```sh
+QUACKGIS_PROFILE_STORAGE='local NVMe model/filesystem' \
+mise exec -- just duckdb-transport-profile \
+  level=reference rows=10000000 \
+  out=.tmp/duckdb-transport-profile/reference-r10m.json
+```
+
 ## Next profiles
 
 E0 first adds the common evidence envelope and gate-oriented scenario support.

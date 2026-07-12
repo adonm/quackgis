@@ -216,6 +216,17 @@ duckdb-current-benchmark driver=duckdb_adbc_driver duckdb_bin=duckdb_bin out=".t
     HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" DUCKDB_BIN="$duckdb_arg" QUACKGIS_BENCHMARK_OUT="$out_arg" \
       cargo test -p quackgis-server --release --test duckdb_wire_read current_duckdb_transport_profile -- --ignored --exact --nocapture --test-threads=1
 
+# Run the parameterized deterministic transport scenario at local/reference scale.
+duckdb-transport-profile level="local" rows="1000000" out=".tmp/duckdb-transport-profile/manifest.json" environment="host_process" driver=duckdb_adbc_driver duckdb_bin=duckdb_bin:
+    @set -eu; level_arg='{{level}}'; rows_arg='{{rows}}'; environment_arg='{{environment}}'; driver_arg='{{driver}}'; duckdb_arg='{{duckdb_bin}}'; out_arg='{{out}}'; \
+    level_arg="${level_arg#level=}"; rows_arg="${rows_arg#rows=}"; environment_arg="${environment_arg#environment=}"; driver_arg="${driver_arg#driver=}"; duckdb_arg="${duckdb_arg#duckdb_bin=}"; out_arg="${out_arg#out=}"; \
+    if [ ! -f "$driver_arg" ]; then echo 'DuckDB ADBC driver is missing; run `mise run duckdb-bootstrap`' >&2; exit 2; fi; \
+    driver_arg="$(realpath "$driver_arg")"; duckdb_arg="$(command -v "$duckdb_arg")"; duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; out_arg="$(realpath -m "$out_arg")"; \
+    HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" DUCKDB_BIN="$duckdb_arg" QUACKGIS_BENCHMARK_OUT="$out_arg" \
+      QUACKGIS_EVIDENCE_LEVEL="$level_arg" QUACKGIS_EXECUTION_ENVIRONMENT="$environment_arg" QUACKGIS_BENCHMARK_ROWS="$rows_arg" \
+      cargo test -p quackgis-server --release --test duckdb_wire_read current_duckdb_transport_profile -- --ignored --exact --nocapture --test-threads=1; \
+    python3 scripts/evidence_manifest_check.py "$out_arg"
+
 # Create an offline, exact-path local DuckLake backup with a checksum manifest.
 duckdb-local-backup catalog=catalog data=data out=".tmp/duckdb-backup":
     python3 scripts/duckdb_local_backup.py backup --catalog "{{catalog}}" --data-root "{{data}}" --destination "{{out}}"

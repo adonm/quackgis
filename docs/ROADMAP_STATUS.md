@@ -13,8 +13,8 @@ Kind tree will not be restored. Current iteration state:
 
 | Work package | State | Next executable result |
 |---|---|---|
-| E0 evidence harness | active; envelope complete | current smoke emits and independently validates source/runtime/host/cgroup/data/oracle/measurement/budget metadata; next split gate-oriented native scenarios |
-| E1 M1/M2 local profiles | queued behind E0 | reduced local result/cancel/COPY profiles using the same reference oracle |
+| E0 evidence harness | active; envelope + first parameterized scenario complete | smoke/local/reference transport entrypoint emits validated source/runtime/host/cgroup/data/oracle/measurement/budget metadata; next split reusable runtime/client fixtures from the monolithic workflow |
+| E1 M1/M2 local profiles | active next | add streaming-result RSS/first-row, then cancellation and COPY profiles using the same level mechanism |
 | K0 minimal Kind topology | queued | one runtime workload, durable local volume, TLS secret, pinned client job image |
 | C0 focused clients | queued behind K0/catalog fixtures | psql and psycopg first, then OGR and headless QGIS |
 | P0 M4 host profiles | queued behind E0/layout implementation | 10M twice before 100M |
@@ -31,7 +31,7 @@ Kind tree will not be restored. Current iteration state:
 | Spatial gaps | `docs/DUCKDB_SPATIAL_GAP_LEDGER.md` | 10 Rust/catalog-edge gaps and 5 extension candidates have ledger-pinned `0A000` simple/extended pgwire behavior; semantics remain unsupported |
 | WKB/Arrow | storage/pgwire native tests + `just arrow-encoder-test` | maintained WKB bytes, structural geometry sentinel `pg_type` lookup, RowDescription/text/binary/NULL identity, generated WKB/fixed-binary properties, scalar/list parity, fail-closed invalid shapes, and panic-free nested errors; broad client discovery and generated temporal/decimal/dictionary/nested coverage remain open |
 | Runtime supply chain | `just duckdb-runtime-offline-smoke` | verified context digests/licenses, preinstalled signed extensions, load-only image and server-start smoke |
-| Current performance smoke | `just duckdb-current-benchmark` + `just evidence-manifest-check` | deterministic 100k-row direct DuckDB/ADBC/pgwire scalar full-scan comparison in the common evidence envelope; correctness and broad liveness budgets only |
+| Current transport profiles | `just duckdb-current-benchmark`, `just duckdb-transport-profile`, and `just evidence-manifest-check` | one deterministic scalar full-scan scenario/oracle runs at smoke/local/reference row counts in the common envelope; current 1M local run passes, but this is not streaming-result, selective-scan, or committed reference evidence |
 | Storage authority | storage unit/native tests | atomic local authority marker; remote authority unsupported |
 | Status/readiness | lifecycle unit/native storage tests | liveness is process-only; readiness requires a bound pgwire socket and a successful read-only DuckLake snapshot probe, and reports startup/storage-failure/drain states |
 | Repository gate | `just ci` | Rust fmt/clippy/tests, native storage/pgwire, common evidence validation, probes, runtime static checks |

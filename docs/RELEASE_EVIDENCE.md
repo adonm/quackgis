@@ -13,6 +13,7 @@ one exact DuckDB/extension bundle.
 | `just duckdb-spatial-compat-probe` | maintained spatial disposition/result classification |
 | `just duckdb-runtime-static-check` | immutable load-only runtime-image contract |
 | `just evidence-manifest-check` | common evidence envelope, source/runtime/host metadata, and claim-level validation |
+| `just duckdb-transport-profile` | parameterized smoke/local/reference scalar transport scenario using one correctness oracle |
 | `.tmp/duckdb/manifest.json` | native library/extension paths and SHA-256 values |
 | `.tmp/duckdb-current-benchmark/manifest.json` | deterministic direct DuckDB/ADBC/pgwire correctness and liveness comparison |
 

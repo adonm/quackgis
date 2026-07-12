@@ -1797,7 +1797,7 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
     assert_eq!(first_i64(&canonical[0], 1), 28);
 }
 
-const BENCHMARK_ROWS: i64 = 100_000;
+const DEFAULT_BENCHMARK_ROWS: i64 = 100_000;
 const BENCHMARK_QUERY: &str = "SELECT count(*)::BIGINT, sum(id)::BIGINT, \
     count(*) FILTER (WHERE grp = 7)::BIGINT, \
     count(*) FILTER (WHERE x BETWEEN 100 AND 199 AND y BETWEEN 100 AND 199)::BIGINT, \
@@ -1810,6 +1810,27 @@ const BENCHMARK_QUERY: &str = "SELECT count(*)::BIGINT, sum(id)::BIGINT, \
 #[ignore = "requires the pinned DuckDB CLI and ADBC runtime"]
 async fn current_duckdb_transport_profile() {
     let started = Instant::now();
+    let evidence_level = EvidenceLevel::parse(
+        &std::env::var("QUACKGIS_EVIDENCE_LEVEL").unwrap_or_else(|_| "smoke".to_owned()),
+    )
+    .expect("valid QUACKGIS_EVIDENCE_LEVEL");
+    assert_ne!(
+        evidence_level,
+        EvidenceLevel::External,
+        "the local transport scenario cannot emit external evidence"
+    );
+    let execution_environment = ExecutionEnvironment::parse(
+        &std::env::var("QUACKGIS_EXECUTION_ENVIRONMENT")
+            .unwrap_or_else(|_| "host_process".to_owned()),
+    )
+    .expect("valid QUACKGIS_EXECUTION_ENVIRONMENT");
+    let benchmark_rows = std::env::var("QUACKGIS_BENCHMARK_ROWS")
+        .map(|value| value.parse::<i64>().expect("integer benchmark rows"))
+        .unwrap_or(DEFAULT_BENCHMARK_ROWS);
+    assert!(
+        (1..=100_000_000).contains(&benchmark_rows),
+        "benchmark rows must be between 1 and 100M"
+    );
     let driver_path = std::env::var_os("QUACKGIS_DUCKDB_ADBC_DRIVER").expect("set ADBC driver");
     let duckdb_bin = std::env::var_os("DUCKDB_BIN").expect("set DUCKDB_BIN");
     let output_path = std::env::var_os("QUACKGIS_BENCHMARK_OUT")
@@ -1829,7 +1850,7 @@ async fn current_duckdb_transport_profile() {
            (i % 32)::SMALLINT AS grp, ((i * 17) % 1000)::DOUBLE AS x, \
            ((i * 31) % 1000)::DOUBLE AS y, \
            ST_AsWKB(ST_Point(((i * 17) % 1000)::DOUBLE, ((i * 31) % 1000)::DOUBLE)) AS geom_wkb \
-         FROM range({BENCHMARK_ROWS}) AS r(i)",
+         FROM range({benchmark_rows}) AS r(i)",
         sql_literal_path(&catalog_path),
         sql_literal_path(&data_path),
     );
@@ -1837,7 +1858,7 @@ async fn current_duckdb_transport_profile() {
     run_duckdb(&duckdb_bin, &create_sql);
     let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
 
-    let expected = benchmark_expected();
+    let expected = benchmark_expected(benchmark_rows);
     let direct_sql = format!(
         "LOAD spatial; LOAD ducklake; ATTACH 'ducklake:{}' AS quackgis (DATA_PATH '{}'); {BENCHMARK_QUERY}",
         sql_literal_path(&catalog_path),
@@ -1915,32 +1936,53 @@ async fn current_duckdb_transport_profile() {
     connection_task.abort();
     server_task.abort();
 
-    assert!(load_ms < 30_000.0, "smoke load exceeded 30 seconds");
+    let (load_budget, handshake_budget, direct_budget, adbc_budget, pgwire_budget, total_budget) =
+        match evidence_level {
+            EvidenceLevel::Smoke => (30_000.0, 5_000.0, 15_000.0, 10_000.0, 10_000.0, 90),
+            EvidenceLevel::Local => (120_000.0, 5_000.0, 60_000.0, 60_000.0, 60_000.0, 300),
+            EvidenceLevel::Reference => (300_000.0, 5_000.0, 120_000.0, 120_000.0, 120_000.0, 900),
+            EvidenceLevel::External => unreachable!("external level rejected above"),
+        };
     assert!(
-        handshake_ms < 5_000.0,
-        "pgwire handshake exceeded 5 seconds"
+        load_ms < load_budget,
+        "{} load exceeded {load_budget} ms",
+        evidence_level.as_str()
+    );
+    assert!(
+        handshake_ms < handshake_budget,
+        "pgwire handshake exceeded {handshake_budget} ms"
     );
     for (path, samples, budget) in [
-        ("direct", &direct_samples, 15_000.0),
-        ("adbc", &adbc_samples, 10_000.0),
-        ("pgwire", &pgwire_samples, 10_000.0),
+        ("direct", &direct_samples, direct_budget),
+        ("adbc", &adbc_samples, adbc_budget),
+        ("pgwire", &pgwire_samples, pgwire_budget),
     ] {
         assert!(
             samples.iter().all(|sample| *sample < budget),
             "{path} smoke sample exceeded {budget} ms: {samples:?}"
         );
     }
-    assert!(started.elapsed() < Duration::from_secs(90));
+    assert!(started.elapsed() < Duration::from_secs(total_budget));
 
+    let profile_id =
+        if evidence_level == EvidenceLevel::Smoke && benchmark_rows == DEFAULT_BENCHMARK_ROWS {
+            "duckdb-current-smoke-r100k-v1".to_owned()
+        } else {
+            format!(
+                "duckdb-transport-{}-r{}-v1",
+                evidence_level.as_str(),
+                benchmark_rows
+            )
+        };
     let manifest = EvidenceEnvelope::collect(
         EvidenceProfile::new(
-            "duckdb-current-smoke-r100k-v1",
-            EvidenceLevel::Smoke,
-            ExecutionEnvironment::HostProcess,
-            "single-client warm scalar full-scan smoke; not a scale claim",
+            profile_id,
+            evidence_level,
+            execution_environment,
+            "single-client warm scalar full-scan transport profile; not a streaming-result or selective-scan claim",
         ),
         json!({
-            "rows": BENCHMARK_ROWS,
+            "rows": benchmark_rows,
             "logical_bytes": null,
             "files": null,
             "row_groups": null,
@@ -1961,11 +2003,12 @@ async fn current_duckdb_transport_profile() {
             },
         }),
         json!({
-            "load_max_ms": 30_000.0,
-            "handshake_max_ms": 5_000.0,
-            "direct_sample_max_ms": 15_000.0,
-            "adbc_sample_max_ms": 10_000.0,
-            "pgwire_sample_max_ms": 10_000.0,
+            "load_max_ms": load_budget,
+            "handshake_max_ms": handshake_budget,
+            "direct_sample_max_ms": direct_budget,
+            "adbc_sample_max_ms": adbc_budget,
+            "pgwire_sample_max_ms": pgwire_budget,
+            "total_max_seconds": total_budget,
         }),
     )
     .expect("collect benchmark evidence");
@@ -2020,10 +2063,11 @@ fn canonical_batches(batches: &[RecordBatch]) -> Vec<i64> {
         .collect()
 }
 
-fn benchmark_expected() -> Vec<i64> {
+fn benchmark_expected(rows: i64) -> Vec<i64> {
     let mut group = 0_i64;
     let mut bbox = 0_i64;
-    for id in 0..BENCHMARK_ROWS {
+    let mut text_bytes = 0_i64;
+    for id in 0..rows {
         if id % 32 == 7 {
             group += 1;
         }
@@ -2032,16 +2076,22 @@ fn benchmark_expected() -> Vec<i64> {
         if (100..=199).contains(&x) && (100..=199).contains(&y) {
             bbox += 1;
         }
+        text_bytes += 6 + id.to_string().len().max(6) as i64;
     }
     vec![
-        BENCHMARK_ROWS,
-        BENCHMARK_ROWS * (BENCHMARK_ROWS - 1) / 2,
+        rows,
+        rows * (rows - 1) / 2,
         group,
         bbox,
         bbox,
-        BENCHMARK_ROWS * 12,
-        BENCHMARK_ROWS * 21,
+        text_bytes,
+        rows * 21,
     ]
+}
+
+#[test]
+fn benchmark_oracle_handles_rows_beyond_six_digits() {
+    assert_eq!(benchmark_expected(1_000_001)[5], 12_000_013);
 }
 
 fn sample_summary(samples: &[f64]) -> serde_json::Value {

@@ -7,7 +7,7 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceLevel {
     Smoke,
@@ -26,9 +26,18 @@ impl EvidenceLevel {
             _ => Err(format!("unknown evidence level {value:?}")),
         }
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Smoke => "smoke",
+            Self::Local => "local",
+            Self::Reference => "reference",
+            Self::External => "external",
+        }
+    }
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionEnvironment {
     HostProcess,
@@ -45,6 +54,15 @@ impl ExecutionEnvironment {
             "kind" => Ok(Self::Kind),
             "managed_service" => Ok(Self::ManagedService),
             _ => Err(format!("unknown execution environment {value:?}")),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::HostProcess => "host_process",
+            Self::ConstrainedContainer => "constrained_container",
+            Self::Kind => "kind",
+            Self::ManagedService => "managed_service",
         }
     }
 }
@@ -385,11 +403,16 @@ mod tests {
             EvidenceLevel::parse("reference"),
             Ok(EvidenceLevel::Reference)
         ));
+        assert_eq!(EvidenceLevel::Local.as_str(), "local");
         assert!(EvidenceLevel::parse("benchmark").is_err());
         assert!(matches!(
             ExecutionEnvironment::parse("kind"),
             Ok(ExecutionEnvironment::Kind)
         ));
+        assert_eq!(
+            ExecutionEnvironment::ConstrainedContainer.as_str(),
+            "constrained_container"
+        );
         assert!(ExecutionEnvironment::parse("cluster").is_err());
     }
 }

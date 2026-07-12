@@ -12,6 +12,9 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 - A common profile evidence envelope with source dirty hashes, checksum-only native
   provenance, host/cgroup fingerprint, data/oracle/measurement/budget sections,
   atomic publication, and an independent CI validator.
+- A parameterized smoke/local/reference transport entrypoint that runs one
+  deterministic DuckDB/ADBC/pgwire scenario and exact-result oracle from 100k
+  through the configured row count; the first dirty-tree 1M local run passes.
 - Owned Rust pgwire/TLS/SCRAM edge over DuckDB ADBC.
 - Official local DuckLake create, Arrow ingest/query, transaction, snapshot
   inspection, adjacent-file merge, and reopen workflows.
