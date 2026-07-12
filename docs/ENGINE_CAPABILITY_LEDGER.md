@@ -33,7 +33,7 @@ Disposition:
 | 10 spatial/catalog gaps | blocked/Rust edge | classified ledger + stable simple/extended `0A000` | prioritize only release-client requirements |
 | `ST_NDims`/`ST_CoordDim`/`ST_GeometryN` | extension candidate | classified + stable simple/extended `0A000` | proposal requires workload + vector benchmark |
 | exact bbox recheck | native query | small storage oracle | safe injection plus holes/invalid/scale plans |
-| layout/locality maintenance | partial native SQL | COPY computes the four explicit hidden bbox columns in DuckDB; NULL/exact/reopen workflow | safe AST predicate injection, mutation maintenance, compaction/layout scale evidence |
+| layout/locality maintenance | partial native SQL | COPY computes four reserved bbox columns; spatial/reserved DML fails closed; ordinary-column bound UPDATE preserves WKB/bbox through reopen | safe AST predicate injection, geometry mutation maintenance, compaction/layout scale evidence |
 | PostgreSQL catalogs | blocked/Rust edge | broad metadata denied | captured psql/psycopg/OGR/QGIS surfaces |
 | geometry OID discovery | partial Rust edge | structural sentinel `pg_type` lookup + RowDescription/text/binary/NULL pgwire test | named QGIS/OGR discovery and subtype/SRID/dimension identity |
 | psql/psycopg | partial | tokio-postgres is maintained test client | version-pinned named workflows |

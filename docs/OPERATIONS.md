@@ -227,8 +227,10 @@ recognized binary geometry column. DuckDB Spatial computes the values during
 atomic publication. COPY must omit the reserved bbox columns; partial, wrong-type,
 caller-supplied, or ambiguous layouts fail with `0A000` before staging and leave
 the session reusable. If the nullable geometry is omitted, all four bounds are
-published as NULL. Automatic DDL, direct mutation maintenance, compaction refresh,
-and predicate injection remain roadmap work.
+published as NULL. Direct INSERT and geometry/reserved-column UPDATEs fail closed;
+ordinary-column UPDATEs are allowed because they leave maintained geometry and
+bounds unchanged. Automatic DDL, geometry mutation maintenance, compaction
+refresh, and predicate injection remain roadmap work.
 
 ## Maintained checks
 

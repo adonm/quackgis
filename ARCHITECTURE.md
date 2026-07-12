@@ -126,10 +126,11 @@ the publication statement computes bbox values with DuckDB Spatial. Rust never
 decodes geometry rows. The reserved columns must be nullable, the table must have
 exactly one recognized geometry field, and clients may not supply bbox values.
 Partial, wrong-type, caller-supplied, or ambiguous layouts fail closed before
-staging; tables with no reserved bbox columns are copied unchanged. Until
-schema-aware DML recomputation is implemented, direct pgwire `INSERT`/`UPDATE` on
-any table containing reserved bbox columns fails closed; this prevents stale or
-forged bounds while keeping COPY as the supported write path.
+staging; tables with no reserved bbox columns are copied unchanged. Direct INSERT,
+geometry assignments, and reserved bbox assignments fail closed until schema-aware
+recomputation exists. UPDATEs touching only ordinary columns are permitted and
+leave maintained geometry/bounds unchanged; COPY remains the supported spatial
+write path.
 
 ## Spatial compatibility
 

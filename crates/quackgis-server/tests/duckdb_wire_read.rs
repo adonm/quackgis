@@ -675,6 +675,41 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
             "{sql}"
         );
     }
+    let safe_layout_update = client
+        .prepare_typed(
+            "UPDATE public.layout_copy SET id = $1::INTEGER WHERE id = $2::INTEGER",
+            &[
+                tokio_postgres::types::Type::INT4,
+                tokio_postgres::types::Type::INT4,
+            ],
+        )
+        .await
+        .expect("prepare non-spatial maintained-layout update");
+    assert_eq!(
+        client
+            .execute(&safe_layout_update, &[&10_i32, &1_i32])
+            .await
+            .expect("non-spatial maintained-layout update"),
+        1
+    );
+    let unchanged_layout = client
+        .query_one(
+            "SELECT hex(geom_wkb), _qg_minx, _qg_miny, _qg_maxx, _qg_maxy \
+             FROM public.layout_copy WHERE id = 10",
+            &[],
+        )
+        .await
+        .expect("non-spatial update preserves maintained layout");
+    assert_eq!(
+        unchanged_layout.get::<_, String>(0),
+        "0101000000000000000000F03F0000000000000040"
+    );
+    for column in 1..=4 {
+        assert_eq!(
+            unchanged_layout.get::<_, f64>(column),
+            if column == 2 || column == 4 { 2.0 } else { 1.0 }
+        );
+    }
     let layout_count = client
         .query_one("SELECT count(*)::BIGINT FROM public.layout_copy", &[])
         .await
@@ -1698,7 +1733,7 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
         .query(
             "SELECT _qg_minx, _qg_miny, _qg_maxx, _qg_maxy, \
              count(*) OVER ()::BIGINT FROM quackgis.main.layout_copy \
-             WHERE id = 1",
+             WHERE id = 10",
         )
         .expect("maintained bbox after restart");
     for (column, expected) in [1.0, 2.0, 1.0, 2.0].into_iter().enumerate() {

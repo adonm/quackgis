@@ -91,9 +91,10 @@ catalog surfaces remain open unless a focused test says otherwise.
   unsupported.
 - Reserved bbox layouts are validated before COPY staging; clients cannot provide
   bbox values, and partial/wrong-type/ambiguous layouts fail with stable `0A000`.
-- Direct `INSERT` and `UPDATE` on a table containing maintained bbox columns return
-  `0A000`; use COPY until schema-aware DML recomputation is implemented. `DELETE`
-  does not create stale surviving rows and remains supported.
+- Direct `INSERT`, geometry UPDATEs, and reserved bbox UPDATEs on a maintained
+  layout return `0A000`; use COPY for spatial writes until schema-aware
+  recomputation is implemented. UPDATEs of ordinary columns preserve existing
+  geometry/bounds, and `DELETE` remains supported.
 - `pg_catalog`, `information_schema`, geography discovery, and GIS client-specific
   metadata are incomplete. One structural `pg_type` lookup resolves the maintained
   geometry/geography sentinel OIDs and nothing broader.

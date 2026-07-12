@@ -65,9 +65,10 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 - Deep local readiness that binds pgwire and queries the DuckLake snapshot surface
   before reporting ready, with explicit starting, storage-unavailable, and draining
   states kept separate from process liveness.
-- Fail-closed `0A000` rejection for direct `INSERT`/`UPDATE` against maintained
-  bbox layouts, preventing stale or caller-forged bounds until schema-aware DML
-  recomputation is available.
+- Fail-closed `0A000` rejection for direct INSERT and geometry/reserved-column
+  UPDATEs against maintained bbox layouts, preventing stale or caller-forged
+  bounds until schema-aware DML recomputation is available. Ordinary-column bound
+  UPDATEs are permitted with unchanged WKB/bbox reopen evidence.
 - A deterministic 32-client native pgwire admission regression: suspended portals
   retain eight reader permits and no ninth reader enters before release.
 - Statement deadlines run native cancellation through reserved blocking-worker

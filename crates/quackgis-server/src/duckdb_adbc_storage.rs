@@ -24,7 +24,8 @@ use arrow_pg::datatypes::{SpatialFamily, classify_spatial_field};
 use arrow_schema::{ArrowError, SchemaRef};
 use sha2::{Digest, Sha256};
 use sqlparser::ast::{
-    ObjectName, ObjectNamePart, Statement as SqlStatement, TableFactor, TableObject,
+    AssignmentTarget, ObjectName, ObjectNamePart, Statement as SqlStatement, TableFactor,
+    TableObject,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
@@ -1270,10 +1271,65 @@ fn reject_maintained_bbox_mutation(
         .iter()
         .any(|column| schema.field_with_name(column).is_ok())
     {
+        match &statement {
+            SqlStatement::Insert(_) => {
+                return Err(EngineError::new(
+                    EngineErrorKind::Unsupported,
+                    "direct INSERT on a maintained bbox table is unsupported; use COPY",
+                ));
+            }
+            SqlStatement::Update(update) => {
+                reject_unsafe_bbox_update(&schema, &update.assignments)?;
+            }
+            _ => unreachable!("mutation kind classified above"),
+        }
+    }
+    Ok(())
+}
+
+fn reject_unsafe_bbox_update(
+    schema: &arrow_schema::Schema,
+    assignments: &[sqlparser::ast::Assignment],
+) -> EngineResult<()> {
+    let spatial_columns = schema
+        .fields()
+        .iter()
+        .filter(|field| classify_spatial_field(field).is_some())
+        .map(|field| field.name().as_str())
+        .collect::<Vec<_>>();
+    if spatial_columns.len() != 1 {
         return Err(EngineError::new(
             EngineErrorKind::Unsupported,
-            "direct INSERT/UPDATE on a maintained bbox table is unsupported; use COPY",
+            "maintained bbox UPDATE requires exactly one spatial column",
         ));
+    }
+    let geometry = spatial_columns[0];
+    for assignment in assignments {
+        let targets = match &assignment.target {
+            AssignmentTarget::ColumnName(target) => std::slice::from_ref(target),
+            AssignmentTarget::Tuple(targets) => targets.as_slice(),
+        };
+        for target in targets {
+            let Some(name) = target.0.last().and_then(|part| match part {
+                ObjectNamePart::Identifier(identifier) => Some(identifier.value.as_str()),
+                _ => None,
+            }) else {
+                return Err(EngineError::new(
+                    EngineErrorKind::Unsupported,
+                    "maintained bbox UPDATE targets must be identifiers",
+                ));
+            };
+            if name.eq_ignore_ascii_case(geometry)
+                || MAINTAINED_BBOX_COLUMNS
+                    .iter()
+                    .any(|bbox| name.eq_ignore_ascii_case(bbox))
+            {
+                return Err(EngineError::new(
+                    EngineErrorKind::Unsupported,
+                    "maintained bbox UPDATE cannot assign the geometry or reserved bbox columns",
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -1858,6 +1914,44 @@ mod tests {
             bbox_publish_projection(&target, &input, "\"id\"").expect("nullable geometry");
         assert!(columns.contains("\"_qg_minx\""));
         assert_eq!(values, "\"id\", NULL, NULL, NULL, NULL");
+    }
+
+    #[test]
+    fn maintained_bbox_updates_allow_only_non_spatial_columns() {
+        let schema = arrow_schema::Schema::new(vec![
+            arrow_schema::Field::new("id", arrow_schema::DataType::Int32, false),
+            arrow_schema::Field::new("name", arrow_schema::DataType::Utf8, true),
+            arrow_schema::Field::new("geom_wkb", arrow_schema::DataType::Binary, true),
+            arrow_schema::Field::new("_qg_minx", arrow_schema::DataType::Float64, true),
+            arrow_schema::Field::new("_qg_miny", arrow_schema::DataType::Float64, true),
+            arrow_schema::Field::new("_qg_maxx", arrow_schema::DataType::Float64, true),
+            arrow_schema::Field::new("_qg_maxy", arrow_schema::DataType::Float64, true),
+        ]);
+        let assignments = |sql: &str| {
+            let mut statements = Parser::parse_sql(&PostgreSqlDialect {}, sql).expect("UPDATE");
+            match statements.remove(0) {
+                SqlStatement::Update(update) => update.assignments,
+                _ => panic!("expected UPDATE"),
+            }
+        };
+
+        assert!(
+            reject_unsafe_bbox_update(
+                &schema,
+                &assignments("UPDATE points SET id = 2, name = 'safe'")
+            )
+            .is_ok()
+        );
+        for sql in [
+            "UPDATE points SET geom_wkb = NULL",
+            "UPDATE points SET _qg_minx = 0",
+            "UPDATE points SET (name, _qg_maxy) = ('forged', 0)",
+        ] {
+            assert!(
+                reject_unsafe_bbox_update(&schema, &assignments(sql)).is_err(),
+                "{sql}"
+            );
+        }
     }
 
     #[test]
