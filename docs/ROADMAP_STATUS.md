@@ -31,7 +31,7 @@ Kind tree will not be restored. Current iteration state:
 | Spatial gaps | `docs/DUCKDB_SPATIAL_GAP_LEDGER.md` | 10 Rust/catalog-edge gaps and 5 extension candidates have ledger-pinned `0A000` simple/extended pgwire behavior; semantics remain unsupported |
 | WKB/Arrow | storage/pgwire native tests + `just arrow-encoder-test` | maintained WKB bytes, structural geometry sentinel `pg_type` lookup, RowDescription/text/binary/NULL identity, generated WKB/fixed-binary properties, scalar/list parity, fail-closed invalid shapes, and panic-free nested errors; broad client discovery and generated temporal/decimal/dictionary/nested coverage remain open |
 | Runtime supply chain | `just duckdb-runtime-offline-smoke` | verified context digests/licenses, preinstalled signed extensions, load-only image and server-start smoke |
-| Current transport profiles | `just duckdb-current-benchmark`, `just duckdb-transport-profile`, and `just evidence-manifest-check` | one deterministic scalar full-scan scenario/oracle runs at smoke/local/reference row counts in the common envelope; current 1M local run passes, but this is not streaming-result, selective-scan, or committed reference evidence |
+| Current transport profiles | `just duckdb-current-benchmark`, `just duckdb-transport-profile`, and `just evidence-manifest-check` | one deterministic scalar full-scan scenario/oracle runs at smoke/local/reference row counts in the common envelope; ADBC/pgwire are warmed and interleaved, with reference enforcement of a one-second minimum ADBC scan and 1.15 maximum pgwire/ADBC p50 ratio; current smoke and 1M local runs are not committed reference evidence |
 | Storage authority | storage unit/native tests | atomic local authority marker; remote authority unsupported |
 | Status/readiness | lifecycle unit/native storage tests | liveness is process-only; readiness requires a bound pgwire socket and a successful read-only DuckLake snapshot probe, and reports startup/storage-failure/drain states |
 | Repository gate | `just ci` | Rust fmt/clippy/tests, native storage/pgwire, common evidence validation, probes, runtime static checks |
@@ -73,6 +73,11 @@ Kind tree will not be restored. Current iteration state:
   with retained reader portals and COPY, observes reader, writer, and maintenance
   work queued together, and completes all three classes without rejection or
   timeout.
+- The scalar transport profile now takes five interleaved warm ADBC/pgwire
+  samples and records their p50 overhead ratio. Reference mode fails unless the
+  direct ADBC p50 lasts at least one second and pgwire is at most 15% slower. A
+  reduced smoke run measures 1.040 but is deliberately ineligible to close the
+  budget; a clean eligible reference run remains open.
 - Supported statement and parameter type surfaces are intentionally narrow.
 - Broad `pg_catalog`/`information_schema`, geography discovery, SRID, dimension,
   geography, extent, MVT, and general `ST_GeometryN` behavior remain incomplete.

@@ -73,6 +73,9 @@ catalog surfaces remain open unless a focused test says otherwise.
   the default eight-reader ceiling under 32 clients and simultaneous all-class
   queueing/completion at reduced smoke scale; this is not mixed-workload soak
   evidence.
+- The scalar transport profile enforces the 15% pgwire-over-ADBC p50 budget only
+  in reference mode and only when direct ADBC lasts at least one second. Reduced
+  smoke/local ratios are diagnostic and do not establish the release budget.
 - Exact pinned DuckDB library version/digest and preinstalled signed extensions.
 - Query results stream one driver-produced Arrow batch at a time and reject a
   driver batch above the configured byte ceiling before pgwire encoding. Clean

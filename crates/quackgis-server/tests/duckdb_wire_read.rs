@@ -1883,16 +1883,6 @@ async fn current_duckdb_transport_profile() {
     let open_started = Instant::now();
     let storage = Arc::new(DuckDbAdbcStorage::open(config).expect("benchmark ADBC storage"));
     let adbc_open_ms = open_started.elapsed().as_secs_f64() * 1000.0;
-    let mut adbc_samples = Vec::new();
-    for _ in 0..3 {
-        let sample_started = Instant::now();
-        let batches = storage
-            .query(BENCHMARK_QUERY)
-            .expect("ADBC benchmark query");
-        adbc_samples.push(sample_started.elapsed().as_secs_f64() * 1000.0);
-        assert_eq!(canonical_batches(&batches), expected);
-    }
-
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
         .expect("benchmark listener");
@@ -1921,16 +1911,37 @@ async fn current_duckdb_transport_profile() {
         .prepare(BENCHMARK_QUERY)
         .await
         .expect("prepare benchmark");
+    assert_eq!(
+        canonical_batches(
+            &storage
+                .query(BENCHMARK_QUERY)
+                .expect("warm ADBC benchmark query")
+        ),
+        expected
+    );
+    let warm_row = client
+        .query_one(&statement, &[])
+        .await
+        .expect("warm pgwire benchmark query");
+    assert_eq!(
+        (0..7)
+            .map(|index| warm_row.get(index))
+            .collect::<Vec<i64>>(),
+        expected
+    );
+    let mut adbc_samples = Vec::new();
     let mut pgwire_samples = Vec::new();
-    for _ in 0..3 {
-        let sample_started = Instant::now();
-        let row = client
-            .query_one(&statement, &[])
-            .await
-            .expect("pgwire benchmark query");
-        pgwire_samples.push(sample_started.elapsed().as_secs_f64() * 1000.0);
-        let actual = (0..7).map(|index| row.get(index)).collect::<Vec<i64>>();
-        assert_eq!(actual, expected);
+    let mut sample_order = Vec::new();
+    for iteration in 0..5 {
+        if iteration % 2 == 0 {
+            sample_order.extend(["adbc", "pgwire"]);
+            adbc_samples.push(run_adbc_benchmark(&storage, &expected));
+            pgwire_samples.push(run_pgwire_benchmark(&client, &statement, &expected).await);
+        } else {
+            sample_order.extend(["pgwire", "adbc"]);
+            pgwire_samples.push(run_pgwire_benchmark(&client, &statement, &expected).await);
+            adbc_samples.push(run_adbc_benchmark(&storage, &expected));
+        }
     }
     drop(client);
     connection_task.abort();
@@ -1962,14 +1973,28 @@ async fn current_duckdb_transport_profile() {
             "{path} smoke sample exceeded {budget} ms: {samples:?}"
         );
     }
+    let adbc_p50_ms = sample_p50(&adbc_samples);
+    let pgwire_p50_ms = sample_p50(&pgwire_samples);
+    let pgwire_overhead_ratio = pgwire_p50_ms / adbc_p50_ms;
+    let overhead_budget_eligible = adbc_p50_ms >= 1_000.0;
+    if evidence_level == EvidenceLevel::Reference {
+        assert!(
+            overhead_budget_eligible,
+            "reference ADBC p50 {adbc_p50_ms:.3} ms is shorter than the required one-second scan"
+        );
+        assert!(
+            pgwire_overhead_ratio <= 1.15,
+            "reference pgwire/ADBC p50 ratio {pgwire_overhead_ratio:.3} exceeds 1.15"
+        );
+    }
     assert!(started.elapsed() < Duration::from_secs(total_budget));
 
     let profile_id =
         if evidence_level == EvidenceLevel::Smoke && benchmark_rows == DEFAULT_BENCHMARK_ROWS {
-            "duckdb-current-smoke-r100k-v1".to_owned()
+            "duckdb-current-smoke-r100k-v2".to_owned()
         } else {
             format!(
-                "duckdb-transport-{}-r{}-v1",
+                "duckdb-transport-{}-r{}-v2",
                 evidence_level.as_str(),
                 benchmark_rows
             )
@@ -1991,6 +2016,7 @@ async fn current_duckdb_transport_profile() {
             "canonical_result": expected,
             "bbox_equals_exact": expected[3] == expected[4],
             "wkb_bytes": expected[6],
+            "all_transport_results_exact": true,
         }),
         json!({
             "load_ms": load_ms,
@@ -2001,6 +2027,11 @@ async fn current_duckdb_transport_profile() {
                 "adbc": sample_summary(&adbc_samples),
                 "pgwire": sample_summary(&pgwire_samples),
             },
+            "interleaved_sample_order": sample_order,
+            "adbc_p50_ms": adbc_p50_ms,
+            "pgwire_p50_ms": pgwire_p50_ms,
+            "pgwire_to_adbc_p50_ratio": pgwire_overhead_ratio,
+            "overhead_budget_eligible": overhead_budget_eligible,
         }),
         json!({
             "load_max_ms": load_budget,
@@ -2008,6 +2039,8 @@ async fn current_duckdb_transport_profile() {
             "direct_sample_max_ms": direct_budget,
             "adbc_sample_max_ms": adbc_budget,
             "pgwire_sample_max_ms": pgwire_budget,
+            "reference_adbc_p50_min_ms": 1000.0,
+            "reference_pgwire_to_adbc_p50_ratio_max": 1.15,
             "total_max_seconds": total_budget,
         }),
     )
@@ -2063,6 +2096,32 @@ fn canonical_batches(batches: &[RecordBatch]) -> Vec<i64> {
         .collect()
 }
 
+fn run_adbc_benchmark(storage: &DuckDbAdbcStorage, expected: &[i64]) -> f64 {
+    let sample_started = Instant::now();
+    let batches = storage
+        .query(BENCHMARK_QUERY)
+        .expect("ADBC benchmark query");
+    let elapsed_ms = sample_started.elapsed().as_secs_f64() * 1000.0;
+    assert_eq!(canonical_batches(&batches), expected);
+    elapsed_ms
+}
+
+async fn run_pgwire_benchmark(
+    client: &tokio_postgres::Client,
+    statement: &tokio_postgres::Statement,
+    expected: &[i64],
+) -> f64 {
+    let sample_started = Instant::now();
+    let row = client
+        .query_one(statement, &[])
+        .await
+        .expect("pgwire benchmark query");
+    let elapsed_ms = sample_started.elapsed().as_secs_f64() * 1000.0;
+    let actual = (0..7).map(|index| row.get(index)).collect::<Vec<i64>>();
+    assert_eq!(actual, expected);
+    elapsed_ms
+}
+
 fn benchmark_expected(rows: i64) -> Vec<i64> {
     let mut group = 0_i64;
     let mut bbox = 0_i64;
@@ -2104,4 +2163,16 @@ fn sample_summary(samples: &[f64]) -> serde_json::Value {
         "max_ms": sorted[sorted.len() - 1],
         "mean_ms": samples.iter().sum::<f64>() / samples.len() as f64,
     })
+}
+
+fn sample_p50(samples: &[f64]) -> f64 {
+    assert!(!samples.is_empty(), "benchmark samples must not be empty");
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    sorted[sorted.len() / 2]
+}
+
+#[test]
+fn benchmark_p50_uses_middle_sample() {
+    assert_eq!(sample_p50(&[5.0, 1.0, 3.0, 2.0, 4.0]), 3.0);
 }

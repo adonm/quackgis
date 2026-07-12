@@ -2,7 +2,7 @@
 
 ## Maintained transport smoke
 
-`duckdb-current-smoke-r100k-v1` compares direct DuckDB CLI, in-process ADBC, and
+`duckdb-current-smoke-r100k-v2` compares direct DuckDB CLI, in-process ADBC, and
 pgwire over the same deterministic official-DuckLake table:
 
 ```sh
@@ -18,8 +18,11 @@ by required CI.
 
 Budgets are deliberately broad liveness ceilings: load under 30 seconds,
 handshake under 5 seconds, each direct sample under 15 seconds, and each ADBC/
-pgwire sample under 10 seconds. Ratios are evidence only because CLI process wall
-time and in-process client wall time have different scopes.
+pgwire sample under 10 seconds. The profile warms ADBC and pgwire, interleaves five
+samples from each path, and records their p50 ratio. Smoke/local ratios are
+diagnostic; reference evidence additionally requires a direct-ADBC p50 of at least
+one second and pgwire p50 no more than 15% above direct ADBC. CLI ratios remain
+evidence only because process wall time and in-process client wall time differ.
 
 This proves deterministic current-path comparison, not streaming, concurrency,
 memory, spill, selective pruning, COPY throughput, or scale.
@@ -53,7 +56,8 @@ mise exec -- just duckdb-transport-profile \
 ```
 
 Reference runs use the identical scenario, require a clean tree and storage
-description, and still remain scalar transport evidence rather than M1
+description, and enforce the M1 overhead budget only when the direct ADBC scan is
+at least one second. They remain scalar transport evidence rather than M1
 streaming-result or M4 selective-scan evidence:
 
 ```sh
