@@ -1947,7 +1947,8 @@ async fn current_duckdb_transport_profile() {
          SET ducklake_default_data_inlining_row_limit=0; \
          ATTACH 'ducklake:{}' AS quackgis (DATA_PATH '{}', DATA_INLINING_ROW_LIMIT 0); \
          CREATE TABLE quackgis.main.benchmark_points AS \
-         SELECT i::INTEGER AS id, 'point-' || lpad(i::VARCHAR, 6, '0') AS name, \
+         SELECT i::INTEGER AS id, \
+           'point-' || lpad(i::VARCHAR, greatest(6, length(i::VARCHAR)), '0') AS name, \
            (i % 32)::SMALLINT AS grp, ((i * 17) % 1000)::DOUBLE AS x, \
            ((i * 31) % 1000)::DOUBLE AS y, \
            ST_AsWKB(ST_Point(((i * 17) % 1000)::DOUBLE, ((i * 31) % 1000)::DOUBLE)) AS geom_wkb \
@@ -2251,7 +2252,9 @@ fn benchmark_expected(rows: i64) -> Vec<i64> {
 
 #[test]
 fn benchmark_oracle_handles_rows_beyond_six_digits() {
+    assert_eq!(benchmark_expected(1_000_000)[5], 12_000_000);
     assert_eq!(benchmark_expected(1_000_001)[5], 12_000_013);
+    assert_eq!(benchmark_expected(10_000_000)[5], 129_000_000);
 }
 
 fn sample_summary(samples: &[f64]) -> serde_json::Value {

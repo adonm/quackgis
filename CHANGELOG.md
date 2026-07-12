@@ -18,6 +18,8 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 - Warm, interleaved ADBC/pgwire transport sampling with an exact-result oracle and
   fail-closed reference enforcement of the one-second eligibility and 15% p50
   overhead limits.
+- Scale-safe transport fixture names retain complete IDs above six digits; the
+  exact byte-count oracle now has boundary coverage through 10M rows.
 - A separately registered result-stream profile with two-millisecond process RSS
   sampling, time-to-first-row, throughput, row/sum oracle, and Arrow batch
   high-water evidence; its first 1M local run passes with one in-flight batch.
