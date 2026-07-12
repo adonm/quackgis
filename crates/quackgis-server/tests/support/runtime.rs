@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::sync::Arc;
 
+use quackgis_server::auth::AuthConfig;
 use quackgis_server::duckdb_adbc_storage::{DuckDbAdbcConfig, DuckDbAdbcStorage, ExtensionPolicy};
 use quackgis_server::pgwire_server::ServerOptions;
 
@@ -13,6 +14,10 @@ pub struct TestRuntime {
 
 impl TestRuntime {
     pub async fn start(options: ServerOptions) -> Self {
+        Self::start_with_auth(options, AuthConfig::trust()).await
+    }
+
+    pub async fn start_with_auth(options: ServerOptions, auth: AuthConfig) -> Self {
         let temp = tempfile::tempdir().expect("profile tempdir");
         let catalog_path = temp.path().join("catalog.ducklake");
         let data_path = temp.path().join("data");
@@ -40,7 +45,7 @@ impl TestRuntime {
                 server_storage,
                 listener,
                 &options,
-                quackgis_server::auth::AuthConfig::trust(),
+                auth,
             )
             .await
         });

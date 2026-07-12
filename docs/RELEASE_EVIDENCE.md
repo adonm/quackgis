@@ -17,6 +17,7 @@ one exact DuckDB/extension bundle.
 | `just duckdb-result-stream-profile` | parameterized result RSS/first-row/cardinality profile; 1M/10M reference runs close the M1 scale gate |
 | `just duckdb-wide-result-profile` | nullable variable-width VARCHAR/BLOB RSS, exact-value, and native-batch profile |
 | `just duckdb-cancellation-profile` | sequential long-query cancel latency, SQLSTATE, quarantine, fresh-session, and native counter evidence |
+| `just duckdb-mixed-concurrency-profile` | retained native reader/writer work, all-class queueing, class/global ceilings, completion, and rejection/timeout evidence |
 | `just duckdb-copy-profile` | direct ADBC versus pgwire COPY RSS, throughput, publication metrics, and exact WKB/count/sum oracle |
 | `just kind-static-check` | minimal DuckDB-only topology shape, immutable image input, secret rendering, and client-job contract |
 | `.tmp/duckdb/manifest.json` | native library/extension paths and SHA-256 values |

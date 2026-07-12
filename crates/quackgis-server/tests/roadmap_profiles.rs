@@ -8,6 +8,7 @@ use arrow_array::{BinaryArray, Int64Array, RecordBatch, RecordBatchReader, Strin
 use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
+use quackgis_server::auth::AuthConfig;
 use quackgis_server::engine_api::{EngineTableRef, IngestDisposition};
 use quackgis_server::pgwire_server::ServerOptions;
 use serde_json::json;
@@ -483,6 +484,252 @@ async fn cancellation_profile() {
 
 #[tokio::test]
 #[ignore = "requires the pinned DuckDB ADBC runtime"]
+async fn mixed_class_concurrency_profile() {
+    const GLOBAL_LIMIT: usize = 3;
+    const READER_LIMIT: usize = 2;
+    const WRITER_LIMIT: usize = 1;
+    const MAINTENANCE_LIMIT: usize = 1;
+
+    let profile = MixedConcurrencyProfile::from_environment();
+    let output_path = std::env::var_os("QUACKGIS_PROFILE_OUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| ".tmp/duckdb-mixed-concurrency/manifest.json".into());
+    let runtime = TestRuntime::start_with_auth(
+        ServerOptions::new()
+            .with_max_connections(12)
+            .with_max_active_queries(GLOBAL_LIMIT)
+            .with_max_reader_queries(READER_LIMIT)
+            .with_max_writer_queries(WRITER_LIMIT)
+            .with_max_maintenance_queries(MAINTENANCE_LIMIT)
+            .with_max_queued_queries(8)
+            .with_max_blocking_workers(8)
+            .with_queue_timeout(Duration::from_secs(15)),
+        AuthConfig::trust()
+            .with_maintenance_user("postgres")
+            .expect("maintenance identity"),
+    )
+    .await;
+    runtime
+        .storage()
+        .execute_update(
+            "CREATE TABLE quackgis.main.mixed_profile(id BIGINT, name VARCHAR); \
+             INSERT INTO quackgis.main.mixed_profile VALUES (1, 'seed')",
+        )
+        .expect("seed mixed profile table");
+
+    let mut holder_releases = Vec::new();
+    let mut holder_tasks = Vec::new();
+    let (entered_tx, mut entered_rx) = tokio::sync::mpsc::channel(GLOBAL_LIMIT);
+    for id in 0..READER_LIMIT {
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        holder_releases.push(release_tx);
+        let (mut client, connection) = runtime.connect().await;
+        let entered_tx = entered_tx.clone();
+        holder_tasks.push(tokio::spawn(async move {
+            let transaction = client.transaction().await.expect("reader transaction");
+            let statement = transaction
+                .prepare("SELECT i::BIGINT FROM range(100000) AS mixed_rows(i)")
+                .await
+                .expect("reader statement");
+            let portal = transaction
+                .bind(&statement, &[])
+                .await
+                .expect("reader portal");
+            let rows = transaction
+                .query_portal(&portal, 1)
+                .await
+                .expect("reader first page");
+            assert_eq!(rows[0].get::<_, i64>(0), 0);
+            entered_tx.send(()).await.expect("reader entered");
+            release_rx.await.expect("reader release");
+            drop((portal, transaction));
+            connection.abort();
+            id
+        }));
+    }
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    holder_releases.push(release_tx);
+    let (writer, writer_connection) = runtime.connect().await;
+    let writer_entered = entered_tx.clone();
+    holder_tasks.push(tokio::spawn(async move {
+        let sink: tokio_postgres::CopyInSink<Bytes> = writer
+            .copy_in("COPY quackgis.main.mixed_profile (id, name) FROM STDIN")
+            .await
+            .expect("writer COPY holder");
+        let mut sink = Box::pin(sink);
+        writer_entered.send(()).await.expect("writer entered");
+        release_rx.await.expect("writer release");
+        assert_eq!(sink.as_mut().finish().await.expect("finish empty COPY"), 0);
+        drop(writer);
+        writer_connection.abort();
+        READER_LIMIT
+    }));
+    drop(entered_tx);
+    for _ in 0..GLOBAL_LIMIT {
+        tokio::time::timeout(Duration::from_secs(5), entered_rx.recv())
+            .await
+            .expect("holder admission timeout")
+            .expect("holder admission");
+    }
+    assert_eq!(
+        quackgis_server::execution_control::active_operations(),
+        GLOBAL_LIMIT
+    );
+
+    let (queued_reader, queued_reader_connection) = runtime.connect().await;
+    let reader_task = tokio::spawn(async move {
+        let count = queued_reader
+            .query_one(
+                "SELECT count(*)::BIGINT FROM quackgis.main.mixed_profile",
+                &[],
+            )
+            .await
+            .expect("queued reader")
+            .get::<_, i64>(0);
+        queued_reader_connection.abort();
+        count
+    });
+    let (queued_writer, queued_writer_connection) = runtime.connect().await;
+    let writer_task = tokio::spawn(async move {
+        queued_writer
+            .batch_execute("BEGIN")
+            .await
+            .expect("queued writer begin");
+        queued_writer
+            .batch_execute("ROLLBACK")
+            .await
+            .expect("queued writer rollback");
+        queued_writer_connection.abort();
+    });
+    let (maintenance, maintenance_connection) = runtime.connect().await;
+    let maintenance_task = tokio::spawn(async move {
+        maintenance
+            .batch_execute(
+                "CALL quackgis_merge_adjacent_files('public', 'mixed_profile', 8, 16777216, NULL)",
+            )
+            .await
+            .expect("queued maintenance");
+        maintenance_connection.abort();
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let metrics =
+                quackgis_server::metrics::render_prometheus(runtime.storage().lifecycle().as_ref());
+            if ["reader", "writer", "maintenance"].iter().all(|class| {
+                prometheus_labeled_u64(&metrics, "quackgis_operations_class_queued", "class", class)
+                    .is_some_and(|value| value >= 1)
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("all operation classes queued");
+    assert_eq!(
+        quackgis_server::execution_control::active_operations(),
+        GLOBAL_LIMIT,
+        "configured global limit must remain saturated, never exceeded"
+    );
+
+    for release in holder_releases {
+        release.send(()).expect("release holder");
+    }
+    for task in holder_tasks {
+        task.await.expect("holder task");
+    }
+    assert_eq!(reader_task.await.expect("reader task"), 1);
+    writer_task.await.expect("writer task");
+    maintenance_task.await.expect("maintenance task");
+
+    let metrics =
+        quackgis_server::metrics::render_prometheus(runtime.storage().lifecycle().as_ref());
+    let reader_high_water = prometheus_labeled_u64(
+        &metrics,
+        "quackgis_operations_class_high_water",
+        "class",
+        "reader",
+    )
+    .expect("reader high water");
+    let writer_high_water = prometheus_labeled_u64(
+        &metrics,
+        "quackgis_operations_class_high_water",
+        "class",
+        "writer",
+    )
+    .expect("writer high water");
+    let maintenance_high_water = prometheus_labeled_u64(
+        &metrics,
+        "quackgis_operations_class_high_water",
+        "class",
+        "maintenance",
+    )
+    .expect("maintenance high water");
+    assert_eq!(reader_high_water, READER_LIMIT as u64);
+    assert_eq!(writer_high_water, WRITER_LIMIT as u64);
+    assert_eq!(maintenance_high_water, MAINTENANCE_LIMIT as u64);
+    let rejected = prometheus_u64(&metrics, "quackgis_admission_rejected_total")
+        .expect("admission rejection metric");
+    let timed_out = prometheus_u64(&metrics, "quackgis_admission_queue_timeouts_total")
+        .expect("admission timeout metric");
+    assert_eq!(rejected, 0);
+    assert_eq!(timed_out, 0);
+    assert_eq!(quackgis_server::execution_control::active_operations(), 0);
+    assert_eq!(quackgis_server::execution_control::queued_operations(), 0);
+
+    let evidence = EvidenceEnvelope::collect(
+        EvidenceProfile::new(
+            format!("duckdb-mixed-concurrency-{}-v1", profile.level.as_str()),
+            profile.level,
+            profile.environment,
+            "two retained pgwire reader portals and one retained pgwire COPY saturate global admission while reader, writer, and maintenance operations queue and then complete",
+        ),
+        json!({
+            "clients": 6,
+            "holder_readers": READER_LIMIT,
+            "holder_writers": WRITER_LIMIT,
+            "queued_readers": 1,
+            "queued_writers": 1,
+            "queued_maintenance": 1,
+        }),
+        json!({
+            "reader_count": 1,
+            "writer_transaction_completed": true,
+            "maintenance_completed": true,
+            "active_after_completion": 0,
+            "queued_after_completion": 0,
+        }),
+        json!({
+            "observed_global_active": GLOBAL_LIMIT,
+            "reader_high_water": reader_high_water,
+            "writer_high_water": writer_high_water,
+            "maintenance_high_water": maintenance_high_water,
+            "admission_rejections": rejected,
+            "queue_timeouts": timed_out,
+        }),
+        json!({
+            "global_active_max": GLOBAL_LIMIT,
+            "reader_active_max": READER_LIMIT,
+            "writer_active_max": WRITER_LIMIT,
+            "maintenance_active_max": MAINTENANCE_LIMIT,
+            "admission_rejections_max": 0,
+            "queue_timeouts_max": 0,
+        }),
+    )
+    .expect("collect mixed-concurrency evidence");
+    evidence
+        .write(&output_path)
+        .expect("write mixed-concurrency evidence");
+    println!(
+        "duckdb_mixed_concurrency_profile_ok clients=6 active_limit={} out={}",
+        GLOBAL_LIMIT,
+        output_path.display()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires the pinned DuckDB ADBC runtime"]
 async fn copy_ingest_profile() {
     let profile = CopyProfile::from_environment();
     let output_path = std::env::var_os("QUACKGIS_PROFILE_OUT")
@@ -790,6 +1037,31 @@ struct CopyProfile {
     throughput_ratio_budget: f64,
 }
 
+struct MixedConcurrencyProfile {
+    level: EvidenceLevel,
+    environment: ExecutionEnvironment,
+}
+
+impl MixedConcurrencyProfile {
+    fn from_environment() -> Self {
+        let level = EvidenceLevel::parse(
+            &std::env::var("QUACKGIS_EVIDENCE_LEVEL").unwrap_or_else(|_| "smoke".to_owned()),
+        )
+        .expect("valid evidence level");
+        assert_ne!(
+            level,
+            EvidenceLevel::External,
+            "external evidence is not local"
+        );
+        let environment = ExecutionEnvironment::parse(
+            &std::env::var("QUACKGIS_EXECUTION_ENVIRONMENT")
+                .unwrap_or_else(|_| "host_process".to_owned()),
+        )
+        .expect("valid execution environment");
+        Self { level, environment }
+    }
+}
+
 impl CopyProfile {
     fn from_environment() -> Self {
         let level = EvidenceLevel::parse(
@@ -1032,11 +1304,25 @@ fn prometheus_u64(metrics: &str, name: &str) -> Option<u64> {
     })
 }
 
+fn prometheus_labeled_u64(
+    metrics: &str,
+    name: &str,
+    label: &str,
+    label_value: &str,
+) -> Option<u64> {
+    let metric_name = format!("{name}{{{label}=\"{label_value}\"}}");
+    prometheus_u64(metrics, &metric_name)
+}
+
 #[test]
 fn parses_process_rss_and_prometheus_values() {
     assert!(process_rss_bytes().is_some_and(|rss| rss > 0));
     assert_eq!(prometheus_u64("metric 7\n", "metric"), Some(7));
     assert_eq!(prometheus_u64("metric 7\n", "missing"), None);
+    assert_eq!(
+        prometheus_labeled_u64("metric{class=\"reader\"} 2\n", "metric", "class", "reader"),
+        Some(2)
+    );
     let summary = latency_summary(&[5.0, 1.0, 4.0, 2.0, 3.0]);
     assert_eq!(summary.min_ms, 1.0);
     assert_eq!(summary.p50_ms, 3.0);

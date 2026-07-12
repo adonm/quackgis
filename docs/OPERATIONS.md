@@ -114,8 +114,11 @@ global active-query limit. Admission acquires both a class permit and a global
 permit under the same bounded queue deadline. Metrics expose active, queued, and
 high-water values by class. A deterministic 32-contender unit gate proves that an
 eight-operation global limit never admits nine. The native pgwire workflow above
-proves the same ceiling for readers; mixed reader/writer/maintenance concurrency
-remains a separate open gate.
+proves the same ceiling for readers. `just duckdb-mixed-concurrency-profile`
+additionally saturates a three-operation global limit with two suspended reader
+portals and one open COPY, observes reader, writer, and maintenance work queued,
+then proves every class completes without rejection or timeout. This is bounded
+admission evidence, not the Local 1.0 mixed-workload soak.
 
 Adjacent-file compaction is the only server-exposed maintenance operation. It is
 available through simple protocol only, requires the explicitly configured

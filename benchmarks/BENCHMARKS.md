@@ -149,11 +149,29 @@ budgets. A first clean 10M attempt measured a 0.200 ratio and correctly failed t
 required 0.50 reference budget, so COPY throughput remains an open M2 gate rather
 than a performance claim.
 
+## Mixed-class concurrency profile
+
+The mixed-class profile fills a three-operation global limit with two suspended
+reader portals and one open COPY. It then observes one reader, writer, and
+authorized maintenance call waiting at the same time, releases the holders, and
+requires all queued work to complete with class high-water values at their
+configured limits and no admission rejection or timeout.
+
+```sh
+mise exec -- just duckdb-mixed-concurrency-profile \
+  level=local out=.tmp/duckdb-mixed-concurrency/local.json
+```
+
+The smoke run is a functional concurrency oracle rather than a throughput claim.
+Together with the maintained 32-client/eight-reader native workflow, it closes the
+open M1 mixed-class admission evidence slice; write/commit interruption and the
+Local 1.0 mixed-workload soak remain separate gates.
+
 ## Next profiles
 
 E0 first adds the common evidence envelope and gate-oriented scenario support.
-E1 then adds transport overhead and mixed-class concurrency after the completed
-profile implementations for result RSS, wide results, cancellation, and COPY.
+E1 then adds transport overhead after the completed profile implementations for
+result RSS, wide results, cancellation, mixed-class concurrency, and COPY.
 Later profiles cover selective scans, grouped aggregates, bounded spatial joins, fragmented-file
 compaction, plans, bytes scanned, spill, and configured-concurrency evidence. The
 exact 10M profile must pass twice before introducing 100M.

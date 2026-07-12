@@ -69,6 +69,10 @@ catalog surfaces remain open unless a focused test says otherwise.
 - Maintenance is disabled unless `QUACKGIS_MAINTENANCE_USER` names the caller;
   it remains constrained by the write table allowlist and cannot run inside an
   explicit transaction.
+- Global and reader/writer/maintenance admission are bounded. Native gates prove
+  the default eight-reader ceiling under 32 clients and simultaneous all-class
+  queueing/completion at reduced smoke scale; this is not mixed-workload soak
+  evidence.
 - Exact pinned DuckDB library version/digest and preinstalled signed extensions.
 - Query results stream one driver-produced Arrow batch at a time and reject a
   driver batch above the configured byte ceiling before pgwire encoding. Clean

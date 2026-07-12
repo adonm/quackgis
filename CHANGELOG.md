@@ -63,6 +63,9 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   and active/queued/high-water metrics.
 - Global plus reader/writer/maintenance-class admission limits and per-class
   active/queued/high-water metrics, with a 32-contender ceiling regression.
+- A registered mixed-class native profile that saturates admission with retained
+  reader/COPY work, observes reader, writer, and maintenance queueing together,
+  and completes without rejection or timeout.
 - Opt-in maintenance identity and a literal-only server-owned adjacent-file
   compaction call with write-policy enforcement, maintenance admission, audit
   events, transaction rejection, and pgwire/reopen evidence.

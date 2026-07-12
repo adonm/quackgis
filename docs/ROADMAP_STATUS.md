@@ -14,7 +14,7 @@ Kind tree will not be restored. Current iteration state:
 | Work package | State | Next executable result |
 |---|---|---|
 | E0 evidence harness | active; shared fixture established | common evidence envelope plus reusable fresh DuckLake/server/client runtime now support separately registered profiles; continue extracting fixtures only when the next profile needs them |
-| E1 M1/M2 local profiles | active | clean 1M/10M BIGINT, 1M wide-result, and 100-cancel references pass; COPY passes reduced local but its first clean 10M attempt fails the 0.50 throughput-ratio budget at 0.200; next COPY optimization, transport overhead, and mixed-class concurrency |
+| E1 M1/M2 local profiles | active | clean 1M/10M BIGINT, 1M wide-result, and 100-cancel references pass; mixed reader/writer/maintenance admission passes its native smoke oracle; COPY passes reduced local but its first clean 10M attempt fails the 0.50 throughput-ratio budget at 0.200; next COPY optimization and transport overhead |
 | K0 minimal Kind topology | active foundation | `deploy/kind/` now renders one TLS-required runtime StatefulSet, retained local PV/PVC, generated Secrets, probes, and opt-in psql/psycopg/OGR Jobs from digest-pinned images; next publish/build the client image and execute the real cluster gates |
 | C0 focused clients | queued behind K0/catalog fixtures | psql and psycopg first, then OGR and headless QGIS |
 | P0 M4 host profiles | queued behind E0/layout implementation | 10M twice before 100M |
@@ -69,7 +69,10 @@ Kind tree will not be restored. Current iteration state:
   Aggregate DuckDB memory and temporary storage are sampled on an independent
   session when metrics are enabled. A 32-contender unit gate and a 32-client
   suspended-portal native workload both prove the eight-operation admission
-  ceiling.
+  ceiling. The separately registered mixed-class profile saturates a global limit
+  with retained reader portals and COPY, observes reader, writer, and maintenance
+  work queued together, and completes all three classes without rejection or
+  timeout.
 - Supported statement and parameter type surfaces are intentionally narrow.
 - Broad `pg_catalog`/`information_schema`, geography discovery, SRID, dimension,
   geography, extent, MVT, and general `ST_GeometryN` behavior remain incomplete.
@@ -94,7 +97,7 @@ Kind tree will not be restored. Current iteration state:
 | Milestone | State | Next closure work |
 |---|---|---|
 | M0 truthful repository | complete | `just project-contract-check` validates links/recipes/spatial counts; required CI invokes maintained Justfile gates and publishes the deterministic transport-smoke manifest |
-| M1 bounded execution | active; implementation majority complete | ADBC streams retain ownership; pgwire pulls one batch under a fail-closed byte ceiling; only native EOF permits reuse; native cancel/deadlines use reserved control capacity; cancelled and partial streams quarantine explicitly; failed-transaction rollback/reuse, classed admission, autosized resources, and sampled memory/temp storage are implemented. Clean 1M/10M generated-BIGINT references pass RSS/first-row/one-batch gates, a clean 100-cancel reference passes at 1.51 ms p95, and the clean 1M wide nullable VARCHAR/BLOB reference crosses 489 batches at 19.17 MiB RSS delta. Remaining: write/commit cancellation, mixed-class native concurrency, and overhead budget. |
+| M1 bounded execution | active; implementation majority complete | ADBC streams retain ownership; pgwire pulls one batch under a fail-closed byte ceiling; only native EOF permits reuse; native cancel/deadlines use reserved control capacity; cancelled and partial streams quarantine explicitly; failed-transaction rollback/reuse, classed admission, autosized resources, and sampled memory/temp storage are implemented. Clean 1M/10M generated-BIGINT references pass RSS/first-row/one-batch gates, a clean 100-cancel reference passes at 1.51 ms p95, and the clean 1M wide nullable VARCHAR/BLOB reference crosses 489 batches at 19.17 MiB RSS delta. A native mixed-class profile now proves simultaneous reader/writer/maintenance queueing and bounded completion. Remaining: write/commit cancellation and overhead budget. |
 | M2 streaming ingest | active; implementation majority complete | incremental bounded parser, exact Arrow batch byte splitting, staging ADBC stream, atomic publication, text escapes, >20 MiB/220k-row regression, synchronous malformed-final-row and oversized-decoded-chunk cleanup, abort zero-row tests, scalar/NULL/WKB reopen, compaction, and metrics are implemented. The same direct-ADBC/pgwire generator and exact oracle pass at 1M local scale with 64 MiB RSS delta and 0.272 throughput ratio. The first clean 10M run measures 0.200 and fails the required 0.50 ratio. Remaining: COPY optimization and passing reference, pre-decode pgwire frame ceiling, and idle-wait error delivery. |
 | M3 focused compatibility | active foundation | maintained SET/SHOW, AST `public` mapping, parsed quoted COPY targets, structural sentinel `pg_type` resolution, geometry RowDescription/text/binary/NULL identity, focused encoder parity, panic-free nested errors, and ledger-pinned `0A000` simple/extended behavior for all 15 non-executable spatial cases are verified. Remaining: pinned named-client traces, DuckDB-derived broad catalog fixtures, subtype/SRID/dimension metadata, implementing release-required Rust-edge semantics, geography evidence, and broader generated encoder coverage. |
 | M4 analytical performance | active foundation | fail-closed COPY bbox maintenance, direct INSERT and geometry/reserved UPDATE rejection, safe ordinary-column bound UPDATEs with unchanged bbox/WKB reopen evidence, and ordinary file compaction are implemented. Remaining: geometry mutation/spatial-compaction refresh, safe AST predicate injection, conservative geometry matrix, scan-byte plans, and current 10M then 100M profiles. |
