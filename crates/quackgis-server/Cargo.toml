@@ -60,6 +60,7 @@ clap = { workspace = true }
 async-trait = { workspace = true }
 futures = "0.3"
 chrono = { workspace = true }
+memchr = { workspace = true }
 rust_decimal = "1.42"
 
 [dev-dependencies]

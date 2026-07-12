@@ -47,8 +47,8 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   and a 0.272 pgwire/direct ratio.
 - COPY text decoding now stores one contiguous bounded batch plus compact field
   ranges, borrows unescaped values, builds Arrow text/binary columns directly,
-  and uses allocation-free hex nibbles instead of per-field/per-row temporary
-  buffers.
+  finds delimiters with bounded slice scanning, and parses hex/integer values
+  without per-field/per-row temporary buffers.
 - The initial minimal DuckDB-only Kind topology: one TLS-required StatefulSet,
   retained node-local PV/PVC, generated TLS/auth Secrets, health probes, and
   opt-in psql/psycopg/OGR Jobs that reject mutable image references at render time.

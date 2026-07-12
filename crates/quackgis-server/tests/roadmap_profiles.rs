@@ -25,6 +25,7 @@ const COPY_WKB: [u8; 21] = [
     1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 ];
 const COPY_WKB_HEX: &str = "010100000000000000000000000000000000000000";
+const COPY_PROFILE_CHUNK_BYTES: usize = 60 * 1024;
 
 #[tokio::test]
 #[ignore = "requires the pinned DuckDB ADBC runtime"]
@@ -1134,7 +1135,7 @@ async fn copy_ingest_profile() {
     let mut next_id = 0_u64;
     let mut wire_bytes = 0_u64;
     while next_id < profile.rows {
-        let (chunk, next) = copy_text_chunk(next_id, profile.rows, 60 * 1024);
+        let (chunk, next) = copy_text_chunk(next_id, profile.rows, COPY_PROFILE_CHUNK_BYTES);
         next_id = next;
         wire_bytes += chunk.len() as u64;
         sink.as_mut()
@@ -1220,7 +1221,7 @@ async fn copy_ingest_profile() {
             "rows": profile.rows,
             "wire_bytes": wire_bytes,
             "arrow_batch_rows": 8_192,
-            "copy_chunk_max_bytes": 60 * 1024,
+            "copy_chunk_max_bytes": COPY_PROFILE_CHUNK_BYTES,
             "wkb_bytes_per_row": 21,
         }),
         json!({
@@ -1248,7 +1249,7 @@ async fn copy_ingest_profile() {
         json!({
             "rss_delta_max_bytes": profile.rss_budget_bytes,
             "pgwire_to_direct_throughput_ratio_min": profile.throughput_ratio_budget,
-            "copy_chunk_max_bytes": 60 * 1024,
+            "copy_chunk_max_bytes": COPY_PROFILE_CHUNK_BYTES,
             "copy_failed_max": 0,
         }),
     )

@@ -48,6 +48,7 @@ clap = { version = "4", features = ["derive", "env"] }
 tempfile = "3"
 futures = "0.3"
 regex = "1"
+memchr = "2"
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 

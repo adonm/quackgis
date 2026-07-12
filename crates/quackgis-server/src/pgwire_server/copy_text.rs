@@ -165,21 +165,19 @@ impl CopyTextDecoder {
             return Err(copy_error("22P04", "COPY data follows the end marker"));
         }
         let mut batches = Vec::new();
-        for &byte in data {
+        let mut offset = 0;
+        while offset < data.len() {
             if self.terminated {
                 return Err(copy_error("22P04", "COPY data follows the end marker"));
             }
-            self.row_bytes = self.row_bytes.saturating_add(1);
-            if self.row_bytes > self.limits.max_row_bytes {
-                return Err(copy_error(
-                    "54000",
-                    &format!(
-                        "COPY row {} exceeds the configured byte limit",
-                        self.row_number
-                    ),
-                ));
-            }
-            match byte {
+            let remaining = &data[offset..];
+            let Some(delimiter_offset) = memchr::memchr2(b'\t', b'\n', remaining) else {
+                self.extend_field(remaining)?;
+                break;
+            };
+            self.extend_field(&remaining[..delimiter_offset])?;
+            self.add_row_bytes(1)?;
+            match remaining[delimiter_offset] {
                 b'\t' => self.finish_field()?,
                 b'\n' => {
                     if self.rows.data.len() > self.field_start
@@ -204,10 +202,31 @@ impl CopyTextDecoder {
                         }
                     }
                 }
-                _ => self.rows.data.push(byte),
+                _ => unreachable!("memchr2 returns only configured delimiters"),
             }
+            offset += delimiter_offset + 1;
         }
         Ok(batches)
+    }
+
+    fn extend_field(&mut self, data: &[u8]) -> Result<(), CopyDecodeError> {
+        self.add_row_bytes(data.len())?;
+        self.rows.data.extend_from_slice(data);
+        Ok(())
+    }
+
+    fn add_row_bytes(&mut self, bytes: usize) -> Result<(), CopyDecodeError> {
+        self.row_bytes = self.row_bytes.saturating_add(bytes);
+        if self.row_bytes > self.limits.max_row_bytes {
+            return Err(copy_error(
+                "54000",
+                &format!(
+                    "COPY row {} exceeds the configured byte limit",
+                    self.row_number
+                ),
+            ));
+        }
+        Ok(())
     }
 
     pub fn finish(&mut self) -> Result<Vec<RecordBatch>, CopyDecodeError> {
@@ -317,11 +336,19 @@ fn copy_array(
     match data_type {
         DataType::Boolean => typed_values(rows, column, parse_bool)
             .map(|values| Arc::new(BooleanArray::from(values)) as ArrayRef),
-        DataType::Int16 => typed_values(rows, column, |value| parse(value, "Int16"))
-            .map(|values| Arc::new(Int16Array::from(values)) as ArrayRef),
-        DataType::Int32 => typed_values(rows, column, |value| parse(value, "Int32"))
-            .map(|values| Arc::new(Int32Array::from(values)) as ArrayRef),
-        DataType::Int64 => typed_values(rows, column, |value| parse(value, "Int64"))
+        DataType::Int16 => typed_values(rows, column, |value| {
+            parse_integer(value, "Int16").and_then(|value| {
+                i16::try_from(value).map_err(|_| copy_error("22P02", "invalid COPY Int16 value"))
+            })
+        })
+        .map(|values| Arc::new(Int16Array::from(values)) as ArrayRef),
+        DataType::Int32 => typed_values(rows, column, |value| {
+            parse_integer(value, "Int32").and_then(|value| {
+                i32::try_from(value).map_err(|_| copy_error("22P02", "invalid COPY Int32 value"))
+            })
+        })
+        .map(|values| Arc::new(Int32Array::from(values)) as ArrayRef),
+        DataType::Int64 => typed_values(rows, column, |value| parse_integer(value, "Int64"))
             .map(|values| Arc::new(Int64Array::from(values)) as ArrayRef),
         DataType::Float32 => typed_values(rows, column, |value| parse(value, "Float32"))
             .map(|values| Arc::new(Float32Array::from(values)) as ArrayRef),
@@ -411,6 +438,31 @@ fn parse<T: std::str::FromStr>(value: &[u8], label: &str) -> Result<T, CopyDecod
     field_text(value)?
         .parse()
         .map_err(|_| copy_error("22P02", &format!("invalid COPY {label} value")))
+}
+
+fn parse_integer(value: &[u8], label: &str) -> Result<i64, CopyDecodeError> {
+    let (negative, digits) = match value.first() {
+        Some(b'-') => (true, &value[1..]),
+        Some(b'+') => (false, &value[1..]),
+        _ => (false, value),
+    };
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return Err(copy_error("22P02", &format!("invalid COPY {label} value")));
+    }
+    let mut parsed = 0_i64;
+    for digit in digits {
+        parsed = if negative {
+            parsed
+                .checked_mul(10)
+                .and_then(|value| value.checked_sub(i64::from(digit - b'0')))
+        } else {
+            parsed
+                .checked_mul(10)
+                .and_then(|value| value.checked_add(i64::from(digit - b'0')))
+        }
+        .ok_or_else(|| copy_error("22P02", &format!("invalid COPY {label} value")))?;
+    }
+    Ok(parsed)
 }
 
 fn parse_bool(value: &[u8]) -> Result<bool, CopyDecodeError> {
@@ -701,6 +753,13 @@ mod tests {
                 .as_ref(),
             br"\x41"
         );
+        assert_eq!(
+            parse_integer(b"-9223372036854775808", "Int64").unwrap(),
+            i64::MIN
+        );
+        assert_eq!(parse_integer(b"+42", "Int64").unwrap(), 42);
+        assert!(parse_integer(b"9223372036854775808", "Int64").is_err());
+        assert!(parse_integer(b"12x", "Int64").is_err());
     }
 
     #[test]
