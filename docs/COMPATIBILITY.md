@@ -97,9 +97,10 @@ catalog surfaces remain open unless a focused test says otherwise.
   a COPY client resumes, deadline cancellation returns `57014` and the target
   remains unchanged even after staging batches were flushed.
 - COPY has no total request ceiling, incrementally decodes PostgreSQL text escapes,
-  and enforces configured row, Arrow-batch, and post-decode wire-chunk limits. The
-  pinned pgwire dependency may allocate a declared frame before that check;
-  oversized decoded chunks and malformed final rows abort staging synchronously.
+  and enforces configured pre-body frontend-frame, post-decode chunk, row, and
+  Arrow-batch limits. A header-only oversized declaration closes immediately with
+  zero publication; oversized decoded chunks and malformed final rows abort
+  staging synchronously.
   CSV/binary COPY options, arrays, JSON, time zones, and every scalar type remain
   unsupported.
 - Reserved bbox layouts are validated before COPY staging; clients cannot provide

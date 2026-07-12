@@ -30,6 +30,27 @@ maintained; broader generated temporal, decimal, dictionary, and nested-type
 coverage remains open. Until then, Arrow and pgwire versions are pinned together
 with the server.
 
+### `vendor/pgwire`
+
+QuackGIS pins a narrow copy of upstream `pgwire` 0.40.4 because the released
+server codec validates type-specific packet limits before body decoding but gives
+`CopyData` a nearly 1 GiB ceiling and exposes no deployment-level override.
+
+Local divergence is limited to:
+
+- a configurable maximum declared frontend-message length in the server codec;
+- `process_socket_with_frontend_limit`, which applies the limit before plaintext
+  or TLS application-frame body reads;
+- a header-only validator used by the focused no-allocation regression; and
+- no protocol, authentication, handler, or message representation changes.
+
+`QUACKGIS_PGWIRE_MAX_FRAME_BYTES` owns the release setting. The native workflow
+sends only an oversized `CopyData` header, requires immediate connection closure,
+and verifies zero published rows; the unit regression proves the five-byte header
+does not grow its buffer. Retire this vendor as soon as upstream exposes an
+equivalent pre-body configurable server limit, after the pgwire workflow, TLS,
+COPY, and Arrow encoder gates pass on the released replacement.
+
 ## Retired forks
 
 The following forks/vendors are no longer compiled or retained in the repository:

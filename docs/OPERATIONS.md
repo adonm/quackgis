@@ -44,6 +44,7 @@ DuckDB home. The server defaults to `127.0.0.1:5434`.
 | `QUACKGIS_QUEUE_TIMEOUT_MS` / `QUACKGIS_STATEMENT_TIMEOUT_MS` | `30000` / `300000` | queue and active query deadlines |
 | `QUACKGIS_SHUTDOWN_TIMEOUT_MS` | `30000` | graceful connection/transaction drain deadline |
 | `QUACKGIS_RESULT_BATCH_BYTES` | `8388608` | fail-closed Arrow result batch ceiling before pgwire encoding |
+| `QUACKGIS_PGWIRE_MAX_FRAME_BYTES` | `16777216` | maximum PostgreSQL declared frontend-message length, checked from the header before body read/decode |
 | `QUACKGIS_COPY_BATCH_ROWS` | `65536` | maximum rows per COPY Arrow batch |
 | `QUACKGIS_COPY_BATCH_BYTES` | `8388608` | maximum Arrow batch and accepted COPY chunk after pgwire decoding |
 | `QUACKGIS_COPY_MAX_ROW_BYTES` | `1048576` | maximum encoded bytes in one COPY row |
@@ -98,9 +99,13 @@ COPY has no total request ceiling. Each client `CopyData` message must fit
 `QUACKGIS_COPY_BATCH_BYTES`; normal PostgreSQL clients already send smaller
 chunks. Startup also requires the row limit to bound one chunk to at most 128
 Arrow batches, preventing pathological valid configurations from defeating
-channel backpressure. With pgwire 0.40, the dependency decodes a declared frame
-before QuackGIS applies this limit; a configurable pre-allocation frame ceiling is
-still required before this is a complete untrusted-wire memory bound.
+channel backpressure. `QUACKGIS_PGWIRE_MAX_FRAME_BYTES` is an earlier, per-message
+wire trust boundary: the pgwire codec rejects the declared length after the
+five-byte typed header (or four-byte startup header) and before reading or decoding
+the body. It must be at least `QUACKGIS_COPY_BATCH_BYTES + 4`. The default 16 MiB
+permits the default 8 MiB COPY chunk while bounding every frontend message; it is
+not a total COPY-size limit. The native raw-wire regression sends no oversized
+body, observes immediate closure, and verifies zero publication.
 
 The blocking-worker limit must be greater than the active-query limit. Regular
 ADBC work can use at most `max_blocking_workers - 1`; the final slot is reserved

@@ -6,6 +6,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/quackgis-server"]
+exclude = ["vendor/pgwire"]
 
 [workspace.package]
 version = "0.2.0"
@@ -54,3 +55,6 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 strip = true
 lto = "thin"
 codegen-units = 1
+
+[patch.crates-io]
+pgwire = { path = "vendor/pgwire" }

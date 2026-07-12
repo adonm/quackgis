@@ -13,6 +13,7 @@ use quackgis_server::duckdb_adbc_storage::{DuckDbAdbcConfig, DuckDbAdbcStorage, 
 use quackgis_server::pgwire_server::ServerOptions;
 use serde::Deserialize;
 use serde_json::json;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 mod support;
 use support::evidence::{EvidenceEnvelope, EvidenceLevel, EvidenceProfile, ExecutionEnvironment};
@@ -57,6 +58,51 @@ fn flushed_copy_rows(count: usize) -> Bytes {
         rows.push_str(&format!("{id}\trow-{id}\n"));
     }
     Bytes::from(rows)
+}
+
+async fn raw_pgwire_startup(port: u16) -> tokio::net::TcpStream {
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("raw pgwire connect");
+    let mut body = Vec::new();
+    body.extend_from_slice(&196_608_i32.to_be_bytes());
+    body.extend_from_slice(b"user\0postgres\0database\0quackgis\0\0");
+    stream
+        .write_all(&((body.len() + 4) as i32).to_be_bytes())
+        .await
+        .expect("raw startup length");
+    stream.write_all(&body).await.expect("raw startup body");
+    raw_pgwire_wait_for(&mut stream, b'Z').await;
+    stream
+}
+
+async fn raw_pgwire_wait_for(stream: &mut tokio::net::TcpStream, expected: u8) {
+    loop {
+        let message_type = stream.read_u8().await.expect("raw backend message type");
+        let length = stream.read_i32().await.expect("raw backend message length");
+        assert!((4..=16 * 1024 * 1024).contains(&length));
+        let mut body = vec![0_u8; length as usize - 4];
+        stream
+            .read_exact(&mut body)
+            .await
+            .expect("raw backend message body");
+        if message_type == expected {
+            return;
+        }
+    }
+}
+
+async fn raw_pgwire_query(stream: &mut tokio::net::TcpStream, sql: &str) {
+    stream.write_u8(b'Q').await.expect("raw query type");
+    stream
+        .write_i32((sql.len() + 5) as i32)
+        .await
+        .expect("raw query length");
+    stream
+        .write_all(sql.as_bytes())
+        .await
+        .expect("raw query body");
+    stream.write_u8(0).await.expect("raw query terminator");
 }
 
 impl Drop for ChildGuard {
@@ -514,6 +560,7 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
         .with_host("127.0.0.1".to_owned())
         .with_port(port)
         .with_statement_timeout(Duration::from_secs(2))
+        .with_pgwire_max_frame_bytes(131_072)
         .with_copy_batch_rows(64)
         .with_copy_batch_bytes(65_536)
         .with_copy_max_row_bytes(16_384);
@@ -1449,6 +1496,41 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
         .await
         .expect("oversized COPY chunk cleanup is synchronous");
     assert_eq!(oversized_rows.get::<_, i64>(0), 0);
+
+    observer
+        .batch_execute("CREATE TABLE quackgis.main.predecode_frame_copy(id INTEGER, name VARCHAR)")
+        .await
+        .expect("create pre-decode frame target");
+    let mut raw_copy = raw_pgwire_startup(port).await;
+    raw_pgwire_query(
+        &mut raw_copy,
+        "COPY quackgis.main.predecode_frame_copy (id, name) FROM STDIN",
+    )
+    .await;
+    raw_pgwire_wait_for(&mut raw_copy, b'G').await;
+    raw_copy
+        .write_u8(b'd')
+        .await
+        .expect("oversized raw CopyData type");
+    raw_copy
+        .write_i32(131_073)
+        .await
+        .expect("oversized raw CopyData declared length");
+    let mut byte = [0_u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(2), raw_copy.read(&mut byte))
+        .await
+        .expect("pre-decode frame rejection deadline")
+        .expect("pre-decode frame socket read");
+    assert_eq!(read, 0, "oversized declared frame must close immediately");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let predecode_rows = observer
+        .query_one(
+            "SELECT count(*)::BIGINT FROM quackgis.main.predecode_frame_copy",
+            &[],
+        )
+        .await
+        .expect("pre-decode frame rollback");
+    assert_eq!(predecode_rows.get::<_, i64>(0), 0);
 
     observer
         .batch_execute("CREATE TABLE quackgis.main.disconnected_copy(id INTEGER, name VARCHAR)")

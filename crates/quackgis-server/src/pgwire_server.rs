@@ -16,7 +16,7 @@ use pgwire::api::auth::{
 };
 use pgwire::api::{ClientInfo, ConnectionManager, ErrorHandler, PgWireServerHandlers};
 use pgwire::error::ErrorInfo;
-use pgwire::tokio::process_socket;
+use pgwire::tokio::process_socket_with_frontend_limit;
 use rustls_pemfile::{certs, pkcs8_private_keys};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::net::TcpListener;
@@ -33,6 +33,7 @@ pub use duckdb::{
     serve_duckdb, serve_duckdb_on_listener, serve_duckdb_on_listener_until, serve_duckdb_until,
 };
 pub const MAX_COPY_BATCHES_PER_CHUNK: usize = copy_text::MAX_BATCHES_PER_COPY_CHUNK;
+pub const DEFAULT_PGWIRE_MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct ServerOptions {
@@ -51,6 +52,7 @@ pub struct ServerOptions {
     queue_timeout: Duration,
     statement_timeout: Duration,
     result_batch_bytes: usize,
+    pgwire_max_frame_bytes: usize,
     copy_batch_rows: usize,
     copy_batch_bytes: usize,
     copy_max_row_bytes: usize,
@@ -74,6 +76,7 @@ impl Default for ServerOptions {
             queue_timeout: Duration::from_secs(30),
             statement_timeout: Duration::from_secs(300),
             result_batch_bytes: 8 * 1024 * 1024,
+            pgwire_max_frame_bytes: DEFAULT_PGWIRE_MAX_FRAME_BYTES,
             copy_batch_rows: 65_536,
             copy_batch_bytes: 8 * 1024 * 1024,
             copy_max_row_bytes: 1024 * 1024,
@@ -161,6 +164,11 @@ impl ServerOptions {
         self
     }
 
+    pub fn with_pgwire_max_frame_bytes(mut self, pgwire_max_frame_bytes: usize) -> Self {
+        self.pgwire_max_frame_bytes = pgwire_max_frame_bytes;
+        self
+    }
+
     pub fn with_copy_batch_rows(mut self, copy_batch_rows: usize) -> Self {
         self.copy_batch_rows = copy_batch_rows;
         self
@@ -210,6 +218,10 @@ impl ServerOptions {
 
     fn result_batch_bytes(&self) -> usize {
         self.result_batch_bytes
+    }
+
+    fn pgwire_max_frame_bytes(&self) -> usize {
+        self.pgwire_max_frame_bytes
     }
 
     fn copy_batch_rows(&self) -> usize {
@@ -308,6 +320,7 @@ where
     H: PgWireServerHandlers + Send + Sync + 'static,
 {
     let tls_acceptor = configure_tls(options)?;
+    let pgwire_max_frame_bytes = options.pgwire_max_frame_bytes();
     log::info!("quackgis pgwire listening on {}", listener.local_addr()?);
     let limiter =
         (options.max_connections > 0).then(|| Arc::new(Semaphore::new(options.max_connections)));
@@ -336,7 +349,12 @@ where
                             },
                             None => None,
                         };
-                        if let Err(error) = process_socket(socket, tls_acceptor, handlers).await {
+                        if let Err(error) = process_socket_with_frontend_limit(
+                            socket,
+                            tls_acceptor,
+                            handlers,
+                            pgwire_max_frame_bytes,
+                        ).await {
                             log::warn!("pgwire socket error from {peer}: {error}");
                         }
                     });
@@ -536,6 +554,7 @@ impl ErrorHandler for LoggingErrorHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::{BufMut, BytesMut};
 
     #[test]
     fn tls_required_mode_fails_without_material() {
@@ -554,5 +573,25 @@ mod tests {
                 .expect("certificate without key");
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
         assert!(error.to_string().contains("configured together"));
+    }
+
+    #[test]
+    fn frontend_frame_limit_rejects_header_before_body_allocation() {
+        let mut frame = BytesMut::with_capacity(5);
+        frame.put_u8(b'd');
+        frame.put_i32(65_537);
+        let capacity = frame.capacity();
+
+        let error = pgwire::tokio::validate_frontend_message_length(&frame, 1, 65_536)
+            .expect_err("oversized declared frame");
+        assert!(error.to_string().contains("65537"));
+        assert_eq!(frame.len(), 5);
+        assert_eq!(frame.capacity(), capacity);
+        assert!(pgwire::tokio::validate_frontend_message_length(&frame, 1, 65_537).is_ok());
+
+        let mut invalid = BytesMut::new();
+        invalid.put_u8(b'd');
+        invalid.put_i32(-1);
+        assert!(pgwire::tokio::validate_frontend_message_length(&invalid, 1, 65_536).is_err());
     }
 }

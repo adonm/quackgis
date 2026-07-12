@@ -21,7 +21,7 @@ Disposition:
 | query cancellation | native + Rust edge | `57014`, explicit quarantine/fresh reuse, and clean 100-cancel reference at 1.51 ms p95 with zero native failures | write/commit cancellation disposition |
 | query admission/resources | Rust edge + native settings | bounded connection/active/queued queries; fixed native worker pool with reserved control slot; queue timeout; DuckDB threads/memory/temp/spill config; 32-client/eight-reader suspended-portal proof plus all-class queue/completion profile | write/commit interruption and mixed-workload soak |
 | Arrow result encoding | Rust edge | one ADBC batch at a time; configured ceiling/metrics; clean 1M/10M generated-BIGINT reference RSS/first-row profiles | wider variable-width/native-batch RSS and type fuzzing |
-| COPY FROM STDIN | Rust edge + native ingest | incremental bounded batches; >20 MiB/220k-row stream; atomic malformed/cancel/disconnect/timeout behavior; scalar/NULL/WKB reopen; compaction | idle-wait error delivery and 10M/1 GiB RSS/throughput gates |
+| COPY FROM STDIN | Rust edge + native ingest | pre-body frontend-frame ceiling; incremental bounded chunks/rows/Arrow batches; >20 MiB/220k-row stream; atomic malformed/cancel/disconnect/timeout behavior; scalar/NULL/WKB reopen; compaction | dependency-limited idle-wait error delivery and 10M/1 GiB RSS/throughput gates |
 | transactions/session isolation | native + Rust ownership | commit/rollback/disconnect workflow | timeout/cancel/uncertain cleanup and pool reuse |
 | local official DuckLake | native | create/ingest/query/snapshot/merge/reopen | backup/restore/upgrade/soak |
 | shared DuckLake | blocked | startup fails closed | after Local 1.0: official managed profile evidence |

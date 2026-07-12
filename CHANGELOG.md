@@ -128,6 +128,10 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   capacity, including a regression with all regular worker capacity occupied.
 - Synchronous COPY cleanup for malformed final rows and oversized decoded chunks,
   with zero-row observer evidence and exact Arrow batch-memory splitting tests.
+- Configurable pre-body pgwire frontend-frame enforcement. A header-only
+  oversized `CopyData` declaration is rejected without reserving its body and the
+  abandoned COPY publishes zero rows; post-decode chunk and Arrow limits remain
+  defense in depth.
 - Native pgwire evidence that a cancelled streaming client is explicitly
   quarantined while an independent session remains usable.
 - Explicit CI execution of the vendored Arrow encoder suite; Float16 and UInt32

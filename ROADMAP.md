@@ -69,7 +69,7 @@ run must use the same implementation and oracle as its reference counterpart.
 | Engine/storage | pinned DuckDB 1.5.4 through ADBC and local official DuckLake | local paths only |
 | Protocol | bounded simple/extended pgwire | narrow statements and parameter types |
 | Results | one driver Arrow batch at a time through pgwire with fail-closed byte ceiling; clean 1M/10M generated-BIGINT reference profile stays below the +128 MiB budget | wider variable-width/native-batch RSS profiles open |
-| COPY | incremental bounded text decoding to one ADBC stream and atomic DuckLake publication | 1 GiB/RSS/throughput evidence and pre-decode pgwire frame bound open; accepted wire chunks are bounded after dependency decoding |
+| COPY | pre-body bounded pgwire frames, incremental bounded text decoding to one ADBC stream, and atomic DuckLake publication | 1 GiB/RSS/throughput evidence open; total COPY remains unbounded while each frame/chunk/row/Arrow batch is bounded |
 | Transactions | independent sessions, commit/rollback/isolation and failed-transaction `25P02` enforcement | write/commit cancellation policy incomplete |
 | Spatial | 42 native/rewrite/macro cases through pgwire | 10 edge gaps and 5 extension candidates |
 | Security | SCRAM, read/write table allowlists, and actual-process required-TLS/restart-rotation evidence | incomplete metadata filtering and packaged rotation/revocation drills |

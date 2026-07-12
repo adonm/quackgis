@@ -51,6 +51,8 @@ async fn main() -> anyhow::Result<()> {
         || cli.copy_batch_bytes == 0
         || cli.copy_max_row_bytes == 0
         || cli.result_batch_bytes == 0
+        || cli.pgwire_max_frame_bytes < 4
+        || cli.pgwire_max_frame_bytes < cli.copy_batch_bytes.saturating_add(4)
         || cli.shutdown_timeout_ms == 0
         || cli
             .copy_batch_rows
@@ -58,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
             < cli.copy_batch_bytes
     {
         anyhow::bail!(
-            "resource limits must be positive, operation-class limits must not exceed the global active-query limit, active queries must leave one reserved blocking control worker, and COPY batch rows must bound one wire chunk to at most {MAX_COPY_BATCHES_PER_CHUNK} batches"
+            "resource limits must be positive, operation-class limits must not exceed the global active-query limit, active queries must leave one reserved blocking control worker, the pgwire frame limit must accommodate COPY batch bytes plus its four-byte declared length, and COPY batch rows must bound one wire chunk to at most {MAX_COPY_BATCHES_PER_CHUNK} batches"
         );
     }
 
@@ -137,6 +139,7 @@ async fn main() -> anyhow::Result<()> {
         .with_queue_timeout(std::time::Duration::from_millis(cli.queue_timeout_ms))
         .with_statement_timeout(std::time::Duration::from_millis(cli.statement_timeout_ms))
         .with_result_batch_bytes(cli.result_batch_bytes)
+        .with_pgwire_max_frame_bytes(cli.pgwire_max_frame_bytes)
         .with_copy_batch_rows(cli.copy_batch_rows)
         .with_copy_batch_bytes(cli.copy_batch_bytes)
         .with_copy_max_row_bytes(cli.copy_max_row_bytes)

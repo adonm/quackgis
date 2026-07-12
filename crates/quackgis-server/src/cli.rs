@@ -3,6 +3,8 @@
 
 use clap::{Parser, ValueEnum};
 
+use crate::pgwire_server::DEFAULT_PGWIRE_MAX_FRAME_BYTES;
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum CliAuthMode {
     Trust,
@@ -64,6 +66,12 @@ pub struct Cli {
     pub shutdown_timeout_ms: u64,
     #[arg(long, env = "QUACKGIS_RESULT_BATCH_BYTES", default_value_t = 8_388_608)]
     pub result_batch_bytes: usize,
+    #[arg(
+        long,
+        env = "QUACKGIS_PGWIRE_MAX_FRAME_BYTES",
+        default_value_t = DEFAULT_PGWIRE_MAX_FRAME_BYTES
+    )]
+    pub pgwire_max_frame_bytes: usize,
     #[arg(long, env = "QUACKGIS_COPY_BATCH_ROWS", default_value_t = 65_536)]
     pub copy_batch_rows: usize,
     #[arg(long, env = "QUACKGIS_COPY_BATCH_BYTES", default_value_t = 8_388_608)]
@@ -135,5 +143,12 @@ mod tests {
         ])
         .expect("required TLS CLI");
         assert_eq!(cli.tls_mode, CliTlsMode::Required);
+    }
+
+    #[test]
+    fn parses_pgwire_frame_limit() {
+        let cli = Cli::try_parse_from(["quackgis-server", "--pgwire-max-frame-bytes=1048576"])
+            .expect("pgwire frame limit CLI");
+        assert_eq!(cli.pgwire_max_frame_bytes, 1_048_576);
     }
 }

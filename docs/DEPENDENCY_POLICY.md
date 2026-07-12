@@ -22,9 +22,11 @@
 
 ## Vendored code
 
-`vendor/arrow-pg` is the only active vendor. Its divergence is documented in
-`DIVERGENCE.md`. It may encode Arrow/PostgreSQL fields and rows; it may not regain
-DataFusion, catalog, planner, or GeoArrow engine responsibilities.
+`vendor/arrow-pg` and the narrowly patched `vendor/pgwire` are the active vendors.
+Their divergences are documented in `DIVERGENCE.md`. The encoder may map and
+encode Arrow/PostgreSQL fields and rows; it may not regain DataFusion, catalog,
+planner, or GeoArrow engine responsibilities. The pgwire patch may enforce the
+frontend frame trust boundary but may not add protocol or authentication policy.
 
 New vendor/fork acceptance requires:
 
