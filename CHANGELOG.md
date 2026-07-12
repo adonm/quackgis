@@ -89,8 +89,9 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   `SHOW search_path`, `public`→`quackgis.main` relation mapping, and quoted
   one-/two-/three-part COPY targets.
 - A registered client-neutral catalog fixture for DuckDB-derived table/column
-  metadata, bounded geometry/geography sentinel lookup, and exact geometry
-  RowDescription/text/binary/NULL behavior.
+  metadata, exact-shape geometry/geography sentinel lookup, all seven returned
+  type fields, and exact geometry/geography RowDescription/text/binary/NULL
+  behavior.
 - DuckDB-computed bbox maintenance during COPY for the explicit reserved-column
   layout contract, including NULL, exact-recheck, and reopen evidence.
 - Fail-closed bbox layout validation rejects partial, wrong-type, caller-supplied,
@@ -127,9 +128,10 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 - Explicit CI execution of the vendored Arrow encoder suite; Float16 and UInt32
   OID scalar parity, Float16/fixed-binary list parity, fail-closed unsupported time
   units, and panic-free nested error propagation now have focused regressions.
-- Narrow structural `pg_type` resolution for the maintained geometry/geography
-  sentinel OIDs, with geometry RowDescription, binary WKB, text hex-WKB, and NULL
-  evidence through the native pgwire client.
+- Narrow exact-AST-shape `pg_type` resolution for the maintained geometry/geography
+  sentinel OIDs, with geometry/geography RowDescription, binary WKB, text hex-WKB,
+  and NULL evidence through the native pgwire client. Near-miss projections, predicates,
+  and constants remain native rather than being intercepted.
 - Ledger-pinned `0A000` simple/extended protocol behavior and session-reuse
   evidence for all 10 deferred Rust-edge and five extension-candidate spatial gaps.
 - Explicit `preferred`/`required` TLS policy: required mode needs paired valid

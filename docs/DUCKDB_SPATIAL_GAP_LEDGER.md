@@ -38,6 +38,8 @@ edge with maintained scalar results. The pgwire test reads this ledger and the
 curated regress source so the lists cannot drift silently. All 15 non-executable
 cases pass through simple and extended pgwire to prove ledger-pinned errors and
 session reuse. The maintained workflow also proves the geometry sentinel's narrow
-structural `pg_type` lookup plus RowDescription, binary WKB, text hex-WKB, and NULL
+exact-shape `pg_type` lookup plus RowDescription, binary WKB, text hex-WKB, and NULL
 behavior with `tokio-postgres`. Implementing the 10 Rust-edge semantics, broader
-catalog discovery, geography, and named-client traces remains M3 work.
+catalog discovery and named-client traces remains M3 work. Geography now has the
+same sentinel lookup and wire-identity fixture as geometry, but no named GIS-client
+discovery evidence.

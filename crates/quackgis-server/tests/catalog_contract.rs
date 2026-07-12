@@ -16,6 +16,7 @@ struct CatalogContract {
     copy_row: String,
     spatial_type_lookup: SpatialTypeLookup,
     geometry: GeometryContract,
+    geography: GeometryContract,
     metadata_queries: Vec<MetadataQuery>,
     ordinary_catalog_query: CountQuery,
 }
@@ -30,6 +31,12 @@ struct SpatialTypeLookup {
 struct SpatialTypeCase {
     oid: u32,
     expected_type_name: Option<String>,
+    expected_type_kind: Option<i8>,
+    expected_element_oid: Option<u32>,
+    expected_range_subtype_oid: Option<u32>,
+    expected_base_oid: Option<u32>,
+    expected_namespace: Option<String>,
+    expected_relation_oid: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -58,6 +65,9 @@ struct CountQuery {
 #[derive(Debug, Eq, PartialEq)]
 struct GeometryBytes(Vec<u8>);
 
+#[derive(Debug, Eq, PartialEq)]
+struct GeographyBytes(Vec<u8>);
+
 impl<'a> tokio_postgres::types::FromSql<'a> for GeometryBytes {
     fn from_sql(
         _ty: &tokio_postgres::types::Type,
@@ -71,6 +81,19 @@ impl<'a> tokio_postgres::types::FromSql<'a> for GeometryBytes {
     }
 }
 
+impl<'a> tokio_postgres::types::FromSql<'a> for GeographyBytes {
+    fn from_sql(
+        _ty: &tokio_postgres::types::Type,
+        raw: &'a [u8],
+    ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        Ok(Self(raw.to_vec()))
+    }
+
+    fn accepts(ty: &tokio_postgres::types::Type) -> bool {
+        ty.oid() == 90_002
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires the pinned DuckDB ADBC runtime"]
 async fn client_neutral_catalog_contract() {
@@ -78,7 +101,7 @@ async fn client_neutral_catalog_contract() {
         "../../../tests/fixtures/duckdb_catalog_contract.json"
     ))
     .expect("catalog contract fixture");
-    assert_eq!(contract.schema_version, 1);
+    assert_eq!(contract.schema_version, 2);
 
     let runtime = TestRuntime::start(ServerOptions::new().with_max_connections(4)).await;
     let _storage = runtime.storage();
@@ -110,9 +133,21 @@ async fn client_neutral_catalog_contract() {
             Some(expected) => {
                 assert_eq!(rows.len(), 1, "spatial type OID {}", case.oid);
                 assert_eq!(rows[0].get::<_, String>(0), *expected);
-                assert_eq!(rows[0].get::<_, i8>(1), b'b' as i8);
-                assert_eq!(rows[0].get::<_, u32>(2), 0);
-                assert_eq!(rows[0].get::<_, Option<u32>>(3), None);
+                assert_eq!(rows[0].get::<_, i8>(1), case.expected_type_kind.unwrap());
+                assert_eq!(rows[0].get::<_, u32>(2), case.expected_element_oid.unwrap());
+                assert_eq!(
+                    rows[0].get::<_, Option<u32>>(3),
+                    case.expected_range_subtype_oid
+                );
+                assert_eq!(rows[0].get::<_, u32>(4), case.expected_base_oid.unwrap());
+                assert_eq!(
+                    rows[0].get::<_, String>(5),
+                    *case.expected_namespace.as_ref().unwrap()
+                );
+                assert_eq!(
+                    rows[0].get::<_, u32>(6),
+                    case.expected_relation_oid.unwrap()
+                );
             }
             None => assert!(rows.is_empty(), "unknown OID {}", case.oid),
         }
@@ -155,6 +190,44 @@ async fn client_neutral_catalog_contract() {
         })
         .expect("geometry text value");
     assert_eq!(text, contract.geometry.expected_text);
+
+    let statement = client
+        .prepare(&contract.geography.query)
+        .await
+        .expect("geography RowDescription");
+    assert_eq!(statement.columns().len(), 1);
+    assert_eq!(
+        statement.columns()[0].type_().oid(),
+        contract.geography.expected_oid
+    );
+    assert_eq!(
+        statement.columns()[0].type_().name(),
+        contract.geography.expected_type_name
+    );
+    let row = client
+        .query_one(&statement, &[])
+        .await
+        .expect("geography binary row");
+    assert_eq!(
+        row.get::<_, GeographyBytes>(0).0,
+        decode_hex(&contract.geography.expected_hex)
+    );
+    let null = client
+        .query_one(&contract.geography.null_query, &[])
+        .await
+        .expect("geography NULL row");
+    assert_eq!(null.get::<_, Option<GeographyBytes>>(0), None);
+    let text = client
+        .simple_query(&contract.geography.text_query)
+        .await
+        .expect("geography text row")
+        .into_iter()
+        .find_map(|message| match message {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::to_owned),
+            _ => None,
+        })
+        .expect("geography text value");
+    assert_eq!(text, contract.geography.expected_text);
 
     for query in &contract.metadata_queries {
         let rows = client
@@ -200,7 +273,7 @@ fn decode_hex(value: &str) -> Vec<u8> {
 fn catalog_fixture_is_valid_and_client_neutral() {
     let raw = include_str!("../../../tests/fixtures/duckdb_catalog_contract.json");
     let contract: CatalogContract = serde_json::from_str(raw).expect("catalog contract fixture");
-    assert_eq!(contract.schema_version, 1);
+    assert_eq!(contract.schema_version, 2);
     let words = raw
         .split(|character: char| !character.is_ascii_alphanumeric())
         .map(str::to_ascii_lowercase)
@@ -212,4 +285,5 @@ fn catalog_fixture_is_valid_and_client_neutral() {
         );
     }
     assert_eq!(decode_hex(&contract.geometry.expected_hex).len(), 21);
+    assert_eq!(decode_hex(&contract.geography.expected_hex).len(), 21);
 }

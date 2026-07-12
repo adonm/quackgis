@@ -35,7 +35,7 @@ Disposition:
 | exact bbox recheck | native query | small storage oracle | safe injection plus holes/invalid/scale plans |
 | layout/locality maintenance | partial native SQL | COPY computes four reserved bbox columns; numbered-bound/NULL geometry UPDATE atomically refreshes them with malformed/rollback/reopen evidence; direct INSERT, arbitrary geometry expressions, and reserved writes fail closed | broader geometry mutation policy, safe AST predicate injection, compaction/layout scale evidence |
 | PostgreSQL catalogs | blocked/Rust edge | client-neutral fixture for DuckDB-derived table/column metadata and ordinary native catalog behavior; broad metadata denied | captured psql/psycopg/OGR/QGIS surfaces |
-| geometry OID discovery | partial Rust edge | client-neutral structural sentinel lookup + RowDescription/text/binary/NULL pgwire fixture | named QGIS/OGR discovery and subtype/SRID/dimension identity |
+| geometry/geography OID discovery | partial Rust edge | client-neutral exact-shape seven-field sentinel lookup + RowDescription/text/binary/NULL pgwire fixture for both families | named QGIS/OGR discovery and subtype/SRID/dimension identity |
 | psql/psycopg | partial | tokio-postgres is maintained test client | version-pinned named workflows |
 | GDAL/OGR | blocked | prior traces only | read + streaming COPY copied-data test |
 | QGIS read-only | blocked | prior traces only | discovery/filter/identify/render test |

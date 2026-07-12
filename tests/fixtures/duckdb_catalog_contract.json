@@ -1,13 +1,13 @@
 {
-  "schema_version": 1,
-  "setup_sql": "CREATE TABLE quackgis.main.catalog_fixture(id BIGINT, name VARCHAR, geom_wkb BLOB)",
-  "copy_sql": "COPY quackgis.main.catalog_fixture (id, name, geom_wkb) FROM STDIN",
-  "copy_row": "1\torigin\t\\x010100000000000000000000000000000000000000\n",
+  "schema_version": 2,
+  "setup_sql": "CREATE TABLE quackgis.main.catalog_fixture(id BIGINT, name VARCHAR, geom_wkb BLOB, geog BLOB)",
+  "copy_sql": "COPY quackgis.main.catalog_fixture (id, name, geom_wkb, geog) FROM STDIN",
+  "copy_row": "1\torigin\t\\x010100000000000000000000000000000000000000\t\\x0101000000000000000000F03F000000000000F03F\n",
   "spatial_type_lookup": {
-    "sql": "SELECT t.typname, t.typtype, t.typelem, r.rngsubtype, t.typbasetype, n.nspname, t.typrelid FROM pg_catalog.pg_type t LEFT JOIN pg_catalog.pg_range r ON r.rngtypid = t.oid INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid WHERE t.oid = $1",
+    "sql": "SELECT t.typname, t.typtype, t.typelem, r.rngsubtype, t.typbasetype, n.nspname, t.typrelid FROM pg_catalog.pg_type t LEFT OUTER JOIN pg_catalog.pg_range r ON r.rngtypid = t.oid INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid WHERE t.oid = $1",
     "cases": [
-      { "oid": 90001, "expected_type_name": "geometry" },
-      { "oid": 90002, "expected_type_name": "geography" },
+      { "oid": 90001, "expected_type_name": "geometry", "expected_type_kind": 98, "expected_element_oid": 0, "expected_range_subtype_oid": null, "expected_base_oid": 0, "expected_namespace": "", "expected_relation_oid": 0 },
+      { "oid": 90002, "expected_type_name": "geography", "expected_type_kind": 98, "expected_element_oid": 0, "expected_range_subtype_oid": null, "expected_base_oid": 0, "expected_namespace": "", "expected_relation_oid": 0 },
       { "oid": 99999, "expected_type_name": null }
     ]
   },
@@ -20,6 +20,15 @@
     "expected_hex": "010100000000000000000000000000000000000000",
     "expected_text": "\\x010100000000000000000000000000000000000000"
   },
+  "geography": {
+    "query": "SELECT geog FROM quackgis.main.catalog_fixture ORDER BY id",
+    "null_query": "SELECT NULL::BLOB AS geog",
+    "text_query": "SELECT geog FROM quackgis.main.catalog_fixture WHERE id = 1",
+    "expected_oid": 90002,
+    "expected_type_name": "geography",
+    "expected_hex": "0101000000000000000000F03F000000000000F03F",
+    "expected_text": "\\x0101000000000000000000f03f000000000000f03f"
+  },
   "metadata_queries": [
     {
       "sql": "SELECT table_schema, table_name FROM information_schema.tables WHERE table_catalog = 'quackgis' AND table_schema = 'main' AND table_name = 'catalog_fixture'",
@@ -27,7 +36,7 @@
     },
     {
       "sql": "SELECT column_name, data_type FROM information_schema.columns WHERE table_catalog = 'quackgis' AND table_schema = 'main' AND table_name = 'catalog_fixture' ORDER BY ordinal_position",
-      "expected_rows": [["id", "BIGINT"], ["name", "VARCHAR"], ["geom_wkb", "BLOB"]]
+      "expected_rows": [["id", "BIGINT"], ["name", "VARCHAR"], ["geom_wkb", "BLOB"], ["geog", "BLOB"]]
     }
   ],
   "ordinary_catalog_query": {

@@ -110,15 +110,17 @@ catalog surfaces remain open unless a focused test says otherwise.
   in the same statement. Arbitrary geometry expressions and tuple assignments
   remain `0A000`. UPDATEs of ordinary columns preserve existing geometry/bounds,
   and `DELETE` remains supported.
-- `pg_catalog`, `information_schema`, geography discovery, and GIS client-specific
+- `pg_catalog`, `information_schema`, broad spatial discovery, and GIS client-specific
   metadata are incomplete. A client-neutral executable fixture covers native
-  DuckDB table/column metadata and one structural `pg_type` lookup for the
-  maintained geometry/geography sentinel OIDs; it does not claim broader catalog
-  compatibility or named-client qualification.
+  DuckDB table/column metadata and one exact structural `pg_type` lookup for the
+  maintained geometry/geography sentinel OIDs, including all seven returned type
+  fields; it does not claim broader catalog compatibility or named-client
+  qualification.
 - Binary columns named `geom_wkb` use the same geometry sentinel OID as the
   maintained COPY bbox layout. RowDescription plus text hex-WKB, binary WKB, and
-  NULL transport are tested through pgwire; subtype/SRID/dimension catalog
-  identity remains open.
+  NULL transport are tested through pgwire for geometry and the maintained
+  `geog` convention for geography; subtype/SRID/dimension catalog identity remains
+  open.
 - Arrow schema mapping and encoding are tested together for Float16, UInt32 OID
   aliases, Float16/fixed-binary lists, WKB, fixed binary, NULLs, invalid JSON, and
   nested error propagation. Unsupported list layouts fail during schema mapping;

@@ -928,29 +928,16 @@ fn validate_statement(sql: &str, mode: ProtocolMode) -> PgWireResult<ValidatedSt
 }
 
 fn is_pg_type_lookup(statement: &Statement) -> bool {
-    if !matches!(statement, Statement::Query(_)) {
-        return false;
-    }
-    let mut statement = statement.clone();
-    let mut relations = Vec::new();
-    let _: ControlFlow<()> = visit_relations_mut(&mut statement, |name| {
-        if let Some(parts) = object_name_values(name) {
-            relations.push(parts);
-        }
-        ControlFlow::Continue(())
-    });
-    let is_catalog_relation = |parts: &[String], table: &str| matches!(parts, [schema, relation] if schema.eq_ignore_ascii_case("pg_catalog") && relation.eq_ignore_ascii_case(table));
-    relations
-        .iter()
-        .any(|parts| is_catalog_relation(parts, "pg_type"))
-        && relations
-            .iter()
-            .any(|parts| is_catalog_relation(parts, "pg_namespace"))
-        && relations.iter().all(|parts| {
-            is_catalog_relation(parts, "pg_type")
-                || is_catalog_relation(parts, "pg_namespace")
-                || is_catalog_relation(parts, "pg_range")
-        })
+    const LOOKUP: &str = "SELECT t.typname, t.typtype, t.typelem, r.rngsubtype, \
+        t.typbasetype, n.nspname, t.typrelid FROM pg_catalog.pg_type t \
+        LEFT OUTER JOIN pg_catalog.pg_range r ON r.rngtypid = t.oid \
+        INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid \
+        WHERE t.oid = $1";
+    let expected = Parser::parse_sql(&PostgreSqlDialect {}, LOOKUP)
+        .expect("static pg_type lookup must parse")
+        .pop()
+        .expect("static pg_type lookup has one statement");
+    statement.to_string() == expected.to_string()
 }
 
 fn unsupported_spatial_function(statement: &Statement) -> Option<&'static str> {
@@ -2075,7 +2062,7 @@ mod tests {
         let lookup = validate_statement(
             "SELECT t.typname, t.typtype, t.typelem, r.rngsubtype, t.typbasetype, \
              n.nspname, t.typrelid FROM pg_catalog.pg_type t \
-             LEFT JOIN pg_catalog.pg_range r ON r.rngtypid = t.oid \
+             LEFT OUTER JOIN pg_catalog.pg_range r ON r.rngtypid = t.oid \
              INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid \
              WHERE t.oid = $1",
             ProtocolMode::Extended,
@@ -2090,6 +2077,29 @@ mod tests {
         )
         .expect("ordinary catalog query");
         assert!(!ordinary.sql.contains("90001"));
+
+        for near_miss in [
+            "SELECT t.typname FROM pg_catalog.pg_type t \
+             INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid \
+             WHERE t.oid = $1",
+            "SELECT t.typname, t.typtype, t.typelem, r.rngsubtype, t.typbasetype, \
+             n.nspname, t.typrelid FROM pg_catalog.pg_type t \
+             LEFT OUTER JOIN pg_catalog.pg_range r ON r.rngtypid = t.oid \
+             INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid \
+             WHERE t.oid = 90001",
+            "SELECT t.typname, t.typtype, t.typelem, r.rngsubtype, t.typbasetype, \
+             n.nspname, t.typrelid FROM pg_catalog.pg_type t \
+             LEFT OUTER JOIN pg_catalog.pg_range r ON r.rngtypid = t.oid \
+             INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid \
+             WHERE t.oid = $1 AND t.typname = 'geometry'",
+        ] {
+            let validated = validate_statement(near_miss, ProtocolMode::Extended)
+                .unwrap_or_else(|error| panic!("near-miss catalog SQL: {error}"));
+            assert!(
+                !validated.sql.contains("WHEN 90001"),
+                "near-miss query was intercepted: {near_miss}"
+            );
+        }
     }
 
     #[test]
