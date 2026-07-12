@@ -255,6 +255,17 @@ impl QueryParser for DuckDbParser {
         let validated = validate_statement(sql, ProtocolMode::Extended)?;
         let pg_type_lookup = is_pg_type_lookup(&validated.ast);
         authorize_statement(client, &self.auth, &validated.ast)?;
+        if validated.kind == StatementKind::SessionSet {
+            let empty = Arc::new(Schema::empty());
+            return Ok(DuckDbStatement {
+                sql: validated.sql,
+                copy_target: None,
+                kind: validated.kind,
+                parameter_schema: Arc::clone(&empty),
+                result_schema: empty,
+                parameter_types: Vec::new(),
+            });
+        }
         let storage = client_session(
             client,
             Arc::clone(&self.storage),
@@ -911,7 +922,9 @@ fn validate_statement(sql: &str, mode: ProtocolMode) -> PgWireResult<ValidatedSt
             StatementKind::Rollback
         }
         Statement::Set(set) if supported_session_set(set) => StatementKind::SessionSet,
-        Statement::ShowVariable { variable } if is_search_path(variable) => StatementKind::Read,
+        Statement::ShowVariable { variable } if supported_show_variable(variable).is_some() => {
+            StatementKind::Read
+        }
         Statement::Call(_) if matches!(mode, ProtocolMode::Simple) => {
             parse_maintenance_call(&statement)?
                 .ok_or_else(|| user_error("0A000", "unsupported DuckDB maintenance procedure"))?;
@@ -932,9 +945,16 @@ fn validate_statement(sql: &str, mode: ProtocolMode) -> PgWireResult<ValidatedSt
              ''::VARCHAR AS nspname, 0::UINTEGER AS typrelid \
          WHERE CAST($1 AS UINTEGER) IN (90001, 90002)"
             .to_owned()
-    } else if matches!(&statement, Statement::ShowVariable { variable } if is_search_path(variable))
-    {
-        "SELECT 'public'::VARCHAR AS search_path".to_owned()
+    } else if let Statement::ShowVariable { variable } = &statement {
+        match supported_show_variable(variable).expect("validated SHOW variable") {
+            SessionVariable::SearchPath => "SELECT 'public'::VARCHAR AS search_path".to_owned(),
+            SessionVariable::ClientEncoding => {
+                "SELECT 'UTF8'::VARCHAR AS client_encoding".to_owned()
+            }
+            SessionVariable::StandardConformingStrings => {
+                "SELECT 'on'::VARCHAR AS standard_conforming_strings".to_owned()
+            }
+        }
     } else {
         let mut execution = statement.clone();
         rewrite_public_relations(&mut execution);
@@ -1149,13 +1169,35 @@ fn supported_session_set(set: &Set) -> bool {
         .to_ascii_lowercase();
     match name.as_str() {
         "standard_conforming_strings" => value == "on",
+        "client_encoding" => matches!(value.as_str(), "utf8" | "unicode"),
         "client_min_messages" => matches!(value.as_str(), "error" | "warning" | "notice"),
         _ => false,
     }
 }
 
-fn is_search_path(variable: &[Ident]) -> bool {
-    matches!(variable, [name] if name.value.eq_ignore_ascii_case("search_path"))
+#[derive(Clone, Copy)]
+enum SessionVariable {
+    SearchPath,
+    ClientEncoding,
+    StandardConformingStrings,
+}
+
+fn supported_show_variable(variable: &[Ident]) -> Option<SessionVariable> {
+    let [name] = variable else {
+        return None;
+    };
+    if name.value.eq_ignore_ascii_case("search_path") {
+        Some(SessionVariable::SearchPath)
+    } else if name.value.eq_ignore_ascii_case("client_encoding") {
+        Some(SessionVariable::ClientEncoding)
+    } else if name
+        .value
+        .eq_ignore_ascii_case("standard_conforming_strings")
+    {
+        Some(SessionVariable::StandardConformingStrings)
+    } else {
+        None
+    }
 }
 
 fn rewrite_public_relations(statement: &mut Statement) {
@@ -2189,12 +2231,37 @@ mod tests {
         let set = validate_statement("SET standard_conforming_strings = ON", ProtocolMode::Simple)
             .expect("supported SET");
         assert_eq!(set.kind, StatementKind::SessionSet);
+        for sql in [
+            "SET client_encoding TO 'UTF8'",
+            "SET client_encoding = 'UNICODE'",
+        ] {
+            assert_eq!(
+                validate_statement(sql, ProtocolMode::Simple)
+                    .expect("supported client encoding")
+                    .kind,
+                StatementKind::SessionSet
+            );
+        }
         assert!(validate_statement("SET TimeZone = 'UTC'", ProtocolMode::Simple).is_err());
 
-        let show =
-            validate_statement("SHOW search_path", ProtocolMode::Simple).expect("supported SHOW");
-        assert_eq!(show.kind, StatementKind::Read);
-        assert_eq!(show.sql, "SELECT 'public'::VARCHAR AS search_path");
+        for (sql, expected) in [
+            (
+                "SHOW search_path",
+                "SELECT 'public'::VARCHAR AS search_path",
+            ),
+            (
+                "SHOW client_encoding",
+                "SELECT 'UTF8'::VARCHAR AS client_encoding",
+            ),
+            (
+                "SHOW standard_conforming_strings",
+                "SELECT 'on'::VARCHAR AS standard_conforming_strings",
+            ),
+        ] {
+            let show = validate_statement(sql, ProtocolMode::Simple).expect("supported SHOW");
+            assert_eq!(show.kind, StatementKind::Read);
+            assert_eq!(show.sql, expected);
+        }
 
         let query = validate_statement(
             "SELECT count(*) FROM \"public\".\"points\"",

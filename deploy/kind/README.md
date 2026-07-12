@@ -48,11 +48,16 @@ mise exec -- just kind-client-gates
 
 `kind-up-local` uses the pinned `kindest/node` digest in `cluster.yaml`, builds
 `localhost/quackgis-duckdb-runtime:dev` and
-`localhost/quackgis-kind-clients:dev`, loads both local tags with
-`kind load docker-image`, reads the resulting CRI repository digests from the
-Kind node, and deploys only those immutable references. This works for either
-Podman or Docker. `imagePullPolicy: IfNotPresent` keeps the node-local images
-offline after loading. Cluster access is isolated in `.tmp/kind/kubeconfig`.
+`localhost/quackgis-kind-clients:dev`, exports provider-native Docker archives,
+loads them with `kind load image-archive`, reads the resulting CRI repository
+manifest digests from each Kind node, installs matching containerd digest aliases,
+and deploys only those immutable references. The
+archive path avoids Kind's known `load docker-image` assumption that a Docker CLI
+exists even when Podman is the selected provider. This works for either Podman or
+Docker. `imagePullPolicy: IfNotPresent` keeps the node-local images offline after
+loading. Cluster access is isolated in `.tmp/kind/kubeconfig`. An existing healthy
+`quackgis` cluster is reused; a named cluster whose API readiness endpoint is
+unreachable is deleted and recreated before image loading.
 
 Delete the disposable node when finished. This deletes its node-local PV data by
 design even though the Kubernetes PV reclaim policy is `Retain`:
@@ -99,4 +104,6 @@ mise exec -- just kind-client-gates
 
 The generated certificate is a 30-day self-signed development certificate whose
 SAN covers the service DNS names. Client Jobs use `verify-full`; the server uses
-TLS-required mode and SCRAM password authentication.
+TLS-required mode and SCRAM password authentication. The StatefulSet explicitly
+overrides the runtime image's loopback development default and binds pgwire to
+`0.0.0.0:5434`; the ClusterIP exposes that endpoint as port 5432.

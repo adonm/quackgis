@@ -43,6 +43,7 @@ def check_templates() -> None:
         "persistentVolumeReclaimPolicy: Retain",
         "QUACKGIS_TLS_MODE",
         "value: required",
+        'args: ["--host", "0.0.0.0", "--port", "5434"]',
         "path: /readyz",
         "path: /healthz",
     ]:

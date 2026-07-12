@@ -37,32 +37,66 @@ if [ ! -f "$tls/tls.crt" ]; then
   "$root/deploy/kind/generate_tls.sh" "$tls"
 fi
 
-if ! kind get clusters | grep -qx quackgis; then
+cluster_exists=false
+if kind get clusters | grep -qx quackgis; then
+  cluster_exists=true
+  kind export kubeconfig --name quackgis --kubeconfig "$kubeconfig"
+  if ! kubectl --request-timeout=5s get --raw=/readyz >/dev/null 2>&1; then
+    printf 'kind_cluster_stale provider=%s cluster=quackgis action=recreate\n' \
+      "$KIND_EXPERIMENTAL_PROVIDER" >&2
+    kind delete cluster --name quackgis
+    cluster_exists=false
+  fi
+fi
+if [ "$cluster_exists" = false ]; then
   kind create cluster \
     --config "$root/deploy/kind/cluster.yaml" \
     --kubeconfig "$kubeconfig" \
     --wait 5m
-else
-  kind export kubeconfig --name quackgis --kubeconfig "$kubeconfig"
 fi
+load_local_image() {
+  source_image=$1
+  archive_name=$2
+  archive="$work/$archive_name.tar"
+  rm -f "$archive"
+  if [ "$engine" = podman ]; then
+    "$engine" image save --format docker-archive --output "$archive" "$source_image"
+  else
+    "$engine" image save --output "$archive" "$source_image"
+  fi
+  kind load image-archive "$archive" --name quackgis
+  rm -f "$archive"
+}
+
 if [ -n "${QUACKGIS_RUNTIME_LOAD_IMAGE:-}" ]; then
-  kind load docker-image "$QUACKGIS_RUNTIME_LOAD_IMAGE" --name quackgis
+  load_local_image "$QUACKGIS_RUNTIME_LOAD_IMAGE" runtime-image
 fi
 if [ -n "${QUACKGIS_CLIENT_LOAD_IMAGE:-}" ]; then
-  kind load docker-image "$QUACKGIS_CLIENT_LOAD_IMAGE" --name quackgis
+  load_local_image "$QUACKGIS_CLIENT_LOAD_IMAGE" client-image
 fi
 
 node_digest_reference() {
   source_image=$1
-  reference=$(
-    "$engine" exec quackgis-control-plane crictl inspecti "$source_image" |
-      python3 -c 'import json, sys
-status = json.load(sys.stdin).get("status", {})
-digests = status.get("repoDigests", [])
-if not digests:
-    raise SystemExit("loaded image has no CRI repository digest")
-print(digests[0])'
+  first_node=$(kind get nodes --name quackgis | head -n 1)
+  digest=$(
+    "$engine" exec "$first_node" ctr --namespace k8s.io images list |
+      awk -v image="$source_image" '$1 == image { print $3; exit }'
   )
+  case "$digest" in
+    sha256:????????????????????????????????????????????????????????????????) ;;
+    *) printf 'loaded image has no containerd manifest digest: %s\n' "$source_image" >&2; exit 2 ;;
+  esac
+  repository=$(python3 -c 'import sys
+value = sys.argv[1].split("@", 1)[0]
+slash = value.rfind("/")
+colon = value.rfind(":")
+print(value[:colon] if colon > slash else value)' "$source_image")
+  reference="$repository@$digest"
+  for node in $(kind get nodes --name quackgis); do
+    if ! "$engine" exec "$node" ctr --namespace k8s.io images tag "$source_image" "$reference" >/dev/null 2>&1; then
+      "$engine" exec "$node" crictl inspecti "$reference" >/dev/null
+    fi
+  done
   printf '%s\n' "$reference"
 }
 

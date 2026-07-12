@@ -39,11 +39,13 @@ mise exec -- just ci
 
 | Client/surface | Current status |
 |---|---|
-| `psql` / PostgreSQL protocol clients | bounded simple/extended protocol supported |
+| `psql` / PostgreSQL protocol clients | bounded simple/extended protocol supported; TLS/SCRAM scalar smoke passes with psql 18.3 in rootless-Podman Kind |
 | `tokio-postgres` | maintained real-driver integration client |
 | PostgreSQL text COPY clients | bounded maintained type set supported |
-| QGIS, GDAL/OGR, GeoServer, Martin | target; prior legacy traces must be rerun against DuckDB before being claimed |
-| SQLAlchemy, GeoPandas, psycopg, pg_featureserv | target; named dependency workflows remain open |
+| GDAL/OGR | 3.11.5 TLS/SCRAM scalar smoke passes in Kind after structural encoding/string/search-path probes; copied-data discovery and optional `ST_SRID` remain open |
+| QGIS, GeoServer, Martin | target; prior legacy traces must be rerun against DuckDB before being claimed |
+| psycopg | 3.2.13 TLS/SCRAM scalar smoke passes in Kind; copied-data workflow remains open |
+| SQLAlchemy, GeoPandas, pg_featureserv | target; named dependency workflows remain open |
 | `pg_dump`, logical replication, PL/pgSQL, triggers, LISTEN/NOTIFY | unsupported/non-goals |
 
 ## Spatial contract

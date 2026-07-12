@@ -25,9 +25,13 @@ def main() -> None:
     )
     assert "kindest/node:v1.36.1@sha256:" in cluster
     assert "KIND_EXPERIMENTAL_PROVIDER" in up
-    assert "kind load docker-image" in up
+    assert "kind load image-archive" in up
+    assert "--format docker-archive" in up
+    assert 'if [ "$engine" = podman ]' in up
     assert "QUACKGIS_RUNTIME_LOAD_IMAGE" in up
     assert "QUACKGIS_CLIENT_LOAD_IMAGE" in up
+    assert "kind_cluster_stale" in up
+    assert "get --raw=/readyz" in up
     assert "FROM registry.fedoraproject.org/fedora-minimal@sha256:" in clients_image
     for client in ["postgresql", "python3-psycopg3", "gdal"]:
         assert client in clients_image

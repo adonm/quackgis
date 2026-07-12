@@ -56,6 +56,12 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   client tools through `just doctor`, auto-selects usable Podman before Docker
   unless explicitly overridden, and provides a pinned rootless local Kind flow
   that builds and loads digest-addressed runtime and psql/psycopg/OGR images.
+- Real rootless-Podman Kind execution now imports local images through portable
+  archives, aliases their containerd manifest digests, recreates stale named
+  clusters, binds packaged pgwire beyond loopback, and passes TLS/SCRAM smoke
+  Jobs with psql 18.3, psycopg 3.2.13, and GDAL/OGR 3.11.5. The pgwire adapter
+  handles those clients' bounded encoding and string-mode SET/SHOW probes without
+  executing PostgreSQL session syntax in DuckDB.
 - The initial minimal DuckDB-only Kind topology: one TLS-required StatefulSet,
   retained node-local PV/PVC, generated TLS/auth Secrets, health probes, and
   opt-in psql/psycopg/OGR Jobs that reject mutable image references at render time.
