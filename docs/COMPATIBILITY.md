@@ -102,10 +102,12 @@ catalog surfaces remain open unless a focused test says otherwise.
   unsupported.
 - Reserved bbox layouts are validated before COPY staging; clients cannot provide
   bbox values, and partial/wrong-type/ambiguous layouts fail with stable `0A000`.
-- Direct `INSERT`, geometry UPDATEs, and reserved bbox UPDATEs on a maintained
-  layout return `0A000`; use COPY for spatial writes until schema-aware
-  recomputation is implemented. UPDATEs of ordinary columns preserve existing
-  geometry/bounds, and `DELETE` remains supported.
+- Direct `INSERT` and reserved bbox UPDATEs on a maintained layout return `0A000`.
+  A geometry UPDATE is supported only when its right-hand side is one numbered
+  bound parameter (optionally cast) or `NULL`; DuckDB recomputes all four bounds
+  in the same statement. Arbitrary geometry expressions and tuple assignments
+  remain `0A000`. UPDATEs of ordinary columns preserve existing geometry/bounds,
+  and `DELETE` remains supported.
 - `pg_catalog`, `information_schema`, geography discovery, and GIS client-specific
   metadata are incomplete. A client-neutral executable fixture covers native
   DuckDB table/column metadata and one structural `pg_type` lookup for the

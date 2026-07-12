@@ -229,15 +229,18 @@ runs official `ducklake_merge_adjacent_files`, requires the active file count to
 at least halve, and verifies unchanged row count/sum afterward. This is functional
 compaction evidence, not yet a production scheduling or capacity policy.
 
-Tables may opt into COPY bbox maintenance by declaring all four reserved nullable
+Tables may opt into bbox maintenance by declaring all four reserved nullable
 `DOUBLE` columns `_qg_minx`, `_qg_miny`, `_qg_maxx`, and `_qg_maxy` and exactly one
 recognized binary geometry column. DuckDB Spatial computes the values during
 atomic publication. COPY must omit the reserved bbox columns; partial, wrong-type,
 caller-supplied, or ambiguous layouts fail with `0A000` before staging and leave
 the session reusable. If the nullable geometry is omitted, all four bounds are
-published as NULL. Direct INSERT and geometry/reserved-column UPDATEs fail closed;
-ordinary-column UPDATEs are allowed because they leave maintained geometry and
-bounds unchanged. Automatic DDL, geometry mutation maintenance, compaction
+published as NULL. Direct INSERT and reserved-column UPDATEs fail closed. A
+geometry UPDATE atomically refreshes all bounds only when the geometry value is a
+numbered bound parameter (optionally cast) or `NULL`; arbitrary expressions and
+tuple assignment fail closed. Ordinary-column UPDATEs are allowed because they
+leave maintained geometry and bounds unchanged. Automatic DDL, general geometry
+expression maintenance, compaction
 refresh, and predicate injection remain roadmap work.
 
 ## Maintained checks

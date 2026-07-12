@@ -24,8 +24,8 @@ use arrow_pg::datatypes::{SpatialFamily, classify_spatial_field};
 use arrow_schema::{ArrowError, SchemaRef};
 use sha2::{Digest, Sha256};
 use sqlparser::ast::{
-    AssignmentTarget, ObjectName, ObjectNamePart, Statement as SqlStatement, TableFactor,
-    TableObject,
+    AssignmentTarget, Expr, ObjectName, ObjectNamePart, Statement as SqlStatement, TableFactor,
+    TableObject, Value,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
@@ -49,6 +49,10 @@ const MIN_DUCKDB_MAX_TEMP_DIRECTORY_BYTES: u64 = 10_737_418_240;
 const CGROUP_UNLIMITED_THRESHOLD: u64 = 1_u64 << 60;
 static COPY_STAGE_ID: AtomicU64 = AtomicU64::new(1);
 const MAINTAINED_BBOX_COLUMNS: [&str; 4] = ["_qg_minx", "_qg_miny", "_qg_maxx", "_qg_maxy"];
+
+struct MaintainedBboxLayout {
+    geometry: String,
+}
 
 /// Whether DuckDB may download the DuckLake extension during initialization.
 ///
@@ -972,29 +976,10 @@ fn bbox_publish_projection(
     input_schema: &arrow_schema::Schema,
     input_columns: &str,
 ) -> EngineResult<(String, String)> {
-    let target_bbox_count = MAINTAINED_BBOX_COLUMNS
-        .iter()
-        .filter(|name| target_schema.field_with_name(name).is_ok())
-        .count();
-    if target_bbox_count == 0 {
+    let Some(layout) = inspect_maintained_bbox_layout(target_schema)? else {
         return Ok((input_columns.to_owned(), input_columns.to_owned()));
-    }
-    if target_bbox_count != MAINTAINED_BBOX_COLUMNS.len() {
-        return Err(EngineError::new(
-            EngineErrorKind::Unsupported,
-            "DuckDB COPY target has a partial reserved bbox layout",
-        ));
-    }
+    };
     for name in MAINTAINED_BBOX_COLUMNS {
-        let field = target_schema
-            .field_with_name(name)
-            .expect("all reserved bbox columns were counted");
-        if field.data_type() != &arrow_schema::DataType::Float64 || !field.is_nullable() {
-            return Err(EngineError::new(
-                EngineErrorKind::Unsupported,
-                "reserved bbox columns must all be nullable DOUBLE values",
-            ));
-        }
         if input_schema.field_with_name(name).is_ok() {
             return Err(EngineError::new(
                 EngineErrorKind::Unsupported,
@@ -1003,20 +988,8 @@ fn bbox_publish_projection(
         }
     }
 
-    let target_geometry = target_schema
-        .fields()
-        .iter()
-        .filter(|field| classify_spatial_field(field) == Some(SpatialFamily::Geometry))
-        .collect::<Vec<_>>();
-    if target_geometry.len() != 1 {
-        return Err(EngineError::new(
-            EngineErrorKind::Unsupported,
-            "reserved bbox layout requires exactly one recognized geometry column",
-        ));
-    }
-    let geometry_name = target_geometry[0].name();
     let geometry = input_schema
-        .field_with_name(geometry_name)
+        .field_with_name(&layout.geometry)
         .ok()
         .filter(|field| classify_spatial_field(field) == Some(SpatialFamily::Geometry))
         .map(|field| quote_identifier(field.name()));
@@ -1026,15 +999,7 @@ fn bbox_publish_projection(
         .collect::<Vec<_>>()
         .join(", ");
     let accessors = if let Some(geometry) = geometry {
-        ["ST_XMin", "ST_YMin", "ST_XMax", "ST_YMax"]
-            .into_iter()
-            .map(|accessor| {
-                format!(
-                    "CASE WHEN {geometry} IS NULL THEN NULL ELSE {accessor}(ST_Extent(ST_GeomFromWKB({geometry}))) END"
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
+        bbox_accessor_values(&geometry)
     } else {
         ["NULL", "NULL", "NULL", "NULL"].join(", ")
     };
@@ -1042,6 +1007,62 @@ fn bbox_publish_projection(
         format!("{input_columns}, {bbox_columns}"),
         format!("{input_columns}, {accessors}"),
     ))
+}
+
+fn inspect_maintained_bbox_layout(
+    schema: &arrow_schema::Schema,
+) -> EngineResult<Option<MaintainedBboxLayout>> {
+    let bbox_count = MAINTAINED_BBOX_COLUMNS
+        .iter()
+        .filter(|name| schema.field_with_name(name).is_ok())
+        .count();
+    if bbox_count == 0 {
+        return Ok(None);
+    }
+    if bbox_count != MAINTAINED_BBOX_COLUMNS.len() {
+        return Err(EngineError::new(
+            EngineErrorKind::Unsupported,
+            "DuckDB table has a partial reserved bbox layout",
+        ));
+    }
+    for name in MAINTAINED_BBOX_COLUMNS {
+        let field = schema
+            .field_with_name(name)
+            .expect("all reserved bbox columns were counted");
+        if field.data_type() != &arrow_schema::DataType::Float64 || !field.is_nullable() {
+            return Err(EngineError::new(
+                EngineErrorKind::Unsupported,
+                "reserved bbox columns must all be nullable DOUBLE values",
+            ));
+        }
+    }
+
+    let geometry = schema
+        .fields()
+        .iter()
+        .filter(|field| classify_spatial_field(field) == Some(SpatialFamily::Geometry))
+        .collect::<Vec<_>>();
+    if geometry.len() != 1 {
+        return Err(EngineError::new(
+            EngineErrorKind::Unsupported,
+            "reserved bbox layout requires exactly one recognized geometry column",
+        ));
+    }
+    Ok(Some(MaintainedBboxLayout {
+        geometry: geometry[0].name().to_owned(),
+    }))
+}
+
+fn bbox_accessor_values(geometry: &str) -> String {
+    ["ST_XMin", "ST_YMin", "ST_XMax", "ST_YMax"]
+        .into_iter()
+        .map(|accessor| {
+            format!(
+                "CASE WHEN {geometry} IS NULL THEN NULL ELSE {accessor}(ST_Extent(ST_GeomFromWKB({geometry}))) END"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl EngineStorageKernel for DuckDbAdbcStorage {
@@ -1065,8 +1086,8 @@ impl EngineStorageKernel for DuckDbAdbcStorage {
 
     fn execute_update_contract(&self, sql: &str) -> EngineResult<Option<i64>> {
         self.with_connection_engine(|connection| {
-            reject_maintained_bbox_mutation(connection, sql)?;
-            execute_update_engine_on(connection, sql)
+            let sql = prepare_maintained_bbox_mutation(connection, sql)?;
+            execute_update_engine_on(connection, &sql)
         })
     }
 
@@ -1082,8 +1103,8 @@ impl EngineStorageKernel for DuckDbAdbcStorage {
             ));
         }
         self.with_connection_engine(|connection| {
-            reject_maintained_bbox_mutation(connection, sql)?;
-            execute_update_engine_on_bound(connection, sql, parameters)
+            let sql = prepare_maintained_bbox_mutation(connection, sql)?;
+            execute_update_engine_on_bound(connection, &sql, parameters)
         })
     }
 
@@ -1229,10 +1250,10 @@ impl EngineStorageKernel for DuckDbAdbcStorage {
     }
 }
 
-fn reject_maintained_bbox_mutation(
+fn prepare_maintained_bbox_mutation(
     connection: &mut ManagedConnection,
     sql: &str,
-) -> EngineResult<()> {
+) -> EngineResult<String> {
     let mut statements = Parser::parse_sql(&PostgreSqlDialect {}, sql).map_err(|error| {
         EngineError::new(
             EngineErrorKind::InvalidQuery,
@@ -1245,7 +1266,7 @@ fn reject_maintained_bbox_mutation(
             "DuckDB mutation inspection requires exactly one statement",
         ));
     }
-    let statement = statements.pop().expect("one mutation statement");
+    let mut statement = statements.pop().expect("one mutation statement");
     let name = match &statement {
         SqlStatement::Insert(insert) => match &insert.table {
             TableObject::TableName(name) => Some(name),
@@ -1255,7 +1276,7 @@ fn reject_maintained_bbox_mutation(
             TableFactor::Table { name, .. } => Some(name),
             _ => None,
         },
-        _ => return Ok(()),
+        _ => return Ok(sql.to_owned()),
     }
     .ok_or_else(|| {
         EngineError::new(
@@ -1267,11 +1288,8 @@ fn reject_maintained_bbox_mutation(
     let schema = connection
         .get_table_schema(Some(&table.catalog), Some(&table.schema), &table.table)
         .map_err(engine_error)?;
-    if MAINTAINED_BBOX_COLUMNS
-        .iter()
-        .any(|column| schema.field_with_name(column).is_ok())
-    {
-        match &statement {
+    if let Some(layout) = inspect_maintained_bbox_layout(&schema)? {
+        match &mut statement {
             SqlStatement::Insert(_) => {
                 return Err(EngineError::new(
                     EngineErrorKind::Unsupported,
@@ -1279,32 +1297,21 @@ fn reject_maintained_bbox_mutation(
                 ));
             }
             SqlStatement::Update(update) => {
-                reject_unsafe_bbox_update(&schema, &update.assignments)?;
+                rewrite_safe_bbox_update(&layout, &mut update.assignments)?;
             }
             _ => unreachable!("mutation kind classified above"),
         }
+        return Ok(statement.to_string());
     }
-    Ok(())
+    Ok(sql.to_owned())
 }
 
-fn reject_unsafe_bbox_update(
-    schema: &arrow_schema::Schema,
-    assignments: &[sqlparser::ast::Assignment],
+fn rewrite_safe_bbox_update(
+    layout: &MaintainedBboxLayout,
+    assignments: &mut Vec<sqlparser::ast::Assignment>,
 ) -> EngineResult<()> {
-    let spatial_columns = schema
-        .fields()
-        .iter()
-        .filter(|field| classify_spatial_field(field).is_some())
-        .map(|field| field.name().as_str())
-        .collect::<Vec<_>>();
-    if spatial_columns.len() != 1 {
-        return Err(EngineError::new(
-            EngineErrorKind::Unsupported,
-            "maintained bbox UPDATE requires exactly one spatial column",
-        ));
-    }
-    let geometry = spatial_columns[0];
-    for assignment in assignments {
+    let mut geometry_value = None;
+    for assignment in assignments.iter() {
         let targets = match &assignment.target {
             AssignmentTarget::ColumnName(target) => std::slice::from_ref(target),
             AssignmentTarget::Tuple(targets) => targets.as_slice(),
@@ -1319,19 +1326,74 @@ fn reject_unsafe_bbox_update(
                     "maintained bbox UPDATE targets must be identifiers",
                 ));
             };
-            if name.eq_ignore_ascii_case(geometry)
-                || MAINTAINED_BBOX_COLUMNS
-                    .iter()
-                    .any(|bbox| name.eq_ignore_ascii_case(bbox))
+            if MAINTAINED_BBOX_COLUMNS
+                .iter()
+                .any(|bbox| name.eq_ignore_ascii_case(bbox))
             {
                 return Err(EngineError::new(
                     EngineErrorKind::Unsupported,
-                    "maintained bbox UPDATE cannot assign the geometry or reserved bbox columns",
+                    "maintained bbox UPDATE cannot assign reserved bbox columns",
                 ));
+            }
+            if name.eq_ignore_ascii_case(&layout.geometry) {
+                if targets.len() != 1 || geometry_value.is_some() {
+                    return Err(EngineError::new(
+                        EngineErrorKind::Unsupported,
+                        "maintained bbox UPDATE must assign geometry exactly once outside a tuple",
+                    ));
+                }
+                if !is_stable_geometry_update(&assignment.value) {
+                    return Err(EngineError::new(
+                        EngineErrorKind::Unsupported,
+                        "maintained bbox geometry UPDATE requires a numbered parameter or NULL",
+                    ));
+                }
+                geometry_value = Some(assignment.value.clone());
             }
         }
     }
+    let Some(geometry_value) = geometry_value else {
+        return Ok(());
+    };
+    let generated = format!(
+        "UPDATE qg SET {}",
+        MAINTAINED_BBOX_COLUMNS
+            .iter()
+            .zip(["ST_XMin", "ST_YMin", "ST_XMax", "ST_YMax"])
+            .map(|(column, accessor)| format!(
+                "{} = CASE WHEN {geometry_value} IS NULL THEN NULL ELSE {accessor}(ST_Extent(ST_GeomFromWKB({geometry_value}))) END",
+                quote_identifier(column),
+            ))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let mut generated = Parser::parse_sql(&PostgreSqlDialect {}, &generated).map_err(|error| {
+        EngineError::new(
+            EngineErrorKind::Internal,
+            format!("cannot build maintained bbox UPDATE: {error}"),
+        )
+    })?;
+    let SqlStatement::Update(generated) = generated.remove(0) else {
+        unreachable!("generated bbox statement is UPDATE")
+    };
+    assignments.extend(generated.assignments);
     Ok(())
+}
+
+fn is_stable_geometry_update(expression: &Expr) -> bool {
+    match expression {
+        Expr::Value(value) => match &value.value {
+            Value::Null => true,
+            Value::Placeholder(placeholder) => {
+                placeholder.strip_prefix('$').is_some_and(|digits| {
+                    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+                })
+            }
+            _ => false,
+        },
+        Expr::Cast { expr, .. } | Expr::Nested(expr) => is_stable_geometry_update(expr),
+        _ => false,
+    }
 }
 
 fn local_table_ref(name: &ObjectName) -> EngineResult<EngineTableRef> {
@@ -1917,7 +1979,7 @@ mod tests {
     }
 
     #[test]
-    fn maintained_bbox_updates_allow_only_non_spatial_columns() {
+    fn maintained_bbox_updates_refresh_only_stable_geometry_assignments() {
         let schema = arrow_schema::Schema::new(vec![
             arrow_schema::Field::new("id", arrow_schema::DataType::Int32, false),
             arrow_schema::Field::new("name", arrow_schema::DataType::Utf8, true),
@@ -1934,21 +1996,45 @@ mod tests {
                 _ => panic!("expected UPDATE"),
             }
         };
+        let layout = inspect_maintained_bbox_layout(&schema)
+            .expect("valid layout")
+            .expect("maintained layout");
 
-        assert!(
-            reject_unsafe_bbox_update(
-                &schema,
-                &assignments("UPDATE points SET id = 2, name = 'safe'")
-            )
-            .is_ok()
-        );
+        let mut ordinary = assignments("UPDATE points SET id = 2, name = 'safe'");
+        rewrite_safe_bbox_update(&layout, &mut ordinary).expect("ordinary update");
+        assert_eq!(ordinary.len(), 2);
+
         for sql in [
+            "UPDATE points SET geom_wkb = $1::BLOB",
             "UPDATE points SET geom_wkb = NULL",
+        ] {
+            let mut rewritten = assignments(sql);
+            rewrite_safe_bbox_update(&layout, &mut rewritten).expect("safe geometry update");
+            assert_eq!(rewritten.len(), 5, "{sql}");
+            let rendered = rewritten
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            for (column, accessor) in MAINTAINED_BBOX_COLUMNS
+                .iter()
+                .zip(["ST_XMin", "ST_YMin", "ST_XMax", "ST_YMax"])
+            {
+                assert!(rendered.contains(column), "{rendered}");
+                assert!(rendered.contains(accessor), "{rendered}");
+            }
+        }
+
+        for sql in [
             "UPDATE points SET _qg_minx = 0",
             "UPDATE points SET (name, _qg_maxy) = ('forged', 0)",
+            "UPDATE points SET geom_wkb = other_geom",
+            "UPDATE points SET geom_wkb = ST_AsWKB(ST_Point(1, 2))",
+            "UPDATE points SET (geom_wkb, name) = ($1, 'unsafe')",
         ] {
+            let mut unsafe_assignments = assignments(sql);
             assert!(
-                reject_unsafe_bbox_update(&schema, &assignments(sql)).is_err(),
+                rewrite_safe_bbox_update(&layout, &mut unsafe_assignments).is_err(),
                 "{sql}"
             );
         }

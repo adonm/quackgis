@@ -44,6 +44,13 @@ fn first_i64(batch: &RecordBatch, column: usize) -> i64 {
         .value(0)
 }
 
+fn point_wkb(x: f64, y: f64) -> Vec<u8> {
+    let mut bytes = vec![1, 1, 0, 0, 0];
+    bytes.extend_from_slice(&x.to_le_bytes());
+    bytes.extend_from_slice(&y.to_le_bytes());
+    bytes
+}
+
 fn flushed_copy_rows(count: usize) -> Bytes {
     let mut rows = String::new();
     for id in 0..count {
@@ -665,8 +672,8 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
     assert_eq!(layout_count.get::<_, i64>(0), 2);
     for sql in [
         "INSERT INTO public.layout_copy (id, geom_wkb) VALUES (3, NULL)",
-        "UPDATE public.layout_copy SET geom_wkb = NULL WHERE id = 1",
         "UPDATE public.layout_copy SET _qg_minx = 0 WHERE id = 1",
+        "UPDATE public.layout_copy SET geom_wkb = ST_AsWKB(ST_Point(3, 4)) WHERE id = 1",
     ] {
         let error = client
             .execute(sql, &[])
@@ -712,6 +719,100 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
             unchanged_layout.get::<_, f64>(column),
             if column == 2 || column == 4 { 2.0 } else { 1.0 }
         );
+    }
+    let geometry_layout_update = client
+        .prepare_typed(
+            "UPDATE public.layout_copy SET geom_wkb = $1::BLOB WHERE id = $2::INTEGER",
+            &[
+                tokio_postgres::types::Type::BYTEA,
+                tokio_postgres::types::Type::INT4,
+            ],
+        )
+        .await
+        .expect("prepare maintained geometry update");
+    let point_7_8 = point_wkb(7.0, 8.0);
+    assert_eq!(
+        client
+            .execute(&geometry_layout_update, &[&&point_7_8[..], &10_i32])
+            .await
+            .expect("atomically update geometry and bbox"),
+        1
+    );
+    let refreshed_layout = client
+        .query_one(
+            "SELECT hex(geom_wkb), _qg_minx, _qg_miny, _qg_maxx, _qg_maxy \
+             FROM public.layout_copy WHERE id = 10",
+            &[],
+        )
+        .await
+        .expect("query refreshed maintained layout");
+    assert_eq!(
+        refreshed_layout.get::<_, String>(0),
+        "01010000000000000000001C400000000000002040"
+    );
+    for (column, expected) in [7.0, 8.0, 7.0, 8.0].into_iter().enumerate() {
+        assert_eq!(refreshed_layout.get::<_, f64>(column + 1), expected);
+    }
+    let malformed_geometry = [1_u8, 2, 3];
+    client
+        .execute(
+            &geometry_layout_update,
+            &[&&malformed_geometry[..], &10_i32],
+        )
+        .await
+        .expect_err("malformed geometry must abort the atomic update");
+    let after_malformed = client
+        .query_one(
+            "SELECT hex(geom_wkb), _qg_minx, _qg_miny FROM public.layout_copy WHERE id = 10",
+            &[],
+        )
+        .await
+        .expect("session and row remain usable after malformed geometry");
+    assert_eq!(
+        after_malformed.get::<_, String>(0),
+        "01010000000000000000001C400000000000002040"
+    );
+    assert_eq!(after_malformed.get::<_, f64>(1), 7.0);
+    assert_eq!(after_malformed.get::<_, f64>(2), 8.0);
+    client
+        .batch_execute("BEGIN")
+        .await
+        .expect("begin bbox rollback");
+    let point_9_10 = point_wkb(9.0, 10.0);
+    client
+        .execute(&geometry_layout_update, &[&&point_9_10[..], &10_i32])
+        .await
+        .expect("update maintained geometry in transaction");
+    client
+        .batch_execute("ROLLBACK")
+        .await
+        .expect("rollback maintained geometry update");
+    let after_layout_rollback = client
+        .query_one(
+            "SELECT _qg_minx, _qg_miny FROM public.layout_copy WHERE id = 10",
+            &[],
+        )
+        .await
+        .expect("query layout after rollback");
+    assert_eq!(after_layout_rollback.get::<_, f64>(0), 7.0);
+    assert_eq!(after_layout_rollback.get::<_, f64>(1), 8.0);
+    client
+        .execute(
+            "UPDATE public.layout_copy SET geom_wkb = NULL WHERE id = 2",
+            &[],
+        )
+        .await
+        .expect("NULL geometry writes NULL bounds");
+    let null_layout = client
+        .query_one(
+            "SELECT geom_wkb IS NULL, _qg_minx IS NULL, _qg_miny IS NULL, \
+             _qg_maxx IS NULL, _qg_maxy IS NULL FROM public.layout_copy WHERE id = 2",
+            &[],
+        )
+        .await
+        .expect("query NULL maintained layout");
+    for column in 0..5 {
+        assert!(null_layout.get::<_, bool>(column));
     }
     let layout_count = client
         .query_one("SELECT count(*)::BIGINT FROM public.layout_copy", &[])
@@ -1739,7 +1840,7 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
              WHERE id = 10",
         )
         .expect("maintained bbox after restart");
-    for (column, expected) in [1.0, 2.0, 1.0, 2.0].into_iter().enumerate() {
+    for (column, expected) in [7.0, 8.0, 7.0, 8.0].into_iter().enumerate() {
         let values = bbox_after_restart[0]
             .column(column)
             .as_any()
