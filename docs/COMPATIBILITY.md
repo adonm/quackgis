@@ -100,7 +100,9 @@ catalog surfaces remain open unless a focused test says otherwise.
   and enforces configured pre-body frontend-frame, post-decode chunk, row, and
   Arrow-batch limits. A header-only oversized declaration closes immediately with
   zero publication; oversized decoded chunks and malformed final rows abort
-  staging synchronously.
+  staging synchronously. The clean 10M reference passes at 126 MiB RSS delta and
+  0.528 of direct ADBC throughput; an idle client receives a timeout/cancel error
+  only when it sends another frame or disconnects.
   CSV/binary COPY options, arrays, JSON, time zones, and every scalar type remain
   unsupported.
 - Reserved bbox layouts are validated before COPY staging; clients cannot provide

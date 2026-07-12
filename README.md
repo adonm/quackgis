@@ -42,9 +42,9 @@ Important limits:
   batches fail closed at a configured byte ceiling, and native calls use a fixed
   worker budget with a reserved cancellation slot; clean 1M/10M BIGINT-stream,
   1M nullable wide-result, 100-cancel, and mixed-class admission evidence passes,
-  and a clean eligible 50M transport reference passes the pgwire overhead budget;
-  the COPY reference throughput budget and write/commit cancellation remain
-  roadmap work;
+  a clean eligible 50M transport reference passes the pgwire overhead budget, and
+  the clean 10M COPY reference passes RSS/throughput/atomicity budgets;
+  write/commit cancellation remains roadmap work;
 - broad PostgreSQL catalogs and named GIS-client parity are incomplete; and
 - remote/shared catalog and object-storage profiles fail closed.
 

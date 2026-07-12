@@ -152,12 +152,14 @@ mise exec -- just duckdb-copy-profile \
 ```
 
 The first dirty-tree 1M-row local run accepted 59.87 MiB of wire data with 64 MiB
-RSS delta and a 0.272 pgwire/direct row-throughput ratio, passing the reduced
-384 MiB and 0.25 budgets. The clean 10M-row reference gate remains open; it uses
-the identical generator, publication path, and oracle with 256 MiB and 0.50
-budgets. A first clean 10M attempt measured a 0.200 ratio and correctly failed the
-required 0.50 reference budget, so COPY throughput remains an open M2 gate rather
-than a performance claim.
+RSS delta and a 0.272 pgwire/direct row-throughput ratio. After replacing
+per-field/per-row allocations with contiguous compact batch storage and direct
+bounded parsing, the clean 10M reference on source `9e4611ed` accepted
+647,777,780 wire bytes in 2,269.23 ms, versus 1,198.89 ms for direct ADBC. Its
+0.528 ratio passes the 0.50 floor; 126 MiB RSS delta passes the 256 MiB ceiling,
+and the exact count/sum/WKB oracle passes for both tables. Commit publication took
+152.83 ms. This closes the M2 10M/RSS/throughput reference gate on the recorded
+Ryzen 7 7700X/64 GiB/HP FX700 NVMe host.
 
 ## Mixed-class concurrency profile
 
@@ -197,7 +199,7 @@ interruption behavior.
 
 ## Next profiles
 
-The remaining E1 performance gate is COPY reference throughput. Later profiles
-cover selective scans, grouped aggregates, bounded spatial joins, fragmented-file
+E1's result, cancellation, transport, mixed-class, and COPY reference budgets now
+pass. Later profiles cover selective scans, grouped aggregates, bounded spatial joins, fragmented-file
 compaction, plans, bytes scanned, spill, and configured-concurrency evidence. The
 exact M4 10M profile must pass twice before introducing 100M.
