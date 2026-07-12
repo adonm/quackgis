@@ -15,9 +15,9 @@ one exact DuckDB/extension bundle.
 | `.tmp/duckdb/manifest.json` | native library/extension paths and SHA-256 values |
 | `.tmp/duckdb-current-benchmark/manifest.json` | deterministic direct DuckDB/ADBC/pgwire correctness and liveness comparison |
 
-`just ci` is the required aggregate local gate after native bootstrap. There is no
-active hosted workflow; a future CI workflow must call the same Justfile recipes
-and may upload verification manifests, not redistributable native binaries.
+`just ci` is the required aggregate local/hosted CI gate after native bootstrap.
+The maintained workflow calls the same Justfile recipes and uploads verification
+manifests, not redistributable native binaries.
 
 ## Evidence levels
 
