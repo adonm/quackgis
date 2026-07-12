@@ -36,6 +36,13 @@ All new profiles use one evidence envelope with source/dirty state, profile ID a
 level, native versions/digests, host and cgroup capacity, rows/bytes/files/row
 groups, correctness results, measurements, budgets, and status.
 
+Validate any emitted envelope independently:
+
+```sh
+mise exec -- just evidence-manifest-check \
+  manifest=.tmp/duckdb-current-benchmark/manifest.json
+```
+
 ## Next profiles
 
 E0 first adds the common evidence envelope and gate-oriented scenario support.

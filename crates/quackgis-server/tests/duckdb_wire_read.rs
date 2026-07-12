@@ -14,6 +14,9 @@ use quackgis_server::pgwire_server::ServerOptions;
 use serde::Deserialize;
 use serde_json::json;
 
+mod support;
+use support::evidence::{EvidenceEnvelope, EvidenceLevel, EvidenceProfile, ExecutionEnvironment};
+
 #[derive(Debug, Eq, PartialEq)]
 struct GeometryBytes(Vec<u8>);
 
@@ -1929,34 +1932,46 @@ async fn current_duckdb_transport_profile() {
     }
     assert!(started.elapsed() < Duration::from_secs(90));
 
-    let manifest = json!({
-        "schema_version": 1,
-        "profile_id": "duckdb-current-smoke-r100k-v1",
-        "status": "pass",
-        "rows": BENCHMARK_ROWS,
-        "correctness": {
+    let manifest = EvidenceEnvelope::collect(
+        EvidenceProfile::new(
+            "duckdb-current-smoke-r100k-v1",
+            EvidenceLevel::Smoke,
+            ExecutionEnvironment::HostProcess,
+            "single-client warm scalar full-scan smoke; not a scale claim",
+        ),
+        json!({
+            "rows": BENCHMARK_ROWS,
+            "logical_bytes": null,
+            "files": null,
+            "row_groups": null,
+        }),
+        json!({
             "canonical_result": expected,
             "bbox_equals_exact": expected[3] == expected[4],
             "wkb_bytes": expected[6],
-        },
-        "load_ms": load_ms,
-        "adbc_open_ms": adbc_open_ms,
-        "pgwire_handshake_ms": handshake_ms,
-        "paths": {
-            "direct_duckdb_cli": sample_summary(&direct_samples),
-            "adbc": sample_summary(&adbc_samples),
-            "pgwire": sample_summary(&pgwire_samples),
-        },
-        "scope": "single-client warm scalar full-scan smoke; not a scale claim",
-    });
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent).expect("benchmark output parent");
-    }
-    std::fs::write(
-        &output_path,
-        serde_json::to_vec_pretty(&manifest).expect("benchmark JSON"),
+        }),
+        json!({
+            "load_ms": load_ms,
+            "adbc_open_ms": adbc_open_ms,
+            "pgwire_handshake_ms": handshake_ms,
+            "paths": {
+                "direct_duckdb_cli": sample_summary(&direct_samples),
+                "adbc": sample_summary(&adbc_samples),
+                "pgwire": sample_summary(&pgwire_samples),
+            },
+        }),
+        json!({
+            "load_max_ms": 30_000.0,
+            "handshake_max_ms": 5_000.0,
+            "direct_sample_max_ms": 15_000.0,
+            "adbc_sample_max_ms": 10_000.0,
+            "pgwire_sample_max_ms": 10_000.0,
+        }),
     )
-    .expect("write benchmark manifest");
+    .expect("collect benchmark evidence");
+    manifest
+        .write(&output_path)
+        .expect("write benchmark manifest");
     println!("duckdb_current_benchmark_ok out={}", output_path.display());
 }
 

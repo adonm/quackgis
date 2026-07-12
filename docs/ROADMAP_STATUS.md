@@ -13,7 +13,7 @@ Kind tree will not be restored. Current iteration state:
 
 | Work package | State | Next executable result |
 |---|---|---|
-| E0 evidence harness | active | common evidence envelope/host fingerprint, then split gate-oriented native scenarios |
+| E0 evidence harness | active; envelope complete | current smoke emits and independently validates source/runtime/host/cgroup/data/oracle/measurement/budget metadata; next split gate-oriented native scenarios |
 | E1 M1/M2 local profiles | queued behind E0 | reduced local result/cancel/COPY profiles using the same reference oracle |
 | K0 minimal Kind topology | queued | one runtime workload, durable local volume, TLS secret, pinned client job image |
 | C0 focused clients | queued behind K0/catalog fixtures | psql and psycopg first, then OGR and headless QGIS |
@@ -31,10 +31,10 @@ Kind tree will not be restored. Current iteration state:
 | Spatial gaps | `docs/DUCKDB_SPATIAL_GAP_LEDGER.md` | 10 Rust/catalog-edge gaps and 5 extension candidates have ledger-pinned `0A000` simple/extended pgwire behavior; semantics remain unsupported |
 | WKB/Arrow | storage/pgwire native tests + `just arrow-encoder-test` | maintained WKB bytes, structural geometry sentinel `pg_type` lookup, RowDescription/text/binary/NULL identity, generated WKB/fixed-binary properties, scalar/list parity, fail-closed invalid shapes, and panic-free nested errors; broad client discovery and generated temporal/decimal/dictionary/nested coverage remain open |
 | Runtime supply chain | `just duckdb-runtime-offline-smoke` | verified context digests/licenses, preinstalled signed extensions, load-only image and server-start smoke |
-| Current performance smoke | `just duckdb-current-benchmark` | deterministic 100k-row direct DuckDB/ADBC/pgwire scalar full-scan comparison; correctness and broad liveness budgets only |
+| Current performance smoke | `just duckdb-current-benchmark` + `just evidence-manifest-check` | deterministic 100k-row direct DuckDB/ADBC/pgwire scalar full-scan comparison in the common evidence envelope; correctness and broad liveness budgets only |
 | Storage authority | storage unit/native tests | atomic local authority marker; remote authority unsupported |
 | Status/readiness | lifecycle unit/native storage tests | liveness is process-only; readiness requires a bound pgwire socket and a successful read-only DuckLake snapshot probe, and reports startup/storage-failure/drain states |
-| Repository gate | `just ci` | Rust fmt/clippy/tests, native storage/pgwire, probes, runtime static checks |
+| Repository gate | `just ci` | Rust fmt/clippy/tests, native storage/pgwire, common evidence validation, probes, runtime static checks |
 
 ## Important implementation limits
 

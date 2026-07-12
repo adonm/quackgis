@@ -12,6 +12,7 @@ one exact DuckDB/extension bundle.
 | `just duckdb-pgwire-workflow-test` | real server protocol, auth, policy, COPY, transaction, spatial, restart behavior |
 | `just duckdb-spatial-compat-probe` | maintained spatial disposition/result classification |
 | `just duckdb-runtime-static-check` | immutable load-only runtime-image contract |
+| `just evidence-manifest-check` | common evidence envelope, source/runtime/host metadata, and claim-level validation |
 | `.tmp/duckdb/manifest.json` | native library/extension paths and SHA-256 values |
 | `.tmp/duckdb-current-benchmark/manifest.json` | deterministic direct DuckDB/ADBC/pgwire correctness and liveness comparison |
 

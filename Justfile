@@ -239,6 +239,10 @@ postgis-regress: duckdb-pgwire-workflow-test
 nextest:
     cargo nextest run --workspace
 
+# Validate the common roadmap evidence envelope emitted by native profiles.
+evidence-manifest-check manifest=".tmp/duckdb-current-benchmark/manifest.json":
+    @manifest_arg='{{manifest}}'; manifest_arg="${manifest_arg#manifest=}"; python3 scripts/evidence_manifest_check.py "$manifest_arg"
+
 # Full local verification gate.
 check: fmt-check clippy test
 
@@ -246,7 +250,7 @@ check: fmt-check clippy test
 check-fast: fmt-check clippy test-fast
 
 # Run the same gate used by GitHub Actions CI.
-ci: check-fast project-contract-check duckdb-adbc-compile-check duckdb-adbc-storage-test duckdb-pgwire-workflow-test probe-static-check runtime-static-check
+ci: check-fast project-contract-check duckdb-adbc-compile-check duckdb-adbc-storage-test duckdb-pgwire-workflow-test evidence-manifest-check probe-static-check runtime-static-check
 
 # Run the dev QuackGIS server on QUACKGIS_HOST/QUACKGIS_PORT.
 server:
@@ -264,12 +268,13 @@ clean-dev:
 # Static validation for maintained helper scripts.
 probe-static-check:
     mkdir -p .tmp/pycache
-    PYTHONPYCACHEPREFIX=.tmp/pycache python3 -m py_compile scripts/*.py scripts/tests/test_duckdb_authority_probe.py scripts/tests/test_duckdb_engine_probe.py scripts/tests/test_duckdb_runtime_static_check.py scripts/tests/test_duckdb_spatial_compat_probe.py
+    PYTHONPYCACHEPREFIX=.tmp/pycache python3 -m py_compile scripts/*.py scripts/tests/test_duckdb_authority_probe.py scripts/tests/test_duckdb_engine_probe.py scripts/tests/test_duckdb_runtime_static_check.py scripts/tests/test_duckdb_spatial_compat_probe.py scripts/tests/test_evidence_manifest_check.py
     python3 scripts/tests/test_duckdb_authority_probe.py
     python3 scripts/tests/test_duckdb_engine_probe.py
     python3 scripts/tests/test_duckdb_spatial_compat_probe.py
     python3 scripts/tests/test_duckdb_runtime_static_check.py
     python3 scripts/tests/test_duckdb_local_backup.py
+    python3 scripts/tests/test_evidence_manifest_check.py
 
 # Validate maintained documentation links, commands, and spatial claims.
 project-contract-check:

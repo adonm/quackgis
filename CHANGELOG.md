@@ -7,6 +7,11 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 
 ### Added
 
+- Local-first smoke/local/reference/external roadmap levels with explicit host
+  performance, minimal-Kind topology, and managed-service claim boundaries.
+- A common profile evidence envelope with source dirty hashes, checksum-only native
+  provenance, host/cgroup fingerprint, data/oracle/measurement/budget sections,
+  atomic publication, and an independent CI validator.
 - Owned Rust pgwire/TLS/SCRAM edge over DuckDB ADBC.
 - Official local DuckLake create, Arrow ingest/query, transaction, snapshot
   inspection, adjacent-file merge, and reopen workflows.
