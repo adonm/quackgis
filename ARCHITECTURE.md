@@ -90,9 +90,10 @@ Native interruption maps to SQLSTATE `57014`. Only a stream that reaches native
 EOF returns its connection; cancellation, reader failure, or dropping a partially
 delivered result quarantines the session. Driver batches larger than the
 configured byte ceiling fail with SQLSTATE `54000` before pgwire encoding. This
-bounds the protocol edge but does not
-prevent a native driver from temporarily allocating that batch; full RSS evidence
-remains open.
+bounds the protocol edge but does not prevent a native driver from temporarily
+allocating that batch. Clean 1M/10M generated-BIGINT profiles prove cardinality-
+independent process RSS for that shape; wider variable-width and maximum native
+batch shapes remain open.
 
 ## Session and transaction ownership
 

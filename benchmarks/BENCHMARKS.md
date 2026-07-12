@@ -77,10 +77,17 @@ mise exec -- just duckdb-result-stream-profile \
   out=.tmp/duckdb-result-stream/local-r1m.json
 ```
 
-The current dirty-tree 1M local run observed one in-flight batch, first row before
-completion, and approximately 1.7 MiB RSS growth. This is functional local
-evidence; the clean 1M and 10M reference runs under the 128 MiB budget remain the
-M1 exit evidence.
+Clean serial reference runs on source `12817bcd` and pinned DuckDB 1.5.4 produced:
+
+| Rows | Idle RSS | RSS delta | First row | Total | In-flight batches |
+|---:|---:|---:|---:|---:|---:|
+| 1,000,000 | 84.47 MiB | 1.72 MiB | 1.74 ms | 150.28 ms | 1 |
+| 10,000,000 | 84.97 MiB | 2.36 MiB | 1.28 ms | 1,494.12 ms | 1 |
+
+Both exact count/sum oracles pass and remain below the +128 MiB reference budget
+on the recorded Ryzen 7 7700X/64 GiB Bazzite host. This closes the cardinality
+independence, first-row, and measured 1M/10M BIGINT-stream portions of M1. Wider
+variable-width/native-batch shapes remain open.
 
 ## Next profiles
 

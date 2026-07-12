@@ -71,8 +71,10 @@ catalog surfaces remain open unless a focused test says otherwise.
   explicit transaction.
 - Exact pinned DuckDB library version/digest and preinstalled signed extensions.
 - Query results stream one driver-produced Arrow batch at a time and reject a
-  driver batch above the configured byte ceiling before pgwire encoding; native
-  allocation and 1M/10M RSS evidence remain open.
+  driver batch above the configured byte ceiling before pgwire encoding. Clean
+  1M/10M generated-BIGINT reference runs stay below the +128 MiB process RSS
+  budget with one in-flight batch; wider variable-width/native-batch shapes remain
+  open.
 - A fully exhausted result returns its native connection. Closing a suspended
   portal or otherwise dropping a partially delivered result quarantines that
   session. After cancellation, the same client receives a stable internal error

@@ -18,9 +18,9 @@ Disposition:
 | TLS/SCRAM/startup | Rust edge | fail-closed material checks, explicit TLS-required startup policy, real SCRAM workflow | encrypted client, plaintext-denial, and restart-rotation evidence |
 | parsed read/write policy | Rust edge | unit + denied real-client cases | filtered metadata/admin permissions |
 | portals/fetch paging | Rust edge | live ADBC stream plus three-page native workflow; native partial-drop quarantine proof | realistic fetch sizes and memory profile |
-| query cancellation | native + Rust edge | cancel token interrupts active DuckDB stream with SQLSTATE `57014`; uncertain stream cleanup is quarantined | 100-cancel p95 and same-client cancellation disposition |
+| query cancellation | native + Rust edge | cancel token interrupts active DuckDB stream with SQLSTATE `57014`; same client is explicitly quarantined and an independent client remains usable | 100-cancel p95 and write/commit cancellation disposition |
 | query admission/resources | Rust edge + native settings | bounded connection/active/queued queries; fixed native worker pool with reserved control slot; queue timeout; DuckDB threads/memory/temp/spill config; 32-client/eight-reader suspended-portal proof | mixed-class native concurrency evidence |
-| Arrow result encoding | Rust edge | one ADBC batch at a time; configured pre-encoder byte ceiling; byte/in-flight metrics; scalar and `arrow-pg` tests | 1M/10M RSS evidence and type fuzzing |
+| Arrow result encoding | Rust edge | one ADBC batch at a time; configured ceiling/metrics; clean 1M/10M generated-BIGINT reference RSS/first-row profiles | wider variable-width/native-batch RSS and type fuzzing |
 | COPY FROM STDIN | Rust edge + native ingest | incremental bounded batches; >20 MiB/220k-row stream; atomic malformed/cancel/disconnect/timeout behavior; scalar/NULL/WKB reopen; compaction | idle-wait error delivery and 10M/1 GiB RSS/throughput gates |
 | transactions/session isolation | native + Rust ownership | commit/rollback/disconnect workflow | timeout/cancel/uncertain cleanup and pool reuse |
 | local official DuckLake | native | create/ingest/query/snapshot/merge/reopen | backup/restore/upgrade/soak |

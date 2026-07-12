@@ -18,6 +18,9 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 - A separately registered result-stream profile with two-millisecond process RSS
   sampling, time-to-first-row, throughput, row/sum oracle, and Arrow batch
   high-water evidence; its first 1M local run passes with one in-flight batch.
+- Clean serial 1M and 10M generated-BIGINT reference runs on source `12817bcd`
+  pass exact cardinality/sum, first-row-before-completion, one-batch high water,
+  and the +128 MiB RSS budget with approximately 1.72/2.36 MiB RSS growth.
 - Owned Rust pgwire/TLS/SCRAM edge over DuckDB ADBC.
 - Official local DuckLake create, Arrow ingest/query, transaction, snapshot
   inspection, adjacent-file merge, and reopen workflows.
