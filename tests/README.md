@@ -24,6 +24,10 @@ direct DuckDB/ADBC/pgwire benchmark smoke and writes its manifest under `.tmp`.
   trace from the exact pinned OGR image against digest-pinned PostgreSQL
   18.4/PostGIS. It freezes copied-point discovery SQL and observed results; it does
   not claim those queries execute through QuackGIS yet.
+- `fixtures/psql_18_3_postgresql18_describe_trace.json` freezes the 12 normalized
+  query families and rendered structure from exact psql 18.3 `\d+` against the
+  same PostgreSQL 18.4/PostGIS oracle. It is a target corpus, not current QuackGIS
+  describe support.
 - `fixtures/postgis_curated_cases.rs` is the deliberately bounded expected-value
   source parsed by the native CLI and pgwire gates, not a Cargo integration test.
 

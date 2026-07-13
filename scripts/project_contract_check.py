@@ -27,6 +27,7 @@ EXPECTED_COUNTS = {
 POSTGRESQL_PROFILE = ROOT / "tests/fixtures/postgresql18_compatibility_profile.json"
 POSTGRESQL_REFERENCE = ROOT / "tests/fixtures/postgresql18_column_core_reference.json"
 OGR_TRACE = ROOT / "tests/fixtures/ogr_3_11_5_postgresql18_trace.json"
+PSQL_TRACE = ROOT / "tests/fixtures/psql_18_3_postgresql18_describe_trace.json"
 
 
 def tracked_markdown() -> list[Path]:
@@ -110,6 +111,7 @@ def check_postgresql_profile(errors: list[str]) -> None:
     profile = json.loads(POSTGRESQL_PROFILE.read_text(encoding="utf-8"))
     reference = json.loads(POSTGRESQL_REFERENCE.read_text(encoding="utf-8"))
     ogr_trace = json.loads(OGR_TRACE.read_text(encoding="utf-8"))
+    psql_trace = json.loads(PSQL_TRACE.read_text(encoding="utf-8"))
 
     if profile.get("schema_version") != 1:
         errors.append("PostgreSQL compatibility profile schema_version must be 1")
@@ -192,6 +194,8 @@ def check_postgresql_profile(errors: list[str]) -> None:
     captured_ids = [item.get("id") for item in captured]
     if "ogr_copied_spatial_table" not in captured_ids:
         errors.append("PostgreSQL compatibility profile does not register the OGR trace")
+    if "psql_describe_copied_table" not in captured_ids:
+        errors.append("PostgreSQL compatibility profile does not register the psql trace")
     if set(captured_ids) & set(pending_ids):
         errors.append("PostgreSQL trace cannot be both captured and pending")
 
@@ -228,6 +232,40 @@ def check_postgresql_profile(errors: list[str]) -> None:
     missing_ogr_queries = sorted(required_ogr_queries - set(ogr_query_ids))
     if missing_ogr_queries:
         errors.append(f"OGR trace missing required query families: {missing_ogr_queries}")
+
+    if psql_trace.get("trace_id") != "psql-18.3-postgresql18-describe-spatial-table-v1":
+        errors.append("psql trace_id is missing or unsupported")
+    if psql_trace.get("client", {}).get("psql_version") != "18.3":
+        errors.append("psql trace must use psql 18.3")
+    if psql_trace.get("oracle", {}).get("postgresql_version") != "18.4":
+        errors.append("psql trace must use the PostgreSQL 18.4 oracle")
+    for label, value in [
+        ("psql client image", psql_trace.get("client", {}).get("image_digest", "")),
+        ("psql PostGIS image", psql_trace.get("oracle", {}).get("postgis_image_digest", "")),
+    ]:
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+            errors.append(f"{label} digest is missing or malformed")
+    serialized_psql_trace = json.dumps(psql_trace).lower()
+    for secret in ["password=", "reference-only"]:
+        if secret in serialized_psql_trace:
+            errors.append(f"psql trace contains credential material: {secret}")
+    psql_queries = psql_trace.get("queries", [])
+    psql_query_ids = [query.get("id") for query in psql_queries]
+    if len(psql_query_ids) != len(set(psql_query_ids)) or len(psql_queries) != 12:
+        errors.append("psql trace query corpus is duplicate, unnamed, or incomplete")
+    required_psql_queries = {
+        "resolve_relation",
+        "relation_properties",
+        "column_properties",
+        "indexes",
+        "not_null_constraints",
+        "row_security_policies",
+        "publications",
+        "partition_children",
+    }
+    missing_psql_queries = sorted(required_psql_queries - set(psql_query_ids))
+    if missing_psql_queries:
+        errors.append(f"psql trace missing required query families: {missing_psql_queries}")
 
 
 def main() -> int:

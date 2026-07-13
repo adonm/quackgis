@@ -120,6 +120,9 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 - A credential-free 21-query copied-point discovery trace from the exact OGR
   3.11.5 image against digest-pinned PostgreSQL 18.4/PostGIS, including observed
   geometry, FID, SRID, feature-count, and extent results.
+- A credential-free 12-query `\d+` trace from exact psql 18.3 against the same
+  oracle, including normalized relation/attribute/index/constraint/policy queries
+  and rendered spatial table structure.
 - A multi-process DuckDB 1.5.4 identity gate proving DuckLake table UUID/ID and
   column field-ID continuity across rename/reopen plus new identity on name reuse.
 - A registered client-neutral catalog fixture for DuckDB-derived table/column

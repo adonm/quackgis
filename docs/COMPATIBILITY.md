@@ -20,6 +20,10 @@ copied-point trace against digest-pinned PostgreSQL 18.4/PostGIS. Its 21 query
 families are an implementation oracle, not evidence that copied spatial discovery
 currently succeeds against QuackGIS.
 
+The same oracle now includes exact psql 18.3 `\d+` evidence: 12 normalized catalog
+query families and the rendered structure of a five-column spatial table. This is
+also a target corpus, not current QuackGIS describe support.
+
 ## Proven local contract
 
 The required real-driver workflow proves:
