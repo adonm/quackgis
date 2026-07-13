@@ -165,10 +165,16 @@ statement and remains table-structural.
 
 WKB/EWKB is the current transport/interchange format. A binary field may advertise
 a maintained geometry/geography sentinel OID through explicit Arrow metadata or a
-conservative name convention. A narrow structural `pg_type` adapter resolves those
-two sentinel OIDs, and the native workflow proves geometry RowDescription plus
-text, binary, and NULL transport. Broad catalog discovery, named-client evidence,
-and durable subtype/SRID/dimension identity remain open.
+conservative name convention. Process-local relational
+`pg_namespace`/`pg_type`/`pg_range` compatibility views resolve those two sentinel
+OIDs through structurally rewritten explicit catalog references. Proven source
+projections receive explicit Arrow type hints; output aliases alone never select
+PostgreSQL OID/`name`/internal-`char` encoding. A minimal owner-role row closes the
+published namespace-owner reference, and restricted identities cannot bypass
+metadata policy through the private rewrite schema. The native workflow proves
+PostgreSQL 18 result types plus geometry RowDescription text, binary, and NULL
+transport. User-object catalogs, RowDescription relation origins, named-client
+discovery, and durable subtype/SRID/dimension identity remain open.
 
 ## Spatial performance
 

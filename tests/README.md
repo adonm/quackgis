@@ -10,8 +10,10 @@ direct DuckDB/ADBC/pgwire benchmark smoke and writes its manifest under `.tmp`.
   cases currently execute through pgwire.
 - `fixtures/duckdb_catalog_contract.json` is the client-neutral executable
   catalog/type fixture. It covers DuckDB-derived table/column metadata, bounded
-  spatial sentinel lookup, geometry RowDescription, binary/text WKB, NULL, and
-  ordinary native catalog behavior through pgwire.
+  relational spatial type catalogs, PostgreSQL 18 lookup result types, geometry
+  RowDescription, binary/text WKB, NULL, unknown OIDs, and ordinary equivalent
+  catalog rows/types through pgwire. It also proves namespace owner resolution and
+  that ordinary `oid`/`typtype` aliases retain their native values and types.
 - `fixtures/postgresql18_compatibility_profile.json` freezes the first target
   catalog/query/wire contract and names every still-pending client trace.
   `fixtures/postgresql18_column_core_reference.json` records normalized

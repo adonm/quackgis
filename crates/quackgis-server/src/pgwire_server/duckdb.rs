@@ -5,6 +5,7 @@
 //! CLI backend. Unsupported policy, storage, statement, COPY, and parameter
 //! shapes fail closed until their D2-D4 contracts pass.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,7 +15,9 @@ use arrow_array::{
     ArrayRef, BinaryArray, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array,
     Int64Array, RecordBatch, RecordBatchReader, StringArray, UInt32Array,
 };
-use arrow_pg::datatypes::{arrow_schema_to_pg_fields, field_into_pg_type};
+use arrow_pg::datatypes::{
+    PgTypeHint, arrow_schema_to_pg_fields, field_into_pg_type, with_pg_type_hint,
+};
 use arrow_pg::encode_recordbatch;
 use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
 use async_trait::async_trait;
@@ -38,9 +41,9 @@ use pgwire::messages::data::DataRow;
 use pgwire::messages::extendedquery::Execute;
 use pgwire::messages::response::TransactionStatus;
 use sqlparser::ast::{
-    CopySource, CopyTarget as AstCopyTarget, Expr, FunctionArg, FunctionArgExpr, FunctionArguments,
-    Ident, ObjectName, ObjectNamePart, Set, Statement, Value, visit_expressions,
-    visit_relations_mut,
+    BinaryOperator, CopySource, CopyTarget as AstCopyTarget, Expr, FunctionArg, FunctionArgExpr,
+    FunctionArguments, Ident, ObjectName, ObjectNamePart, SelectItem, Set, SetExpr, Statement,
+    TableFactor, Value, visit_expressions, visit_relations_mut,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
@@ -253,7 +256,7 @@ impl QueryParser for DuckDbParser {
             });
         }
         let validated = validate_statement(sql, ProtocolMode::Extended)?;
-        let pg_type_lookup = is_pg_type_lookup(&validated.ast);
+        let oid_parameters = catalog_oid_parameter_indexes(&validated.ast);
         authorize_statement(client, &self.auth, &validated.ast)?;
         if validated.kind == StatementKind::SessionSet {
             let empty = Arc::new(Schema::empty());
@@ -291,16 +294,24 @@ impl QueryParser for DuckDbParser {
                 .iter()
                 .enumerate()
                 .map(|(index, field)| {
-                    if pg_type_lookup && index == 0 {
-                        return Field::new("oid", DataType::UInt32, false);
-                    }
                     if field.data_type() == &DataType::Null
                         && let Some(Some(pg_type)) = types.get(index)
                     {
-                        return Field::new(
+                        let field = Field::new(
                             field.name(),
                             pg_type_to_arrow(pg_type).unwrap_or(DataType::Null),
                             true,
+                        );
+                        return if *pg_type == Type::OID {
+                            with_pg_type_hint(field, PgTypeHint::Oid)
+                        } else {
+                            field
+                        };
+                    }
+                    if field.data_type() == &DataType::Null && oid_parameters.contains(&index) {
+                        return with_pg_type_hint(
+                            Field::new("oid", DataType::UInt32, false),
+                            PgTypeHint::Oid,
                         );
                     }
                     field.as_ref().clone()
@@ -312,12 +323,16 @@ impl QueryParser for DuckDbParser {
             .iter()
             .map(field_into_pg_type)
             .collect::<PgWireResult<Vec<_>>>()?;
+        let result_schema = Arc::new(annotate_catalog_result_schema(
+            &validated.ast,
+            description.result_schema.as_ref(),
+        ));
         Ok(DuckDbStatement {
             sql: validated.sql,
             copy_target: None,
             kind: validated.kind,
             parameter_schema,
-            result_schema: description.result_schema,
+            result_schema,
             parameter_types,
         })
     }
@@ -459,11 +474,15 @@ impl SimpleQueryHandler for DuckDbService {
                         Arc::clone(&self.control.blocking_workers),
                     )));
                 }
+                let result_schema = ast.as_ref().map(|statement| {
+                    annotate_catalog_result_schema(statement, result.schema.as_ref())
+                });
                 Ok(vec![Response::Query(query_response(
                     result,
                     &Format::UnifiedText,
                     self.control.result_batch_bytes,
                     Arc::clone(&self.control.blocking_workers),
+                    result_schema.as_ref(),
                 )?)])
             }
             SimpleStatementKind::Write(command) => {
@@ -765,6 +784,7 @@ impl ExtendedQueryHandler for DuckDbService {
                     &portal.result_column_format,
                     self.control.result_batch_bytes,
                     Arc::clone(&self.control.blocking_workers),
+                    Some(statement.result_schema.as_ref()),
                 )?))
             }
             StatementKind::Write(command) => {
@@ -908,6 +928,12 @@ fn validate_statement(sql: &str, mode: ProtocolMode) -> PgWireResult<ValidatedSt
             &format!("PostGIS function {function} is not supported by QuackGIS"),
         ));
     }
+    if invalid_quoted_catalog_reference(&statement) {
+        return Err(user_error(
+            "42703",
+            "quoted PostgreSQL catalog identifier does not match the maintained lowercase name",
+        ));
+    }
     let kind = match &statement {
         Statement::Query(_) => StatementKind::Read,
         Statement::CreateTable(_) => StatementKind::Write("CREATE TABLE"),
@@ -937,15 +963,7 @@ fn validate_statement(sql: &str, mode: ProtocolMode) -> PgWireResult<ValidatedSt
             ));
         }
     };
-    let execution_sql = if is_pg_type_lookup(&statement) {
-        "SELECT CASE CAST($1 AS UINTEGER) \
-             WHEN 90001 THEN 'geometry' WHEN 90002 THEN 'geography' END::VARCHAR AS typname, \
-             'b'::VARCHAR AS typtype, 0::UINTEGER AS typelem, \
-             NULL::UINTEGER AS rngsubtype, 0::UINTEGER AS typbasetype, \
-             ''::VARCHAR AS nspname, 0::UINTEGER AS typrelid \
-         WHERE CAST($1 AS UINTEGER) IN (90001, 90002)"
-            .to_owned()
-    } else if let Statement::ShowVariable { variable } = &statement {
+    let execution_sql = if let Statement::ShowVariable { variable } = &statement {
         match supported_show_variable(variable).expect("validated SHOW variable") {
             SessionVariable::SearchPath => "SELECT 'public'::VARCHAR AS search_path".to_owned(),
             SessionVariable::ClientEncoding => {
@@ -958,6 +976,7 @@ fn validate_statement(sql: &str, mode: ProtocolMode) -> PgWireResult<ValidatedSt
     } else {
         let mut execution = statement.clone();
         rewrite_public_relations(&mut execution);
+        rewrite_pg_catalog_relations(&mut execution);
         execution.to_string()
     };
     Ok(ValidatedStatement {
@@ -965,19 +984,6 @@ fn validate_statement(sql: &str, mode: ProtocolMode) -> PgWireResult<ValidatedSt
         kind,
         ast: statement,
     })
-}
-
-fn is_pg_type_lookup(statement: &Statement) -> bool {
-    const LOOKUP: &str = "SELECT t.typname, t.typtype, t.typelem, r.rngsubtype, \
-        t.typbasetype, n.nspname, t.typrelid FROM pg_catalog.pg_type t \
-        LEFT OUTER JOIN pg_catalog.pg_range r ON r.rngtypid = t.oid \
-        INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid \
-        WHERE t.oid = $1";
-    let expected = Parser::parse_sql(&PostgreSqlDialect {}, LOOKUP)
-        .expect("static pg_type lookup must parse")
-        .pop()
-        .expect("static pg_type lookup has one statement");
-    statement.to_string() == expected.to_string()
 }
 
 fn unsupported_spatial_function(statement: &Statement) -> Option<&'static str> {
@@ -1227,6 +1233,310 @@ fn rewrite_public_relations(statement: &mut Statement) {
         }
         ControlFlow::Continue(())
     });
+}
+
+fn rewrite_pg_catalog_relations(statement: &mut Statement) {
+    let _: ControlFlow<()> = visit_relations_mut(statement, |name| {
+        if let Some(table) = maintained_pg_catalog_relation(name) {
+            *name = ObjectName(vec![
+                ObjectNamePart::Identifier(Ident::new("quackgis_pg_catalog")),
+                ObjectNamePart::Identifier(Ident::new(table)),
+            ]);
+        }
+        ControlFlow::Continue(())
+    });
+}
+
+fn maintained_pg_catalog_relation(name: &ObjectName) -> Option<&'static str> {
+    let [
+        ObjectNamePart::Identifier(schema),
+        ObjectNamePart::Identifier(table),
+    ] = name.0.as_slice()
+    else {
+        return None;
+    };
+    if !pg_identifier_matches(schema, "pg_catalog") {
+        return None;
+    }
+    ["pg_namespace", "pg_type", "pg_range", "pg_roles"]
+        .into_iter()
+        .find(|candidate| pg_identifier_matches(table, candidate))
+}
+
+fn invalid_quoted_catalog_reference(statement: &Statement) -> bool {
+    let mut clone = statement.clone();
+    let mut invalid_relation = false;
+    let _: ControlFlow<()> = visit_relations_mut(&mut clone, |name| {
+        let [
+            ObjectNamePart::Identifier(schema),
+            ObjectNamePart::Identifier(table),
+        ] = name.0.as_slice()
+        else {
+            return ControlFlow::Continue(());
+        };
+        let catalog_name = ["pg_namespace", "pg_type", "pg_range", "pg_roles"]
+            .into_iter()
+            .any(|candidate| table.value.eq_ignore_ascii_case(candidate));
+        if schema.value.eq_ignore_ascii_case("pg_catalog")
+            && catalog_name
+            && maintained_pg_catalog_relation(name).is_none()
+        {
+            invalid_relation = true;
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    });
+    if invalid_relation {
+        return true;
+    }
+
+    let aliases = top_level_catalog_aliases(statement);
+    let Statement::Query(query) = statement else {
+        return false;
+    };
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return false;
+    };
+    select.projection.iter().any(|item| {
+        let expression = match item {
+            SelectItem::UnnamedExpr(expression)
+            | SelectItem::ExprWithAlias {
+                expr: expression, ..
+            } => expression,
+            _ => return false,
+        };
+        invalid_quoted_catalog_column(expression, &aliases)
+    }) || select
+        .selection
+        .as_ref()
+        .is_some_and(|selection| invalid_quoted_catalog_column(selection, &aliases))
+}
+
+fn invalid_quoted_catalog_column(
+    expression: &Expr,
+    aliases: &HashMap<String, &'static str>,
+) -> bool {
+    let invalid = |relation: &str, column: &Ident| {
+        column.quote_style.is_some()
+            && catalog_columns(relation)
+                .iter()
+                .any(|(name, _)| column.value.eq_ignore_ascii_case(name) && column.value != *name)
+    };
+    match expression {
+        Expr::CompoundIdentifier(identifiers) if identifiers.len() == 2 => aliases
+            .get(&identifier_key(&identifiers[0]))
+            .is_some_and(|relation| invalid(relation, &identifiers[1])),
+        Expr::Identifier(column) if aliases.len() == 1 => aliases
+            .values()
+            .next()
+            .is_some_and(|relation| invalid(relation, column)),
+        Expr::BinaryOp { left, right, .. } => {
+            invalid_quoted_catalog_column(left, aliases)
+                || invalid_quoted_catalog_column(right, aliases)
+        }
+        Expr::Nested(expression) => invalid_quoted_catalog_column(expression, aliases),
+        _ => false,
+    }
+}
+
+fn pg_identifier_matches(identifier: &Ident, expected: &str) -> bool {
+    if identifier.quote_style.is_some() {
+        identifier.value == expected
+    } else {
+        identifier.value.eq_ignore_ascii_case(expected)
+    }
+}
+
+fn identifier_key(identifier: &Ident) -> String {
+    if identifier.quote_style.is_some() {
+        identifier.value.clone()
+    } else {
+        identifier.value.to_ascii_lowercase()
+    }
+}
+
+fn top_level_catalog_aliases(statement: &Statement) -> HashMap<String, &'static str> {
+    let Statement::Query(query) = statement else {
+        return HashMap::new();
+    };
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return HashMap::new();
+    };
+    let mut aliases = HashMap::new();
+    for table in &select.from {
+        collect_catalog_alias(&table.relation, &mut aliases);
+        for join in &table.joins {
+            collect_catalog_alias(&join.relation, &mut aliases);
+        }
+    }
+    aliases
+}
+
+fn collect_catalog_alias(factor: &TableFactor, aliases: &mut HashMap<String, &'static str>) {
+    let TableFactor::Table { name, alias, .. } = factor else {
+        return;
+    };
+    let Some(relation) = maintained_pg_catalog_relation(name) else {
+        return;
+    };
+    let identifier = alias
+        .as_ref()
+        .map(|alias| &alias.name)
+        .or_else(|| match name.0.last() {
+            Some(ObjectNamePart::Identifier(identifier)) => Some(identifier),
+            _ => None,
+        });
+    if let Some(identifier) = identifier {
+        aliases.insert(identifier_key(identifier), relation);
+    }
+}
+
+fn catalog_columns(relation: &str) -> &'static [(&'static str, PgTypeHint)] {
+    match relation {
+        "pg_namespace" => &[
+            ("oid", PgTypeHint::Oid),
+            ("nspname", PgTypeHint::Name),
+            ("nspowner", PgTypeHint::Oid),
+        ],
+        "pg_type" => &[
+            ("oid", PgTypeHint::Oid),
+            ("typname", PgTypeHint::Name),
+            ("typnamespace", PgTypeHint::Oid),
+            ("typtype", PgTypeHint::Char),
+            ("typcategory", PgTypeHint::Char),
+            ("typdelim", PgTypeHint::Char),
+            ("typrelid", PgTypeHint::Oid),
+            ("typelem", PgTypeHint::Oid),
+            ("typarray", PgTypeHint::Oid),
+            ("typbasetype", PgTypeHint::Oid),
+            ("typcollation", PgTypeHint::Oid),
+        ],
+        "pg_range" => &[
+            ("rngtypid", PgTypeHint::Oid),
+            ("rngsubtype", PgTypeHint::Oid),
+        ],
+        "pg_roles" => &[("rolname", PgTypeHint::Name), ("oid", PgTypeHint::Oid)],
+        _ => &[],
+    }
+}
+
+fn catalog_column_hint(relation: &str, column: &Ident) -> Option<PgTypeHint> {
+    catalog_columns(relation)
+        .iter()
+        .find_map(|(name, hint)| pg_identifier_matches(column, name).then_some(*hint))
+}
+
+fn catalog_expression_hint(
+    expression: &Expr,
+    aliases: &HashMap<String, &'static str>,
+) -> Option<PgTypeHint> {
+    match expression {
+        Expr::CompoundIdentifier(identifiers) if identifiers.len() == 2 => {
+            let relation = aliases.get(&identifier_key(&identifiers[0]))?;
+            catalog_column_hint(relation, &identifiers[1])
+        }
+        Expr::Identifier(column) if aliases.len() == 1 => {
+            catalog_column_hint(aliases.values().next()?, column)
+        }
+        Expr::Nested(expression) => catalog_expression_hint(expression, aliases),
+        _ => None,
+    }
+}
+
+fn annotate_catalog_result_schema(statement: &Statement, schema: &Schema) -> Schema {
+    let aliases = top_level_catalog_aliases(statement);
+    if aliases.is_empty() {
+        return schema.clone();
+    }
+    let Statement::Query(query) = statement else {
+        return schema.clone();
+    };
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return schema.clone();
+    };
+    if select.projection.len() != schema.fields().len() {
+        return schema.clone();
+    }
+    Schema::new(
+        schema
+            .fields()
+            .iter()
+            .zip(&select.projection)
+            .map(|(field, item)| {
+                let expression = match item {
+                    SelectItem::UnnamedExpr(expression)
+                    | SelectItem::ExprWithAlias {
+                        expr: expression, ..
+                    } => expression,
+                    _ => return field.as_ref().clone(),
+                };
+                catalog_expression_hint(expression, &aliases)
+                    .map(|hint| with_pg_type_hint(field.as_ref().clone(), hint))
+                    .unwrap_or_else(|| field.as_ref().clone())
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn catalog_oid_parameter_indexes(statement: &Statement) -> HashSet<usize> {
+    let aliases = top_level_catalog_aliases(statement);
+    if aliases.is_empty() {
+        return HashSet::new();
+    }
+    let Statement::Query(query) = statement else {
+        return HashSet::new();
+    };
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return HashSet::new();
+    };
+    let mut indexes = HashSet::new();
+    if let Some(selection) = &select.selection {
+        collect_catalog_oid_parameters(selection, &aliases, &mut indexes);
+    }
+    indexes
+}
+
+fn collect_catalog_oid_parameters(
+    expression: &Expr,
+    aliases: &HashMap<String, &'static str>,
+    indexes: &mut HashSet<usize>,
+) {
+    match expression {
+        Expr::BinaryOp { left, op, right } => {
+            if matches!(op, BinaryOperator::Eq) {
+                for (column, value) in [
+                    (left.as_ref(), right.as_ref()),
+                    (right.as_ref(), left.as_ref()),
+                ] {
+                    if catalog_expression_hint(column, aliases) == Some(PgTypeHint::Oid)
+                        && let Some(index) = numbered_parameter_index(value)
+                    {
+                        indexes.insert(index);
+                    }
+                }
+            }
+            if matches!(op, BinaryOperator::And | BinaryOperator::Or) {
+                collect_catalog_oid_parameters(left, aliases, indexes);
+                collect_catalog_oid_parameters(right, aliases, indexes);
+            }
+        }
+        Expr::Nested(expression) => collect_catalog_oid_parameters(expression, aliases, indexes),
+        _ => {}
+    }
+}
+
+fn numbered_parameter_index(expression: &Expr) -> Option<usize> {
+    let Expr::Value(value) = expression else {
+        return None;
+    };
+    let Value::Placeholder(placeholder) = &value.value else {
+        return None;
+    };
+    placeholder
+        .strip_prefix('$')?
+        .parse::<usize>()
+        .ok()?
+        .checked_sub(1)
 }
 
 fn object_name_values(name: &ObjectName) -> Option<Vec<String>> {
@@ -1493,9 +1803,10 @@ fn query_response(
     format: &Format,
     max_batch_bytes: usize,
     blocking_workers: Arc<BlockingWorkerPool>,
+    result_schema: Option<&Schema>,
 ) -> PgWireResult<QueryResponse> {
     let fields = Arc::new(arrow_schema_to_pg_fields(
-        result.schema.as_ref(),
+        result_schema.unwrap_or(result.schema.as_ref()),
         format,
         None,
     )?);
@@ -2120,7 +2431,7 @@ mod tests {
     }
 
     #[test]
-    fn geometry_type_lookup_is_a_narrow_catalog_adapter() {
+    fn spatial_type_catalog_relations_are_structurally_rewritten() {
         let lookup = validate_statement(
             "SELECT t.typname, t.typtype, t.typelem, r.rngsubtype, t.typbasetype, \
              n.nspname, t.typrelid FROM pg_catalog.pg_type t \
@@ -2130,17 +2441,25 @@ mod tests {
             ProtocolMode::Extended,
         )
         .expect("structural pg_type lookup");
-        assert!(lookup.sql.contains("90001"));
-        assert!(lookup.sql.contains("90002"));
+        assert_eq!(
+            catalog_oid_parameter_indexes(&lookup.ast),
+            std::collections::HashSet::from([0])
+        );
+        assert!(lookup.sql.contains("quackgis_pg_catalog.pg_type"));
+        assert!(lookup.sql.contains("quackgis_pg_catalog.pg_range"));
+        assert!(lookup.sql.contains("quackgis_pg_catalog.pg_namespace"));
+        assert!(!lookup.sql.contains("CASE"));
+        assert!(!lookup.sql.contains("90001"));
 
         let ordinary = validate_statement(
             "SELECT typname FROM pg_catalog.pg_type",
             ProtocolMode::Extended,
         )
         .expect("ordinary catalog query");
+        assert!(ordinary.sql.contains("quackgis_pg_catalog.pg_type"));
         assert!(!ordinary.sql.contains("90001"));
 
-        for near_miss in [
+        for relational_query in [
             "SELECT t.typname FROM pg_catalog.pg_type t \
              INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid \
              WHERE t.oid = $1",
@@ -2155,13 +2474,71 @@ mod tests {
              INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid \
              WHERE t.oid = $1 AND t.typname = 'geometry'",
         ] {
-            let validated = validate_statement(near_miss, ProtocolMode::Extended)
-                .unwrap_or_else(|error| panic!("near-miss catalog SQL: {error}"));
+            let validated = validate_statement(relational_query, ProtocolMode::Extended)
+                .unwrap_or_else(|error| panic!("relational catalog SQL: {error}"));
             assert!(
-                !validated.sql.contains("WHEN 90001"),
-                "near-miss query was intercepted: {near_miss}"
+                validated.sql.contains("quackgis_pg_catalog.pg_type"),
+                "catalog relation was not rewritten: {relational_query}"
             );
+            assert!(!validated.sql.contains("WHEN 90001"));
         }
+
+        let future = validate_statement(
+            "SELECT relname FROM pg_catalog.pg_class",
+            ProtocolMode::Extended,
+        )
+        .expect("future catalog query remains parseable");
+        assert!(future.sql.contains("pg_catalog.pg_class"));
+        assert!(!future.sql.contains("quackgis_pg_catalog.pg_class"));
+
+        let user_oid = validate_statement(
+            "SELECT p.oid FROM quackgis.main.points p WHERE p.oid = $1",
+            ProtocolMode::Extended,
+        )
+        .expect("user oid query");
+        assert!(catalog_oid_parameter_indexes(&user_oid.ast).is_empty());
+
+        assert!(
+            validate_statement(
+                "SELECT typname FROM \"PG_CATALOG\".\"PG_TYPE\"",
+                ProtocolMode::Extended,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_statement(
+                "SELECT t.\"OID\" FROM pg_catalog.pg_type t",
+                ProtocolMode::Extended,
+            )
+            .is_err()
+        );
+
+        let quoted_alias = validate_statement(
+            "SELECT \"t\".oid FROM pg_catalog.pg_type AS t",
+            ProtocolMode::Extended,
+        )
+        .expect("quoted lowercase alias matches unquoted declaration");
+        let quoted_alias_schema = Schema::new(vec![Field::new("oid", DataType::UInt32, false)]);
+        let quoted_alias_schema =
+            annotate_catalog_result_schema(&quoted_alias.ast, &quoted_alias_schema);
+        let quoted_alias_field = Arc::new(quoted_alias_schema.field(0).clone());
+        assert_eq!(field_into_pg_type(&quoted_alias_field).unwrap(), Type::OID);
+
+        let shadowed = validate_statement(
+            "SELECT t.typname FROM pg_catalog.pg_type t WHERE EXISTS (\
+             SELECT 1 FROM quackgis.main.user_oids t WHERE t.oid = $1)",
+            ProtocolMode::Extended,
+        )
+        .expect("nested alias shadowing query");
+        assert!(catalog_oid_parameter_indexes(&shadowed.ast).is_empty());
+
+        let owner = validate_statement(
+            "SELECT n.nspname, r.rolname FROM pg_catalog.pg_namespace n \
+             JOIN pg_catalog.pg_roles r ON r.oid = n.nspowner",
+            ProtocolMode::Extended,
+        )
+        .expect("bootstrap owner query");
+        assert!(owner.sql.contains("quackgis_pg_catalog.pg_roles"));
     }
 
     #[test]

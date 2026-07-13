@@ -66,9 +66,11 @@ The actual-process TLS profile verifies encrypted SCRAM, hostname/trust checking
 plaintext denial, and restart-based certificate/password rotation; packaged Kind
 rotation remains open.
 
-The maintained Rust pgwire client also resolves spatial sentinels through a
-narrow exact-shape `pg_type` adapter and verifies RowDescription plus text, binary,
-and NULL WKB transport. This is not yet QGIS/OGR discovery evidence.
+The maintained Rust pgwire client resolves spatial sentinels through process-local
+relational `pg_namespace`/`pg_type`/`pg_range` compatibility views and verifies
+PostgreSQL 18 result types plus RowDescription text, binary, and NULL WKB
+transport. Only geometry/geography catalog rows exist; this is not yet broad
+catalog or QGIS/OGR discovery evidence.
 
 When `QUACKGIS_METRICS_PORT` is configured, the same loopback HTTP listener serves
 `/healthz`, startup/drain-aware readiness at `/readyz`, and Prometheus data at

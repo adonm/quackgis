@@ -60,13 +60,15 @@ The current runtime has only a bootstrap contract:
 - DuckDB-derived `information_schema.columns` supports the read-only REST preview;
 - `public` relation names are structurally mapped to DuckDB/DuckLake `main`;
 - geometry and geography use two maintained pgwire type OIDs;
-- one exact seven-field `pg_type` lookup is intercepted for those OIDs;
+- process-local relational `pg_namespace`, `pg_type`, and `pg_range` views expose
+  the two spatial OIDs through structurally rewritten explicit catalog references;
 - RowDescription and text/binary/NULL WKB transport are tested; and
 - broad `pg_catalog` and restricted-user metadata access fail closed.
 
-This does not yet provide coherent PostgreSQL catalogs, stable relation OIDs,
+This does not yet provide user-object PostgreSQL catalogs, stable relation OIDs,
 source relation/attribute identity in RowDescription, PostgreSQL roles, ACLs,
-role switching, or role-aware OpenAPI.
+role switching, or role-aware OpenAPI. The spatial type views are the first
+relational C3 slice, not a broad catalog claim.
 
 The first target contract is frozen in
 `tests/fixtures/postgresql18_compatibility_profile.json`. Its normalized result
@@ -428,6 +430,17 @@ Deliver:
 
 Gate: client-neutral differential fixtures and actual pgwire tests pass for
 scalar, geometry, and geography columns, including restart and rename.
+
+Current progress: the exact whole-query spatial type interception has been
+removed. Explicit `pg_catalog.pg_type`, `pg_range`, and `pg_namespace` references
+are structurally mapped to private process-local views; the custom-type resolver,
+ordinary scans, unknown OIDs, namespace identity, parameter OID, and all seven
+PostgreSQL 18 result types pass through actual pgwire. Catalog wire hints are bound
+to structurally proven source projections, so ordinary aliases cannot coerce or
+truncate values. A minimal `quackgis_owner` row resolves namespace owner OIDs, and
+the private rewrite schema is covered by restricted-metadata policy. Built-in type
+rows, user-object catalogs/OIDs, unqualified implicit `pg_catalog` lookup, and
+RowDescription relation/attribute origins remain open.
 
 ### C4 — implement role and session semantics
 

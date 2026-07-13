@@ -21,6 +21,13 @@
   ],
   "query_descriptions": [
     {
+      "query_id": "bootstrap_owner_resolution",
+      "columns": [
+        { "name": "nspname", "type_oid": 19 },
+        { "name": "rolname", "type_oid": 19 }
+      ]
+    },
+    {
       "query_id": "tokio_postgres_custom_type_lookup",
       "columns": [
         { "name": "typname", "type_oid": 19 },

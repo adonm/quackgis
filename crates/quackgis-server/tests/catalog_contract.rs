@@ -18,7 +18,7 @@ struct CatalogContract {
     geometry: GeometryContract,
     geography: GeometryContract,
     metadata_queries: Vec<MetadataQuery>,
-    ordinary_catalog_query: CountQuery,
+    ordinary_catalog_query: OrdinaryCatalogQuery,
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,9 +57,17 @@ struct MetadataQuery {
 }
 
 #[derive(Debug, Deserialize)]
-struct CountQuery {
+struct OrdinaryCatalogQuery {
     sql: String,
-    expected_count: i64,
+    expected_rows: Vec<OrdinaryTypeRow>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OrdinaryTypeRow {
+    oid: u32,
+    type_name: String,
+    namespace_oid: u32,
+    type_kind: i8,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -101,7 +109,7 @@ async fn client_neutral_catalog_contract() {
         "../../../tests/fixtures/duckdb_catalog_contract.json"
     ))
     .expect("catalog contract fixture");
-    assert_eq!(contract.schema_version, 2);
+    assert_eq!(contract.schema_version, 3);
 
     let runtime = TestRuntime::start(ServerOptions::new().with_max_connections(4)).await;
     let _storage = runtime.storage();
@@ -124,9 +132,31 @@ async fn client_neutral_catalog_contract() {
         1
     );
 
+    let type_lookup = client
+        .prepare(&contract.spatial_type_lookup.sql)
+        .await
+        .expect("prepare relational spatial type lookup");
+    assert_eq!(type_lookup.params(), &[tokio_postgres::types::Type::OID]);
+    let expected_lookup_columns = [
+        ("typname", tokio_postgres::types::Type::NAME),
+        ("typtype", tokio_postgres::types::Type::CHAR),
+        ("typelem", tokio_postgres::types::Type::OID),
+        ("rngsubtype", tokio_postgres::types::Type::OID),
+        ("typbasetype", tokio_postgres::types::Type::OID),
+        ("nspname", tokio_postgres::types::Type::NAME),
+        ("typrelid", tokio_postgres::types::Type::OID),
+    ];
+    assert_eq!(type_lookup.columns().len(), expected_lookup_columns.len());
+    for (column, (expected_name, expected_type)) in
+        type_lookup.columns().iter().zip(expected_lookup_columns)
+    {
+        assert_eq!(column.name(), expected_name);
+        assert_eq!(column.type_(), &expected_type, "{expected_name}");
+    }
+
     for case in &contract.spatial_type_lookup.cases {
         let rows = client
-            .query(&contract.spatial_type_lookup.sql, &[&case.oid])
+            .query(&type_lookup, &[&case.oid])
             .await
             .unwrap_or_else(|error| panic!("spatial type lookup {}: {error}", case.oid));
         match &case.expected_type_name {
@@ -245,15 +275,56 @@ async fn client_neutral_catalog_contract() {
         assert_eq!(actual, query.expected_rows, "metadata query: {}", query.sql);
     }
 
-    let ordinary_count = client
-        .query_one(&contract.ordinary_catalog_query.sql, &[])
+    let ordinary = client
+        .prepare(&contract.ordinary_catalog_query.sql)
         .await
-        .expect("ordinary native catalog query")
-        .get::<_, i64>(0);
+        .expect("ordinary relational catalog query");
+    let expected_columns = [
+        ("oid", tokio_postgres::types::Type::OID),
+        ("typname", tokio_postgres::types::Type::NAME),
+        ("typnamespace", tokio_postgres::types::Type::OID),
+        ("typtype", tokio_postgres::types::Type::CHAR),
+    ];
+    for (column, (name, ty)) in ordinary.columns().iter().zip(expected_columns) {
+        assert_eq!(column.name(), name);
+        assert_eq!(column.type_(), &ty, "{name}");
+    }
+    let rows = client
+        .query(&ordinary, &[])
+        .await
+        .expect("ordinary relational catalog rows");
     assert_eq!(
-        ordinary_count,
-        contract.ordinary_catalog_query.expected_count
+        rows.len(),
+        contract.ordinary_catalog_query.expected_rows.len()
     );
+    for (row, expected) in rows
+        .iter()
+        .zip(&contract.ordinary_catalog_query.expected_rows)
+    {
+        assert_eq!(row.get::<_, u32>(0), expected.oid);
+        assert_eq!(row.get::<_, String>(1), expected.type_name);
+        assert_eq!(row.get::<_, u32>(2), expected.namespace_oid);
+        assert_eq!(row.get::<_, i8>(3), expected.type_kind);
+    }
+
+    let aliases = client
+        .prepare("SELECT -1::INTEGER AS oid, 'base'::VARCHAR AS typtype")
+        .await
+        .expect("ordinary aliases remain ordinary PostgreSQL types");
+    assert_eq!(
+        aliases.columns()[0].type_(),
+        &tokio_postgres::types::Type::INT4
+    );
+    assert_eq!(
+        aliases.columns()[1].type_(),
+        &tokio_postgres::types::Type::TEXT
+    );
+    let row = client
+        .query_one(&aliases, &[])
+        .await
+        .expect("ordinary alias row");
+    assert_eq!(row.get::<_, i32>(0), -1);
+    assert_eq!(row.get::<_, String>(1), "base");
     connection.abort();
 }
 
@@ -273,7 +344,7 @@ fn decode_hex(value: &str) -> Vec<u8> {
 fn catalog_fixture_is_valid_and_client_neutral() {
     let raw = include_str!("../../../tests/fixtures/duckdb_catalog_contract.json");
     let contract: CatalogContract = serde_json::from_str(raw).expect("catalog contract fixture");
-    assert_eq!(contract.schema_version, 2);
+    assert_eq!(contract.schema_version, 3);
     let words = raw
         .split(|character: char| !character.is_ascii_alphanumeric())
         .map(str::to_ascii_lowercase)

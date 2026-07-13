@@ -13,22 +13,24 @@ use postgres_types::Kind;
 use crate::row_encoder::RowEncoder;
 
 const OID_ALIAS_METADATA_KEY: &str = "pg.oid_alias";
-const OID_COLUMN_NAMES: &[&str] = &[
-    "oid",
-    "typelem",
-    "rngsubtype",
-    "typbasetype",
-    "typrelid",
-    "typnamespace",
-    "enumtypid",
-    "attrelid",
-    "atttypid",
-    "relnamespace",
-    "reltype",
-    "reloftype",
-    "reltoastrelid",
-    "relrewrite",
-];
+pub const PG_TYPE_HINT_METADATA_KEY: &str = "quackgis.pg_type_hint";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PgTypeHint {
+    Oid,
+    Name,
+    Char,
+}
+
+impl PgTypeHint {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Oid => "oid",
+            Self::Name => "name",
+            Self::Char => "char",
+        }
+    }
+}
 
 /// PostgreSQL type OID advertised for PostGIS-style `geometry` columns.
 ///
@@ -147,9 +149,13 @@ pub fn with_spatial_family_metadata(field: Field, family: Option<SpatialFamily>)
     field.with_metadata(metadata)
 }
 
-fn is_oid_column_name(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    OID_COLUMN_NAMES.contains(&lower.as_str())
+pub fn with_pg_type_hint(field: Field, hint: PgTypeHint) -> Field {
+    let mut metadata = field.metadata().clone();
+    metadata.insert(
+        PG_TYPE_HINT_METADATA_KEY.to_string(),
+        hint.as_str().to_string(),
+    );
+    field.with_metadata(metadata)
 }
 
 pub fn is_binary_arrow_type(dt: &DataType) -> bool {
@@ -283,21 +289,43 @@ pub fn into_pg_type(arrow_type: &DataType) -> PgWireResult<Type> {
 pub fn field_into_pg_type(field: &Arc<Field>) -> PgWireResult<Type> {
     let arrow_type = field.data_type();
 
-    // PostgreSQL catalog OID aliases use Arrow Int32/UInt32 with metadata or a
-    // conventional name. Clients rely on these fields being advertised as OID.
     if matches!(arrow_type, DataType::Int32 | DataType::UInt32)
-        && (field.metadata().contains_key(OID_ALIAS_METADATA_KEY)
-            || is_oid_column_name(field.name()))
+        && field.metadata().contains_key(OID_ALIAS_METADATA_KEY)
     {
         return Ok(Type::OID);
     }
 
-    if matches!(
-        arrow_type,
-        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
-    ) && field.name().eq_ignore_ascii_case("typtype")
-    {
-        return Ok(Type::CHAR);
+    if let Some(hint) = field.metadata().get(PG_TYPE_HINT_METADATA_KEY) {
+        let hinted_type = match hint.as_str() {
+            "oid" if matches!(arrow_type, DataType::Int32 | DataType::UInt32) => Type::OID,
+            "name"
+                if matches!(
+                    arrow_type,
+                    DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+                ) =>
+            {
+                Type::NAME
+            }
+            "char"
+                if matches!(
+                    arrow_type,
+                    DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+                ) =>
+            {
+                Type::CHAR
+            }
+            _ => {
+                return Err(PgWireError::UserError(Box::new(ErrorInfo::new(
+                    "ERROR".to_owned(),
+                    "XX000".to_owned(),
+                    format!(
+                        "PostgreSQL type hint {hint:?} is invalid for Arrow field {} ({arrow_type})",
+                        field.name()
+                    ),
+                ))));
+            }
+        };
+        return Ok(hinted_type);
     }
 
     // PostGIS-compat: explicitly annotated binary fields, followed by legacy
@@ -435,6 +463,30 @@ mod tests {
             let field = Arc::new(Field::new("properties", data_type, true));
             let ty = field_into_pg_type(&field).expect("properties field type");
             assert_eq!(ty, Type::JSONB);
+        }
+    }
+
+    #[test]
+    fn explicit_postgresql_catalog_hints_advertise_reference_types() {
+        for (name, data_type, hint, expected) in [
+            ("oid", DataType::UInt32, PgTypeHint::Oid, Type::OID),
+            ("typname", DataType::Utf8, PgTypeHint::Name, Type::NAME),
+            ("typtype", DataType::Utf8, PgTypeHint::Char, Type::CHAR),
+        ] {
+            let field = Arc::new(with_pg_type_hint(Field::new(name, data_type, false), hint));
+            assert_eq!(field_into_pg_type(&field).unwrap(), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn ordinary_aliases_do_not_change_postgresql_type_or_value_contract() {
+        for (name, data_type, expected) in [
+            ("oid", DataType::Int32, Type::INT4),
+            ("typname", DataType::Utf8, Type::TEXT),
+            ("typtype", DataType::Utf8, Type::TEXT),
+        ] {
+            let field = Arc::new(Field::new(name, data_type, false));
+            assert_eq!(field_into_pg_type(&field).unwrap(), expected, "{name}");
         }
     }
 

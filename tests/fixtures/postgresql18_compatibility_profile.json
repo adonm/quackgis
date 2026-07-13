@@ -109,6 +109,15 @@
       ]
     },
     {
+      "name": "pg_catalog.pg_roles",
+      "stage": "C3",
+      "trace_status": "required_owner_resolution",
+      "required_columns": [
+        { "name": "oid", "type_oid": 26, "nullable": false },
+        { "name": "rolname", "type_oid": 19, "nullable": false }
+      ]
+    },
+    {
       "name": "information_schema.tables",
       "stage": "C3",
       "trace_status": "captured_rest_bootstrap",
@@ -141,6 +150,19 @@
     }
   ],
   "query_families": [
+    {
+      "id": "bootstrap_owner_resolution",
+      "stage": "C3",
+      "trace_status": "required_consistency",
+      "protocol": "extended",
+      "consumers": ["client-neutral catalog contract"],
+      "sql": "SELECT n.nspname, r.rolname FROM pg_catalog.pg_namespace n INNER JOIN pg_catalog.pg_roles r ON r.oid = n.nspowner WHERE n.nspname IN ('pg_catalog', 'public') ORDER BY n.nspname",
+      "parameter_type_oids": [],
+      "expected_columns": [
+        { "name": "nspname", "type_oid": 19, "nullable": false },
+        { "name": "rolname", "type_oid": 19, "nullable": false }
+      ]
+    },
     {
       "id": "tokio_postgres_custom_type_lookup",
       "stage": "C3",

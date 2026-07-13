@@ -10,6 +10,7 @@ pub mod execution_control;
 pub mod lifecycle;
 pub mod metrics;
 pub mod pgwire_server;
+pub mod postgres_compat;
 pub mod spatial_compat;
 pub mod statement_policy;
 pub mod storage_authority;

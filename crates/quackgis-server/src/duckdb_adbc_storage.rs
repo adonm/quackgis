@@ -260,9 +260,11 @@ impl DuckDbAdbcConfig {
         format!(
             "{extension_sql}\n\
              {}\n\
+             {}\n\
              SET ducklake_default_data_inlining_row_limit = 0;\n\
              ATTACH {} AS {} (DATA_PATH {}, DATA_INLINING_ROW_LIMIT 0);",
             crate::spatial_compat::DUCKDB_COMPATIBILITY_MACROS,
+            crate::postgres_compat::duckdb_catalog_bootstrap_sql(),
             quote_literal(&self.ducklake_uri),
             quote_identifier(&self.catalog_name),
             quote_literal(&self.data_path),
@@ -1986,6 +1988,10 @@ mod tests {
         assert!(sql.starts_with("LOAD ducklake;\nLOAD spatial;"));
         assert!(sql.contains("quackgis_st_geomfromewkt"));
         assert!(sql.contains("quackgis_st_geometry_type"));
+        assert!(sql.contains("quackgis_pg_catalog.pg_namespace"));
+        assert!(sql.contains("quackgis_pg_catalog.pg_type"));
+        assert!(sql.contains("quackgis_pg_catalog.pg_range"));
+        assert!(sql.contains("quackgis_pg_catalog.pg_roles"));
         assert!(sql.contains("ducklake_default_data_inlining_row_limit = 0"));
         assert!(sql.contains("AS \"quack\"\"gis\""));
         assert!(sql.contains("DATA_PATH '/data/it''s-here'"));

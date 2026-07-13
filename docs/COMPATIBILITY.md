@@ -131,11 +131,12 @@ catalog surfaces remain open unless a focused test says otherwise.
   remain `0A000`. UPDATEs of ordinary columns preserve existing geometry/bounds,
   and `DELETE` remains supported.
 - `pg_catalog`, `information_schema`, broad spatial discovery, and GIS client-specific
-  metadata are incomplete. A client-neutral executable fixture covers native
-  DuckDB table/column metadata and one exact structural `pg_type` lookup for the
-  maintained geometry/geography sentinel OIDs, including all seven returned type
-  fields; it does not claim broader catalog compatibility or named-client
-  qualification.
+  metadata are incomplete. A client-neutral executable fixture structurally maps
+  explicit `pg_catalog` namespace/type/range references to private relational
+  views for the maintained geometry/geography OIDs. The parameter and all seven
+  lookup fields use PostgreSQL 18 types; equivalent ordinary scans, unknown OIDs,
+  public namespace, and WKB transport pass. It does not claim built-in/user-object
+  catalogs, implicit lookup, RowDescription origins, or named-client qualification.
 - Binary columns named `geom_wkb` use the same geometry sentinel OID as the
   maintained COPY bbox layout. RowDescription plus text hex-WKB, binary WKB, and
   NULL transport are tested through pgwire for geometry and the maintained

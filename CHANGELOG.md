@@ -115,10 +115,16 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 - Structural compatibility for maintained PostgreSQL session settings,
   `SHOW search_path`, `public`→`quackgis.main` relation mapping, and quoted
   one-/two-/three-part COPY targets.
+- A machine-readable `pg18-column-core-v1` contract with digest-pinned PostgreSQL
+  18.4 result-description evidence and explicit pending named-client traces.
+- A multi-process DuckDB 1.5.4 identity gate proving DuckLake table UUID/ID and
+  column field-ID continuity across rename/reopen plus new identity on name reuse.
 - A registered client-neutral catalog fixture for DuckDB-derived table/column
-  metadata, exact-shape geometry/geography sentinel lookup, all seven returned
-  type fields, and exact geometry/geography RowDescription/text/binary/NULL
-  behavior.
+  metadata and relational geometry/geography namespace/type/range views. Explicit
+  catalog references are structurally mapped and projected fields receive
+  provenance-bound PostgreSQL type metadata; OID parameters and all seven result
+  fields match PostgreSQL 18 types, with owner resolution, typed ordinary scans,
+  alias-safety, unknown-OID, and exact RowDescription/text/binary/NULL behavior.
 - DuckDB-computed bbox maintenance during COPY for the explicit reserved-column
   layout contract, including NULL, exact-recheck, and reopen evidence.
 - Fail-closed bbox layout validation rejects partial, wrong-type, caller-supplied,

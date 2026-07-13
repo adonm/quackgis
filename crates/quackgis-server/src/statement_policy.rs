@@ -234,15 +234,19 @@ fn collect_name_target(name: &ObjectName, ctes: &HashSet<String>, targets: &mut 
     {
         return;
     }
-    let first = name
+    let schema = name
         .0
-        .first()
+        .len()
+        .checked_sub(2)
+        .and_then(|index| name.0.get(index))
         .map(ToString::to_string)
         .unwrap_or_default()
         .trim_matches('"')
         .to_ascii_lowercase();
-    if matches!(first.as_str(), "pg_catalog" | "information_schema")
-        || sensitive_metadata_name(name)
+    if matches!(
+        schema.as_str(),
+        "pg_catalog" | "information_schema" | "quackgis_pg_catalog"
+    ) || sensitive_metadata_name(name)
     {
         targets.sensitive_metadata = true;
     } else if let Some((schema, table)) = table_name_parts(name) {
@@ -320,4 +324,32 @@ fn object_name_last(name: &ObjectName) -> Option<String> {
     name.0
         .last()
         .map(|part| part.to_string().trim_matches('"').to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::parse_read_allowlist;
+    use sqlparser::dialect::PostgreSqlDialect;
+    use sqlparser::parser::Parser;
+
+    #[test]
+    fn restricted_metadata_policy_cannot_bypass_catalog_rewrite_schema() {
+        let auth =
+            AuthConfig::password("writer", "writer-secret", Some(("reader", "reader-secret")))
+                .unwrap()
+                .with_read_allowlist(parse_read_allowlist("allowed").unwrap());
+
+        for sql in [
+            "SELECT typname FROM pg_catalog.pg_type",
+            "SELECT typname FROM quackgis_pg_catalog.pg_type",
+            "SELECT typname FROM memory.quackgis_pg_catalog.pg_type",
+            "SELECT table_name FROM memory.information_schema.tables",
+        ] {
+            let statement = Parser::parse_sql(&PostgreSqlDialect {}, sql)
+                .unwrap()
+                .remove(0);
+            assert!(authorize_statement(&auth, Some("reader"), &statement).is_err());
+        }
+    }
 }
