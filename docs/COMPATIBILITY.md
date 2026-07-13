@@ -38,10 +38,12 @@ The required real-driver workflow proves:
 - required TLS with client-side certificate/hostname verification, plaintext
   denial, and restart-based certificate/password rotation;
 - one structurally parsed `SELECT`, `CREATE TABLE`, `INSERT`, `UPDATE`, `DELETE`,
-  `BEGIN`, `COMMIT`, or `ROLLBACK` statement;
+  `BEGIN`, `COMMIT`, or `ROLLBACK` statement; the sole multi-statement exception is
+  an all-`SET`, maximum-eight, structurally allowlisted simple-query batch;
 - parameterized reads and mutations without SQL interpolation;
 - PostgreSQL text `COPY FROM STDIN` for the maintained scalar and WKB types;
-- `SET standard_conforming_strings`, bounded `client_min_messages`,
+- `SET standard_conforming_strings`, encoding, bounded `client_min_messages`, and
+  the exact QGIS 3.44 `extra_float_digits`/`application_name`/`datestyle` bootstrap;
   `SHOW search_path`, `public` relation mapping, and quoted COPY targets;
 - portal paging, transaction isolation, failed-transaction `25P02` enforcement,
   `COMMIT`-as-rollback after failure, disconnect rollback, restart, and reopen;

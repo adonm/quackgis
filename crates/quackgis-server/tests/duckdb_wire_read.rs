@@ -612,6 +612,13 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
         .batch_execute("SET client_min_messages = error")
         .await
         .expect("client message setting");
+    client
+        .batch_execute(
+            "SET extra_float_digits=3;SET application_name=' external';\
+             SET datestyle='ISO';SET client_min_messages TO error;",
+        )
+        .await
+        .expect("QGIS session bootstrap batch");
     let search_path = client
         .simple_query("SHOW search_path")
         .await

@@ -440,6 +440,7 @@ impl SimpleQueryHandler for DuckDbService {
                 authorize_maintenance(client, &self.auth, command)?
             }
             (_, Some(statement)) => authorize_statement(client, &self.auth, statement)?,
+            (SimpleStatementKind::SessionSetBatch(_), None) => {}
             (_, None) => {
                 return Err(user_error(
                     "XX000",
@@ -641,6 +642,9 @@ impl SimpleQueryHandler for DuckDbService {
                 }
             }
             SimpleStatementKind::SessionSet => Ok(vec![Response::Execution(Tag::new("SET"))]),
+            SimpleStatementKind::SessionSetBatch(count) => Ok((0..count)
+                .map(|_| Response::Execution(Tag::new("SET")))
+                .collect()),
             SimpleStatementKind::Copy(target) => begin_copy(client, storage, target, &self.control)
                 .await
                 .map(|response| vec![response]),
@@ -892,6 +896,13 @@ fn validate_simple_sql(
         let sql = normalize_sql(sql)?;
         return Ok((sql, SimpleStatementKind::Copy(target), None));
     }
+    if let Some(count) = validate_session_set_batch(sql)? {
+        return Ok((
+            sql.to_owned(),
+            SimpleStatementKind::SessionSetBatch(count),
+            None,
+        ));
+    }
     let validated = validate_statement(sql, ProtocolMode::Simple)?;
     let kind = match validated.kind {
         StatementKind::Read => SimpleStatementKind::Read,
@@ -916,6 +927,7 @@ enum SimpleStatementKind {
     Commit,
     Rollback,
     SessionSet,
+    SessionSetBatch(usize),
     Maintenance(MaintenanceCommand),
     Copy(CopyTarget),
 }
@@ -1217,7 +1229,44 @@ fn supported_session_set(set: &Set) -> bool {
         "standard_conforming_strings" => value == "on",
         "client_encoding" => matches!(value.as_str(), "utf8" | "unicode"),
         "client_min_messages" => matches!(value.as_str(), "error" | "warning" | "notice"),
+        "extra_float_digits" => value == "3",
+        "datestyle" => value == "iso",
+        "application_name" => match &values[0] {
+            Expr::Value(value) => match &value.value {
+                Value::SingleQuotedString(value) => {
+                    value.len() <= 64 && !value.chars().any(char::is_control)
+                }
+                _ => false,
+            },
+            _ => false,
+        },
         _ => false,
+    }
+}
+
+fn validate_session_set_batch(sql: &str) -> PgWireResult<Option<usize>> {
+    let normalized = normalize_sql(sql)?;
+    let statements = Parser::parse_sql(&PostgreSqlDialect {}, &normalized)
+        .map_err(|error| user_error("42601", &error.to_string()))?;
+    if statements.len() <= 1 {
+        return Ok(None);
+    }
+    if statements.len() > 8 {
+        return Err(user_error(
+            "54000",
+            "session bootstrap batch exceeds eight SET statements",
+        ));
+    }
+    if statements
+        .iter()
+        .all(|statement| matches!(statement, Statement::Set(set) if supported_session_set(set)))
+    {
+        Ok(Some(statements.len()))
+    } else {
+        Err(user_error(
+            "0A000",
+            "multi-statement simple queries are limited to maintained session SET batches",
+        ))
     }
 }
 
@@ -3095,6 +3144,23 @@ mod tests {
             );
         }
         assert!(validate_statement("SET TimeZone = 'UTC'", ProtocolMode::Simple).is_err());
+        let (_, batch, ast) = validate_simple_sql(
+            "SET extra_float_digits=3;SET application_name=' external';\
+             SET datestyle='ISO';SET client_min_messages TO error;",
+        )
+        .expect("QGIS session bootstrap batch");
+        assert!(matches!(batch, SimpleStatementKind::SessionSetBatch(4)));
+        assert!(ast.is_none());
+        for invalid in [
+            "SET extra_float_digits=2;SET datestyle='ISO'",
+            "SET extra_float_digits=3;SELECT 1",
+            "SET application_name='abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklm';SET datestyle='ISO'",
+        ] {
+            assert!(
+                validate_simple_sql(invalid).is_err(),
+                "invalid SET batch: {invalid}"
+            );
+        }
 
         for (sql, expected) in [
             (

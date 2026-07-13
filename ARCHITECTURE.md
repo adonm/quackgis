@@ -74,12 +74,14 @@ connection reuse is part of the target security contract.
 
 ### SQL admission
 
-Standalone `sqlparser` parses exactly one statement. The current allowlist admits
-bounded query, create-table, insert, update, delete, simple transaction, and strict
-maintained SET/SHOW shapes. An AST relation visitor maps PostgreSQL `public` to
-DuckLake `quackgis.main` before execution while policy sees the original target.
-Unsupported shapes fail closed. COPY uses parsed one-/two-/three-part identifiers
-and dedicated protocol state.
+Standalone `sqlparser` parses exactly one general statement. The only batch path
+accepts at most eight simple-protocol statements and requires every member to be a
+strict maintained session `SET`; it emits one completion per member and never
+reaches ADBC. The general allowlist admits bounded query, create-table, insert,
+update, delete, simple transaction, and maintained SET/SHOW shapes. An AST relation
+visitor maps PostgreSQL `public` to DuckLake `quackgis.main` before execution while
+policy sees the original target. Unsupported shapes fail closed. COPY uses parsed
+one-/two-/three-part identifiers and dedicated protocol state.
 
 ### Storage authority
 

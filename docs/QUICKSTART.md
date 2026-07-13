@@ -54,8 +54,9 @@ SELECT ST_AsText(ST_GeomFromText('POINT(1 2)'));
 
 The currently maintained write examples are exercised by `just smoke`; the public
 SQL surface is deliberately bounded. Do not infer support for arbitrary DDL,
-multi-statement batches, broad catalogs, compaction calls, or GIS clients from
-ordinary DuckDB/PostgreSQL behavior.
+general multi-statement batches, broad catalogs, compaction calls, or GIS clients
+from ordinary DuckDB/PostgreSQL behavior. The exact QGIS all-`SET` session bootstrap
+is a narrow exception, not general batching support.
 
 ## 4. Verify changes
 

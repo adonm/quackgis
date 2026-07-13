@@ -40,9 +40,10 @@ rotation, revocation infrastructure, and production failure drills remain open.
 3. **REST → pgwire:** the target authenticator credential is a privileged service
    secret because its holder can assume configured API roles and set request
    context. REST never receives ADBC or storage access.
-4. **SQL → policy → ADBC:** exactly one structurally parsed statement is
-   authorized before prepare/schema access. Unknown write/read/catalog/policy
-   shapes fail closed.
+4. **SQL → policy → ADBC:** exactly one general structurally parsed statement is
+   authorized before prepare/schema access. The bounded all-allowlisted session
+   `SET` batch is handled without ADBC; unknown write/read/catalog/policy shapes
+   fail closed.
 5. **Catalog/control metadata:** user schema comes from DuckDB/DuckLake. Protected
    QuackGIS metadata may hold roles, memberships, grants, policy, compatibility
    OIDs, and epochs, but must not become an independent user-schema authority.
@@ -57,6 +58,10 @@ rotation, revocation infrastructure, and production failure drills remain open.
 - `QUACKGIS_READ_ALLOWLIST` restricts table reads and denies broad metadata access
   until maintained PostgreSQL catalog surfaces exist.
 - Object identity is normalized from the parsed statement, never a raw SQL prefix.
+- General SQL remains exactly one statement. The only multi-statement exception is
+  a simple-protocol batch of at most eight structurally parsed statements where
+  every member is an allowlisted session `SET`; mixed or over-limit batches fail
+  before authorization/execution and `application_name` is control-free/64 bytes.
 - Compatibility rewrites may shape SQL/results but may not change the underlying
   table authorization decision. Direct, joined (including PIVOT/UNPIVOT wrappers),
   derived, CTE, set-operation, and select/query-level expression-subquery reads

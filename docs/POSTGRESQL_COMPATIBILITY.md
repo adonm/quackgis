@@ -461,6 +461,12 @@ Direct private-schema access and the structurally lossy `TABLE` query form are
 rejected. User-object catalogs/OIDs, broader built-ins, `reg*`, and RowDescription
 relation/attribute origins remain open.
 
+The exact QGIS 3.44 four-statement session bootstrap now passes as the only
+multi-statement exception: simple-protocol batches are limited to eight structurally
+parsed, individually allowlisted `SET` statements. `extra_float_digits=3`,
+`datestyle=ISO`, a control-free 64-byte `application_name`, and maintained
+`client_min_messages` values are accepted without widening general SQL batching.
+
 ### C4 — implement role and session semantics
 
 Deliver:

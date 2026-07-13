@@ -126,6 +126,9 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 - A credential-free offscreen QGIS 3.44.11 PostgreSQL provider trace: 32 statements
   (26 unique families) for layer open, fields, CRS, privileges, ownership, count,
   3D extent, and a successful binary-cursor feature read.
+- Exact QGIS 3.44 session bootstrap support: its four `SET` statements are accepted
+  only as an all-allowlisted simple-query batch (maximum eight), with bounded,
+  control-free `application_name`; mixed/general multi-statement SQL remains denied.
 - A multi-process DuckDB 1.5.4 identity gate proving DuckLake table UUID/ID and
   column field-ID continuity across rename/reopen plus new identity on name reuse.
 - A registered client-neutral catalog fixture for DuckDB-derived table/column
