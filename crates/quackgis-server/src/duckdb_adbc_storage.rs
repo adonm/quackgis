@@ -24,8 +24,9 @@ use arrow_pg::datatypes::{SpatialFamily, classify_spatial_field};
 use arrow_schema::{ArrowError, SchemaRef};
 use sha2::{Digest, Sha256};
 use sqlparser::ast::{
-    AssignmentTarget, Expr, ObjectName, ObjectNamePart, Statement as SqlStatement, TableFactor,
-    TableObject, Value,
+    AssignmentTarget, BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr,
+    FunctionArguments, Ident, ObjectName, ObjectNamePart, Query, SetExpr,
+    Statement as SqlStatement, TableFactor, TableObject, UnaryOperator, Value,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
@@ -49,9 +50,18 @@ const MIN_DUCKDB_MAX_TEMP_DIRECTORY_BYTES: u64 = 10_737_418_240;
 const CGROUP_UNLIMITED_THRESHOLD: u64 = 1_u64 << 60;
 static COPY_STAGE_ID: AtomicU64 = AtomicU64::new(1);
 const MAINTAINED_BBOX_COLUMNS: [&str; 4] = ["_qg_minx", "_qg_miny", "_qg_maxx", "_qg_maxy"];
+const MAX_BBOX_WKT_BYTES: usize = 65_536;
+const MAX_BBOX_NUMERIC_LITERAL_BYTES: usize = 64;
 
 struct MaintainedBboxLayout {
     geometry: String,
+}
+
+struct BboxQueryTarget {
+    table: EngineTableRef,
+    qualifier: Ident,
+    geometry: Ident,
+    probe: Expr,
 }
 
 /// Whether DuckDB may download the DuckLake extension during initialization.
@@ -613,8 +623,9 @@ impl DuckDbAdbcStorage {
             closed: AtomicBool::new(false),
         });
         let setup: EngineResult<_> = (|| {
+            let sql = prepare_maintained_bbox_query(&mut connection, sql)?;
             let mut statement = connection.new_statement().map_err(engine_error)?;
-            statement.set_sql_query(sql).map_err(engine_error)?;
+            statement.set_sql_query(&sql).map_err(engine_error)?;
             if let Some(parameters) = parameters {
                 statement.prepare().map_err(engine_error)?;
                 statement.bind(parameters).map_err(engine_error)?;
@@ -1418,6 +1429,340 @@ impl EngineStorageKernel for DuckDbAdbcStorage {
     }
 }
 
+fn prepare_maintained_bbox_query(
+    connection: &mut ManagedConnection,
+    sql: &str,
+) -> EngineResult<String> {
+    let Ok(mut statements) = Parser::parse_sql(&PostgreSqlDialect {}, sql) else {
+        return Ok(sql.to_owned());
+    };
+    if statements.len() != 1 {
+        return Ok(sql.to_owned());
+    }
+    let mut statement = statements.pop().expect("one query statement");
+    let Some(target) = bbox_query_target(&statement) else {
+        return Ok(sql.to_owned());
+    };
+    let schema = connection
+        .get_table_schema(
+            Some(&target.table.catalog),
+            Some(&target.table.schema),
+            &target.table.table,
+        )
+        .map_err(engine_error)?;
+    let Some(layout) = inspect_maintained_bbox_layout(&schema)? else {
+        return Ok(sql.to_owned());
+    };
+    if !identifier_matches(&target.geometry, &layout.geometry) {
+        return Ok(sql.to_owned());
+    }
+    inject_bbox_candidate(&mut statement, &target)?;
+    Ok(statement.to_string())
+}
+
+fn inject_bbox_candidate(
+    statement: &mut SqlStatement,
+    target: &BboxQueryTarget,
+) -> EngineResult<()> {
+    let candidate = bbox_candidate_expression(&target.qualifier, &target.probe)?;
+    let query = bbox_query_mut(statement).expect("query target was already classified");
+    let SetExpr::Select(select) = query.body.as_mut() else {
+        unreachable!("bbox query target requires a SELECT")
+    };
+    let exact = select.selection.take().expect("bbox target requires WHERE");
+    select.selection = Some(Expr::BinaryOp {
+        left: Box::new(candidate),
+        op: BinaryOperator::And,
+        right: Box::new(exact),
+    });
+    Ok(())
+}
+
+fn bbox_query(statement: &SqlStatement) -> Option<&Query> {
+    match statement {
+        SqlStatement::Query(query) => Some(query),
+        SqlStatement::Explain { statement, .. } => match statement.as_ref() {
+            SqlStatement::Query(query) => Some(query),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn bbox_query_mut(statement: &mut SqlStatement) -> Option<&mut Query> {
+    match statement {
+        SqlStatement::Query(query) => Some(query),
+        SqlStatement::Explain { statement, .. } => match statement.as_mut() {
+            SqlStatement::Query(query) => Some(query),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn bbox_query_target(statement: &SqlStatement) -> Option<BboxQueryTarget> {
+    let query = bbox_query(statement)?;
+    if query.with.is_some() {
+        return None;
+    }
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return None;
+    };
+    let [from] = select.from.as_slice() else {
+        return None;
+    };
+    if !from.joins.is_empty() || !select.lateral_views.is_empty() || select.prewhere.is_some() {
+        return None;
+    }
+    let TableFactor::Table {
+        name,
+        alias,
+        args: None,
+        with_hints,
+        version: None,
+        with_ordinality: false,
+        partitions,
+        json_path: None,
+        sample: None,
+        index_hints,
+    } = &from.relation
+    else {
+        return None;
+    };
+    if !with_hints.is_empty() || !partitions.is_empty() || !index_hints.is_empty() {
+        return None;
+    }
+    if alias
+        .as_ref()
+        .is_some_and(|alias| !alias.columns.is_empty())
+    {
+        return None;
+    }
+    let table = local_table_ref(name).ok()?;
+    let qualifier =
+        alias
+            .as_ref()
+            .map(|alias| alias.name.clone())
+            .or_else(|| match name.0.last() {
+                Some(ObjectNamePart::Identifier(identifier)) => Some(identifier.clone()),
+                _ => None,
+            })?;
+    let selection = select.selection.as_ref()?;
+    let mut predicates = Vec::new();
+    collect_mandatory_bbox_predicates(selection, &qualifier, &mut predicates);
+    let [(geometry, probe)] = predicates.as_slice() else {
+        return None;
+    };
+    Some(BboxQueryTarget {
+        table,
+        qualifier,
+        geometry: geometry.clone(),
+        probe: probe.clone(),
+    })
+}
+
+fn collect_mandatory_bbox_predicates(
+    expression: &Expr,
+    qualifier: &Ident,
+    predicates: &mut Vec<(Ident, Expr)>,
+) {
+    match expression {
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::And,
+            right,
+        } => {
+            collect_mandatory_bbox_predicates(left, qualifier, predicates);
+            collect_mandatory_bbox_predicates(right, qualifier, predicates);
+        }
+        Expr::Nested(expression) => {
+            collect_mandatory_bbox_predicates(expression, qualifier, predicates);
+        }
+        Expr::Function(function) => {
+            if let Some(predicate) = maintained_intersection(function, qualifier) {
+                predicates.push(predicate);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn maintained_intersection(function: &Function, qualifier: &Ident) -> Option<(Ident, Expr)> {
+    if !plain_function_named(function, "st_intersects") {
+        return None;
+    }
+    let arguments = plain_function_arguments(function)?;
+    let [left, right] = arguments.as_slice() else {
+        return None;
+    };
+    for (geometry, probe) in [(*left, *right), (*right, *left)] {
+        if let Some(column) = maintained_geometry_column(geometry, qualifier)
+            && stable_probe_geometry(probe)
+        {
+            return Some((column, probe.clone()));
+        }
+    }
+    None
+}
+
+fn maintained_geometry_column(expression: &Expr, qualifier: &Ident) -> Option<Ident> {
+    let Expr::Function(function) = expression else {
+        return None;
+    };
+    if !plain_function_named(function, "st_geomfromwkb") {
+        return None;
+    }
+    let arguments = plain_function_arguments(function)?;
+    let [column] = arguments.as_slice() else {
+        return None;
+    };
+    match column {
+        Expr::Identifier(column) => Some(column.clone()),
+        Expr::CompoundIdentifier(parts) if matches!(parts.as_slice(), [source, _] if identifiers_match(source, qualifier)) => {
+            parts.last().cloned()
+        }
+        _ => None,
+    }
+}
+
+fn stable_probe_geometry(expression: &Expr) -> bool {
+    let Expr::Function(function) = expression else {
+        return false;
+    };
+    let Some(arguments) = plain_function_arguments(function) else {
+        return false;
+    };
+    if plain_function_named(function, "st_makeenvelope") {
+        arguments.len() == 4 && arguments.into_iter().all(stable_numeric_value)
+    } else if plain_function_named(function, "st_geomfromtext") {
+        matches!(arguments.as_slice(), [value] if stable_string_value(value))
+    } else if plain_function_named(function, "st_geomfromwkb") {
+        matches!(arguments.as_slice(), [value] if stable_bound_value(value))
+    } else {
+        false
+    }
+}
+
+fn plain_function_named(function: &Function, expected: &str) -> bool {
+    matches!(
+        function.name.0.as_slice(),
+        [ObjectNamePart::Identifier(identifier)]
+            if identifier.quote_style.is_none() && identifier.value.eq_ignore_ascii_case(expected)
+    ) && !function.uses_odbc_syntax
+        && matches!(function.parameters, FunctionArguments::None)
+        && function.filter.is_none()
+        && function.null_treatment.is_none()
+        && function.over.is_none()
+        && function.within_group.is_empty()
+}
+
+fn plain_function_arguments(function: &Function) -> Option<Vec<&Expr>> {
+    let FunctionArguments::List(arguments) = &function.args else {
+        return None;
+    };
+    if arguments.duplicate_treatment.is_some() || !arguments.clauses.is_empty() {
+        return None;
+    }
+    arguments
+        .args
+        .iter()
+        .map(|argument| match argument {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(expression)) => Some(expression),
+            _ => None,
+        })
+        .collect()
+}
+
+fn stable_numeric_value(expression: &Expr) -> bool {
+    match expression {
+        Expr::Value(value) => match &value.value {
+            Value::Number(value, false) => {
+                value.len() <= MAX_BBOX_NUMERIC_LITERAL_BYTES
+                    && value.parse::<f64>().is_ok_and(f64::is_finite)
+            }
+            Value::Placeholder(value) => numbered_parameter(value),
+            _ => false,
+        },
+        Expr::UnaryOp {
+            op: UnaryOperator::Plus | UnaryOperator::Minus,
+            expr,
+        }
+        | Expr::Nested(expr)
+        | Expr::Cast { expr, .. } => stable_numeric_value(expr),
+        _ => false,
+    }
+}
+
+fn stable_string_value(expression: &Expr) -> bool {
+    match expression {
+        Expr::Value(value) => {
+            matches!(&value.value, Value::SingleQuotedString(value) if value.len() <= MAX_BBOX_WKT_BYTES)
+        }
+        Expr::Nested(expr) | Expr::Cast { expr, .. } => stable_string_value(expr),
+        _ => false,
+    }
+}
+
+fn stable_bound_value(expression: &Expr) -> bool {
+    match expression {
+        Expr::Value(value) => {
+            matches!(&value.value, Value::Placeholder(value) if numbered_parameter(value))
+        }
+        Expr::Nested(expr) | Expr::Cast { expr, .. } => stable_bound_value(expr),
+        _ => false,
+    }
+}
+
+fn numbered_parameter(value: &str) -> bool {
+    value
+        .strip_prefix(char::from(36_u8))
+        .and_then(|digits| digits.parse::<usize>().ok())
+        .is_some_and(|index| index > 0)
+}
+
+fn bbox_candidate_expression(qualifier: &Ident, probe: &Expr) -> EngineResult<Expr> {
+    let qualifier = qualifier.to_string();
+    let probe = probe.to_string();
+    let sql = format!(
+        "SELECT 1 WHERE \
+         {qualifier}._qg_maxx >= ST_XMin(ST_Extent({probe})) AND \
+         {qualifier}._qg_minx <= ST_XMax(ST_Extent({probe})) AND \
+         {qualifier}._qg_maxy >= ST_YMin(ST_Extent({probe})) AND \
+         {qualifier}._qg_miny <= ST_YMax(ST_Extent({probe}))"
+    );
+    let mut statements = Parser::parse_sql(&PostgreSqlDialect {}, &sql).map_err(|error| {
+        EngineError::new(
+            EngineErrorKind::Internal,
+            format!("cannot build maintained bbox candidate: {error}"),
+        )
+    })?;
+    let SqlStatement::Query(query) = statements.remove(0) else {
+        unreachable!("generated bbox candidate is SELECT")
+    };
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        unreachable!("generated bbox candidate is SELECT")
+    };
+    select
+        .selection
+        .clone()
+        .ok_or_else(|| EngineError::new(EngineErrorKind::Internal, "bbox candidate has no filter"))
+}
+
+fn identifier_matches(identifier: &Ident, expected: &str) -> bool {
+    if identifier.quote_style.is_some() {
+        identifier.value == expected
+    } else {
+        identifier.value.eq_ignore_ascii_case(expected)
+    }
+}
+
+fn identifiers_match(left: &Ident, right: &Ident) -> bool {
+    match (left.quote_style, right.quote_style) {
+        (Some(_), _) | (_, Some(_)) => left.value == right.value,
+        (None, None) => left.value.eq_ignore_ascii_case(&right.value),
+    }
+}
+
 fn prepare_maintained_bbox_mutation(
     connection: &mut ManagedConnection,
     sql: &str,
@@ -1675,11 +2020,12 @@ fn query_on(connection: &mut ManagedConnection, sql: &str) -> Result<Vec<RecordB
     if sql.trim().is_empty() {
         bail!("refusing to execute empty DuckDB ADBC SQL");
     }
+    let sql = prepare_maintained_bbox_query(connection, sql).map_err(anyhow::Error::new)?;
     let mut statement = connection
         .new_statement()
         .context("creating DuckDB ADBC statement")?;
     statement
-        .set_sql_query(sql)
+        .set_sql_query(&sql)
         .context("setting DuckDB ADBC SQL")?;
     statement
         .execute()
@@ -1693,8 +2039,9 @@ fn describe_on(
     sql: &str,
 ) -> EngineResult<EngineStatementDescription> {
     validate_sql(sql)?;
+    let sql = prepare_maintained_bbox_query(connection, sql)?;
     let mut statement = connection.new_statement().map_err(engine_error)?;
-    statement.set_sql_query(sql).map_err(engine_error)?;
+    statement.set_sql_query(&sql).map_err(engine_error)?;
     statement.prepare().map_err(engine_error)?;
     let parameter_schema = statement.get_parameter_schema().map_err(engine_error)?;
     let result_schema = statement.execute_schema().map_err(engine_error)?;
@@ -1710,8 +2057,9 @@ fn query_result_on(
     parameters: Option<RecordBatch>,
 ) -> EngineResult<EngineQueryResult> {
     validate_sql(sql)?;
+    let sql = prepare_maintained_bbox_query(connection, sql)?;
     let mut statement = connection.new_statement().map_err(engine_error)?;
-    statement.set_sql_query(sql).map_err(engine_error)?;
+    statement.set_sql_query(&sql).map_err(engine_error)?;
     if let Some(parameters) = parameters {
         statement.prepare().map_err(engine_error)?;
         statement.bind(parameters).map_err(engine_error)?;
@@ -2210,6 +2558,76 @@ mod tests {
             assert!(
                 rewrite_safe_bbox_update(&layout, &mut unsafe_assignments).is_err(),
                 "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn bbox_query_injection_is_conservative_and_keeps_exact_recheck() {
+        let parse = |sql: &str| {
+            Parser::parse_sql(&PostgreSqlDialect {}, sql)
+                .expect("query")
+                .remove(0)
+        };
+        for sql in [
+            "SELECT id FROM quackgis.main.points WHERE \
+             ST_Intersects(ST_GeomFromWKB(geom_wkb), ST_MakeEnvelope(-1, -2, $1, $2))",
+            "SELECT p.id FROM public.points AS p WHERE p.id > 0 AND \
+             ST_Intersects(ST_GeomFromText('POLYGON((0 0,2 0,2 2,0 2,0 0))'), \
+                           ST_GeomFromWKB(p.geom_wkb))",
+            "EXPLAIN SELECT id FROM points WHERE \
+             ST_Intersects(ST_GeomFromWKB(points.geom_wkb), \
+                           ST_GeomFromWKB($1::BLOB))",
+        ] {
+            let mut statement = parse(sql);
+            let target = bbox_query_target(&statement)
+                .unwrap_or_else(|| panic!("supported bbox query: {sql}"));
+            inject_bbox_candidate(&mut statement, &target).expect("inject bbox candidate");
+            let rendered = statement.to_string();
+            for column in MAINTAINED_BBOX_COLUMNS {
+                assert!(rendered.contains(column), "{rendered}");
+            }
+            assert_eq!(
+                rendered
+                    .to_ascii_lowercase()
+                    .matches("st_intersects")
+                    .count(),
+                1,
+                "exact predicate must remain once: {rendered}"
+            );
+            assert!(
+                rendered.to_ascii_lowercase().contains("st_extent"),
+                "probe bounds must stay planner-visible: {rendered}"
+            );
+        }
+
+        for sql in [
+            "SELECT id FROM points WHERE ST_Intersects(ST_GeomFromWKB(geom_wkb), ST_MakeEnvelope(0, 0, 1, 1)) OR id = 1",
+            "SELECT id FROM points WHERE NOT ST_Intersects(ST_GeomFromWKB(geom_wkb), ST_MakeEnvelope(0, 0, 1, 1))",
+            "SELECT id FROM points WHERE ST_Intersects(ST_GeomFromWKB(geom_wkb), ST_Buffer(ST_Point(0, 0), 1))",
+            "SELECT p.id FROM points p JOIN categories c ON c.id = p.id WHERE ST_Intersects(ST_GeomFromWKB(p.geom_wkb), ST_MakeEnvelope(0, 0, 1, 1))",
+            "SELECT id FROM points WHERE ST_Intersects(ST_GeomFromWKB(geom_wkb), ST_MakeEnvelope(0, 0, 1, 1)) AND ST_Intersects(ST_GeomFromWKB(geom_wkb), ST_MakeEnvelope(2, 2, 3, 3))",
+            "SELECT id FROM points WHERE ST_Intersects(ST_GeomFromWKB(geom_wkb), ST_GeomFromWKB($0::BLOB))",
+        ] {
+            assert!(
+                bbox_query_target(&parse(sql)).is_none(),
+                "unsupported query must not receive a candidate: {sql}"
+            );
+        }
+
+        for oversized in [
+            format!(
+                "SELECT id FROM points WHERE ST_Intersects(ST_GeomFromWKB(geom_wkb), ST_GeomFromText('{}'))",
+                "0".repeat(MAX_BBOX_WKT_BYTES + 1)
+            ),
+            format!(
+                "SELECT id FROM points WHERE ST_Intersects(ST_GeomFromWKB(geom_wkb), ST_MakeEnvelope(0, 0, {}, 1))",
+                "9".repeat(MAX_BBOX_NUMERIC_LITERAL_BYTES + 1)
+            ),
+        ] {
+            assert!(
+                bbox_query_target(&parse(&oversized)).is_none(),
+                "oversized inline probe must not be duplicated"
             );
         }
     }

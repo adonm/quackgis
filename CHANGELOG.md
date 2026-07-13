@@ -148,6 +148,13 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   layout contract, including NULL, exact-recheck, and reopen evidence.
 - Fail-closed bbox layout validation rejects partial, wrong-type, caller-supplied,
   or ambiguous reserved columns before staging and keeps the pgwire session usable.
+- Conservative one-table bbox candidate injection for mandatory exact
+  `ST_Intersects` predicates over maintained WKB layouts. Bounded literal
+  envelope/text and numbered-bound WKB probes gain four planner-visible overlap
+  filters while retaining the original exact predicate; OR/NOT, joins,
+  subqueries, multiple matches, and arbitrary/oversized probes stay unoptimized;
+  malformed or ambiguous reserved layouts fail closed. Native
+  hole/boundary/NULL/bound/reopen/`EXPLAIN` and actual pgwire literal cases pass.
 - COPY deadline evidence after flushed batches, with an explicit pre-publication
   cancellation check preventing aborted ADBC EOF normalization from publishing.
 - A generated 220k-row, greater-than-20-MiB pgwire COPY regression using bounded

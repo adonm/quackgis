@@ -35,7 +35,9 @@ planner/executor and official DuckLake is the sole writer for new storage.
 - independent transactions and portal paging;
 - PostgreSQL text COPY for maintained scalar/WKB types;
 - maintained client settings, `public` schema mapping, and quoted COPY targets;
-- optional reserved bbox columns validated and maintained by DuckDB during COPY;
+- optional reserved bbox columns validated and maintained by DuckDB during COPY,
+  with conservative exact-rechecked candidate injection for bounded one-table
+  `ST_Intersects` shapes;
 - explicitly authorized adjacent-file compaction through a server-owned call;
 - SCRAM and parsed read/write table policy; and
 - 42 curated spatial cases using original PostGIS spellings through DuckDB native

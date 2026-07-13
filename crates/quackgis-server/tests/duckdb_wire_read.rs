@@ -686,9 +686,7 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
     let exact_bbox = client
         .query_one(
             "SELECT count(*)::BIGINT FROM public.layout_copy \
-             WHERE _qg_minx <= 1.5 AND _qg_maxx >= 0.5 \
-               AND _qg_miny <= 2.5 AND _qg_maxy >= 1.5 \
-               AND ST_Intersects(ST_GeomFromWKB(geom_wkb), \
+             WHERE ST_Intersects(ST_GeomFromWKB(geom_wkb), \
                    ST_MakeEnvelope(0.5, 1.5, 1.5, 2.5))",
             &[],
         )

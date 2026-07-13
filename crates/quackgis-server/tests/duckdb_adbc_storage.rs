@@ -61,11 +61,11 @@ fn point_batch(ids: Vec<i32>, names: Vec<&str>, geometries: Vec<&[u8]>) -> Recor
 fn layout_point_batch(points: &[(i32, f64, f64)]) -> RecordBatch {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int32, false),
-        Field::new("geom_wkb", DataType::Binary, false),
-        Field::new("_qg_minx", DataType::Float64, false),
-        Field::new("_qg_miny", DataType::Float64, false),
-        Field::new("_qg_maxx", DataType::Float64, false),
-        Field::new("_qg_maxy", DataType::Float64, false),
+        Field::new("geom_wkb", DataType::Binary, true),
+        Field::new("_qg_minx", DataType::Float64, true),
+        Field::new("_qg_miny", DataType::Float64, true),
+        Field::new("_qg_maxx", DataType::Float64, true),
+        Field::new("_qg_maxy", DataType::Float64, true),
     ]));
     let geometries: Vec<Vec<u8>> = points.iter().map(|(_, x, y)| point_wkb(*x, *y)).collect();
     let xs: Vec<f64> = points.iter().map(|(_, x, _)| *x).collect();
@@ -86,6 +86,29 @@ fn layout_point_batch(points: &[(i32, f64, f64)]) -> RecordBatch {
         ],
     )
     .expect("layout point batch")
+}
+
+fn layout_null_geometry_batch(id: i32) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("geom_wkb", DataType::Binary, true),
+        Field::new("_qg_minx", DataType::Float64, true),
+        Field::new("_qg_miny", DataType::Float64, true),
+        Field::new("_qg_maxx", DataType::Float64, true),
+        Field::new("_qg_maxy", DataType::Float64, true),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int32Array::from(vec![id])),
+            Arc::new(BinaryArray::from(vec![None::<&[u8]>])),
+            Arc::new(Float64Array::from(vec![None])),
+            Arc::new(Float64Array::from(vec![None])),
+            Arc::new(Float64Array::from(vec![None])),
+            Arc::new(Float64Array::from(vec![None])),
+        ],
+    )
+    .expect("layout NULL geometry batch")
 }
 
 #[test]
@@ -387,11 +410,20 @@ fn duckdb_hidden_bbox_candidates_keep_exact_spatial_recheck() {
                 (1, 0.0, 0.0),
                 (2, 2.0, 2.0),
                 (3, 5.0, 5.0),
-                (4, 10.0, 10.0),
+                (4, 6.0, 6.0),
+                (5, 10.0, 10.0),
             ])],
             IngestMode::Create,
         )
         .expect("ingest hidden-layout fixture");
+    storage
+        .ingest(
+            "main",
+            "layout_points",
+            vec![layout_null_geometry_batch(6)],
+            IngestMode::Append,
+        )
+        .expect("append NULL geometry fixture");
 
     let polygon = "POLYGON ((-1 -1, 6 -1, 6 6, -1 6, -1 -1), \
                    (1 1, 3 1, 3 3, 1 3, 1 1))";
@@ -402,16 +434,38 @@ fn duckdb_hidden_bbox_candidates_keep_exact_spatial_recheck() {
                AND _qg_maxy >= -1 AND _qg_miny <= 6",
         )
         .expect("bbox candidate query");
-    assert_eq!(first_i64(&candidates[0], 0), 3);
+    assert_eq!(first_i64(&candidates[0], 0), 4);
 
     let exact_sql = format!(
         "SELECT count(*) FROM quackgis.main.layout_points \
-         WHERE _qg_maxx >= -1 AND _qg_minx <= 6 \
-           AND _qg_maxy >= -1 AND _qg_miny <= 6 \
-           AND ST_Intersects(ST_GeomFromWKB(geom_wkb), ST_GeomFromText('{polygon}'))"
+         WHERE ST_Intersects(ST_GeomFromWKB(geom_wkb), ST_GeomFromText('{polygon}'))"
     );
-    let exact = storage.query(&exact_sql).expect("bbox plus exact recheck");
-    assert_eq!(first_i64(&exact[0], 0), 2);
+    let exact = storage
+        .query(&exact_sql)
+        .expect("automatically injected bbox plus exact recheck");
+    assert_eq!(first_i64(&exact[0], 0), 3);
+
+    let bound_sql = "SELECT count(*) FROM quackgis.main.layout_points \
+                     WHERE ST_Intersects(ST_GeomFromWKB(geom_wkb), \
+                                         ST_GeomFromWKB($1::BLOB))";
+    let description = storage
+        .describe(bound_sql)
+        .expect("describe bound bbox query");
+    assert_eq!(description.parameter_schema.fields().len(), 1);
+    let point = point_wkb(5.0, 5.0);
+    let parameters = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new(
+            "probe_wkb",
+            DataType::Binary,
+            false,
+        )])),
+        vec![Arc::new(BinaryArray::from_vec(vec![point.as_slice()]))],
+    )
+    .expect("bound bbox parameter");
+    let bound = storage
+        .query_bound(bound_sql, parameters)
+        .expect("bound bbox query");
+    assert_eq!(first_i64(&bound.batches[0], 0), 1);
 
     let explain = storage
         .query(&format!("EXPLAIN {exact_sql}"))
@@ -444,7 +498,7 @@ fn duckdb_hidden_bbox_candidates_keep_exact_spatial_recheck() {
     let reopened_exact = reopened
         .query(&exact_sql)
         .expect("exact recheck after reopen");
-    assert_eq!(first_i64(&reopened_exact[0], 0), 2);
+    assert_eq!(first_i64(&reopened_exact[0], 0), 3);
 }
 
 #[test]

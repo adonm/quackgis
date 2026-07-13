@@ -151,6 +151,17 @@ recomputes all four bounds in the same DuckDB statement. UPDATEs touching only
 ordinary columns preserve maintained geometry/bounds; COPY remains the primary
 spatial write path.
 
+At the storage trust boundary, before native describe/prepare/execute, a narrow
+AST rule may add planner-visible bbox candidates to one-table reads over that
+maintained layout. It accepts one mandatory `AND` conjunct shaped as
+`ST_Intersects(ST_GeomFromWKB(the maintained column), probe)`, where `probe` is a
+bounded literal envelope/text geometry or numbered-bound WKB. The generated
+four-axis overlap test is conjoined with the original exact predicate; it never
+replaces the exact DuckDB Spatial call. Joins, OR/NOT placement, subqueries,
+multiple exact predicates, arbitrary/oversized probe expressions, and
+non-maintained layouts are left unchanged; malformed or ambiguous reserved
+layouts fail closed. Describe and execution use the same rewrite.
+
 ## Spatial compatibility
 
 DuckDB Spatial owns exact execution. Compatibility follows the decision ladder:

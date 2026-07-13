@@ -149,11 +149,20 @@ catalog surfaces remain open unless a focused test says otherwise.
   in the same statement. Arbitrary geometry expressions and tuple assignments
   remain `0A000`. UPDATEs of ordinary columns preserve existing geometry/bounds,
   and `DELETE` remains supported.
+- A one-table exact `ST_Intersects` over the maintained WKB column gains
+  conservative four-axis bbox candidates for bounded literal envelopes/text
+  geometries and numbered-bound WKB. The exact DuckDB predicate remains in the
+  plan, and native plus pgwire tests cover holes, boundaries, NULL, bound/literal
+  probes, and reopen. OR/NOT placement, joins, subqueries, multiple matching
+  predicates, and arbitrary or oversized probe expressions are deliberately left
+  unoptimized; malformed/ambiguous reserved layouts fail closed. This is
+  functional evidence, not a scan-byte or scale claim.
 - `pg_catalog`, `information_schema`, broad spatial discovery, and GIS client-specific
   metadata are incomplete. A client-neutral executable fixture structurally maps
   explicit and implicit namespace/database/type/range/collation/owner-role
   references to private views. It proves stable logical database/schema/search-path
-  discovery with `name`/`name[]` wire types, 24 exact PostgreSQL 18 profile/QGIS built-ins plus
+  discovery with `name`/`name[]` wire types, 24 exact PostgreSQL 18 profile/QGIS
+  built-ins plus
   PostGIS-shaped geometry/geography scalar/array rows, every namespace/owner/
   array/collation link, wire/OID parameter types, and WKB transport. All
   unimplemented/private catalog routing and unsupported wildcard/nested/set/

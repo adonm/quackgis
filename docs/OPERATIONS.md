@@ -277,9 +277,19 @@ published as NULL. Direct INSERT and reserved-column UPDATEs fail closed. A
 geometry UPDATE atomically refreshes all bounds only when the geometry value is a
 numbered bound parameter (optionally cast) or `NULL`; arbitrary expressions and
 tuple assignment fail closed. Ordinary-column UPDATEs are allowed because they
-leave maintained geometry and bounds unchanged. Automatic DDL, general geometry
-expression maintenance, compaction
-refresh, and predicate injection remain roadmap work.
+leave maintained geometry and bounds unchanged.
+
+One-table `ST_Intersects` reads over a valid maintained layout automatically gain
+four planner-visible bbox overlap candidates when the data geometry is the
+maintained WKB column and the other geometry is a bounded literal envelope/text
+value or numbered-bound WKB. The original exact predicate remains in the plan.
+The native gate checks holes, an outer boundary, NULL geometry, literal and bound
+probes, reopen, and `EXPLAIN`; the pgwire workflow executes the literal form
+without client-written bbox SQL. OR/NOT placement, joins, subqueries, multiple
+matching predicates, and arbitrary or oversized geometry expressions are not
+optimized; malformed or ambiguous reserved layouts fail closed. Automatic DDL,
+general geometry-expression maintenance, compaction refresh, scan-byte evidence,
+and scale profiles remain roadmap work.
 
 ## Maintained checks
 
