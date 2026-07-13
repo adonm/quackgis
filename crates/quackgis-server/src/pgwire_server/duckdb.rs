@@ -43,7 +43,8 @@ use pgwire::messages::response::TransactionStatus;
 use sqlparser::ast::{
     BinaryOperator, CopySource, CopyTarget as AstCopyTarget, Expr, FunctionArg, FunctionArgExpr,
     FunctionArguments, Ident, JoinConstraint, JoinOperator, ObjectName, ObjectNamePart, SelectItem,
-    Set, SetExpr, Statement, TableFactor, Value, visit_expressions, visit_relations_mut,
+    Set, SetExpr, Statement, TableFactor, Value, visit_expressions, visit_expressions_mut,
+    visit_relations_mut,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
@@ -1029,6 +1030,7 @@ fn validate_statement(sql: &str, mode: ProtocolMode) -> PgWireResult<ValidatedSt
         let mut execution = statement.clone();
         rewrite_public_relations(&mut execution);
         rewrite_pg_catalog_relations(&mut execution);
+        rewrite_pg_catalog_functions(&mut execution);
         execution.to_string()
     };
     Ok(ValidatedStatement {
@@ -1336,6 +1338,64 @@ fn rewrite_pg_catalog_relations(statement: &mut Statement) {
     });
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MaintainedPgFunction {
+    Database,
+    Schema,
+    Schemas,
+}
+
+impl MaintainedPgFunction {
+    const fn private_name(self) -> &'static str {
+        match self {
+            Self::Database => "quackgis_current_database",
+            Self::Schema => "quackgis_current_schema",
+            Self::Schemas => "quackgis_current_schemas",
+        }
+    }
+
+    const fn result_hint(self) -> PgTypeHint {
+        match self {
+            Self::Database | Self::Schema => PgTypeHint::Name,
+            Self::Schemas => PgTypeHint::NameArray,
+        }
+    }
+}
+
+fn maintained_pg_function(name: &ObjectName) -> Option<MaintainedPgFunction> {
+    let function = match name.0.as_slice() {
+        [ObjectNamePart::Identifier(function)] => function,
+        [
+            ObjectNamePart::Identifier(schema),
+            ObjectNamePart::Identifier(function),
+        ] if pg_identifier_matches(schema, "pg_catalog") => function,
+        _ => return None,
+    };
+    if pg_identifier_matches(function, "current_database") {
+        Some(MaintainedPgFunction::Database)
+    } else if pg_identifier_matches(function, "current_schema") {
+        Some(MaintainedPgFunction::Schema)
+    } else if pg_identifier_matches(function, "current_schemas") {
+        Some(MaintainedPgFunction::Schemas)
+    } else {
+        None
+    }
+}
+
+fn rewrite_pg_catalog_functions(statement: &mut Statement) {
+    let _: ControlFlow<()> = visit_expressions_mut(statement, |expression| {
+        let Expr::Function(function) = expression else {
+            return ControlFlow::Continue(());
+        };
+        if let Some(maintained) = maintained_pg_function(&function.name) {
+            function.name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(
+                maintained.private_name(),
+            ))]);
+        }
+        ControlFlow::Continue(())
+    });
+}
+
 fn maintained_pg_catalog_relation(name: &ObjectName) -> Option<&'static str> {
     if name.0.len() > 2 {
         return None;
@@ -1343,6 +1403,7 @@ fn maintained_pg_catalog_relation(name: &ObjectName) -> Option<&'static str> {
     let (table, _) = catalog_relation_identifier(name)?;
     [
         "pg_namespace",
+        "pg_database",
         "pg_type",
         "pg_range",
         "pg_collation",
@@ -1626,6 +1687,7 @@ fn stale_catalog_column_qualifier(expression: &Expr) -> bool {
     pg_identifier_matches(schema, "pg_catalog")
         && [
             "pg_namespace",
+            "pg_database",
             "pg_type",
             "pg_range",
             "pg_collation",
@@ -1664,6 +1726,14 @@ fn private_catalog_reference(statement: &Statement) -> bool {
         return true;
     }
     let _: ControlFlow<()> = visit_expressions(statement, |expression| {
+        if let Expr::Function(function) = expression
+            && function.name.0.iter().any(|part| {
+                matches!(part, ObjectNamePart::Identifier(identifier) if identifier.value.to_ascii_lowercase().starts_with("quackgis_current_"))
+            })
+        {
+            found = true;
+            return ControlFlow::Break(());
+        }
         let Expr::CompoundIdentifier(identifiers) = expression else {
             return ControlFlow::Continue(());
         };
@@ -1828,6 +1898,11 @@ fn catalog_columns(relation: &str) -> &'static [(&'static str, PgTypeHint)] {
             ("nspname", PgTypeHint::Name),
             ("nspowner", PgTypeHint::Oid),
         ],
+        "pg_database" => &[
+            ("oid", PgTypeHint::Oid),
+            ("datname", PgTypeHint::Name),
+            ("datdba", PgTypeHint::Oid),
+        ],
         "pg_type" => &[
             ("oid", PgTypeHint::Oid),
             ("typname", PgTypeHint::Name),
@@ -1860,6 +1935,7 @@ fn catalog_columns(relation: &str) -> &'static [(&'static str, PgTypeHint)] {
 fn catalog_column_names(relation: &str) -> &'static [&'static str] {
     match relation {
         "pg_namespace" => &["oid", "nspname", "nspowner"],
+        "pg_database" => &["oid", "datname", "datdba"],
         "pg_type" => &[
             "oid",
             "typname",
@@ -1925,9 +2001,6 @@ fn catalog_expression_hint(
 
 fn annotate_catalog_result_schema(statement: &Statement, schema: &Schema) -> Schema {
     let aliases = top_level_catalog_aliases(statement);
-    if aliases.is_empty() {
-        return schema.clone();
-    }
     let Statement::Query(query) = statement else {
         return schema.clone();
     };
@@ -1950,12 +2023,20 @@ fn annotate_catalog_result_schema(statement: &Statement, schema: &Schema) -> Sch
                     } => expression,
                     _ => return field.as_ref().clone(),
                 };
-                catalog_expression_hint(expression, &aliases)
-                    .map(|hint| with_pg_type_hint(field.as_ref().clone(), hint))
+                let hint = catalog_expression_hint(expression, &aliases)
+                    .or_else(|| maintained_function_hint(expression));
+                hint.map(|hint| with_pg_type_hint(field.as_ref().clone(), hint))
                     .unwrap_or_else(|| field.as_ref().clone())
             })
             .collect::<Vec<_>>(),
     )
+}
+
+fn maintained_function_hint(expression: &Expr) -> Option<PgTypeHint> {
+    let Expr::Function(function) = expression else {
+        return None;
+    };
+    maintained_pg_function(&function.name).map(MaintainedPgFunction::result_hint)
 }
 
 fn catalog_oid_parameter_indexes(statement: &Statement) -> HashSet<usize> {
@@ -3063,6 +3144,55 @@ mod tests {
         )
         .expect("bootstrap owner query");
         assert!(owner.sql.contains("quackgis_pg_catalog.pg_roles"));
+    }
+
+    #[test]
+    fn database_and_schema_discovery_are_structural_and_typed() {
+        let validated = validate_statement(
+            "SELECT current_database() AS database_name, \
+             pg_catalog.current_schema() AS schema_name, \
+             current_schemas(true) AS schemas",
+            ProtocolMode::Extended,
+        )
+        .expect("maintained database discovery");
+        assert!(validated.sql.contains("quackgis_current_database()"));
+        assert!(validated.sql.contains("quackgis_current_schema()"));
+        assert!(validated.sql.contains("quackgis_current_schemas(true)"));
+        let schema = annotate_catalog_result_schema(
+            &validated.ast,
+            &Schema::new(vec![
+                Field::new("database_name", DataType::Utf8, false),
+                Field::new("schema_name", DataType::Utf8, false),
+                Field::new(
+                    "schemas",
+                    DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                    false,
+                ),
+            ]),
+        );
+        assert_eq!(
+            field_into_pg_type(&Arc::new(schema.field(0).clone())).unwrap(),
+            Type::NAME
+        );
+        assert_eq!(
+            field_into_pg_type(&Arc::new(schema.field(1).clone())).unwrap(),
+            Type::NAME
+        );
+        assert_eq!(
+            field_into_pg_type(&Arc::new(schema.field(2).clone())).unwrap(),
+            Type::NAME_ARRAY
+        );
+
+        let database = validate_statement(
+            "SELECT d.oid, d.datname, d.datdba FROM pg_database d",
+            ProtocolMode::Extended,
+        )
+        .expect("maintained pg_database");
+        assert!(database.sql.contains("quackgis_pg_catalog.pg_database"));
+        assert!(
+            validate_statement("SELECT quackgis_current_database()", ProtocolMode::Extended,)
+                .is_err()
+        );
     }
 
     #[test]

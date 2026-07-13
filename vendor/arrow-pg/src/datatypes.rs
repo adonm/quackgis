@@ -19,6 +19,7 @@ pub const PG_TYPE_HINT_METADATA_KEY: &str = "quackgis.pg_type_hint";
 pub enum PgTypeHint {
     Oid,
     Name,
+    NameArray,
     Char,
 }
 
@@ -27,6 +28,7 @@ impl PgTypeHint {
         match self {
             Self::Oid => "oid",
             Self::Name => "name",
+            Self::NameArray => "name_array",
             Self::Char => "char",
         }
     }
@@ -306,6 +308,18 @@ pub fn field_into_pg_type(field: &Arc<Field>) -> PgWireResult<Type> {
             {
                 Type::NAME
             }
+            "name_array"
+                if matches!(
+                    arrow_type,
+                    DataType::List(field) | DataType::LargeList(field)
+                        if matches!(
+                            field.data_type(),
+                            DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+                        )
+                ) =>
+            {
+                Type::NAME_ARRAY
+            }
             "char"
                 if matches!(
                     arrow_type,
@@ -404,6 +418,19 @@ mod tests {
         let ty = field_into_pg_type(&field).expect("geography field type");
         assert_eq!(ty.oid(), GEOGRAPHY_OID);
         assert_eq!(ty.name(), "geography");
+    }
+
+    #[test]
+    fn name_array_hint_advertises_postgresql_name_array() {
+        let field = Arc::new(with_pg_type_hint(
+            Field::new(
+                "current_schemas",
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                false,
+            ),
+            PgTypeHint::NameArray,
+        ));
+        assert_eq!(field_into_pg_type(&field).unwrap(), Type::NAME_ARRAY);
     }
 
     #[test]

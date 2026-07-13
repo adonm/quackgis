@@ -44,7 +44,9 @@ The required real-driver workflow proves:
 - PostgreSQL text `COPY FROM STDIN` for the maintained scalar and WKB types;
 - `SET standard_conforming_strings`, encoding, bounded `client_min_messages`, and
   the exact QGIS 3.44 `extra_float_digits`/`application_name`/`datestyle` bootstrap;
-  `SHOW search_path`, `public` relation mapping, and quoted COPY targets;
+  `SHOW search_path`, stable `pg_database` identity, PostgreSQL-shaped
+  `current_database`/`current_schema`/`current_schemas`, `public` relation mapping,
+  and quoted COPY targets;
 - portal paging, transaction isolation, failed-transaction `25P02` enforcement,
   `COMMIT`-as-rollback after failure, disconnect rollback, restart, and reopen;
 - the simple-protocol, server-owned
@@ -149,8 +151,9 @@ catalog surfaces remain open unless a focused test says otherwise.
   and `DELETE` remains supported.
 - `pg_catalog`, `information_schema`, broad spatial discovery, and GIS client-specific
   metadata are incomplete. A client-neutral executable fixture structurally maps
-  explicit and implicit namespace/type/range/collation/owner-role references to
-  private views. It proves 24 exact PostgreSQL 18 profile/QGIS built-ins plus
+  explicit and implicit namespace/database/type/range/collation/owner-role
+  references to private views. It proves stable logical database/schema/search-path
+  discovery with `name`/`name[]` wire types, 24 exact PostgreSQL 18 profile/QGIS built-ins plus
   PostGIS-shaped geometry/geography scalar/array rows, every namespace/owner/
   array/collation link, wire/OID parameter types, and WKB transport. All
   unimplemented/private catalog routing and unsupported wildcard/nested/set/

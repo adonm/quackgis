@@ -140,6 +140,10 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   Unimplemented catalog routing, reserved CTE shadowing, and unsupported wildcard/
   nested/set/derived/implicit-join/cross-database shapes fail closed rather than
   reaching DuckDB/user objects; private-schema and `TABLE` access are rejected.
+- Stable single-logical-database discovery through relational `pg_database` plus
+  structurally rewritten `current_database`, `current_schema`, and
+  `current_schemas`; actual pgwire evidence checks owner references and exact
+  PostgreSQL `oid`, `name`, and `name[]` result types.
 - DuckDB-computed bbox maintenance during COPY for the explicit reserved-column
   layout contract, including NULL, exact-recheck, and reopen evidence.
 - Fail-closed bbox layout validation rejects partial, wrong-type, caller-supplied,

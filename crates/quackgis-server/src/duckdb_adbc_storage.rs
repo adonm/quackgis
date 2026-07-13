@@ -1989,6 +1989,7 @@ mod tests {
         assert!(sql.contains("quackgis_st_geomfromewkt"));
         assert!(sql.contains("quackgis_st_geometry_type"));
         assert!(sql.contains("quackgis_pg_catalog.pg_namespace"));
+        assert!(sql.contains("quackgis_pg_catalog.pg_database"));
         assert!(sql.contains("quackgis_pg_catalog.pg_type"));
         assert!(sql.contains("quackgis_pg_catalog.pg_range"));
         assert!(sql.contains("quackgis_pg_catalog.pg_collation"));

@@ -21,6 +21,7 @@ struct CatalogContract {
     ordinary_catalog_query: OrdinaryCatalogQuery,
     builtin_type_query: BuiltinTypeQuery,
     type_catalog_integrity: TypeCatalogIntegrity,
+    session_discovery: SessionDiscovery,
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,6 +98,20 @@ struct TypeCatalogIntegrity {
     expected_unresolved: i64,
 }
 
+#[derive(Debug, Deserialize)]
+struct SessionDiscovery {
+    identity_sql: String,
+    implicit_schemas_sql: String,
+    explicit_schemas_sql: String,
+    database_sql: String,
+    expected_database_oid: u32,
+    expected_database: String,
+    expected_schema: String,
+    expected_implicit_schemas: Vec<String>,
+    expected_explicit_schemas: Vec<String>,
+    expected_owner: String,
+}
+
 #[derive(Debug, Eq, PartialEq)]
 struct GeometryBytes(Vec<u8>);
 
@@ -136,7 +151,7 @@ async fn client_neutral_catalog_contract() {
         "../../../tests/fixtures/duckdb_catalog_contract.json"
     ))
     .expect("catalog contract fixture");
-    assert_eq!(contract.schema_version, 4);
+    assert_eq!(contract.schema_version, 5);
 
     let runtime = TestRuntime::start(ServerOptions::new().with_max_connections(4)).await;
     let _storage = runtime.storage();
@@ -400,6 +415,88 @@ async fn client_neutral_catalog_contract() {
         );
     }
 
+    let identity = client
+        .prepare(&contract.session_discovery.identity_sql)
+        .await
+        .expect("prepare database identity query");
+    assert_eq!(
+        identity.columns()[0].type_(),
+        &tokio_postgres::types::Type::NAME
+    );
+    assert_eq!(
+        identity.columns()[1].type_(),
+        &tokio_postgres::types::Type::NAME
+    );
+    let identity = client
+        .query_one(&identity, &[])
+        .await
+        .expect("database identity row");
+    assert_eq!(
+        identity.get::<_, String>(0),
+        contract.session_discovery.expected_database
+    );
+    assert_eq!(
+        identity.get::<_, String>(1),
+        contract.session_discovery.expected_schema
+    );
+
+    for (sql, expected) in [
+        (
+            &contract.session_discovery.implicit_schemas_sql,
+            &contract.session_discovery.expected_implicit_schemas,
+        ),
+        (
+            &contract.session_discovery.explicit_schemas_sql,
+            &contract.session_discovery.expected_explicit_schemas,
+        ),
+    ] {
+        let statement = client
+            .prepare(sql)
+            .await
+            .expect("prepare current_schemas query");
+        assert_eq!(
+            statement.columns()[0].type_(),
+            &tokio_postgres::types::Type::NAME_ARRAY
+        );
+        let schemas = client
+            .query_one(&statement, &[])
+            .await
+            .expect("current_schemas row")
+            .get::<_, Vec<String>>(0);
+        assert_eq!(&schemas, expected);
+    }
+
+    let database = client
+        .prepare(&contract.session_discovery.database_sql)
+        .await
+        .expect("prepare pg_database query");
+    let database_columns = [
+        tokio_postgres::types::Type::OID,
+        tokio_postgres::types::Type::NAME,
+        tokio_postgres::types::Type::OID,
+        tokio_postgres::types::Type::NAME,
+    ];
+    for (column, expected_type) in database.columns().iter().zip(database_columns) {
+        assert_eq!(column.type_(), &expected_type);
+    }
+    let database = client
+        .query_one(&database, &[])
+        .await
+        .expect("pg_database row");
+    assert_eq!(
+        database.get::<_, u32>(0),
+        contract.session_discovery.expected_database_oid
+    );
+    assert_eq!(
+        database.get::<_, String>(1),
+        contract.session_discovery.expected_database
+    );
+    assert_eq!(database.get::<_, u32>(2), 10);
+    assert_eq!(
+        database.get::<_, String>(3),
+        contract.session_discovery.expected_owner
+    );
+
     let aliases = client
         .prepare("SELECT -1::INTEGER AS oid, 'base'::VARCHAR AS typtype")
         .await
@@ -437,7 +534,7 @@ fn decode_hex(value: &str) -> Vec<u8> {
 fn catalog_fixture_is_valid_and_client_neutral() {
     let raw = include_str!("../../../tests/fixtures/duckdb_catalog_contract.json");
     let contract: CatalogContract = serde_json::from_str(raw).expect("catalog contract fixture");
-    assert_eq!(contract.schema_version, 4);
+    assert_eq!(contract.schema_version, 5);
     let words = raw
         .split(|character: char| !character.is_ascii_alphanumeric())
         .map(str::to_ascii_lowercase)

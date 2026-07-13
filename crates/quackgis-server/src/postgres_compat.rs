@@ -6,6 +6,7 @@ use arrow_pg::datatypes::{GEOGRAPHY_OID, GEOMETRY_OID};
 pub const PG_CATALOG_NAMESPACE_OID: u32 = 11;
 pub const PUBLIC_NAMESPACE_OID: u32 = 2_200;
 pub const BOOTSTRAP_OWNER_OID: u32 = 10;
+pub const QUACKGIS_DATABASE_OID: u32 = 16_384;
 pub const GEOMETRY_ARRAY_OID: u32 = 90_003;
 pub const GEOGRAPHY_ARRAY_OID: u32 = 90_004;
 
@@ -189,6 +190,10 @@ pub fn duckdb_catalog_bootstrap_sql() -> String {
            ({PG_CATALOG_NAMESPACE_OID}::UINTEGER, 'pg_catalog'::VARCHAR, {BOOTSTRAP_OWNER_OID}::UINTEGER),\n\
            ({PUBLIC_NAMESPACE_OID}::UINTEGER, 'public'::VARCHAR, {BOOTSTRAP_OWNER_OID}::UINTEGER)\n\
          ) AS n(oid, nspname, nspowner);\n\
+         CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_database AS\n\
+         SELECT {QUACKGIS_DATABASE_OID}::UINTEGER AS oid,\n\
+                'quackgis'::VARCHAR AS datname,\n\
+                {BOOTSTRAP_OWNER_OID}::UINTEGER AS datdba;\n\
          CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_type AS\n\
          SELECT * FROM (VALUES\n{type_rows}\n\
          ) AS t(oid, typname, typnamespace, typlen, typbyval, typtype, typcategory,\n\
@@ -208,7 +213,12 @@ pub fn duckdb_catalog_bootstrap_sql() -> String {
                 collisdeterministic, collencoding, collcollate, collctype,\n\
                 colllocale, collicurules, collversion);\n\
          CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_roles AS\n\
-         SELECT {BOOTSTRAP_OWNER_OID}::UINTEGER AS oid, 'quackgis_owner'::VARCHAR AS rolname;"
+         SELECT {BOOTSTRAP_OWNER_OID}::UINTEGER AS oid, 'quackgis_owner'::VARCHAR AS rolname;\n\
+         CREATE OR REPLACE MACRO quackgis_current_database() AS 'quackgis';\n\
+         CREATE OR REPLACE MACRO quackgis_current_schema() AS 'public';\n\
+         CREATE OR REPLACE MACRO quackgis_current_schemas(include_implicit) AS\n\
+           CASE WHEN CAST(include_implicit AS BOOLEAN)\n\
+                THEN ['pg_catalog', 'public'] ELSE ['public'] END;"
     )
 }
 
@@ -226,6 +236,7 @@ mod tests {
             PG_CATALOG_NAMESPACE_OID,
             PUBLIC_NAMESPACE_OID,
             BOOTSTRAP_OWNER_OID,
+            QUACKGIS_DATABASE_OID,
         ] {
             assert!(sql.contains(&value.to_string()), "missing OID {value}");
         }
@@ -273,11 +284,15 @@ mod tests {
             reference["builtin_type_rows"]
         );
         assert!(sql.contains("quackgis_pg_catalog.pg_namespace"));
+        assert!(sql.contains("quackgis_pg_catalog.pg_database"));
         assert!(sql.contains("quackgis_pg_catalog.pg_type"));
         assert!(sql.contains("quackgis_pg_catalog.pg_range"));
         assert!(sql.contains("quackgis_pg_catalog.pg_collation"));
         assert!(sql.contains("quackgis_pg_catalog.pg_roles"));
         assert!(sql.contains("quackgis_owner"));
+        assert!(sql.contains("quackgis_current_database"));
+        assert!(sql.contains("quackgis_current_schema"));
+        assert!(sql.contains("quackgis_current_schemas"));
         assert!(!sql.contains("CREATE TABLE"));
     }
 }

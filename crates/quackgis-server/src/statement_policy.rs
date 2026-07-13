@@ -280,7 +280,7 @@ fn unqualified_pg_catalog_name(name: &ObjectName) -> bool {
     object_name_last(name).is_some_and(|name| {
         matches!(
             name.to_ascii_lowercase().as_str(),
-            "pg_namespace" | "pg_type" | "pg_range" | "pg_collation" | "pg_roles"
+            "pg_namespace" | "pg_database" | "pg_type" | "pg_range" | "pg_collation" | "pg_roles"
         )
     })
 }

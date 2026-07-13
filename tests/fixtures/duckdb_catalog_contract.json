@@ -1,5 +1,5 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "setup_sql": "CREATE TABLE quackgis.main.catalog_fixture(id BIGINT, name VARCHAR, geom_wkb BLOB, geog BLOB)",
   "copy_sql": "COPY quackgis.main.catalog_fixture (id, name, geom_wkb, geog) FROM STDIN",
   "copy_row": "1\torigin\t\\x010100000000000000000000000000000000000000\t\\x0101000000000000000000F03F000000000000F03F\n",
@@ -69,8 +69,21 @@
       "SELECT count(*)::BIGINT FROM pg_type t LEFT JOIN pg_type e ON e.oid = t.typelem LEFT JOIN pg_type a ON a.oid = t.typarray LEFT JOIN pg_collation c ON c.oid = t.typcollation WHERE (t.typelem <> 0 AND e.oid IS NULL) OR (t.typarray <> 0 AND (a.oid IS NULL OR a.typelem <> t.oid)) OR (t.typcategory = 'A' AND t.typelem <> 0 AND e.typarray <> t.oid) OR (t.typcollation <> 0 AND c.oid IS NULL)",
       "SELECT count(*)::BIGINT FROM pg_type t LEFT JOIN pg_namespace n ON n.oid = t.typnamespace WHERE n.oid IS NULL",
       "SELECT count(*)::BIGINT FROM pg_namespace n LEFT JOIN pg_roles r ON r.oid = n.nspowner WHERE r.oid IS NULL",
+      "SELECT count(*)::BIGINT FROM pg_database d LEFT JOIN pg_roles r ON r.oid = d.datdba WHERE r.oid IS NULL",
       "SELECT count(*)::BIGINT FROM pg_collation c LEFT JOIN pg_namespace n ON n.oid = c.collnamespace LEFT JOIN pg_roles r ON r.oid = c.collowner WHERE n.oid IS NULL OR r.oid IS NULL"
     ],
     "expected_unresolved": 0
+  },
+  "session_discovery": {
+    "identity_sql": "SELECT current_database() AS database_name, pg_catalog.current_schema() AS schema_name",
+    "implicit_schemas_sql": "SELECT current_schemas(true) AS schemas",
+    "explicit_schemas_sql": "SELECT pg_catalog.current_schemas(false) AS schemas",
+    "database_sql": "SELECT d.oid, d.datname, d.datdba, r.rolname FROM pg_catalog.pg_database d INNER JOIN pg_catalog.pg_roles r ON r.oid = d.datdba WHERE d.datname = current_database()",
+    "expected_database_oid": 16384,
+    "expected_database": "quackgis",
+    "expected_schema": "public",
+    "expected_implicit_schemas": ["pg_catalog", "public"],
+    "expected_explicit_schemas": ["public"],
+    "expected_owner": "quackgis_owner"
   }
 }

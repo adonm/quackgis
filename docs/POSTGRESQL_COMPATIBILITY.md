@@ -459,8 +459,12 @@ Gate: client-neutral differential fixtures and actual pgwire tests pass for
 scalar, geometry, and geography columns, including restart and rename.
 
 Current progress: exact whole-query interception is removed. Explicit and implicit
-`pg_catalog` namespace/type/range/collation/owner-role references map structurally
-to protected process-local views. Twenty-eight rows cover 24 exact PostgreSQL 18
+`pg_catalog` namespace/database/type/range/collation/owner-role references map
+structurally to protected process-local views. The stable single logical-database
+row and structurally rewritten `current_database`, `current_schema`, and
+`current_schemas` functions agree on `quackgis`, `public`, and the maintained
+implicit search path, with PostgreSQL `name`/`name[]` result types. Twenty-eight
+rows cover 24 exact PostgreSQL 18
 profile/QGIS built-ins plus geometry/geography scalars and their PostGIS-shaped
 array partners; all array links resolve, spatial delimiters are `:`, and the
 `default`/`C` collation OIDs close nonzero references. The custom-type resolver,

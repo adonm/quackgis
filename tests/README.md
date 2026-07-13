@@ -18,6 +18,9 @@ direct DuckDB/ADBC/pgwire benchmark smoke and writes its manifest under `.tmp`.
   built-ins, PostGIS-shaped spatial scalar/arrays, full-row oracle equality,
   reciprocal namespace/owner/array/collation references, explicit OID parameters,
   and fail-closed private/unsupported routing and provenance shapes.
+  Schema version 5 adds stable logical-database/owner identity and structural
+  `current_database`/`current_schema`/`current_schemas` behavior with exact
+  PostgreSQL `name` and `name[]` wire types.
 - `fixtures/postgresql18_compatibility_profile.json` freezes the first target
   catalog/query/wire contract and names every still-pending client trace.
   `fixtures/postgresql18_column_core_reference.json` records normalized
