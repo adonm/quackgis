@@ -113,8 +113,21 @@ does not support `CREATE SCHEMA`; non-public schema evidence creates a table in
 the same transaction. QuackGIS will not substitute an unstable name-based OID:
 empty-schema support requires an upstream durable schema-identity surface.
 
-`pg_class`, `pg_attribute`, row-type projection,
-RowDescription origins, and cache consumers remain the next C3 slices.
+The same development lane now projects current base tables into `pg_class`,
+current columns into `pg_attribute`, and one reserved composite row type per
+table into `pg_type`. Namespace/relation/type/attribute references are joined
+from the registry, `main` remains PostgreSQL `public`, dropped mappings stay
+private tombstones, and unsupported DuckDB column types fail closed. Direct qualified or unambiguous table-column and plain wildcard RowDescription
+fields carry the same relation OID/attribute number across maintained base-table
+joins; expressions do not. PostgreSQL-reserved schema aliases and public
+geometry/geography type-name collisions fail closed. Prepared reads pin the
+schema epoch and fail `0A000` after a committed schema change. A guarded current-
+column view also fails rather than returning partial rows if a read lands in the
+user-commit/registry-reconciliation gap.
+
+Broader expression provenance, durable empty-schema identity, `reg*` resolution,
+constraints/indexes/defaults/comments, and REST cache consumers remain later C3
+slices.
 
 ## Runtime trust boundary
 

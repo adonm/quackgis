@@ -4,10 +4,12 @@ use std::sync::Arc;
 use adbc_core::options::IngestMode;
 use arrow_array::{Array, Int32Array, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
+use quackgis_server::auth::AuthConfig;
 use quackgis_server::duckdb_adbc_storage::{DuckDbAdbcConfig, DuckDbAdbcStorage, ExtensionPolicy};
 use quackgis_server::engine_api::{
     EngineStorageKernel, EngineTableRef, EngineTransactionState, IngestDisposition,
 };
+use quackgis_server::pgwire_server::ServerOptions;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct IdentityRow {
@@ -120,6 +122,322 @@ fn registered_columns(
                 .collect::<Vec<_>>()
         })
         .collect()
+}
+
+async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("development catalog listener");
+    let port = listener
+        .local_addr()
+        .expect("development catalog address")
+        .port();
+    let server_storage = Arc::clone(&storage);
+    let server = tokio::spawn(async move {
+        quackgis_server::pgwire_server::serve_duckdb_on_listener(
+            server_storage,
+            listener,
+            &ServerOptions::new().with_max_connections(4),
+            AuthConfig::trust(),
+        )
+        .await
+    });
+    let (client, connection) = tokio_postgres::connect(
+        &format!("host=127.0.0.1 port={port} user=postgres dbname=quackgis"),
+        tokio_postgres::NoTls,
+    )
+    .await
+    .expect("development catalog pgwire connection");
+    let connection = tokio::spawn(connection);
+
+    client
+        .batch_execute(
+            "CREATE TABLE quackgis.main.catalog_projection(\
+             id BIGINT NOT NULL, label VARCHAR, geom_wkb BLOB, \
+             score DOUBLE, active BOOLEAN)",
+        )
+        .await
+        .expect("create projected catalog table");
+
+    let catalog_sql = "SELECT c.oid, c.relname, c.relnamespace, c.reltype, c.relowner, \
+                c.relkind, c.relnatts, c.relrowsecurity, a.attrelid, a.attname, \
+                a.atttypid, a.attlen, a.attnum, a.atttypmod, a.attnotnull, \
+                a.attidentity, a.attgenerated, a.attisdropped, t.typname, \
+                rt.typrelid, n.nspname \
+         FROM pg_catalog.pg_namespace n \
+         JOIN pg_catalog.pg_class c ON c.relnamespace = n.oid \
+         JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid \
+         JOIN pg_catalog.pg_type t ON t.oid = a.atttypid \
+         JOIN pg_catalog.pg_type rt ON rt.oid = c.reltype \
+         WHERE n.nspname = 'public' AND c.relname = 'catalog_projection' \
+         ORDER BY a.attnum";
+    let catalog = client
+        .prepare(catalog_sql)
+        .await
+        .expect("prepare registry-backed catalog join");
+    let catalog_types = [
+        tokio_postgres::types::Type::OID,
+        tokio_postgres::types::Type::NAME,
+        tokio_postgres::types::Type::OID,
+        tokio_postgres::types::Type::OID,
+        tokio_postgres::types::Type::OID,
+        tokio_postgres::types::Type::CHAR,
+        tokio_postgres::types::Type::INT2,
+        tokio_postgres::types::Type::BOOL,
+        tokio_postgres::types::Type::OID,
+        tokio_postgres::types::Type::NAME,
+        tokio_postgres::types::Type::OID,
+        tokio_postgres::types::Type::INT2,
+        tokio_postgres::types::Type::INT2,
+        tokio_postgres::types::Type::INT4,
+        tokio_postgres::types::Type::BOOL,
+        tokio_postgres::types::Type::CHAR,
+        tokio_postgres::types::Type::CHAR,
+        tokio_postgres::types::Type::BOOL,
+        tokio_postgres::types::Type::NAME,
+        tokio_postgres::types::Type::OID,
+        tokio_postgres::types::Type::NAME,
+    ];
+    assert_eq!(catalog.columns().len(), catalog_types.len());
+    for (column, expected) in catalog.columns().iter().zip(catalog_types) {
+        assert_eq!(
+            column.type_(),
+            &expected,
+            "catalog column {}",
+            column.name()
+        );
+    }
+    let rows = client
+        .query(&catalog, &[])
+        .await
+        .expect("registry-backed catalog rows");
+    assert_eq!(rows.len(), 5);
+    let relation_oid = rows[0].get::<_, u32>(0);
+    let row_type_oid = rows[0].get::<_, u32>(3);
+    assert!(relation_oid >= 100_000);
+    assert!(row_type_oid >= 100_000);
+    assert_ne!(relation_oid, row_type_oid);
+    let expected = [
+        ("id", 20_u32, 8_i16, true),
+        ("label", 25, -1, false),
+        ("geom_wkb", 90_001, -1, false),
+        ("score", 701, 8, false),
+        ("active", 16, 1, false),
+    ];
+    for (index, (row, expected)) in rows.iter().zip(expected).enumerate() {
+        assert_eq!(row.get::<_, u32>(0), relation_oid);
+        assert_eq!(row.get::<_, String>(1), "catalog_projection");
+        assert_eq!(row.get::<_, u32>(2), 2_200);
+        assert_eq!(row.get::<_, u32>(3), row_type_oid);
+        assert_eq!(row.get::<_, u32>(4), 10);
+        assert_eq!(row.get::<_, i8>(5), b'r' as i8);
+        assert_eq!(row.get::<_, i16>(6), 5);
+        assert!(!row.get::<_, bool>(7));
+        assert_eq!(row.get::<_, u32>(8), relation_oid);
+        assert_eq!(row.get::<_, String>(9), expected.0);
+        assert_eq!(row.get::<_, u32>(10), expected.1);
+        assert_eq!(row.get::<_, i16>(11), expected.2);
+        assert_eq!(row.get::<_, i16>(12), i16::try_from(index + 1).unwrap());
+        assert_eq!(row.get::<_, i32>(13), -1);
+        assert_eq!(row.get::<_, bool>(14), expected.3);
+        assert!(!row.get::<_, bool>(17));
+        assert_eq!(row.get::<_, u32>(19), relation_oid);
+        assert_eq!(row.get::<_, String>(20), "public");
+    }
+    for sql in [
+        "SELECT count(*)::BIGINT FROM pg_class c \
+         LEFT JOIN pg_namespace n ON n.oid = c.relnamespace \
+         LEFT JOIN pg_type t ON t.oid = c.reltype \
+         LEFT JOIN pg_roles r ON r.oid = c.relowner \
+         WHERE n.oid IS NULL OR t.oid IS NULL OR t.typrelid <> c.oid OR r.oid IS NULL",
+        "SELECT count(*)::BIGINT FROM pg_attribute a \
+         LEFT JOIN pg_class c ON c.oid = a.attrelid \
+         LEFT JOIN pg_type t ON t.oid = a.atttypid \
+         WHERE c.oid IS NULL OR t.oid IS NULL OR a.attnum <= 0 OR a.attnum > c.relnatts",
+    ] {
+        let unresolved = client
+            .query_one(sql, &[])
+            .await
+            .unwrap_or_else(|error| panic!("catalog reference integrity {sql}: {error}"));
+        assert_eq!(unresolved.get::<_, i64>(0), 0, "{sql}");
+    }
+    let analytics = client
+        .query_one(
+            "SELECT n.oid, c.oid, c.reltype, a.attnum FROM pg_namespace n \
+             JOIN pg_class c ON c.relnamespace = n.oid \
+             JOIN pg_attribute a ON a.attrelid = c.oid \
+             WHERE n.nspname = 'analytics' AND c.relname = 'measurements'",
+            &[],
+        )
+        .await
+        .expect("non-public registry-backed catalog row");
+    assert!(analytics.get::<_, u32>(0) >= 100_000);
+    let analytics_relation_oid = analytics.get::<_, u32>(1);
+    assert!(analytics_relation_oid >= 100_000);
+    assert!(analytics.get::<_, u32>(2) >= 100_000);
+    assert_eq!(analytics.get::<_, i16>(3), 1);
+
+    let direct = client
+        .prepare(
+            "SELECT p.id, p.label AS renamed, p.id + 1 AS expression \
+             FROM public.catalog_projection p",
+        )
+        .await
+        .expect("prepare direct-column origins");
+    assert_eq!(direct.columns()[0].table_oid(), Some(relation_oid));
+    assert_eq!(direct.columns()[0].column_id(), Some(1));
+    assert_eq!(direct.columns()[1].table_oid(), Some(relation_oid));
+    assert_eq!(direct.columns()[1].column_id(), Some(2));
+    assert_eq!(direct.columns()[2].table_oid(), None);
+    assert_eq!(direct.columns()[2].column_id(), None);
+
+    let joined = client
+        .prepare(
+            "SELECT p.id, m.value, p.id + m.value AS expression \
+             FROM public.catalog_projection p \
+             JOIN quackgis.analytics.measurements m ON true",
+        )
+        .await
+        .expect("prepare joined direct-column origins");
+    assert_eq!(joined.columns()[0].table_oid(), Some(relation_oid));
+    assert_eq!(joined.columns()[0].column_id(), Some(1));
+    assert_eq!(
+        joined.columns()[1].table_oid(),
+        Some(analytics_relation_oid)
+    );
+    assert_eq!(joined.columns()[1].column_id(), Some(1));
+    assert_eq!(joined.columns()[2].table_oid(), None);
+    assert_eq!(joined.columns()[2].column_id(), None);
+
+    let wildcard = client
+        .prepare("SELECT p.* FROM public.catalog_projection p")
+        .await
+        .expect("prepare wildcard origins");
+    assert_eq!(wildcard.columns().len(), 5);
+    for (index, column) in wildcard.columns().iter().enumerate() {
+        assert_eq!(column.table_oid(), Some(relation_oid));
+        assert_eq!(column.column_id(), Some(i16::try_from(index + 1).unwrap()));
+    }
+
+    execute_storage_update(
+        &storage,
+        "ALTER TABLE quackgis.main.catalog_projection RENAME COLUMN label TO title",
+    )
+    .await;
+    execute_storage_update(
+        &storage,
+        "ALTER TABLE quackgis.main.catalog_projection RENAME TO catalog_projection_renamed",
+    )
+    .await;
+    let stale = client
+        .query(&direct, &[])
+        .await
+        .expect_err("schema epoch must invalidate the prepared statement");
+    assert_eq!(
+        stale.code(),
+        Some(&tokio_postgres::error::SqlState::FEATURE_NOT_SUPPORTED)
+    );
+    let renamed = client
+        .prepare("SELECT p.id, p.title FROM public.catalog_projection_renamed p")
+        .await
+        .expect("prepare renamed direct-column origins");
+    assert_eq!(renamed.columns()[0].table_oid(), Some(relation_oid));
+    assert_eq!(renamed.columns()[0].column_id(), Some(1));
+    assert_eq!(renamed.columns()[1].table_oid(), Some(relation_oid));
+    assert_eq!(renamed.columns()[1].column_id(), Some(2));
+
+    let renamed_catalog = client
+        .query(
+            "SELECT c.oid, a.attname, a.attnum FROM pg_class c \
+             JOIN pg_attribute a ON a.attrelid = c.oid \
+             WHERE c.relname = 'catalog_projection_renamed' ORDER BY a.attnum",
+            &[],
+        )
+        .await
+        .expect("catalog rows after rename");
+    assert_eq!(renamed_catalog.len(), 5);
+    assert!(
+        renamed_catalog
+            .iter()
+            .all(|row| row.get::<_, u32>(0) == relation_oid)
+    );
+    assert_eq!(renamed_catalog[1].get::<_, String>(1), "title");
+    assert_eq!(renamed_catalog[1].get::<_, i16>(2), 2);
+
+    execute_storage_update(
+        &storage,
+        "ALTER TABLE quackgis.main.catalog_projection_renamed DROP COLUMN active",
+    )
+    .await;
+    execute_storage_update(
+        &storage,
+        "ALTER TABLE quackgis.main.catalog_projection_renamed ADD COLUMN active BOOLEAN",
+    )
+    .await;
+    let readded = client
+        .query_one(
+            "SELECT c.relnatts, a.attnum FROM pg_class c \
+             JOIN pg_attribute a ON a.attrelid = c.oid \
+             WHERE c.relname = 'catalog_projection_renamed' AND a.attname = 'active'",
+            &[],
+        )
+        .await
+        .expect("catalog tombstone attribute numbering");
+    assert_eq!(readded.get::<_, i16>(0), 6);
+    assert_eq!(readded.get::<_, i16>(1), 6);
+
+    execute_storage_update(
+        &storage,
+        "CREATE TABLE quackgis.main.unsupported_catalog_type(payload STRUCT(x INTEGER))",
+    )
+    .await;
+    client
+        .query(
+            "SELECT a.atttypid FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid \
+             WHERE c.relname = 'unsupported_catalog_type'",
+            &[],
+        )
+        .await
+        .expect_err("unsupported user-column type must fail closed");
+    execute_storage_update(
+        &storage,
+        "DROP TABLE quackgis.main.unsupported_catalog_type",
+    )
+    .await;
+
+    execute_storage_update(
+        &storage,
+        "DROP TABLE quackgis.main.catalog_projection_renamed",
+    )
+    .await;
+    execute_storage_update(
+        &storage,
+        "CREATE TABLE quackgis.main.catalog_projection_renamed(id BIGINT)",
+    )
+    .await;
+    let recreated = client
+        .query_one(
+            "SELECT c.oid, c.reltype, a.attnum FROM pg_class c \
+             JOIN pg_attribute a ON a.attrelid = c.oid \
+             WHERE c.relname = 'catalog_projection_renamed'",
+            &[],
+        )
+        .await
+        .expect("recreated catalog identity");
+    assert_ne!(recreated.get::<_, u32>(0), relation_oid);
+    assert_ne!(recreated.get::<_, u32>(1), row_type_oid);
+    assert_eq!(recreated.get::<_, i16>(2), 1);
+
+    connection.abort();
+    server.abort();
+}
+
+async fn execute_storage_update(storage: &Arc<DuckDbAdbcStorage>, sql: &'static str) {
+    let storage = Arc::clone(storage);
+    tokio::task::spawn_blocking(move || storage.execute_update(sql))
+        .await
+        .expect("development catalog DDL worker")
+        .unwrap_or_else(|error| panic!("development catalog DDL {sql}: {error}"));
 }
 
 #[test]
@@ -359,7 +677,8 @@ fn development_ducklake_column_identity_contract() {
     assert_eq!(readded_state, (initial_next_oid, added_state.1 + 2));
     drop(storage);
 
-    let reopened = DuckDbAdbcStorage::open(config.clone()).expect("reopen development DuckLake");
+    let reopened =
+        Arc::new(DuckDbAdbcStorage::open(config.clone()).expect("reopen development DuckLake"));
     assert_eq!(
         identity_rows(
             &reopened
@@ -414,7 +733,7 @@ fn development_ducklake_column_identity_contract() {
     assert_eq!(first_i64(&attribute_mappings, 0), 5);
 
     EngineStorageKernel::execute_update_contract(
-        &reopened,
+        reopened.as_ref(),
         "CREATE TABLE quackgis.main.contract_identity(flag BOOLEAN)",
     )
     .expect("contract DDL reconciliation");
@@ -447,7 +766,7 @@ fn development_ducklake_column_identity_contract() {
         1
     );
     EngineStorageKernel::ingest_contract(
-        &reopened,
+        reopened.as_ref(),
         &EngineTableRef {
             catalog: "quackgis".to_owned(),
             schema: "main".to_owned(),
@@ -524,6 +843,12 @@ fn development_ducklake_column_identity_contract() {
         )
         .expect("complete concurrent registry coverage");
     assert_eq!(first_i64(&missing, 0), 0);
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("development catalog Tokio runtime")
+        .block_on(prove_registry_catalog_pgwire(Arc::clone(&reopened)));
 
     let corruption = reopened.transaction(|transaction| {
         transaction.execute_update(

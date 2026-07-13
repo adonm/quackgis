@@ -168,8 +168,8 @@ catalog surfaces remain open unless a focused test says otherwise.
   array/collation link, wire/OID parameter types, and WKB transport. All
   unimplemented/private catalog routing and unsupported wildcard/nested/set/
   derived/implicit-join/CTE/cross-database shapes fail closed. The structurally
-  lossy `TABLE` form is rejected globally. This does not claim user-object catalogs,
-  RowDescription origins, or named-client execution against QuackGIS. An opt-in
+  lossy `TABLE` form is rejected globally. This does not claim named-client
+  execution against QuackGIS. An opt-in
   checksum-pinned DuckLake 1.5.4 development extension now proves the selected
   public column-identity lifecycle contract through ADBC. That lane also proves
   durable namespace/relation/row-type OID and per-table attribute-number
@@ -178,8 +178,14 @@ catalog surfaces remain open unless a focused test says otherwise.
   reconciliation; all public development create paths pass the gate, and direct
   or dynamically indirect pgwire access to registry tables is denied. Empty
   schemas remain unsupported because the selected API emits no durable identity
-  for them. This lane is not loaded by default, packaged, or release-supported,
-  and does not yet expose user-object catalogs.
+  for them. The development lane now exposes current base tables through guarded,
+  registry-backed `pg_namespace`, `pg_class`, `pg_attribute`, and composite
+  `pg_type` rows. Actual pgwire joins prove stable rename/reopen identity,
+  attribute tombstones, drop/recreate, non-public schemas, scalar/spatial type
+  references, direct-column/wildcard RowDescription origins, unsupported-type
+  rejection, and prepared-read epoch invalidation. Baseline startup still rejects
+  those user-object catalogs explicitly. This lane is not loaded by default,
+  packaged, or release-supported.
 - Binary columns named `geom_wkb` use the same geometry sentinel OID as the
   maintained COPY bbox layout. RowDescription plus text hex-WKB, binary WKB, and
   NULL transport are tested through pgwire for geometry and the maintained

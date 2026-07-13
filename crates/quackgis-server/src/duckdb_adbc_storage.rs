@@ -64,6 +64,19 @@ struct BboxQueryTarget {
     probe: Expr,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogColumnIdentity {
+    pub name: String,
+    pub relation_oid: u32,
+    pub attribute_number: i16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogTableIdentity {
+    pub schema_epoch: u64,
+    pub columns: Vec<CatalogColumnIdentity>,
+}
+
 /// Whether DuckDB may download the DuckLake extension during initialization.
 ///
 /// `LoadOnly` is the production-safe default: image construction must install
@@ -506,6 +519,13 @@ impl DuckDbAdbcStorage {
         if catalog_identity_enabled {
             initialize_catalog_identity_registry_on(&mut connection, &config.catalog_name)
                 .context("initializing transactional PostgreSQL catalog identity")?;
+            execute_update_on(
+                &mut connection,
+                &crate::postgres_compat::duckdb_identity_catalog_bootstrap_sql(
+                    &config.catalog_name,
+                ),
+            )
+            .context("projecting registry-backed PostgreSQL catalogs")?;
         }
 
         Ok(Self {
@@ -541,6 +561,119 @@ impl DuckDbAdbcStorage {
 
     pub fn lifecycle(&self) -> Arc<RuntimeLifecycle> {
         Arc::clone(&self.lifecycle)
+    }
+
+    pub fn catalog_identity_enabled(&self) -> bool {
+        self.catalog_identity_enabled
+    }
+
+    pub fn catalog_schema_epoch(&self) -> EngineResult<Option<u64>> {
+        if !self.catalog_identity_enabled {
+            return Ok(None);
+        }
+        self.with_connection_engine(|connection| {
+            let _catalog_commit = self.catalog_commit_guard().map_err(anyhow_engine_error)?;
+            catalog_schema_epoch_on(connection, &self.catalog_name).map(Some)
+        })
+    }
+
+    pub fn catalog_table_identity(
+        &self,
+        table: &EngineTableRef,
+    ) -> EngineResult<Option<CatalogTableIdentity>> {
+        if !self.catalog_identity_enabled {
+            return Ok(None);
+        }
+        if table.catalog != self.catalog_name {
+            return Err(EngineError::new(
+                EngineErrorKind::Unsupported,
+                "PostgreSQL catalog identity is available only for the configured DuckLake catalog",
+            ));
+        }
+        let schema = if table.schema.eq_ignore_ascii_case("public") {
+            "main"
+        } else {
+            table.schema.as_str()
+        };
+        let sql = format!(
+            "SELECT c.column_name, CAST(c.relation_oid AS BIGINT), \
+                    CAST(c.attnum AS BIGINT), CAST(s.schema_epoch AS BIGINT) \
+             FROM quackgis_pg_catalog._current_columns c, \
+                  {}.{}.catalog_state s \
+             WHERE s.singleton AND lower(c.schema_name) = lower({}) \
+               AND lower(c.table_name) = lower({}) \
+             ORDER BY c.ordinal_position",
+            quote_identifier(&self.catalog_name),
+            quote_identifier(crate::postgres_compat::INTERNAL_SCHEMA),
+            quote_literal(schema),
+            quote_literal(&table.table),
+        );
+        self.with_connection_engine(|connection| {
+            let _catalog_commit = self.catalog_commit_guard().map_err(anyhow_engine_error)?;
+            let result = query_result_on(connection, &sql, None)?;
+            let mut columns = Vec::new();
+            let mut schema_epoch = None;
+            for batch in result.batches {
+                let names = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| {
+                        EngineError::new(
+                            EngineErrorKind::Internal,
+                            "catalog column name is not Utf8",
+                        )
+                    })?;
+                let relation_oids = int64_column(&batch, 1, "catalog relation OID")?;
+                let attribute_numbers = int64_column(&batch, 2, "catalog attribute number")?;
+                let epochs = int64_column(&batch, 3, "catalog schema epoch")?;
+                for row in 0..batch.num_rows() {
+                    let relation_oid = u32::try_from(relation_oids.value(row)).map_err(|_| {
+                        EngineError::new(
+                            EngineErrorKind::Internal,
+                            "catalog relation OID is outside the PostgreSQL OID range",
+                        )
+                    })?;
+                    let attribute_number =
+                        i16::try_from(attribute_numbers.value(row)).map_err(|_| {
+                            EngineError::new(
+                                EngineErrorKind::Internal,
+                                "catalog attribute number is outside the PostgreSQL range",
+                            )
+                        })?;
+                    if attribute_number <= 0 {
+                        return Err(EngineError::new(
+                            EngineErrorKind::Internal,
+                            "catalog attribute number is not positive",
+                        ));
+                    }
+                    let epoch = u64::try_from(epochs.value(row)).map_err(|_| {
+                        EngineError::new(
+                            EngineErrorKind::Internal,
+                            "catalog schema epoch is outside the supported range",
+                        )
+                    })?;
+                    if schema_epoch
+                        .replace(epoch)
+                        .is_some_and(|current| current != epoch)
+                    {
+                        return Err(EngineError::new(
+                            EngineErrorKind::Internal,
+                            "catalog table identity spans multiple schema epochs",
+                        ));
+                    }
+                    columns.push(CatalogColumnIdentity {
+                        name: names.value(row).to_owned(),
+                        relation_oid,
+                        attribute_number,
+                    });
+                }
+            }
+            Ok(schema_epoch.map(|schema_epoch| CatalogTableIdentity {
+                schema_epoch,
+                columns,
+            }))
+        })
     }
 
     pub fn transaction_state(&self) -> EngineTransactionState {
@@ -671,13 +804,22 @@ impl DuckDbAdbcStorage {
     }
 
     pub fn query_stream(self: &Arc<Self>, sql: &str) -> EngineResult<EngineQueryStream> {
-        self.query_bound_stream(sql, None)
+        self.query_bound_stream_at_catalog_epoch(sql, None, None)
     }
 
     pub fn query_bound_stream(
         self: &Arc<Self>,
         sql: &str,
         parameters: Option<RecordBatch>,
+    ) -> EngineResult<EngineQueryStream> {
+        self.query_bound_stream_at_catalog_epoch(sql, parameters, None)
+    }
+
+    pub fn query_bound_stream_at_catalog_epoch(
+        self: &Arc<Self>,
+        sql: &str,
+        parameters: Option<RecordBatch>,
+        expected_catalog_epoch: Option<u64>,
     ) -> EngineResult<EngineQueryStream> {
         if parameters
             .as_ref()
@@ -690,6 +832,27 @@ impl DuckDbAdbcStorage {
         }
         validate_read_query_sql(sql)?;
         let mut connection = self.take_connection_engine()?;
+        let catalog_commit = self.catalog_commit_guard().map_err(anyhow_engine_error)?;
+        if let Some(expected) = expected_catalog_epoch {
+            let current = match catalog_schema_epoch_on(&mut connection, &self.catalog_name) {
+                Ok(current) => current,
+                Err(error) => {
+                    drop(catalog_commit);
+                    self.return_connection(connection)
+                        .map_err(anyhow_engine_error)?;
+                    return Err(error);
+                }
+            };
+            if current != expected {
+                drop(catalog_commit);
+                self.return_connection(connection)
+                    .map_err(anyhow_engine_error)?;
+                return Err(EngineError::new(
+                    EngineErrorKind::Unsupported,
+                    "cached PostgreSQL statement was invalidated by a schema change",
+                ));
+            }
+        }
         let cancellation = Arc::new(DuckDbCancelHandle {
             connection: Mutex::new(connection.clone()),
             requested: AtomicBool::new(false),
@@ -707,6 +870,7 @@ impl DuckDbAdbcStorage {
             let schema = reader.schema();
             Ok((statement, reader, schema))
         })();
+        drop(catalog_commit);
         match setup {
             Ok((statement, reader, schema)) => Ok(EngineQueryStream::new(
                 schema,
@@ -2266,6 +2430,46 @@ fn validate_catalog_identity_coverage_on(
         bail!("DuckLake catalog identity coverage returned an invalid result shape");
     }
     Ok(())
+}
+
+fn catalog_schema_epoch_on(connection: &mut ManagedConnection, catalog: &str) -> EngineResult<u64> {
+    let sql = format!(
+        "SELECT CAST(schema_epoch AS BIGINT) FROM {}.{}.catalog_state WHERE singleton",
+        quote_identifier(catalog),
+        quote_identifier(crate::postgres_compat::INTERNAL_SCHEMA),
+    );
+    let result = query_result_on(connection, &sql, None)?;
+    let batch = result.batches.first().ok_or_else(|| {
+        EngineError::new(
+            EngineErrorKind::Internal,
+            "catalog schema epoch query returned no batch",
+        )
+    })?;
+    if result.batches.len() != 1 || batch.num_rows() != 1 {
+        return Err(EngineError::new(
+            EngineErrorKind::Internal,
+            "catalog schema epoch query returned an invalid result shape",
+        ));
+    }
+    let epoch = int64_column(batch, 0, "catalog schema epoch")?.value(0);
+    u64::try_from(epoch).map_err(|_| {
+        EngineError::new(
+            EngineErrorKind::Internal,
+            "catalog schema epoch is outside the supported range",
+        )
+    })
+}
+
+fn int64_column<'a>(
+    batch: &'a RecordBatch,
+    column: usize,
+    label: &str,
+) -> EngineResult<&'a Int64Array> {
+    batch
+        .column(column)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .ok_or_else(|| EngineError::new(EngineErrorKind::Internal, format!("{label} is not Int64")))
 }
 
 fn query_on(connection: &mut ManagedConnection, sql: &str) -> Result<Vec<RecordBatch>> {

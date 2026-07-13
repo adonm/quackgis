@@ -214,10 +214,13 @@ upstream schema-level API before that surface can be claimed.
 - A pooled or reused native connection never inherits another pgwire session's
   role or request context.
 
-The development C2 registry now maintains the schema half of the first invariant:
-a committed identity fingerprint advances one durable epoch for create, rename,
-add, drop, and recreate, while rollback and restart without change do not. No
-cache consumes that epoch yet, and the security epoch remains future C4 work.
+The development registry maintains the schema half of the first invariant: a
+committed identity fingerprint advances one durable epoch for create, rename,
+add, drop, and recreate, while rollback and restart without change do not.
+Extended-protocol reads pin that epoch at parse time and reject execution after a
+change; direct-column origins are resolved from the same guarded registry
+snapshot. REST and other catalog caches do not consume it yet, and the security
+epoch remains future C4 work.
 
 ## Compatibility surfaces
 
@@ -507,8 +510,17 @@ instead of falling through to DuckDB/user objects. CTE shadowing, wildcard,
 nested/set/derived type-preserving expressions, `USING`/`NATURAL` catalog joins,
 and three-part qualification fail closed until their provenance can be represented.
 Direct private-schema access and the structurally lossy `TABLE` query form are
-rejected. User-object catalogs/OIDs, broader built-ins, `reg*`, and RowDescription
-relation/attribute origins remain open.
+rejected. In the checksum-pinned development identity lane, current DuckLake base
+tables now add registry-backed namespace, `pg_class`, `pg_attribute`, and
+composite row-type rows. Pgwire joins prove PostgreSQL OID/`name`/internal-`char`
+types, scalar/spatial type references, nullability, rename/reopen, retained
+attribute gaps, drop/recreate, and non-public schemas. Direct qualified or unambiguous base-table columns and plain wildcard
+projections carry matching relation OID/attribute-number origins, including
+joins; expressions carry zero origins. Unsupported column types and baseline
+startup without the identity capability fail closed. This remains development-
+only until upstream acceptance and a signed official bundle. Broader built-ins,
+`reg*`, constraints/indexes/defaults/comments, privilege-aware visibility, and
+complex expression provenance remain open.
 
 The exact QGIS 3.44 four-statement session bootstrap now passes as the only
 multi-statement exception: simple-protocol batches are limited to eight structurally

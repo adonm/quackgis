@@ -515,6 +515,21 @@ async fn client_neutral_catalog_contract() {
         .expect("ordinary alias row");
     assert_eq!(row.get::<_, i32>(0), -1);
     assert_eq!(row.get::<_, String>(1), "base");
+
+    for sql in [
+        "SELECT relname FROM pg_catalog.pg_class",
+        "SELECT attname FROM pg_catalog.pg_attribute",
+    ] {
+        let error = client
+            .query(sql, &[])
+            .await
+            .expect_err("baseline catalog must reject unavailable user identity");
+        assert_eq!(
+            error.code(),
+            Some(&tokio_postgres::error::SqlState::FEATURE_NOT_SUPPORTED),
+            "{sql}"
+        );
+    }
     connection.abort();
 }
 

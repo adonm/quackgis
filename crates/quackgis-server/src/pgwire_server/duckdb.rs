@@ -26,7 +26,7 @@ use pgwire::api::cancel::CancelHandler;
 use pgwire::api::copy::CopyHandler;
 use pgwire::api::portal::{Format, Portal, PortalExecutionState};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler, send_partial_query_response};
-use pgwire::api::results::{CopyResponse, QueryResponse, Response, Tag};
+use pgwire::api::results::{CopyResponse, FieldInfo, QueryResponse, Response, Tag};
 use pgwire::api::stmt::QueryParser;
 use pgwire::api::store::PortalStore;
 use pgwire::api::{
@@ -43,8 +43,8 @@ use pgwire::messages::response::TransactionStatus;
 use sqlparser::ast::{
     BinaryOperator, CopySource, CopyTarget as AstCopyTarget, Expr, FunctionArg, FunctionArgExpr,
     FunctionArguments, Ident, JoinConstraint, JoinOperator, ObjectName, ObjectNamePart, SelectItem,
-    Set, SetExpr, Statement, TableFactor, Value, visit_expressions, visit_expressions_mut,
-    visit_relations_mut,
+    SelectItemQualifiedWildcardKind, Set, SetExpr, Statement, TableFactor, Value,
+    WildcardAdditionalOptions, visit_expressions, visit_expressions_mut, visit_relations_mut,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
@@ -55,7 +55,7 @@ use super::{
     serve_with_handlers, serve_with_handlers_on_listener, serve_with_handlers_on_listener_until,
 };
 use crate::auth::{AuthConfig, AuthMode};
-use crate::duckdb_adbc_storage::DuckDbAdbcStorage;
+use crate::duckdb_adbc_storage::{CatalogTableIdentity, DuckDbAdbcStorage};
 use crate::engine_api::{
     EngineCancellation, EngineError, EngineErrorKind, EngineMaintenanceRequest, EngineQueryStream,
     EngineResult, EngineStorageKernel, EngineTableRef, EngineTransactionState, IngestDisposition,
@@ -219,6 +219,20 @@ struct DuckDbStatement {
     parameter_schema: SchemaRef,
     result_schema: SchemaRef,
     parameter_types: Vec<Type>,
+    result_origins: Vec<Option<CatalogColumnOrigin>>,
+    catalog_epoch: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CatalogColumnOrigin {
+    relation_oid: u32,
+    attribute_number: i16,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ResolvedResultOrigins {
+    origins: Vec<Option<CatalogColumnOrigin>>,
+    catalog_epoch: Option<u64>,
 }
 
 struct DuckDbParser {
@@ -254,9 +268,15 @@ impl QueryParser for DuckDbParser {
                 parameter_schema: Arc::clone(&empty),
                 result_schema: empty,
                 parameter_types: Vec::new(),
+                result_origins: Vec::new(),
+                catalog_epoch: None,
             });
         }
-        let validated = validate_statement(sql, ProtocolMode::Extended)?;
+        let validated = validate_statement_with_catalog_identity(
+            sql,
+            ProtocolMode::Extended,
+            self.storage.catalog_identity_enabled(),
+        )?;
         let oid_parameters = catalog_oid_parameter_indexes(&validated.ast);
         authorize_statement(client, &self.auth, &validated.ast)?;
         if validated.kind == StatementKind::SessionSet {
@@ -268,6 +288,8 @@ impl QueryParser for DuckDbParser {
                 parameter_schema: Arc::clone(&empty),
                 result_schema: empty,
                 parameter_types: Vec::new(),
+                result_origins: Vec::new(),
+                catalog_epoch: None,
             });
         }
         let storage = client_session(
@@ -282,9 +304,26 @@ impl QueryParser for DuckDbParser {
             .await
             .map_err(admission_error)?;
         let describe_sql = validated.sql.clone();
-        let description = self
+        let origin_statement = validated.ast.clone();
+        let (description, result_origins, catalog_epoch) = self
             .blocking_workers
-            .run_regular(move || storage.describe(&describe_sql))
+            .run_regular(move || {
+                let epoch_before = storage.catalog_schema_epoch()?;
+                let description = storage.describe(&describe_sql)?;
+                let result_origins = resolve_result_origins(
+                    &storage,
+                    &origin_statement,
+                    Some(description.result_schema.fields().len()),
+                )?;
+                let epoch_after = storage.catalog_schema_epoch()?;
+                if epoch_before != epoch_after {
+                    return Err(EngineError::new(
+                        EngineErrorKind::Unsupported,
+                        "PostgreSQL catalog changed while preparing the statement",
+                    ));
+                }
+                Ok((description, result_origins.origins, epoch_after))
+            })
             .await
             .map_err(blocking_worker_error)?
             .map_err(engine_error)?;
@@ -344,6 +383,8 @@ impl QueryParser for DuckDbParser {
             parameter_schema,
             result_schema,
             parameter_types,
+            result_origins,
+            catalog_epoch,
         })
     }
 
@@ -355,12 +396,12 @@ impl QueryParser for DuckDbParser {
         &self,
         statement: &Self::Statement,
         format: Option<&Format>,
-    ) -> PgWireResult<Vec<pgwire::api::results::FieldInfo>> {
+    ) -> PgWireResult<Vec<FieldInfo>> {
         let default_format = Format::UnifiedText;
-        arrow_schema_to_pg_fields(
+        result_fields_with_origins(
             statement.result_schema.as_ref(),
             format.unwrap_or(&default_format),
-            None,
+            &statement.result_origins,
         )
     }
 }
@@ -425,7 +466,10 @@ impl SimpleQueryHandler for DuckDbService {
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-        let (sql, kind, ast) = validate_simple_sql(query)?;
+        let (sql, kind, ast) = validate_simple_sql_with_catalog_identity(
+            query,
+            self.storage.catalog_identity_enabled(),
+        )?;
         let failed_transaction = client.transaction_status() == TransactionStatus::Error;
         if failed_transaction
             && !matches!(
@@ -463,10 +507,29 @@ impl SimpleQueryHandler for DuckDbService {
                     .acquire(OperationClass::Reader)
                     .await
                     .map_err(admission_error)?;
+                let origin_statement = ast.clone();
+                let origin_storage = Arc::clone(&storage);
+                let resolved_origins = self
+                    .control
+                    .blocking_workers
+                    .run_regular(move || match origin_statement.as_ref() {
+                        Some(statement) => resolve_result_origins(&origin_storage, statement, None),
+                        None => Ok(ResolvedResultOrigins::default()),
+                    })
+                    .await
+                    .map_err(blocking_worker_error)?
+                    .map_err(engine_error)?;
+                let expected_catalog_epoch = resolved_origins.catalog_epoch;
                 let mut result = self
                     .control
                     .blocking_workers
-                    .run_regular(move || storage.query_stream(&sql))
+                    .run_regular(move || {
+                        storage.query_bound_stream_at_catalog_epoch(
+                            &sql,
+                            None,
+                            expected_catalog_epoch,
+                        )
+                    })
                     .await
                     .map_err(blocking_worker_error)?
                     .map_err(engine_error)?
@@ -495,6 +558,7 @@ impl SimpleQueryHandler for DuckDbService {
                     self.control.result_batch_bytes,
                     Arc::clone(&self.control.blocking_workers),
                     result_schema.as_ref(),
+                    &resolved_origins.origins,
                 )?)])
             }
             SimpleStatementKind::Write(command) => {
@@ -757,6 +821,7 @@ impl ExtendedQueryHandler for DuckDbService {
         )
         .await?;
         let sql = statement.sql.clone();
+        let catalog_epoch = statement.catalog_epoch;
         match statement.kind {
             StatementKind::Read => {
                 let permit = self
@@ -769,16 +834,21 @@ impl ExtendedQueryHandler for DuckDbService {
                     .control
                     .blocking_workers
                     .run_regular(move || {
-                        if let Some(parameters) = parameters {
-                            storage.query_bound_stream(&sql, Some(parameters))
-                        } else {
-                            storage.query_stream(&sql)
-                        }
+                        storage.query_bound_stream_at_catalog_epoch(&sql, parameters, catalog_epoch)
                     })
                     .await
                     .map_err(blocking_worker_error)?
                     .map_err(engine_error)?
                     .with_guard(Box::new(permit));
+                if !result_schema_compatible(
+                    statement.result_schema.as_ref(),
+                    result.schema.as_ref(),
+                ) {
+                    return Err(user_error(
+                        "0A000",
+                        "cached PostgreSQL statement result type changed",
+                    ));
+                }
                 if let Some(cancellation) = result.cancellation() {
                     let (pid, secret) = client.pid_and_secret_key();
                     let deadline_cancellation = Arc::clone(&cancellation);
@@ -800,6 +870,7 @@ impl ExtendedQueryHandler for DuckDbService {
                     self.control.result_batch_bytes,
                     Arc::clone(&self.control.blocking_workers),
                     Some(statement.result_schema.as_ref()),
+                    &statement.result_origins,
                 )?))
             }
             StatementKind::Write(command) => {
@@ -890,8 +961,16 @@ struct ValidatedStatement {
     ast: Statement,
 }
 
+#[cfg(test)]
 fn validate_simple_sql(
     sql: &str,
+) -> PgWireResult<(String, SimpleStatementKind, Option<Statement>)> {
+    validate_simple_sql_with_catalog_identity(sql, false)
+}
+
+fn validate_simple_sql_with_catalog_identity(
+    sql: &str,
+    catalog_identity_enabled: bool,
 ) -> PgWireResult<(String, SimpleStatementKind, Option<Statement>)> {
     if let Some(target) = parse_copy_target(sql)? {
         let sql = normalize_sql(sql)?;
@@ -904,7 +983,11 @@ fn validate_simple_sql(
             None,
         ));
     }
-    let validated = validate_statement(sql, ProtocolMode::Simple)?;
+    let validated = validate_statement_with_catalog_identity(
+        sql,
+        ProtocolMode::Simple,
+        catalog_identity_enabled,
+    )?;
     let kind = match validated.kind {
         StatementKind::Read => SimpleStatementKind::Read,
         StatementKind::Write(command) => SimpleStatementKind::Write(command),
@@ -933,7 +1016,16 @@ enum SimpleStatementKind {
     Copy(CopyTarget),
 }
 
+#[cfg(test)]
 fn validate_statement(sql: &str, mode: ProtocolMode) -> PgWireResult<ValidatedStatement> {
+    validate_statement_with_catalog_identity(sql, mode, false)
+}
+
+fn validate_statement_with_catalog_identity(
+    sql: &str,
+    mode: ProtocolMode,
+    catalog_identity_enabled: bool,
+) -> PgWireResult<ValidatedStatement> {
     let sql = normalize_sql(sql)?;
     let sql = crate::spatial_compat::rewrite_postgis_sql(&sql);
     let mut statements = Parser::parse_sql(&PostgreSqlDialect {}, &sql)
@@ -987,7 +1079,7 @@ fn validate_statement(sql: &str, mode: ProtocolMode) -> PgWireResult<ValidatedSt
             "TABLE query form is not supported by QuackGIS authorization or catalog routing",
         ));
     }
-    if let Some(relation) = unsupported_catalog_relation(&statement) {
+    if let Some(relation) = unsupported_catalog_relation(&statement, catalog_identity_enabled) {
         return Err(user_error(
             "0A000",
             &format!("PostgreSQL catalog relation {relation} is not implemented by QuackGIS"),
@@ -1417,12 +1509,18 @@ fn maintained_pg_catalog_relation(name: &ObjectName) -> Option<&'static str> {
         "pg_namespace",
         "pg_database",
         "pg_type",
+        "pg_class",
+        "pg_attribute",
         "pg_range",
         "pg_collation",
         "pg_roles",
     ]
     .into_iter()
     .find(|candidate| pg_identifier_matches(table, candidate))
+}
+
+fn identity_catalog_relation(relation: &str) -> bool {
+    matches!(relation, "pg_class" | "pg_attribute")
 }
 
 fn catalog_relation_identifier(name: &ObjectName) -> Option<(&Ident, bool)> {
@@ -1441,7 +1539,10 @@ fn catalog_relation_identifier(name: &ObjectName) -> Option<(&Ident, bool)> {
     }
 }
 
-fn unsupported_catalog_relation(statement: &Statement) -> Option<String> {
+fn unsupported_catalog_relation(
+    statement: &Statement,
+    catalog_identity_enabled: bool,
+) -> Option<String> {
     let mut clone = statement.clone();
     let mut unsupported = None;
     let _: ControlFlow<()> = visit_relations_mut(&mut clone, |name| {
@@ -1451,9 +1552,10 @@ fn unsupported_catalog_relation(statement: &Statement) -> Option<String> {
         let lower_table = table.value.to_ascii_lowercase();
         let unqualified_pg_name =
             lower_table.starts_with("pg_") && pg_identifier_matches(table, &lower_table);
-        if maintained_pg_catalog_relation(name).is_none()
-            && (explicitly_catalog || unqualified_pg_name)
-        {
+        let maintained = maintained_pg_catalog_relation(name);
+        if maintained.is_some_and(identity_catalog_relation) && !catalog_identity_enabled {
+            unsupported = Some(lower_table);
+        } else if maintained.is_none() && (explicitly_catalog || unqualified_pg_name) {
             unsupported = Some(table.value.to_ascii_lowercase());
         }
         if unsupported.is_some() {
@@ -1701,6 +1803,8 @@ fn stale_catalog_column_qualifier(expression: &Expr) -> bool {
             "pg_namespace",
             "pg_database",
             "pg_type",
+            "pg_class",
+            "pg_attribute",
             "pg_range",
             "pg_collation",
             "pg_roles",
@@ -2066,6 +2170,21 @@ fn catalog_columns(relation: &str) -> &'static [(&'static str, PgTypeHint)] {
             ("typbasetype", PgTypeHint::Oid),
             ("typcollation", PgTypeHint::Oid),
         ],
+        "pg_class" => &[
+            ("oid", PgTypeHint::Oid),
+            ("relname", PgTypeHint::Name),
+            ("relnamespace", PgTypeHint::Oid),
+            ("reltype", PgTypeHint::Oid),
+            ("relowner", PgTypeHint::Oid),
+            ("relkind", PgTypeHint::Char),
+        ],
+        "pg_attribute" => &[
+            ("attrelid", PgTypeHint::Oid),
+            ("attname", PgTypeHint::Name),
+            ("atttypid", PgTypeHint::Oid),
+            ("attidentity", PgTypeHint::Char),
+            ("attgenerated", PgTypeHint::Char),
+        ],
         "pg_range" => &[
             ("rngtypid", PgTypeHint::Oid),
             ("rngsubtype", PgTypeHint::Oid),
@@ -2105,6 +2224,28 @@ fn catalog_column_names(relation: &str) -> &'static [&'static str] {
             "typtypmod",
             "typndims",
             "typcollation",
+        ],
+        "pg_class" => &[
+            "oid",
+            "relname",
+            "relnamespace",
+            "reltype",
+            "relowner",
+            "relkind",
+            "relnatts",
+            "relrowsecurity",
+        ],
+        "pg_attribute" => &[
+            "attrelid",
+            "attname",
+            "atttypid",
+            "attlen",
+            "attnum",
+            "atttypmod",
+            "attnotnull",
+            "attidentity",
+            "attgenerated",
+            "attisdropped",
         ],
         "pg_range" => &["rngtypid", "rngsubtype"],
         "pg_collation" => &[
@@ -2180,6 +2321,306 @@ fn annotate_catalog_result_schema(statement: &Statement, schema: &Schema) -> Sch
             })
             .collect::<Vec<_>>(),
     )
+}
+
+fn resolve_result_origins(
+    storage: &DuckDbAdbcStorage,
+    statement: &Statement,
+    expected_fields: Option<usize>,
+) -> EngineResult<ResolvedResultOrigins> {
+    let empty = || ResolvedResultOrigins {
+        origins: vec![None; expected_fields.unwrap_or(0)],
+        catalog_epoch: None,
+    };
+    let Statement::Query(query) = statement else {
+        return Ok(empty());
+    };
+    if query.with.is_some() {
+        return Ok(empty());
+    }
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return Ok(empty());
+    };
+    if select.from.is_empty() {
+        return Ok(empty());
+    }
+    let mut sources = Vec::new();
+    for table in &select.from {
+        for factor in
+            std::iter::once(&table.relation).chain(table.joins.iter().map(|join| &join.relation))
+        {
+            let Some(source) = origin_source(storage, factor)? else {
+                return Ok(empty());
+            };
+            sources.push(source);
+        }
+    }
+    let catalog_epoch = sources[0].identity.schema_epoch;
+    if sources
+        .iter()
+        .any(|source| source.identity.schema_epoch != catalog_epoch)
+    {
+        return Err(EngineError::new(
+            EngineErrorKind::Unsupported,
+            "PostgreSQL catalog changed while resolving RowDescription origins",
+        ));
+    }
+    let mut origins = Vec::new();
+    for item in &select.projection {
+        match item {
+            SelectItem::UnnamedExpr(expression)
+            | SelectItem::ExprWithAlias {
+                expr: expression, ..
+            } => origins.push(origin_for_expression(expression, &sources)),
+            SelectItem::Wildcard(options) if plain_wildcard(options) => {
+                for source in &sources {
+                    origins.extend(source.identity.columns.iter().map(column_origin));
+                }
+            }
+            SelectItem::QualifiedWildcard(
+                SelectItemQualifiedWildcardKind::ObjectName(qualifier),
+                options,
+            ) if plain_wildcard(options) => {
+                let matching = sources
+                    .iter()
+                    .filter(|source| {
+                        source_qualifier_matches(qualifier, &source.name, source.alias.as_ref())
+                    })
+                    .collect::<Vec<_>>();
+                let [source] = matching.as_slice() else {
+                    return Ok(empty());
+                };
+                origins.extend(source.identity.columns.iter().map(column_origin));
+            }
+            _ => return Ok(empty()),
+        }
+    }
+    if expected_fields.is_some_and(|expected| origins.len() != expected) {
+        origins = vec![None; expected_fields.unwrap_or(0)];
+    }
+    Ok(ResolvedResultOrigins {
+        origins,
+        catalog_epoch: Some(catalog_epoch),
+    })
+}
+
+struct OriginSource {
+    name: ObjectName,
+    alias: Option<sqlparser::ast::TableAlias>,
+    identity: CatalogTableIdentity,
+}
+
+fn origin_source(
+    storage: &DuckDbAdbcStorage,
+    factor: &TableFactor,
+) -> EngineResult<Option<OriginSource>> {
+    let TableFactor::Table {
+        name,
+        alias,
+        args: None,
+        ..
+    } = factor
+    else {
+        return Ok(None);
+    };
+    if alias
+        .as_ref()
+        .is_some_and(|alias| !alias.columns.is_empty())
+    {
+        return Ok(None);
+    }
+    let Some(table) = user_table_ref(name) else {
+        return Ok(None);
+    };
+    let Some(identity) = storage.catalog_table_identity(&table)? else {
+        return Ok(None);
+    };
+    Ok(Some(OriginSource {
+        name: name.clone(),
+        alias: alias.clone(),
+        identity,
+    }))
+}
+
+fn user_table_ref(name: &ObjectName) -> Option<EngineTableRef> {
+    let parts = object_name_values(name)?;
+    let (catalog, schema, table) = match parts.as_slice() {
+        [table] => ("quackgis", "main", table.as_str()),
+        [schema, table] => (
+            "quackgis",
+            if schema.eq_ignore_ascii_case("public") {
+                "main"
+            } else {
+                schema.as_str()
+            },
+            table.as_str(),
+        ),
+        [catalog, schema, table] if catalog.eq_ignore_ascii_case("quackgis") => (
+            "quackgis",
+            if schema.eq_ignore_ascii_case("public") {
+                "main"
+            } else {
+                schema.as_str()
+            },
+            table.as_str(),
+        ),
+        _ => return None,
+    };
+    if schema.eq_ignore_ascii_case("pg_catalog")
+        || schema.eq_ignore_ascii_case("quackgis_pg_catalog")
+        || schema.eq_ignore_ascii_case(crate::postgres_compat::INTERNAL_SCHEMA)
+    {
+        return None;
+    }
+    Some(EngineTableRef {
+        catalog: catalog.to_owned(),
+        schema: schema.to_owned(),
+        table: table.to_owned(),
+    })
+}
+
+fn origin_for_expression(
+    expression: &Expr,
+    sources: &[OriginSource],
+) -> Option<CatalogColumnOrigin> {
+    match expression {
+        Expr::Identifier(column) => {
+            let matching = sources
+                .iter()
+                .filter_map(|source| origin_for_column(column, &source.identity))
+                .collect::<Vec<_>>();
+            match matching.as_slice() {
+                [origin] => Some(*origin),
+                _ => None,
+            }
+        }
+        Expr::CompoundIdentifier(identifiers) if identifiers.len() >= 2 => {
+            let prefix = &identifiers[..identifiers.len() - 1];
+            let column = identifiers.last()?;
+            let matching = sources
+                .iter()
+                .filter(|source| source_prefix_matches(prefix, &source.name, source.alias.as_ref()))
+                .filter_map(|source| origin_for_column(column, &source.identity))
+                .collect::<Vec<_>>();
+            match matching.as_slice() {
+                [origin] => Some(*origin),
+                _ => None,
+            }
+        }
+        Expr::Nested(expression) => origin_for_expression(expression, sources),
+        _ => None,
+    }
+}
+
+fn origin_for_column(
+    column: &Ident,
+    identity: &CatalogTableIdentity,
+) -> Option<CatalogColumnOrigin> {
+    identity
+        .columns
+        .iter()
+        .find(|candidate| pg_identifier_matches(column, &candidate.name))
+        .and_then(column_origin)
+}
+
+fn column_origin(
+    column: &crate::duckdb_adbc_storage::CatalogColumnIdentity,
+) -> Option<CatalogColumnOrigin> {
+    Some(CatalogColumnOrigin {
+        relation_oid: column.relation_oid,
+        attribute_number: column.attribute_number,
+    })
+}
+
+fn source_prefix_matches(
+    prefix: &[Ident],
+    source: &ObjectName,
+    alias: Option<&sqlparser::ast::TableAlias>,
+) -> bool {
+    if let Some(alias) = alias {
+        return matches!(prefix, [qualifier] if identifier_key(qualifier) == identifier_key(&alias.name));
+    }
+    let source_identifiers = source
+        .0
+        .iter()
+        .map(|part| match part {
+            ObjectNamePart::Identifier(identifier) => Some(identifier),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>();
+    let Some(source_identifiers) = source_identifiers else {
+        return false;
+    };
+    matches!(prefix, [qualifier] if source_identifiers.last().is_some_and(|source| identifier_key(qualifier) == identifier_key(source)))
+        || (prefix.len() == source_identifiers.len()
+            && prefix
+                .iter()
+                .zip(source_identifiers)
+                .all(|(actual, expected)| identifier_key(actual) == identifier_key(expected)))
+}
+
+fn source_qualifier_matches(
+    qualifier: &ObjectName,
+    source: &ObjectName,
+    alias: Option<&sqlparser::ast::TableAlias>,
+) -> bool {
+    let identifiers = qualifier
+        .0
+        .iter()
+        .map(|part| match part {
+            ObjectNamePart::Identifier(identifier) => Some(identifier.clone()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>();
+    identifiers.is_some_and(|identifiers| source_prefix_matches(&identifiers, source, alias))
+}
+
+fn plain_wildcard(options: &WildcardAdditionalOptions) -> bool {
+    options.opt_ilike.is_none()
+        && options.opt_exclude.is_none()
+        && options.opt_except.is_none()
+        && options.opt_replace.is_none()
+        && options.opt_rename.is_none()
+        && options.opt_alias.is_none()
+}
+
+fn result_fields_with_origins(
+    schema: &Schema,
+    format: &Format,
+    origins: &[Option<CatalogColumnOrigin>],
+) -> PgWireResult<Vec<FieldInfo>> {
+    let fields = arrow_schema_to_pg_fields(schema, format, None)?;
+    if origins.len() != fields.len() {
+        return Ok(fields);
+    }
+    Ok(fields
+        .into_iter()
+        .zip(origins)
+        .map(|(field, origin)| {
+            origin.map_or(field.clone(), |origin| {
+                FieldInfo::new(
+                    field.name().to_owned(),
+                    Some(origin.relation_oid as i32),
+                    Some(origin.attribute_number),
+                    field.datatype().clone(),
+                    field.format(),
+                )
+            })
+        })
+        .collect())
+}
+
+fn result_schema_compatible(expected: &Schema, actual: &Schema) -> bool {
+    expected.fields().len() == actual.fields().len()
+        && expected
+            .fields()
+            .iter()
+            .zip(actual.fields())
+            .all(|(expected, actual)| {
+                expected.name() == actual.name()
+                    && expected.data_type() == actual.data_type()
+                    && expected.is_nullable() == actual.is_nullable()
+            })
 }
 
 fn maintained_function_hint(expression: &Expr) -> Option<PgTypeHint> {
@@ -2515,11 +2956,12 @@ fn query_response(
     max_batch_bytes: usize,
     blocking_workers: Arc<BlockingWorkerPool>,
     result_schema: Option<&Schema>,
+    result_origins: &[Option<CatalogColumnOrigin>],
 ) -> PgWireResult<QueryResponse> {
-    let fields = Arc::new(arrow_schema_to_pg_fields(
+    let fields = Arc::new(result_fields_with_origins(
         result_schema.unwrap_or(result.schema.as_ref()),
         format,
-        None,
+        result_origins,
     )?);
     let rows = futures::stream::try_unfold(
         StreamingRowState {
@@ -3264,6 +3706,28 @@ mod tests {
             );
         }
 
+        let identity_catalog = validate_statement_with_catalog_identity(
+            "SELECT n.oid, n.nspname, c.oid, c.relname, c.reltype, c.relkind, \
+                    c.relnatts, a.attname, a.atttypid, a.attnum, a.attidentity \
+             FROM pg_catalog.pg_namespace n \
+             JOIN pg_catalog.pg_class c ON c.relnamespace = n.oid \
+             JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid \
+             WHERE n.nspname = 'public' ORDER BY c.oid, a.attnum",
+            ProtocolMode::Extended,
+            true,
+        )
+        .expect("capability-gated user catalog query");
+        assert!(
+            identity_catalog
+                .sql
+                .contains("quackgis_pg_catalog.pg_class")
+        );
+        assert!(
+            identity_catalog
+                .sql
+                .contains("quackgis_pg_catalog.pg_attribute")
+        );
+
         let user_oid = validate_statement(
             "SELECT p.oid FROM quackgis.main.points p WHERE p.oid = $1",
             ProtocolMode::Extended,
@@ -3321,6 +3785,37 @@ mod tests {
         )
         .expect("bootstrap owner query");
         assert!(owner.sql.contains("quackgis_pg_catalog.pg_roles"));
+    }
+
+    #[test]
+    fn row_description_origins_preserve_postgresql_identifiers() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("label", DataType::Utf8, true),
+            Field::new("expression", DataType::Int64, true),
+        ]);
+        let origins = [
+            Some(CatalogColumnOrigin {
+                relation_oid: 100_001,
+                attribute_number: 1,
+            }),
+            Some(CatalogColumnOrigin {
+                relation_oid: 100_001,
+                attribute_number: 3,
+            }),
+            None,
+        ];
+        let fields =
+            result_fields_with_origins(&schema, &Format::UnifiedText, &origins).expect("fields");
+        assert_eq!(
+            (fields[0].table_id(), fields[0].column_id()),
+            (Some(100_001), Some(1))
+        );
+        assert_eq!(
+            (fields[1].table_id(), fields[1].column_id()),
+            (Some(100_001), Some(3))
+        );
+        assert_eq!((fields[2].table_id(), fields[2].column_id()), (None, None));
     }
 
     #[test]

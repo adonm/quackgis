@@ -151,9 +151,39 @@ const TYPE_ROWS: &[PgTypeRow] = &[
     spatial_array(GEOGRAPHY_ARRAY_OID, "_geography", GEOGRAPHY_OID),
 ];
 
-fn type_rows_sql() -> String {
-    TYPE_ROWS
-        .iter()
+// Scalar and array rows needed only once user-column catalogs are enabled.
+// Keeping these out of the baseline projection preserves the frozen
+// pg18-column-core-v1 oracle until the upstream DuckLake identity API ships in
+// an official bundle.
+const IDENTITY_TYPE_ROWS: &[PgTypeRow] = &[
+    builtin_scalar(17, "bytea", -1, 'U', 1001),
+    builtin_array(1001, "_bytea", 17, 0),
+    builtin_scalar(700, "float4", 4, 'N', 1021).by_value(),
+    builtin_scalar(701, "float8", 8, 'N', 1022)
+        .by_value()
+        .preferred(),
+    builtin_array(1021, "_float4", 700, 0),
+    builtin_array(1022, "_float8", 701, 0),
+    builtin_scalar(1082, "date", 4, 'D', 1182).by_value(),
+    builtin_scalar(1083, "time", 8, 'D', 1183).by_value(),
+    builtin_array(1115, "_timestamp", 1114, 0),
+    builtin_scalar(1114, "timestamp", 8, 'D', 1115).by_value(),
+    builtin_array(1182, "_date", 1082, 0),
+    builtin_array(1183, "_time", 1083, 0),
+    builtin_array(1185, "_timestamptz", 1184, 0),
+    builtin_scalar(1184, "timestamptz", 8, 'D', 1185)
+        .by_value()
+        .preferred(),
+    builtin_scalar(1186, "interval", 16, 'T', 1187).preferred(),
+    builtin_array(1187, "_interval", 1186, 0),
+    builtin_array(1231, "_numeric", 1700, 0),
+    builtin_scalar(1700, "numeric", -1, 'N', 1231),
+    builtin_scalar(3802, "jsonb", -1, 'U', 3807),
+    builtin_array(3807, "_jsonb", 3802, 0),
+];
+
+fn render_type_rows<'a>(rows: impl IntoIterator<Item = &'a PgTypeRow>) -> String {
+    rows.into_iter()
         .map(|row| {
             format!(
                 "({}::UINTEGER, '{}'::VARCHAR, {}::UINTEGER, {}::SMALLINT, {}, \
@@ -175,6 +205,14 @@ fn type_rows_sql() -> String {
         })
         .collect::<Vec<_>>()
         .join(",\n")
+}
+
+fn type_rows_sql() -> String {
+    render_type_rows(TYPE_ROWS)
+}
+
+fn identity_type_rows_sql() -> String {
+    render_type_rows(TYPE_ROWS.iter().chain(IDENTITY_TYPE_ROWS))
 }
 
 /// Create the first relational PostgreSQL compatibility catalog.
@@ -221,6 +259,156 @@ pub fn duckdb_catalog_bootstrap_sql() -> String {
          CREATE OR REPLACE MACRO quackgis_current_schemas(include_implicit) AS\n\
            CASE WHEN CAST(include_implicit AS BOOLEAN)\n\
                 THEN ['pg_catalog', 'public'] ELSE ['public'] END;"
+    )
+}
+
+fn duckdb_column_type_oid_sql() -> &'static str {
+    "CASE
+       WHEN data_type = 'BLOB' AND lower(column_name) IN
+         ('geog', 'geography', 'the_geog') THEN 90002
+       WHEN data_type = 'BLOB' AND lower(column_name) IN
+         ('geom', 'geometry', 'the_geom', 'wkb_geometry', 'wkb_geom',
+          'geom_wkb', 'shape', 'footprint', 'way') THEN 90001
+       WHEN data_type IN ('VARCHAR', 'JSON') AND lower(column_name) = 'properties' THEN 3802
+       WHEN data_type IN ('VARCHAR', 'JSON') THEN 25
+       WHEN data_type = 'BOOLEAN' THEN 16
+       WHEN data_type = 'TINYINT' THEN 18
+       WHEN data_type IN ('SMALLINT', 'UTINYINT') THEN 21
+       WHEN data_type IN ('INTEGER', 'USMALLINT') THEN 23
+       WHEN data_type IN ('BIGINT', 'UINTEGER') THEN 20
+       WHEN data_type IN ('HUGEINT', 'UHUGEINT', 'UBIGINT')
+         OR (starts_with(data_type, 'DECIMAL(') AND NOT ends_with(data_type, '[]')) THEN 1700
+       WHEN data_type = 'FLOAT' THEN 700
+       WHEN data_type = 'DOUBLE' THEN 701
+       WHEN data_type = 'DATE' THEN 1082
+       WHEN data_type = 'TIME' THEN 1083
+       WHEN data_type IN ('TIMESTAMP', 'TIMESTAMP_S', 'TIMESTAMP_MS', 'TIMESTAMP_NS') THEN 1114
+       WHEN data_type = 'TIMESTAMP WITH TIME ZONE' THEN 1184
+       WHEN data_type = 'INTERVAL' THEN 1186
+       WHEN data_type = 'BLOB' THEN 17
+       WHEN data_type = 'BOOLEAN[]' THEN 1000
+       WHEN data_type IN ('TINYINT[]', 'SMALLINT[]', 'UTINYINT[]') THEN 1005
+       WHEN data_type IN ('INTEGER[]', 'USMALLINT[]') THEN 1007
+       WHEN data_type IN ('BIGINT[]', 'UINTEGER[]') THEN 1016
+       WHEN data_type IN ('HUGEINT[]', 'UHUGEINT[]', 'UBIGINT[]')
+         OR (starts_with(data_type, 'DECIMAL(') AND ends_with(data_type, '[]')) THEN 1231
+       WHEN data_type = 'FLOAT[]' THEN 1021
+       WHEN data_type = 'DOUBLE[]' THEN 1022
+       WHEN data_type = 'DATE[]' THEN 1182
+       WHEN data_type = 'TIME[]' THEN 1183
+       WHEN data_type IN ('TIMESTAMP[]', 'TIMESTAMP_S[]', 'TIMESTAMP_MS[]', 'TIMESTAMP_NS[]') THEN 1115
+       WHEN data_type = 'TIMESTAMP WITH TIME ZONE[]' THEN 1185
+       WHEN data_type = 'INTERVAL[]' THEN 1187
+       WHEN data_type IN ('VARCHAR[]', 'JSON[]') THEN 1009
+       WHEN data_type = 'BLOB[]' THEN 1001
+       ELSE error('unsupported DuckLake column type in PostgreSQL catalog projection')
+     END"
+}
+
+/// Replace the baseline catalog views with registry-backed user-object views.
+///
+/// This SQL is executed only after the checksum-pinned development DuckLake
+/// identity function and registry have both been validated. `_current_columns`
+/// fails closed if a reader lands between the user commit and the separately
+/// serialized registry reconciliation transaction.
+pub fn duckdb_identity_catalog_bootstrap_sql(catalog: &str) -> String {
+    let catalog_identifier = quote_identifier(catalog);
+    let catalog_literal = quote_literal(catalog);
+    let schema = quote_identifier(INTERNAL_SCHEMA);
+    let type_rows = identity_type_rows_sql();
+    let type_oid = duckdb_column_type_oid_sql();
+    format!(
+        "CREATE OR REPLACE VIEW quackgis_pg_catalog._current_columns AS\n\
+         WITH identity AS (\n\
+           SELECT * FROM ducklake_column_info({catalog_literal})\n\
+           WHERE schema_name <> {internal_schema_literal}\n\
+         ), identity_fingerprint AS (\n\
+           SELECT sha256(coalesce(CAST(to_json(list(struct_pack(\n\
+             schema_uuid := schema_uuid, schema_name := schema_name,\n\
+             table_uuid := table_uuid, table_name := table_name,\n\
+             column_id := column_id, column_name := column_name)\n\
+             ORDER BY schema_uuid, table_uuid, column_id)) AS VARCHAR), '[]'))\n\
+             AS fingerprint\n\
+           FROM identity\n\
+         ), valid AS (\n\
+           SELECT CASE WHEN s.identity_fingerprint = f.fingerprint\n\
+             AND NOT EXISTS (\n\
+               SELECT 1 FROM identity i\n\
+               LEFT JOIN {catalog_identifier}.{schema}.namespace_oid n USING (schema_uuid)\n\
+               LEFT JOIN {catalog_identifier}.{schema}.relation_oid r USING (table_uuid)\n\
+               LEFT JOIN {catalog_identifier}.{schema}.attribute_number a\n\
+                 USING (table_uuid, column_id)\n\
+               LEFT JOIN information_schema.columns c\n\
+                 ON c.table_catalog = {catalog_literal}\n\
+                AND c.table_schema = i.schema_name\n\
+                AND c.table_name = i.table_name\n\
+                AND c.column_name = i.column_name\n\
+               WHERE i.schema_name IN ('public', 'pg_catalog', 'information_schema',\n\
+                                       'quackgis_pg_catalog')\n\
+                  OR (i.schema_name = 'main' AND lower(i.table_name) IN\n\
+                      ('geometry', 'geography', '_geometry', '_geography'))\n\
+                  OR n.oid IS NULL OR r.oid IS NULL OR a.attnum IS NULL\n\
+                  OR c.column_name IS NULL OR r.namespace_oid <> n.oid)\n\
+             THEN true ELSE error('PostgreSQL catalog identity snapshot is not reconciled') END AS ok\n\
+           FROM identity_fingerprint f, {catalog_identifier}.{schema}.catalog_state s\n\
+           WHERE s.singleton\n\
+         )\n\
+         SELECT i.schema_name, i.schema_uuid, i.table_name, i.table_uuid,\n\
+                i.column_name, i.column_id, n.oid AS namespace_oid,\n\
+                r.oid AS relation_oid, r.row_type_oid, a.attnum,\n\
+                c.ordinal_position, c.data_type, c.is_nullable,\n\
+                c.numeric_precision, c.numeric_scale\n\
+         FROM identity i\n\
+         JOIN {catalog_identifier}.{schema}.namespace_oid n USING (schema_uuid)\n\
+         JOIN {catalog_identifier}.{schema}.relation_oid r USING (table_uuid)\n\
+         JOIN {catalog_identifier}.{schema}.attribute_number a USING (table_uuid, column_id)\n\
+         JOIN information_schema.columns c\n\
+           ON c.table_catalog = {catalog_literal}\n\
+          AND c.table_schema = i.schema_name\n\
+          AND c.table_name = i.table_name\n\
+          AND c.column_name = i.column_name\n\
+         CROSS JOIN valid v WHERE v.ok;\n\
+         CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_namespace AS\n\
+         SELECT * FROM (VALUES\n\
+           ({PG_CATALOG_NAMESPACE_OID}::UINTEGER, 'pg_catalog'::VARCHAR, {BOOTSTRAP_OWNER_OID}::UINTEGER),\n\
+           ({PUBLIC_NAMESPACE_OID}::UINTEGER, 'public'::VARCHAR, {BOOTSTRAP_OWNER_OID}::UINTEGER)\n\
+         ) AS n(oid, nspname, nspowner)\n\
+         UNION ALL\n\
+         SELECT DISTINCT namespace_oid, schema_name, {BOOTSTRAP_OWNER_OID}::UINTEGER\n\
+         FROM quackgis_pg_catalog._current_columns\n\
+         WHERE schema_name <> 'main';\n\
+         CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_type AS\n\
+         SELECT * FROM (VALUES\n{type_rows}\n\
+         ) AS t(oid, typname, typnamespace, typlen, typbyval, typtype, typcategory,\n\
+                typispreferred, typisdefined, typdelim, typrelid, typelem, typarray,\n\
+                typnotnull, typbasetype, typtypmod, typndims, typcollation)\n\
+         UNION ALL\n\
+         SELECT DISTINCT row_type_oid, table_name, namespace_oid, -1::SMALLINT, false,\n\
+                'c'::VARCHAR, 'C'::VARCHAR, false, true, ','::VARCHAR, relation_oid,\n\
+                0::UINTEGER, 0::UINTEGER, false, 0::UINTEGER, -1::INTEGER,\n\
+                0::INTEGER, 0::UINTEGER\n\
+         FROM quackgis_pg_catalog._current_columns;\n\
+         CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_class AS\n\
+         SELECT relation_oid AS oid, table_name AS relname, namespace_oid AS relnamespace,\n\
+                row_type_oid AS reltype, {BOOTSTRAP_OWNER_OID}::UINTEGER AS relowner,\n\
+                'r'::VARCHAR AS relkind, CAST(max(attnum) AS SMALLINT) AS relnatts,\n\
+                false AS relrowsecurity\n\
+         FROM quackgis_pg_catalog._current_columns\n\
+         GROUP BY relation_oid, table_name, namespace_oid, row_type_oid;\n\
+         CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_attribute AS\n\
+         WITH typed AS (\n\
+           SELECT *, CAST(({type_oid}) AS UINTEGER) AS atttypid,\n\
+                  CASE WHEN starts_with(data_type, 'DECIMAL(') AND NOT ends_with(data_type, '[]')\n\
+                       THEN CAST(numeric_precision * 65536 + numeric_scale + 4 AS INTEGER)\n\
+                       ELSE -1::INTEGER END AS atttypmod\n\
+           FROM quackgis_pg_catalog._current_columns\n\
+         )\n\
+         SELECT relation_oid AS attrelid, column_name AS attname, typed.atttypid,\n\
+                t.typlen AS attlen, attnum, atttypmod, is_nullable = 'NO' AS attnotnull,\n\
+                ''::VARCHAR AS attidentity, ''::VARCHAR AS attgenerated,\n\
+                false AS attisdropped\n\
+         FROM typed JOIN quackgis_pg_catalog.pg_type t ON t.oid = typed.atttypid;",
+        internal_schema_literal = quote_literal(INTERNAL_SCHEMA),
     )
 }
 
@@ -443,7 +631,11 @@ pub fn ducklake_identity_registry_coverage_sql(catalog: &str) -> String {
            LEFT JOIN {catalog_identifier}.{schema}.attribute_number a\n\
              ON a.table_uuid = i.table_uuid AND a.column_id = i.column_id\n\
            WHERE i.schema_name <> {internal_schema_literal}\n\
-             AND (n.oid IS NULL OR r.oid IS NULL OR a.attnum IS NULL\n\
+             AND (i.schema_name IN ('public', 'pg_catalog', 'information_schema',\n\
+                                    'quackgis_pg_catalog')\n\
+                  OR (i.schema_name = 'main' AND lower(i.table_name) IN\n\
+                      ('geometry', 'geography', '_geometry', '_geography'))\n\
+                  OR n.oid IS NULL OR r.oid IS NULL OR a.attnum IS NULL\n\
                   OR r.namespace_oid <> n.oid\n\
                   OR (i.schema_name = 'main' AND n.oid <> {PUBLIC_NAMESPACE_OID})\n\
                   OR (i.schema_name <> 'main' AND n.oid = {PUBLIC_NAMESPACE_OID}))\n\
@@ -552,5 +744,28 @@ mod tests {
         assert!(coverage.contains("ducklake_column_info('quackgis')"));
         assert!(coverage.contains("does not cover the committed snapshot"));
         assert!(coverage.contains("r.namespace_oid <> n.oid"));
+        assert!(coverage.contains("'public', 'pg_catalog', 'information_schema'"));
+        assert!(coverage.contains("'geometry', 'geography', '_geometry', '_geography'"));
+
+        let catalogs = duckdb_identity_catalog_bootstrap_sql("quackgis");
+        for relation in [
+            "_current_columns",
+            "pg_namespace",
+            "pg_type",
+            "pg_class",
+            "pg_attribute",
+        ] {
+            assert!(
+                catalogs.contains(&format!("quackgis_pg_catalog.{relation}")),
+                "missing identity catalog {relation}"
+            );
+        }
+        assert!(catalogs.contains("PostgreSQL catalog identity snapshot is not reconciled"));
+        assert!(catalogs.contains("unsupported DuckLake column type"));
+        assert!(catalogs.contains("row_type_oid"));
+        assert!(catalogs.contains("CAST(max(attnum) AS SMALLINT) AS relnatts"));
+        assert!(catalogs.contains("is_nullable = 'NO' AS attnotnull"));
+        assert!(catalogs.contains("false AS attisdropped"));
+        assert_eq!(IDENTITY_TYPE_ROWS.len(), 20);
     }
 }
