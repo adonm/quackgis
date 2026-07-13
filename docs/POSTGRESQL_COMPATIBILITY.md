@@ -68,6 +68,18 @@ This does not yet provide coherent PostgreSQL catalogs, stable relation OIDs,
 source relation/attribute identity in RowDescription, PostgreSQL roles, ACLs,
 role switching, or role-aware OpenAPI.
 
+The first target contract is frozen in
+`tests/fixtures/postgresql18_compatibility_profile.json`. Its normalized result
+types come from PostgreSQL 18.4 image digest
+`sha256:0c49c0c906cb405ea65e70c284570fee91c7750ca9336369afc0edf4fce211db`
+and are recorded in
+`tests/fixtures/postgresql18_column_core_reference.json`. The profile covers the
+current custom-type resolver, core relation/column identity, PostgreSQL-facing
+REST table/column discovery, and maintained session probes. It explicitly lists
+psql copied-table, OGR 3.11.5 copied-spatial-table, QGIS 3.44 headless, and
+role/OpenAPI traces as pending; no behavior is inferred from a different client
+version.
+
 ## Required invariants
 
 ### One source of schema truth
@@ -359,6 +371,10 @@ Deliver:
 
 Gate: every implementation item has a client/workload reason and a PostgreSQL
 oracle before compatibility code is added.
+
+Current progress: `pg18-column-core-v1` freezes the first result-type/query
+contract and PostgreSQL 18.4 oracle. C1 remains open for the pinned copied-data
+psql/OGR/QGIS traces and the later role/privilege/OpenAPI reference matrix.
 
 ### C2 — build catalog snapshot and identity foundations
 

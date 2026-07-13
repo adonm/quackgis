@@ -1,0 +1,285 @@
+{
+  "schema_version": 1,
+  "profile_id": "pg18-column-core-v1",
+  "target": {
+    "postgresql_major": 18,
+    "postgis_scope": "geometry/geography type identity and WKB transport only"
+  },
+  "purpose": "Freeze the first client-neutral PostgreSQL catalog and wire contract that replaces exact pg_type interception and DuckDB-main REST discovery.",
+  "consumer_versions": {
+    "psql": "18.3",
+    "psycopg": "3.2.13",
+    "gdal_ogr": "3.11.5",
+    "qgis": "3.44 target; trace pending",
+    "pg_rest_server_revision": "b7915d3c3361f0fee45de6e292e62f6f6186375f"
+  },
+  "identity_policy": {
+    "builtin_oids": "PostgreSQL 18 standard values",
+    "geometry_oid": 90001,
+    "geography_oid": 90002,
+    "dynamic_oids": "installation-local, nonzero uint32 values stable for the supported object lifetime",
+    "duckdb_runtime_oids_allowed": false,
+    "name_hashes_allowed": false
+  },
+  "catalog_relations": [
+    {
+      "name": "pg_catalog.pg_namespace",
+      "stage": "C3",
+      "trace_status": "required_by_type_lookup",
+      "required_columns": [
+        { "name": "oid", "type_oid": 26, "nullable": false },
+        { "name": "nspname", "type_oid": 19, "nullable": false },
+        { "name": "nspowner", "type_oid": 26, "nullable": false }
+      ]
+    },
+    {
+      "name": "pg_catalog.pg_type",
+      "stage": "C3",
+      "trace_status": "captured_tokio_postgres",
+      "required_columns": [
+        { "name": "oid", "type_oid": 26, "nullable": false },
+        { "name": "typname", "type_oid": 19, "nullable": false },
+        { "name": "typnamespace", "type_oid": 26, "nullable": false },
+        { "name": "typlen", "type_oid": 21, "nullable": false },
+        { "name": "typbyval", "type_oid": 16, "nullable": false },
+        { "name": "typtype", "type_oid": 18, "nullable": false },
+        { "name": "typcategory", "type_oid": 18, "nullable": false },
+        { "name": "typispreferred", "type_oid": 16, "nullable": false },
+        { "name": "typisdefined", "type_oid": 16, "nullable": false },
+        { "name": "typdelim", "type_oid": 18, "nullable": false },
+        { "name": "typrelid", "type_oid": 26, "nullable": false },
+        { "name": "typelem", "type_oid": 26, "nullable": false },
+        { "name": "typarray", "type_oid": 26, "nullable": false },
+        { "name": "typnotnull", "type_oid": 16, "nullable": false },
+        { "name": "typbasetype", "type_oid": 26, "nullable": false },
+        { "name": "typtypmod", "type_oid": 23, "nullable": false },
+        { "name": "typndims", "type_oid": 23, "nullable": false },
+        { "name": "typcollation", "type_oid": 26, "nullable": false }
+      ]
+    },
+    {
+      "name": "pg_catalog.pg_range",
+      "stage": "C3",
+      "trace_status": "captured_tokio_postgres",
+      "required_columns": [
+        { "name": "rngtypid", "type_oid": 26, "nullable": false },
+        { "name": "rngsubtype", "type_oid": 26, "nullable": false }
+      ]
+    },
+    {
+      "name": "pg_catalog.pg_class",
+      "stage": "C3",
+      "trace_status": "reference_pending",
+      "required_columns": [
+        { "name": "oid", "type_oid": 26, "nullable": false },
+        { "name": "relname", "type_oid": 19, "nullable": false },
+        { "name": "relnamespace", "type_oid": 26, "nullable": false },
+        { "name": "reltype", "type_oid": 26, "nullable": false },
+        { "name": "relowner", "type_oid": 26, "nullable": false },
+        { "name": "relkind", "type_oid": 18, "nullable": false },
+        { "name": "relnatts", "type_oid": 21, "nullable": false },
+        { "name": "relrowsecurity", "type_oid": 16, "nullable": false }
+      ]
+    },
+    {
+      "name": "pg_catalog.pg_attribute",
+      "stage": "C3",
+      "trace_status": "reference_pending",
+      "required_columns": [
+        { "name": "attrelid", "type_oid": 26, "nullable": false },
+        { "name": "attname", "type_oid": 19, "nullable": false },
+        { "name": "atttypid", "type_oid": 26, "nullable": false },
+        { "name": "attlen", "type_oid": 21, "nullable": false },
+        { "name": "attnum", "type_oid": 21, "nullable": false },
+        { "name": "atttypmod", "type_oid": 23, "nullable": false },
+        { "name": "attnotnull", "type_oid": 16, "nullable": false },
+        { "name": "attidentity", "type_oid": 18, "nullable": false },
+        { "name": "attgenerated", "type_oid": 18, "nullable": false },
+        { "name": "attisdropped", "type_oid": 16, "nullable": false }
+      ]
+    },
+    {
+      "name": "pg_catalog.pg_database",
+      "stage": "C3",
+      "trace_status": "reference_pending",
+      "required_columns": [
+        { "name": "oid", "type_oid": 26, "nullable": false },
+        { "name": "datname", "type_oid": 19, "nullable": false },
+        { "name": "datdba", "type_oid": 26, "nullable": false }
+      ]
+    },
+    {
+      "name": "information_schema.tables",
+      "stage": "C3",
+      "trace_status": "captured_rest_bootstrap",
+      "required_columns": [
+        { "name": "table_catalog", "type_oid": 19, "nullable": true },
+        { "name": "table_schema", "type_oid": 19, "nullable": true },
+        { "name": "table_name", "type_oid": 19, "nullable": true },
+        { "name": "table_type", "type_oid": 1043, "nullable": true },
+        { "name": "is_insertable_into", "type_oid": 1043, "nullable": true }
+      ]
+    },
+    {
+      "name": "information_schema.columns",
+      "stage": "C3",
+      "trace_status": "captured_rest_bootstrap",
+      "required_columns": [
+        { "name": "table_catalog", "type_oid": 19, "nullable": true },
+        { "name": "table_schema", "type_oid": 19, "nullable": true },
+        { "name": "table_name", "type_oid": 19, "nullable": true },
+        { "name": "column_name", "type_oid": 19, "nullable": true },
+        { "name": "ordinal_position", "type_oid": 23, "nullable": true },
+        { "name": "column_default", "type_oid": 1043, "nullable": true },
+        { "name": "is_nullable", "type_oid": 1043, "nullable": true },
+        { "name": "data_type", "type_oid": 1043, "nullable": true },
+        { "name": "udt_schema", "type_oid": 19, "nullable": true },
+        { "name": "udt_name", "type_oid": 19, "nullable": true },
+        { "name": "is_identity", "type_oid": 1043, "nullable": true },
+        { "name": "is_generated", "type_oid": 1043, "nullable": true }
+      ]
+    }
+  ],
+  "query_families": [
+    {
+      "id": "tokio_postgres_custom_type_lookup",
+      "stage": "C3",
+      "trace_status": "captured",
+      "protocol": "extended",
+      "consumers": ["tokio-postgres", "psycopg-compatible type resolution"],
+      "sql": "SELECT t.typname, t.typtype, t.typelem, r.rngsubtype, t.typbasetype, n.nspname, t.typrelid FROM pg_catalog.pg_type t LEFT OUTER JOIN pg_catalog.pg_range r ON r.rngtypid = t.oid INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid WHERE t.oid = $1",
+      "parameter_type_oids": [26],
+      "expected_columns": [
+        { "name": "typname", "type_oid": 19, "nullable": false },
+        { "name": "typtype", "type_oid": 18, "nullable": false },
+        { "name": "typelem", "type_oid": 26, "nullable": false },
+        { "name": "rngsubtype", "type_oid": 26, "nullable": true },
+        { "name": "typbasetype", "type_oid": 26, "nullable": false },
+        { "name": "nspname", "type_oid": 19, "nullable": false },
+        { "name": "typrelid", "type_oid": 26, "nullable": false }
+      ]
+    },
+    {
+      "id": "ordinary_spatial_type_scan",
+      "stage": "C3",
+      "trace_status": "required_consistency",
+      "protocol": "extended",
+      "consumers": ["client-neutral catalog contract", "OGR type discovery"],
+      "sql": "SELECT oid, typname, typnamespace, typtype FROM pg_catalog.pg_type WHERE oid IN (90001, 90002) ORDER BY oid",
+      "parameter_type_oids": [],
+      "expected_columns": [
+        { "name": "oid", "type_oid": 26, "nullable": false },
+        { "name": "typname", "type_oid": 19, "nullable": false },
+        { "name": "typnamespace", "type_oid": 26, "nullable": false },
+        { "name": "typtype", "type_oid": 18, "nullable": false }
+      ]
+    },
+    {
+      "id": "information_schema_table_discovery",
+      "stage": "C3",
+      "trace_status": "required_consistency",
+      "protocol": "extended",
+      "consumers": ["quackgis-rest", "client-neutral catalog contract"],
+      "sql": "SELECT table_catalog, table_schema, table_name, table_type, is_insertable_into FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name",
+      "parameter_type_oids": [],
+      "expected_columns": [
+        { "name": "table_catalog", "type_oid": 19, "nullable": true },
+        { "name": "table_schema", "type_oid": 19, "nullable": true },
+        { "name": "table_name", "type_oid": 19, "nullable": true },
+        { "name": "table_type", "type_oid": 1043, "nullable": true },
+        { "name": "is_insertable_into", "type_oid": 1043, "nullable": true }
+      ]
+    },
+    {
+      "id": "rest_table_column_discovery",
+      "stage": "C3",
+      "trace_status": "captured_duckdb_form_target_postgresql_form_frozen",
+      "protocol": "extended",
+      "consumers": ["quackgis-rest"],
+      "sql": "SELECT table_name, column_name, data_type, udt_schema, udt_name, is_nullable, column_default, ordinal_position FROM information_schema.columns WHERE table_schema = 'public' ORDER BY table_name, ordinal_position",
+      "parameter_type_oids": [],
+      "expected_columns": [
+        { "name": "table_name", "type_oid": 19, "nullable": true },
+        { "name": "column_name", "type_oid": 19, "nullable": true },
+        { "name": "data_type", "type_oid": 1043, "nullable": true },
+        { "name": "udt_schema", "type_oid": 19, "nullable": true },
+        { "name": "udt_name", "type_oid": 19, "nullable": true },
+        { "name": "is_nullable", "type_oid": 1043, "nullable": true },
+        { "name": "column_default", "type_oid": 1043, "nullable": true },
+        { "name": "ordinal_position", "type_oid": 23, "nullable": true }
+      ]
+    },
+    {
+      "id": "session_encoding_probe",
+      "stage": "C3",
+      "trace_status": "captured_libpq_ogr",
+      "protocol": "simple",
+      "consumers": ["psql", "OGR"],
+      "sql": "SHOW client_encoding",
+      "parameter_type_oids": [],
+      "expected_columns": [
+        { "name": "client_encoding", "type_oid": 25, "nullable": false }
+      ]
+    },
+    {
+      "id": "session_string_probe",
+      "stage": "C3",
+      "trace_status": "captured_libpq_ogr",
+      "protocol": "simple",
+      "consumers": ["psql", "OGR"],
+      "sql": "SHOW standard_conforming_strings",
+      "parameter_type_oids": [],
+      "expected_columns": [
+        { "name": "standard_conforming_strings", "type_oid": 25, "nullable": false }
+      ]
+    },
+    {
+      "id": "session_search_path_probe",
+      "stage": "C3",
+      "trace_status": "captured_ogr",
+      "protocol": "simple",
+      "consumers": ["OGR", "REST"],
+      "sql": "SHOW search_path",
+      "parameter_type_oids": [],
+      "expected_columns": [
+        { "name": "search_path", "type_oid": 25, "nullable": false }
+      ]
+    }
+  ],
+  "pending_trace_families": [
+    {
+      "id": "psql_describe_copied_table",
+      "required_version": "18.3",
+      "reason": "capture psql catalog SQL and normalized PostgreSQL 18 output"
+    },
+    {
+      "id": "ogr_copied_spatial_table",
+      "required_version": "3.11.5",
+      "reason": "capture exact pg_catalog, geometry_columns, typmod, SRID, and key discovery SQL"
+    },
+    {
+      "id": "qgis_headless_copied_layer",
+      "required_version": "3.44",
+      "reason": "source and runtime trace are not yet present; do not infer from historical clients"
+    },
+    {
+      "id": "role_privilege_openapi",
+      "required_version": "PostgreSQL 18 reference plus QuackGIS REST",
+      "reason": "depends on C4/C5 role and privilege semantics"
+    }
+  ],
+  "deliberate_divergences": [
+    {
+      "id": "physical_postgresql_storage_fields",
+      "policy": "omit from this profile or publish only a documented PostgreSQL-valid not-applicable value"
+    },
+    {
+      "id": "dynamic_oid_numbers",
+      "policy": "cross-reference and lifecycle consistency are required; equality to another installation is not"
+    },
+    {
+      "id": "listen_schema_invalidation",
+      "policy": "use QuackGIS schema/security epochs; LISTEN is not implemented solely for REST cache refresh"
+    }
+  ]
+}

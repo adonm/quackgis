@@ -8,6 +8,7 @@ one exact DuckDB/extension bundle.
 | Artifact/gate | Purpose |
 |---|---|
 | `just check-fast` | Rust formatting, clippy, unit and compile-time integration targets |
+| `just project-contract-check` | documentation/recipe/spatial claims plus the machine-readable PostgreSQL 18 profile/reference consistency contract |
 | `just duckdb-adbc-storage-test` | native Arrow/DuckLake write/query/transaction/reopen behavior |
 | `just duckdb-pgwire-workflow-test` | real server protocol, auth, policy, COPY, transaction, spatial, restart behavior |
 | `just duckdb-catalog-contract-test` | client-neutral DuckDB-derived metadata plus bounded geometry type/transport contract |

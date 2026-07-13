@@ -12,6 +12,12 @@ direct DuckDB/ADBC/pgwire benchmark smoke and writes its manifest under `.tmp`.
   catalog/type fixture. It covers DuckDB-derived table/column metadata, bounded
   spatial sentinel lookup, geometry RowDescription, binary/text WKB, NULL, and
   ordinary native catalog behavior through pgwire.
+- `fixtures/postgresql18_compatibility_profile.json` freezes the first target
+  catalog/query/wire contract and names every still-pending client trace.
+  `fixtures/postgresql18_column_core_reference.json` records normalized
+  RowDescription/type evidence from the digest-pinned PostgreSQL 18.4 oracle.
+  `just project-contract-check` validates both files together; they are target
+  contracts, not QuackGIS implementation claims.
 - `fixtures/postgis_curated_cases.rs` is the deliberately bounded expected-value
   source parsed by the native CLI and pgwire gates, not a Cargo integration test.
 

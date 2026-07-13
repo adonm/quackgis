@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "profile_id": "pg18-column-core-v1",
+  "oracle": {
+    "server_version": "PostgreSQL 18.4",
+    "image": "docker.io/library/postgres:18",
+    "image_digest": "sha256:0c49c0c906cb405ea65e70c284570fee91c7750ca9336369afc0edf4fce211db",
+    "capture_date": "2026-07-13"
+  },
+  "builtin_types": [
+    { "oid": 16, "name": "bool" },
+    { "oid": 18, "name": "char" },
+    { "oid": 19, "name": "name" },
+    { "oid": 20, "name": "int8" },
+    { "oid": 21, "name": "int2" },
+    { "oid": 23, "name": "int4" },
+    { "oid": 25, "name": "text" },
+    { "oid": 26, "name": "oid" },
+    { "oid": 1003, "name": "_name" },
+    { "oid": 1043, "name": "varchar" }
+  ],
+  "query_descriptions": [
+    {
+      "query_id": "tokio_postgres_custom_type_lookup",
+      "columns": [
+        { "name": "typname", "type_oid": 19 },
+        { "name": "typtype", "type_oid": 18 },
+        { "name": "typelem", "type_oid": 26 },
+        { "name": "rngsubtype", "type_oid": 26 },
+        { "name": "typbasetype", "type_oid": 26 },
+        { "name": "nspname", "type_oid": 19 },
+        { "name": "typrelid", "type_oid": 26 }
+      ]
+    },
+    {
+      "query_id": "rest_table_column_discovery",
+      "columns": [
+        { "name": "table_name", "type_oid": 19 },
+        { "name": "column_name", "type_oid": 19 },
+        { "name": "data_type", "type_oid": 1043 },
+        { "name": "udt_schema", "type_oid": 19 },
+        { "name": "udt_name", "type_oid": 19 },
+        { "name": "is_nullable", "type_oid": 1043 },
+        { "name": "column_default", "type_oid": 1043 },
+        { "name": "ordinal_position", "type_oid": 23 }
+      ]
+    },
+    {
+      "query_id": "information_schema_table_discovery",
+      "columns": [
+        { "name": "table_catalog", "type_oid": 19 },
+        { "name": "table_schema", "type_oid": 19 },
+        { "name": "table_name", "type_oid": 19 },
+        { "name": "table_type", "type_oid": 1043 },
+        { "name": "is_insertable_into", "type_oid": 1043 }
+      ]
+    },
+    {
+      "query_id": "session_encoding_probe",
+      "columns": [
+        { "name": "client_encoding", "type_oid": 25 }
+      ]
+    },
+    {
+      "query_id": "session_string_probe",
+      "columns": [
+        { "name": "standard_conforming_strings", "type_oid": 25 }
+      ]
+    },
+    {
+      "query_id": "session_search_path_probe",
+      "columns": [
+        { "name": "search_path", "type_oid": 25 }
+      ]
+    }
+  ],
+  "normalization": {
+    "dynamic_object_oids": "excluded",
+    "installation_paths": "excluded",
+    "locale": "not part of this profile",
+    "postgis_dynamic_type_oids": "validated by QuackGIS cross-reference tests, not numeric equality"
+  }
+}

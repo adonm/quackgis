@@ -24,6 +24,8 @@ EXPECTED_COUNTS = {
     "rust_edge": 10,
     "extension_candidate": 5,
 }
+POSTGRESQL_PROFILE = ROOT / "tests/fixtures/postgresql18_compatibility_profile.json"
+POSTGRESQL_REFERENCE = ROOT / "tests/fixtures/postgresql18_column_core_reference.json"
 
 
 def tracked_markdown() -> list[Path]:
@@ -103,18 +105,103 @@ def check_claim_text(errors: list[str]) -> None:
             errors.append(f"{relative}: missing maintained claim {phrase!r}")
 
 
+def check_postgresql_profile(errors: list[str]) -> None:
+    profile = json.loads(POSTGRESQL_PROFILE.read_text(encoding="utf-8"))
+    reference = json.loads(POSTGRESQL_REFERENCE.read_text(encoding="utf-8"))
+
+    if profile.get("schema_version") != 1:
+        errors.append("PostgreSQL compatibility profile schema_version must be 1")
+    if profile.get("profile_id") != "pg18-column-core-v1":
+        errors.append("PostgreSQL compatibility profile_id must be pg18-column-core-v1")
+    if profile.get("target", {}).get("postgresql_major") != 18:
+        errors.append("PostgreSQL compatibility profile must target major version 18")
+    if reference.get("profile_id") != profile.get("profile_id"):
+        errors.append("PostgreSQL reference output does not name the active profile")
+    digest = reference.get("oracle", {}).get("image_digest", "")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        errors.append("PostgreSQL reference image digest is missing or malformed")
+
+    relations = profile.get("catalog_relations", [])
+    relation_names = [relation.get("name") for relation in relations]
+    required_relations = {
+        "pg_catalog.pg_namespace",
+        "pg_catalog.pg_type",
+        "pg_catalog.pg_range",
+        "pg_catalog.pg_class",
+        "pg_catalog.pg_attribute",
+        "pg_catalog.pg_database",
+        "information_schema.tables",
+        "information_schema.columns",
+    }
+    if len(relation_names) != len(set(relation_names)):
+        errors.append("PostgreSQL compatibility profile contains duplicate relations")
+    missing_relations = sorted(required_relations - set(relation_names))
+    if missing_relations:
+        errors.append(f"PostgreSQL compatibility profile missing relations: {missing_relations}")
+    for relation in relations:
+        columns = relation.get("required_columns", [])
+        names = [column.get("name") for column in columns]
+        if not relation.get("stage") or not relation.get("trace_status") or not columns:
+            errors.append(f"PostgreSQL relation is incomplete: {relation.get('name')!r}")
+        if len(names) != len(set(names)):
+            errors.append(f"PostgreSQL relation has duplicate columns: {relation.get('name')!r}")
+        for column in columns:
+            if not isinstance(column.get("type_oid"), int) or column["type_oid"] <= 0:
+                errors.append(
+                    f"PostgreSQL relation column has invalid type OID: "
+                    f"{relation.get('name')}.{column.get('name')}"
+                )
+
+    queries = profile.get("query_families", [])
+    query_by_id = {query.get("id"): query for query in queries}
+    if len(query_by_id) != len(queries) or None in query_by_id:
+        errors.append("PostgreSQL compatibility profile contains duplicate/unnamed queries")
+    for query in queries:
+        if not query.get("sql") or not query.get("consumers") or not query.get("expected_columns"):
+            errors.append(f"PostgreSQL query family is incomplete: {query.get('id')!r}")
+        column_names = [column.get("name") for column in query.get("expected_columns", [])]
+        if len(column_names) != len(set(column_names)):
+            errors.append(f"PostgreSQL query has duplicate result columns: {query.get('id')!r}")
+
+    for description in reference.get("query_descriptions", []):
+        query_id = description.get("query_id")
+        query = query_by_id.get(query_id)
+        if query is None:
+            errors.append(f"PostgreSQL reference has unknown query_id: {query_id!r}")
+            continue
+        expected = [
+            (column.get("name"), column.get("type_oid"))
+            for column in query.get("expected_columns", [])
+        ]
+        actual = [
+            (column.get("name"), column.get("type_oid"))
+            for column in description.get("columns", [])
+        ]
+        if actual != expected:
+            errors.append(f"PostgreSQL reference result drift for query: {query_id}")
+
+    pending = profile.get("pending_trace_families", [])
+    pending_ids = [item.get("id") for item in pending]
+    if len(pending_ids) != len(set(pending_ids)) or not all(pending_ids):
+        errors.append("PostgreSQL compatibility profile has duplicate/unnamed pending traces")
+
+
 def main() -> int:
     errors: list[str] = []
     try:
         check_markdown(errors)
         check_spatial_ledger(errors)
         check_claim_text(errors)
+        check_postgresql_profile(errors)
     except (OSError, subprocess.CalledProcessError, ValueError, json.JSONDecodeError) as error:
         errors.append(str(error))
     if errors:
         print("\n".join(errors), file=sys.stderr)
         return 1
-    print("project_contract_check_ok markdown=tracked spatial=57 executable=42")
+    print(
+        "project_contract_check_ok markdown=tracked spatial=57 executable=42 "
+        "postgresql_profile=pg18-column-core-v1"
+    )
     return 0
 
 

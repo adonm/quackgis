@@ -10,6 +10,11 @@ and role-aware REST profile in
 is a current compatibility claim unless it is also recorded below and in
 [ROADMAP_STATUS.md](./ROADMAP_STATUS.md).
 
+The machine-readable `pg18-column-core-v1` target and digest-pinned PostgreSQL
+18.4 result-description oracle are validated by `just project-contract-check`.
+They freeze desired behavior and do not imply that QuackGIS currently implements
+the listed catalogs or PostgreSQL result types.
+
 ## Proven local contract
 
 The required real-driver workflow proves:
