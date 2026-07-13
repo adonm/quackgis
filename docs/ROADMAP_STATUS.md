@@ -18,8 +18,9 @@ Kind tree will not be restored. Current iteration state:
 | K0 minimal Kind topology | local execution passes | rootless Podman runs one TLS-required runtime StatefulSet, retained local PV/PVC, generated Secrets, probes, and psql/psycopg/OGR Jobs from node-local digest-addressed images; next packaged rotation and recovery |
 | C0 PostgreSQL compatibility | basic scalar smokes plus core profile/oracle; exact OGR 3.11.5 copied-point, psql 18.3 `\d+`, and successful offscreen QGIS 3.44.11 open/inspect/count/extent/read traces captured against digest-pinned PostgreSQL 18.4/PostGIS; durable identity and relational spatial type views pass; exact-1.5.4 development identity lane now has a protected transactional OID/attribute registry and schema epoch with lifecycle evidence | project registry-backed `pg_class`/`pg_attribute`, row types, origins, and traced user-object/spatial/privilege catalogs; obtain upstream acceptance and a signed official identity contract for release; capture RBAC/OpenAPI references with C4/C5 |
 | H0 role-aware HTTP | authenticated read-only actual-pgwire preview passes | catalog-backed discovery, JWT role mapping, transaction-local role/context, role-aware OpenAPI, immutable image, and Kind replicas |
-| P0 M4 host profiles | active foundation; conservative single-table correctness matrix passes | add the scan-byte/plan oracle, then run 10M twice before 100M |
+| P0 M4 host profiles | active foundation; conservative single-table correctness matrix passes | add the scan-byte/plan oracle with `OPERATOR_ROW_GROUPS_SCANNED` and a native-geometry Parquet-statistics baseline, then delete redundant bbox machinery if it wins; run 10M twice before 100M |
 | K1 operations/shared rehearsal | deferred by dependency | Local 1.0 operations first; PostgreSQL/MinIO is rehearsal, not managed evidence |
+| U0 upstream adoption | design active | conditional deletion/adoption matrix now covers 1.5.5/2.0, PEG, Quack, async I/O, C/Rust extension APIs, native spatial/pruning, and DuckLake protected snapshots/RBAC/UDTs/materialized views; executable candidate matrices remain open |
 
 ## Current verified floor
 

@@ -8,6 +8,8 @@ This document defines the durable product direction.
 - [COMPATIBILITY.md](./COMPATIBILITY.md) owns current client and SQL claims.
 - [POSTGRESQL_COMPATIBILITY.md](./POSTGRESQL_COMPATIBILITY.md) owns the target
   catalog, role, privilege, and REST delivery contract.
+- [DUCKDB_ROADMAP_ALIGNMENT.md](./DUCKDB_ROADMAP_ALIGNMENT.md) owns conditional
+  adoption and deletion gates for upstream DuckDB/DuckLake roadmap features.
 
 ## Product thesis
 
@@ -131,6 +133,9 @@ Additional rules:
   snapshots, or DuckLake writes.
 - Every DuckDB upgrade reruns the ladder; compatibility code is deleted when
   native behavior satisfies the contract.
+- Speculative upstream features may intentionally defer overlapping QuackGIS
+  work when they have a plausible deletion path, but production adopts only a
+  released pinned feature that passes the maintained gate.
 
 ## Performance direction
 
@@ -212,6 +217,11 @@ Passing an earlier ring does not imply a later claim.
   and maintained summaries using official primitives.
 - **Later research:** multi-modal inventories and national-scale stress after the
   10M and 100M vector gates are routine.
+
+Stable Quack is a candidate engine transport for Local/Shared 1.x, not another
+client API. Official DuckLake protected snapshots, RBAC, UDTs, and materialized
+views are preferred future primitives where they can delete QuackGIS control or
+summary machinery without weakening PostgreSQL-facing semantics.
 
 ## Explicit non-goals
 

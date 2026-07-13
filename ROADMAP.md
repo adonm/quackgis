@@ -252,6 +252,9 @@ Deliver:
 - retain the original exact DuckDB predicate;
 - maintain bbox/locality columns during COPY and compaction in DuckDB;
 - benchmark WKB storage against native geometry before changing representation;
+- exercise DuckDB 1.5.4+ native geometry Parquet statistics and
+  `OPERATOR_ROW_GROUPS_SCANNED`, deleting maintained bbox machinery if the native
+  exact plan meets the same scan and correctness gates;
 - set file/row-group sizing from DuckDB evidence;
 - cover selective scans, grouped aggregates, bounded spatial joins, wide
   projections, and fragmented-file compaction; and
@@ -282,6 +285,13 @@ Deliver:
 - health, readiness, graceful shutdown, and transaction drain;
 - backup, restore, compaction, capacity, spill, and incident procedures;
 - supported DuckDB/extension upgrade and reopen tests;
+- one supported, non-EOL release bundle decision after evaluating DuckDB 1.5.5
+  and the released DuckDB 2.0 line; preview/nightly artifacts are evidence inputs,
+  not release dependencies;
+- classic/PEG parser equivalence for every maintained allow/deny/rewrite family
+  while both parser modes exist;
+- a measured keep-ADBC-or-adopt-Quack decision covering transport, cancellation,
+  transaction, security, crash, and resource gates;
 - TLS and secret-rotation evidence;
 - catalog/control-metadata backup, restore, upgrade, and cache-invalidation
   evidence;
@@ -336,6 +346,10 @@ Exit gates:
 **Outcome:** operators can stage, validate, publish, protect, roll back, and retire
 dataset versions using official DuckLake primitives.
 
+Official DuckLake protected snapshots are the intended protection primitive.
+QuackGIS does not implement a competing snapshot-protection format while that
+upstream capability is pending.
+
 Exit gates:
 
 - readers see either old or new release, never partial promotion;
@@ -353,6 +367,8 @@ Exit gates:
 - Billion-row scheduled, 10 TB, or trillion-class claims.
 - Branch/merge and CDC row functions.
 - A QuackGIS DuckDB extension without an accepted, benchmarked proposal.
+- Production Quack transport before the stable protocol and QuackGIS equivalence
+  gates pass.
 
 ## Risk controls
 

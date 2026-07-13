@@ -147,6 +147,8 @@ Read:
 - [docs/COMPATIBILITY.md](./docs/COMPATIBILITY.md) — supported surface and limits.
 - [docs/POSTGRESQL_COMPATIBILITY.md](./docs/POSTGRESQL_COMPATIBILITY.md) — target
   catalog/RBAC contract and ordered implementation plan.
+- [docs/DUCKDB_ROADMAP_ALIGNMENT.md](./docs/DUCKDB_ROADMAP_ALIGNMENT.md) —
+  conditional adoption/deletion gates for upstream DuckDB and DuckLake work.
 - [docs/OPERATIONS.md](./docs/OPERATIONS.md) — local runtime and security baseline.
 - [docs/QUICKSTART.md](./docs/QUICKSTART.md) — guided setup.
 - [DIVERGENCE.md](./DIVERGENCE.md) — retained `arrow-pg` divergence.

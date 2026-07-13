@@ -8,7 +8,9 @@ Forward outcomes belong in [ROADMAP.md](./ROADMAP.md). Current evidence belongs 
 [docs/ROADMAP_STATUS.md](./docs/ROADMAP_STATUS.md). Product ownership and extension
 rules belong in [docs/PROJECT_DIRECTION.md](./docs/PROJECT_DIRECTION.md). The
 target PostgreSQL catalog/RBAC design belongs in
-[docs/POSTGRESQL_COMPATIBILITY.md](./docs/POSTGRESQL_COMPATIBILITY.md).
+[docs/POSTGRESQL_COMPATIBILITY.md](./docs/POSTGRESQL_COMPATIBILITY.md). Conditional
+adoption of upstream DuckDB/DuckLake roadmap work belongs in
+[docs/DUCKDB_ROADMAP_ALIGNMENT.md](./docs/DUCKDB_ROADMAP_ALIGNMENT.md).
 
 ## Layer model
 
@@ -23,7 +25,8 @@ PostgreSQL / GIS / application clients
 │ portals · Arrow↔PostgreSQL encoding · PostGIS compatibility  │
 │ bounded request context · audit/metrics                      │
 └──────────────────────────────────────────────────────────────┘
-                  │ Arrow / ADBC
+                  │ current: Arrow / ADBC
+                  │ candidate: stable Quack-backed transport
                   ▼
 ┌──────────────────────────────────────────────────────────────┐
 │ DuckDB + official extensions                                 │
@@ -83,6 +86,12 @@ visitor maps PostgreSQL `public` to DuckLake `quackgis.main` before execution wh
 policy sees the original target. Unsupported shapes fail closed. COPY uses parsed
 one-/two-/three-part identifiers and dedicated protocol state.
 
+DuckDB's planned default PEG parser does not replace this authorization boundary
+unless a released stable API can provide an equivalent restricted AST contract.
+Engine upgrades must run accepted and denied SQL under both parser modes while
+both exist. Runtime grammar extension is operator-controlled and may never widen
+client SQL implicitly.
+
 ### Storage authority
 
 Startup atomically creates or validates `_quackgis/storage-authority-v1` below the
@@ -98,6 +107,14 @@ SQL → normalize/rewrite → PostgreSQL AST → authorization/admission
     → per-client DuckDB ADBC session → describe/bind/execute
     → owned ADBC reader → one Arrow batch → pgwire rows → client
 ```
+
+The engine transport is replaceable only at this boundary. A stable Quack-backed
+out-of-process profile may replace ADBC if it preserves Arrow streaming,
+parameters, transaction outcomes, cancellation, extension pins, and resource
+budgets while reducing native crash/concurrency burden. It does not replace the
+Rust pgwire/catalog/authorization edge. Async I/O is adopted only when exposed by
+a supported cancellable client API, at which point it replaces the matching
+blocking path rather than creating a second execution path.
 
 The live stream owns its ADBC reader, statement, connection lease, admission
 permit, cancellation registration, and deadline. Pgwire requests another native

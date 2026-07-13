@@ -15,6 +15,11 @@
   continues to require the signed official extension.
 - DataFusion, SedonaDB, forked DuckLake writers, and auxiliary engines require a
   new architecture decision and are not acceptable transitive conveniences.
+- Upstream roadmap adoption follows `DUCKDB_ROADMAP_ALIGNMENT.md`: evaluate
+  DuckDB 1.5.5 after release and DuckDB 2.0 as a full bundle; do not publish Local
+  1.0 on an unsupported engine line. Stable Quack, async client I/O, and C/Rust
+  extension APIs may replace current code only after equivalence and upgrade
+  gates pass.
 
 ## Rust dependencies
 
@@ -63,5 +68,8 @@ are recorded and these gates pass:
 - pinned native ADBC storage workflow;
 - real pgwire workflow and spatial corpus;
 - independent official DuckDB reopen;
-- runtime image load-only/static checks; and
-- catalog/data backup, reopen, and rollback evidence once Local 1.0 supports it.
+- runtime image load-only/static checks;
+- catalog/data backup, reopen, and rollback evidence once Local 1.0 supports it;
+- classic/PEG parser acceptance and denial parity while both modes are available; and
+- deletion review for compatibility, pruning, transport, and extension code
+  superseded by the candidate bundle.
