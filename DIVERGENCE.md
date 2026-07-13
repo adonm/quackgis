@@ -74,6 +74,25 @@ PostgreSQL execution backends QuackGIS dependencies. Upstream updates require
 reviewing the parser, SQL generator, schema types, license, and compatibility
 cases before changing the pinned revision.
 
+## Development-only reference fork
+
+### `adonm/ducklake` column identity
+
+The ignored `.tmp/ref/ducklake` checkout temporarily ports the proposed public
+`ducklake_column_info(catalog)` function to DuckLake `v1.5-variegata` and pins its
+DuckDB submodule to exact `v1.5.4`. The function is read-only and exposes current
+top-level base-table schema/table/column identities; it does not change DuckLake
+metadata writes. Exact source commits, build inputs, artifact checksum, tests,
+runtime isolation, and reproduction commands are recorded in
+`docs/DEVELOPMENT_DUCKLAKE.md`.
+
+This fork is not tracked source, a default runtime dependency, or a production
+storage authority. QuackGIS loads its unsigned binary only when an operator
+provides both the explicit development path and exact SHA-256. Default and
+packaged startup still load the signed official extension. Retire the override
+when the public API ships in a version-matched official bundle; if upstream does
+not accept it, release use requires a separate long-term support decision.
+
 ## Retired forks
 
 The following forks/vendors are no longer compiled or retained in the repository:

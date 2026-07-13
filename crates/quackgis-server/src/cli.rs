@@ -28,6 +28,10 @@ pub struct Cli {
     pub duckdb_driver: Option<std::path::PathBuf>,
     #[arg(long, env = "QUACKGIS_DUCKDB_DATABASE_URI", default_value = ":memory:")]
     pub duckdb_database_uri: String,
+    #[arg(long, env = "QUACKGIS_DEV_DUCKLAKE_EXTENSION")]
+    pub dev_ducklake_extension: Option<std::path::PathBuf>,
+    #[arg(long, env = "QUACKGIS_DEV_DUCKLAKE_EXTENSION_SHA256")]
+    pub dev_ducklake_extension_sha256: Option<String>,
     #[arg(long, env = "QUACKGIS_DUCKDB_THREADS")]
     pub duckdb_threads: Option<usize>,
     #[arg(long, env = "QUACKGIS_DUCKDB_MEMORY_LIMIT_BYTES")]

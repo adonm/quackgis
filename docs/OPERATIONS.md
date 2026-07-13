@@ -35,6 +35,7 @@ DuckDB home. The server defaults to `127.0.0.1:5434`.
 |---|---|---|
 | `QUACKGIS_DUCKDB_ADBC_DRIVER` | unset outside mise | required absolute path to pinned `libduckdb` |
 | `QUACKGIS_DUCKDB_DATABASE_URI` | `:memory:` | DuckDB control database URI |
+| `QUACKGIS_DEV_DUCKLAKE_EXTENSION` / `QUACKGIS_DEV_DUCKLAKE_EXTENSION_SHA256` | unset | paired development-only absolute extension path and exact lowercase SHA-256; never release-supported |
 | `QUACKGIS_HOST` / `QUACKGIS_PORT` | `127.0.0.1` / `5434` | pgwire bind |
 | `QUACKGIS_MAX_CONNECTIONS` | `64` | accepted connection bound |
 | `QUACKGIS_MAX_ACTIVE_QUERIES` / `QUACKGIS_MAX_QUEUED_QUERIES` | `8` / `64` | execution and admission queue bounds |
@@ -68,6 +69,10 @@ DuckDB home. The server defaults to `127.0.0.1:5434`.
 
 `QUACKGIS_CATALOG_URL` and remote/object-store data paths are reserved and fail
 closed. S3 credentials and the retired engine selector are not runtime options.
+The unsigned DuckLake override is opt-in native-code execution and is rejected
+unless both values pass strict path and digest validation. Default startup still
+loads only signed extensions. See [DEVELOPMENT_DUCKLAKE.md](DEVELOPMENT_DUCKLAKE.md)
+for its isolated development workflow and deletion plan.
 
 The optional `quackgis-rest` process has a separate configuration and failure
 domain. It requires `QUACKGIS_REST_DATABASE_URL`,

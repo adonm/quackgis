@@ -69,11 +69,17 @@ struct BboxQueryTarget {
 /// `LoadOnly` is the production-safe default: image construction must install
 /// and pin the extension in advance. `InstallAndLoad` is intended only for local
 /// evaluation where network access and extension provenance are explicit.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+/// `DevelopmentDuckLake` permits one exact unsigned native artifact after local
+/// path and digest validation; it must never be selected from client input.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum ExtensionPolicy {
     #[default]
     LoadOnly,
     InstallAndLoad,
+    DevelopmentDuckLake {
+        path: PathBuf,
+        sha256: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -257,16 +263,32 @@ impl DuckDbAdbcConfig {
                 bail!("DuckDB ADBC {label} must not contain NUL bytes");
             }
         }
+        if let ExtensionPolicy::DevelopmentDuckLake { path, sha256 } = &self.extension_policy {
+            validate_development_extension(path, sha256)?;
+        }
         Ok(())
     }
 
     fn bootstrap_sql(&self) -> String {
-        let extension_sql = match self.extension_policy {
+        let extension_sql = match &self.extension_policy {
             ExtensionPolicy::LoadOnly => "LOAD ducklake;\nLOAD spatial;",
             ExtensionPolicy::InstallAndLoad => {
                 "INSTALL ducklake;\nINSTALL spatial;\nLOAD ducklake;\nLOAD spatial;"
             }
+            ExtensionPolicy::DevelopmentDuckLake { path, .. } => {
+                return self.bootstrap_sql_with_extensions(&format!(
+                    "LOAD {};\nLOAD spatial;",
+                    quote_literal(
+                        path.to_str()
+                            .expect("development extension path validated as UTF-8"),
+                    )
+                ));
+            }
         };
+        self.bootstrap_sql_with_extensions(extension_sql)
+    }
+
+    fn bootstrap_sql_with_extensions(&self, extension_sql: &str) -> String {
         format!(
             "{extension_sql}\n\
              {}\n\
@@ -278,6 +300,13 @@ impl DuckDbAdbcConfig {
             quote_literal(&self.ducklake_uri),
             quote_identifier(&self.catalog_name),
             quote_literal(&self.data_path),
+        )
+    }
+
+    fn allows_unsigned_extensions(&self) -> bool {
+        matches!(
+            self.extension_policy,
+            ExtensionPolicy::DevelopmentDuckLake { .. }
         )
     }
 }
@@ -441,9 +470,19 @@ impl DuckDbAdbcStorage {
                 config.driver_path.display()
             )
         })?;
-        let database = driver
-            .new_database_with_opts([(OptionDatabase::Uri, config.database_uri.clone().into())])
-            .context("initializing DuckDB ADBC database")?;
+        let database = if config.allows_unsigned_extensions() {
+            driver.new_database_with_opts([
+                (OptionDatabase::Uri, config.database_uri.clone().into()),
+                (
+                    OptionDatabase::Other("allow_unsigned_extensions".to_owned()),
+                    "true".into(),
+                ),
+            ])
+        } else {
+            driver
+                .new_database_with_opts([(OptionDatabase::Uri, config.database_uri.clone().into())])
+        }
+        .context("initializing DuckDB ADBC database")?;
         let mut connection = database
             .new_connection()
             .context("opening DuckDB ADBC connection")?;
@@ -2276,26 +2315,65 @@ fn quote_identifier(value: &str) -> String {
 }
 
 fn verify_driver_digest(path: &std::path::Path) -> Result<()> {
-    let mut file = std::fs::File::open(path)
-        .with_context(|| format!("opening DuckDB ADBC driver at {}", path.display()))?;
-    let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 1024 * 1024];
-    loop {
-        let bytes = file
-            .read(&mut buffer)
-            .with_context(|| format!("hashing DuckDB ADBC driver at {}", path.display()))?;
-        if bytes == 0 {
-            break;
-        }
-        digest.update(&buffer[..bytes]);
-    }
-    let actual = format!("{:x}", digest.finalize());
+    let actual = file_sha256(path)?;
     if actual != SUPPORTED_LIBDUCKDB_SHA256 {
         bail!(
             "DuckDB ADBC driver checksum mismatch: expected {SUPPORTED_LIBDUCKDB_SHA256}, got {actual}"
         );
     }
     Ok(())
+}
+
+fn validate_development_extension(path: &Path, expected_sha256: &str) -> Result<()> {
+    if !path.is_absolute() {
+        bail!("development DuckLake extension path must be absolute");
+    }
+    if path.to_str().is_none() {
+        bail!("development DuckLake extension path must be valid UTF-8");
+    }
+    if expected_sha256.len() != 64
+        || !expected_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        bail!("development DuckLake extension SHA-256 must be 64 lowercase hexadecimal characters");
+    }
+    let metadata = path.symlink_metadata().with_context(|| {
+        format!(
+            "reading development DuckLake extension metadata at {}",
+            path.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!(
+            "development DuckLake extension must be a non-symlink regular file: {}",
+            path.display()
+        );
+    }
+    let actual = file_sha256(path)?;
+    if actual != expected_sha256 {
+        bail!(
+            "development DuckLake extension checksum mismatch: expected {expected_sha256}, got {actual}"
+        );
+    }
+    Ok(())
+}
+
+fn file_sha256(path: &Path) -> Result<String> {
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("opening native artifact at {}", path.display()))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+    loop {
+        let bytes = file
+            .read(&mut buffer)
+            .with_context(|| format!("hashing native artifact at {}", path.display()))?;
+        if bytes == 0 {
+            break;
+        }
+        digest.update(&buffer[..bytes]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 fn verify_runtime_version(connection: &mut ManagedConnection) -> Result<()> {
@@ -2364,6 +2442,51 @@ mod tests {
                 .bootstrap_sql()
                 .starts_with("INSTALL ducklake;\nINSTALL spatial;\nLOAD ducklake;\nLOAD spatial;")
         );
+    }
+
+    #[test]
+    fn development_extension_requires_an_exact_regular_file_digest() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let extension = temp.path().join("ducklake.duckdb_extension");
+        std::fs::write(&extension, b"development ducklake").expect("extension fixture");
+        let extension = extension.canonicalize().expect("absolute extension path");
+        let digest = file_sha256(&extension).expect("extension digest");
+        let config = DuckDbAdbcConfig {
+            driver_path: Path::new("/opt/quackgis/libduckdb.so").to_path_buf(),
+            database_uri: ":memory:".to_owned(),
+            ducklake_uri: "ducklake:metadata.ducklake".to_owned(),
+            catalog_name: "quackgis".to_owned(),
+            data_path: "/data".to_owned(),
+            extension_policy: ExtensionPolicy::DevelopmentDuckLake {
+                path: extension.clone(),
+                sha256: digest.clone(),
+            },
+        };
+
+        validate_development_extension(&extension, &digest).expect("valid override");
+        let sql = config.bootstrap_sql();
+        assert!(sql.starts_with(&format!(
+            "LOAD {};\nLOAD spatial;",
+            quote_literal(&extension.display().to_string())
+        )));
+        assert!(!sql.contains("INSTALL ducklake"));
+        assert!(config.allows_unsigned_extensions());
+
+        let replacement = if digest.starts_with('0') { "1" } else { "0" };
+        let wrong_digest = format!("{replacement}{}", &digest[1..]);
+        assert!(validate_development_extension(&extension, &wrong_digest).is_err());
+        assert!(validate_development_extension(&extension, "ABC").is_err());
+        assert!(
+            validate_development_extension(Path::new("relative.duckdb_extension"), &digest)
+                .is_err()
+        );
+
+        #[cfg(unix)]
+        {
+            let link = temp.path().join("linked.duckdb_extension");
+            std::os::unix::fs::symlink(&extension, &link).expect("extension symlink");
+            assert!(validate_development_extension(&link, &digest).is_err());
+        }
     }
 
     #[test]

@@ -12,6 +12,8 @@ duckdb_bin := env_var_or_default("DUCKDB_BIN", "duckdb")
 duckdb_version := env_var_or_default("DUCKDB_VERSION", "1.5.4")
 duckdb_home := env_var_or_default("DUCKDB_HOME", ".tmp/duckdb/home")
 duckdb_adbc_driver := env_var_or_default("QUACKGIS_DUCKDB_ADBC_DRIVER", ".tmp/duckdb/v" + duckdb_version + "/lib/libduckdb.so")
+dev_ducklake_extension := env_var_or_default("QUACKGIS_DEV_DUCKLAKE_EXTENSION", "")
+dev_ducklake_extension_sha256 := env_var_or_default("QUACKGIS_DEV_DUCKLAKE_EXTENSION_SHA256", "")
 ref_qgis_url := env_var_or_default("REF_QGIS_URL", "https://github.com/qgis/QGIS")
 ref_qgis_branch := env_var_or_default("REF_QGIS_BRANCH", "release-3_44")
 ref_duckdb_url := env_var_or_default("REF_DUCKDB_URL", "https://github.com/duckdb/duckdb")
@@ -211,6 +213,17 @@ duckdb-adbc-storage-test driver=duckdb_adbc_driver:
     driver_arg="$(realpath "$driver_arg")"; \
     duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; \
     HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" cargo test -p quackgis-server --test duckdb_adbc_storage -- --ignored --nocapture
+
+# Run the opt-in checksum-pinned development DuckLake identity contract.
+duckdb-development-ducklake-test extension=dev_ducklake_extension sha256=dev_ducklake_extension_sha256 driver=duckdb_adbc_driver:
+    @set -eu; \
+    extension_arg='{{extension}}'; sha256_arg='{{sha256}}'; driver_arg='{{driver}}'; \
+    extension_arg="${extension_arg#extension=}"; sha256_arg="${sha256_arg#sha256=}"; driver_arg="${driver_arg#driver=}"; \
+    if [ ! -f "$extension_arg" ] || [ -L "$extension_arg" ]; then echo 'Development DuckLake extension must be a non-symlink file; see docs/DEVELOPMENT_DUCKLAKE.md' >&2; exit 2; fi; \
+    if [ ! -f "$driver_arg" ]; then echo 'DuckDB ADBC driver is missing; run `mise run duckdb-bootstrap`' >&2; exit 2; fi; \
+    extension_arg="$(realpath "$extension_arg")"; driver_arg="$(realpath "$driver_arg")"; duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; \
+    HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" QUACKGIS_DEV_DUCKLAKE_EXTENSION="$extension_arg" QUACKGIS_DEV_DUCKLAKE_EXTENSION_SHA256="$sha256_arg" \
+      cargo test -p quackgis-server --test development_ducklake development_ducklake_column_identity_contract -- --ignored --exact --nocapture
 
 # Run the bounded local DuckDB pgwire create/COPY/query/mutation/transaction workflow.
 duckdb-pgwire-workflow-test driver=duckdb_adbc_driver:

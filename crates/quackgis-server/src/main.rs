@@ -24,6 +24,11 @@ async fn main() -> anyhow::Result<()> {
     if cli.tls_cert.is_some() != cli.tls_key.is_some() {
         anyhow::bail!("--tls-cert and --tls-key must be specified together");
     }
+    if cli.dev_ducklake_extension.is_some() != cli.dev_ducklake_extension_sha256.is_some() {
+        anyhow::bail!(
+            "--dev-ducklake-extension and --dev-ducklake-extension-sha256 must be specified together"
+        );
+    }
     if cli.tls_mode == CliTlsMode::Required && cli.tls_cert.is_none() {
         anyhow::bail!("--tls-mode=required requires --tls-cert and --tls-key");
     }
@@ -91,13 +96,31 @@ async fn main() -> anyhow::Result<()> {
             "--duckdb-driver/QUACKGIS_DUCKDB_ADBC_DRIVER is required for the DuckDB runtime"
         )
     })?;
+    let extension_policy = match (
+        cli.dev_ducklake_extension.clone(),
+        cli.dev_ducklake_extension_sha256.clone(),
+    ) {
+        (Some(path), Some(sha256)) => {
+            log::warn!(
+                "using checksum-pinned unsigned development DuckLake extension {}; this configuration is not release-supported",
+                path.display()
+            );
+            ExtensionPolicy::DevelopmentDuckLake { path, sha256 }
+        }
+        (None, None) => ExtensionPolicy::LoadOnly,
+        _ => unreachable!("development extension arguments were validated as a pair"),
+    };
+    let development_ducklake = matches!(
+        extension_policy,
+        ExtensionPolicy::DevelopmentDuckLake { .. }
+    );
     let config = DuckDbAdbcConfig {
         driver_path,
         database_uri: cli.duckdb_database_uri.clone(),
         ducklake_uri: format!("ducklake:{}", cli.catalog_path),
         catalog_name: cli.ducklake_catalog_name.clone(),
         data_path: cli.data_path.clone(),
-        extension_policy: ExtensionPolicy::LoadOnly,
+        extension_policy,
     };
     let mut resources = DuckDbResourceConfig::for_data_path(&cli.data_path);
     if let Some(threads) = cli.duckdb_threads {
@@ -178,7 +201,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     log::info!(
-        "quackgis-server listening on {}:{} ({}; {}); engine=DuckDB; storage=official-DuckLake",
+        "quackgis-server listening on {}:{} ({}; {}); engine=DuckDB; storage={}",
         pgwire_address.ip(),
         pgwire_address.port(),
         if cli.tls_mode == CliTlsMode::Required {
@@ -191,7 +214,12 @@ async fn main() -> anyhow::Result<()> {
         match auth.mode() {
             AuthMode::Trust => "trust auth (dev mode)",
             AuthMode::Password => "SCRAM password auth",
-        }
+        },
+        if development_ducklake {
+            "checksum-pinned-development-DuckLake"
+        } else {
+            "official-DuckLake"
+        },
     );
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);

@@ -8,6 +8,11 @@
   pgwire, independent-reopen, runtime-package, and upgrade gates.
 - Runtime artifacts are checksum-pinned and preinstalled; production does not
   download extensions.
+- An unsigned DuckLake artifact may be loaded only by the paired, checksum-pinned
+  development override documented in `DEVELOPMENT_DUCKLAKE.md`. It must use the
+  exact DuckDB ABI, an isolated non-symlink path, and a disposable data root. The
+  override is prohibited in release and deployment profiles; default startup
+  continues to require the signed official extension.
 - DataFusion, SedonaDB, forked DuckLake writers, and auxiliary engines require a
   new architecture decision and are not acceptable transitive conveniences.
 
@@ -41,6 +46,13 @@ New vendor/fork acceptance requires:
 3. minimal documented divergence;
 4. tests and upgrade ownership; and
 5. a deletion/upstream plan.
+
+The temporary DuckLake identity fork satisfies these conditions only as a local
+development input: exact source/submodule commits, build inputs, artifact digest,
+focused tests, trust boundary, and deletion plan are recorded in
+`DEVELOPMENT_DUCKLAKE.md` and `DIVERGENCE.md`. It is not vendored, packaged, or a
+supported writer fork. Upstream acceptance or an explicit long-term fork decision
+is still required before release.
 
 ## Upgrade evidence
 

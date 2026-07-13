@@ -39,10 +39,15 @@ omits views, nested child fields, uncommitted DDL, types, and nullability; exist
 public SQL metadata can provide non-identity attributes. A prototype based on
 upstream commit `d4a23e83cab5ff81d239a40c7891141c19c611cb` passes transaction,
 rename, reopen, empty-column, nested-column, view, drop/recreate, and output-schema
-tests. Catalog projection remains blocked until that contract is accepted
-upstream and available in QuackGIS's pinned official extension bundle. QuackGIS
-will not carry the prototype as a runtime patch or depend on hidden attachment
-names.
+tests. Its development-only 1.5 port is pinned to DuckDB 1.5.4, passes the
+complete DuckLake function-test group, loads against the official QuackGIS driver
+ABI, and passes a QuackGIS lifecycle gate. `DEVELOPMENT_DUCKLAKE.md` records exact
+source and artifact pins.
+
+This unblocks implementation experiments, not release. Catalog projection in the
+default runtime remains blocked until the contract is accepted upstream and
+available in QuackGIS's pinned signed extension bundle. QuackGIS will not package
+the prototype, use it in production, or depend on hidden attachment names.
 
 ## Authority and migration
 

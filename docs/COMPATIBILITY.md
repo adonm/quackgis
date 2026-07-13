@@ -169,7 +169,11 @@ catalog surfaces remain open unless a focused test says otherwise.
   unimplemented/private catalog routing and unsupported wildcard/nested/set/
   derived/implicit-join/CTE/cross-database shapes fail closed. The structurally
   lossy `TABLE` form is rejected globally. This does not claim user-object catalogs,
-  RowDescription origins, or named-client execution against QuackGIS.
+  RowDescription origins, or named-client execution against QuackGIS. An opt-in
+  checksum-pinned DuckLake 1.5.4 development extension now proves the selected
+  public column-identity lifecycle contract through ADBC; it is not loaded by
+  default, packaged, or release-supported, and does not yet expose user-object
+  catalogs.
 - Binary columns named `geom_wkb` use the same geometry sentinel OID as the
   maintained COPY bbox layout. RowDescription plus text hex-WKB, binary WKB, and
   NULL transport are tested through pgwire for geometry and the maintained

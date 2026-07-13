@@ -170,11 +170,15 @@ DuckLake `BIGINT` identities, and a column key is scoped by its table identity.
 A reference implementation based on upstream DuckLake commit
 `d4a23e83cab5ff81d239a40c7891141c19c611cb` passes its focused lifecycle,
 transaction, nesting, view, and exact-schema tests plus the complete upstream
-function-test group. This is proposal evidence, not QuackGIS runtime evidence:
-the function is not yet merged or present in the pinned DuckDB 1.5.4 bundle.
-C2 must not consume it until the public contract is accepted upstream and a
-version-pinned official extension reproduces those tests. Private attachment
-names must not leak into client SQL.
+function-test group. A development-only port pinned to the DuckDB 1.5.4 ABI also
+passes QuackGIS's exact-schema, transaction, rename, reopen, add, and
+drop/recreate contract through ADBC. Exact source/artifact pins and the unsigned
+native-code boundary are recorded in `DEVELOPMENT_DUCKLAKE.md`.
+
+C2/C3 development may consume that function only through the explicit
+checksum-pinned override. Release support remains blocked until the public
+contract is accepted upstream and a version-pinned signed official extension
+reproduces the tests. Private attachment names must not leak into client SQL.
 
 ### Transaction and cache correctness
 
