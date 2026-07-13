@@ -157,12 +157,24 @@ durable compatibility-registry keys, not PostgreSQL OIDs: they are not nonzero
 uint32 values with PostgreSQL lifecycle semantics. A small transactional mapping
 for namespace/relation OIDs and durable attribute numbers is therefore required.
 
-The official public metadata API remains incomplete for authoritative extraction:
-`ducklake_table_info` provides table and schema IDs but not qualified schema UUIDs
-or all column IDs, including empty/new columns. C2 must either obtain an upstream
-public catalog-identity function or separately approve a version-pinned adapter
-over the official DuckLake specification. Private attachment names must not leak
-into client SQL.
+The lower-maintenance extraction boundary is now decided: obtain an upstream
+public DuckLake function rather than bind QuackGIS to private metadata tables or
+carry a version-pinned specification adapter. The required
+`ducklake_column_info(catalog)` contract returns exactly `schema_name`,
+`schema_id`, `schema_uuid`, `table_name`, `table_id`, `table_uuid`, `column_name`,
+and `column_id` for each current top-level base-table column in the transaction's
+pinned committed DuckLake snapshot. Views, nested child fields, and uncommitted
+DDL are excluded; committed empty/new columns are included. Numeric IDs remain
+DuckLake `BIGINT` identities, and a column key is scoped by its table identity.
+
+A reference implementation based on upstream DuckLake commit
+`d4a23e83cab5ff81d239a40c7891141c19c611cb` passes its focused lifecycle,
+transaction, nesting, view, and exact-schema tests plus the complete upstream
+function-test group. This is proposal evidence, not QuackGIS runtime evidence:
+the function is not yet merged or present in the pinned DuckDB 1.5.4 bundle.
+C2 must not consume it until the public contract is accepted upstream and a
+version-pinned official extension reproduces those tests. Private attachment
+names must not leak into client SQL.
 
 ### Transaction and cache correctness
 
@@ -423,9 +435,11 @@ publishes no catalog change, and every nonzero reference selected by the profile
 resolves.
 
 Current progress: durable table/column identity and name-reuse behavior pass in
-independent DuckDB 1.5.4 processes. The registry decision is closed. C2 remains
-open for the public metadata extraction boundary, transactional OID/attribute
-mapping, immutable snapshot, and commit/rollback epoch behavior.
+independent DuckDB 1.5.4 processes. The registry and lower-maintenance extraction
+decisions are closed, and the upstream public-function proposal passes against
+DuckLake main. C2 remains open for upstream acceptance and a pinned-runtime
+contract test, transactional OID/attribute mapping, immutable snapshot, and
+commit/rollback epoch behavior.
 
 ### C3 — implement core catalogs and wire identity
 

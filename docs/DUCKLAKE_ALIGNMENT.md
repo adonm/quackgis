@@ -29,10 +29,20 @@ unsupported errors.
 and Parquet field IDs are durable across supported table/column rename and reopen,
 while drop/recreate gets a new table identity. They are suitable keys for a
 PostgreSQL compatibility registry. They cannot be exposed directly as PostgreSQL
-OIDs, and the current public DuckLake functions do not provide complete qualified
-schema and all-column IDs. Catalog projection must wait for an upstream public
-identity API or an explicitly reviewed, version-pinned official-spec adapter; it
-must not depend casually on hidden attachment names.
+OIDs.
+
+QuackGIS has selected an upstream public identity API instead of a private or
+version-pinned metadata adapter. The proposed `ducklake_column_info(catalog)`
+returns qualified schema/table names, IDs and UUIDs plus top-level logical column
+names and IDs from the pinned committed DuckLake snapshot. This deliberately
+omits views, nested child fields, uncommitted DDL, types, and nullability; existing
+public SQL metadata can provide non-identity attributes. A prototype based on
+upstream commit `d4a23e83cab5ff81d239a40c7891141c19c611cb` passes transaction,
+rename, reopen, empty-column, nested-column, view, drop/recreate, and output-schema
+tests. Catalog projection remains blocked until that contract is accepted
+upstream and available in QuackGIS's pinned official extension bundle. QuackGIS
+will not carry the prototype as a runtime patch or depend on hidden attachment
+names.
 
 ## Authority and migration
 
