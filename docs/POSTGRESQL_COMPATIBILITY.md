@@ -77,10 +77,11 @@ types come from PostgreSQL 18.4 image digest
 and are recorded in
 `tests/fixtures/postgresql18_column_core_reference.json`. The profile covers the
 current custom-type resolver, core relation/column identity, PostgreSQL-facing
-REST table/column discovery, and maintained session probes. It explicitly lists
-psql copied-table, OGR 3.11.5 copied-spatial-table, QGIS 3.44 headless, and
-role/OpenAPI traces as pending; no behavior is inferred from a different client
-version.
+REST table/column discovery, and maintained session probes. The exact OGR 3.11.5
+copied-point discovery trace is frozen separately in
+`tests/fixtures/ogr_3_11_5_postgresql18_trace.json`. Psql copied-table, QGIS 3.44
+headless, and role/OpenAPI traces remain pending; no behavior is inferred from a
+different client version.
 
 ## Required invariants
 
@@ -390,8 +391,11 @@ Gate: every implementation item has a client/workload reason and a PostgreSQL
 oracle before compatibility code is added.
 
 Current progress: `pg18-column-core-v1` freezes the first result-type/query
-contract and PostgreSQL 18.4 oracle. C1 remains open for the pinned copied-data
-psql/OGR/QGIS traces and the later role/privilege/OpenAPI reference matrix.
+contract and PostgreSQL 18.4 oracle. A real OGR 3.11.5 `-ro -so` copied-point run
+against digest-pinned PostgreSQL 18.4/PostGIS freezes 21 ordered session, catalog,
+spatial metadata, count, and extent query families plus the exact observed layer
+result. C1 remains open for copied-table psql, headless QGIS 3.44, and the later
+role/privilege/OpenAPI reference matrix.
 
 ### C2 — build catalog snapshot and identity foundations
 

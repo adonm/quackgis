@@ -26,6 +26,7 @@ EXPECTED_COUNTS = {
 }
 POSTGRESQL_PROFILE = ROOT / "tests/fixtures/postgresql18_compatibility_profile.json"
 POSTGRESQL_REFERENCE = ROOT / "tests/fixtures/postgresql18_column_core_reference.json"
+OGR_TRACE = ROOT / "tests/fixtures/ogr_3_11_5_postgresql18_trace.json"
 
 
 def tracked_markdown() -> list[Path]:
@@ -108,6 +109,7 @@ def check_claim_text(errors: list[str]) -> None:
 def check_postgresql_profile(errors: list[str]) -> None:
     profile = json.loads(POSTGRESQL_PROFILE.read_text(encoding="utf-8"))
     reference = json.loads(POSTGRESQL_REFERENCE.read_text(encoding="utf-8"))
+    ogr_trace = json.loads(OGR_TRACE.read_text(encoding="utf-8"))
 
     if profile.get("schema_version") != 1:
         errors.append("PostgreSQL compatibility profile schema_version must be 1")
@@ -185,6 +187,47 @@ def check_postgresql_profile(errors: list[str]) -> None:
     pending_ids = [item.get("id") for item in pending]
     if len(pending_ids) != len(set(pending_ids)) or not all(pending_ids):
         errors.append("PostgreSQL compatibility profile has duplicate/unnamed pending traces")
+
+    captured = profile.get("captured_trace_families", [])
+    captured_ids = [item.get("id") for item in captured]
+    if "ogr_copied_spatial_table" not in captured_ids:
+        errors.append("PostgreSQL compatibility profile does not register the OGR trace")
+    if set(captured_ids) & set(pending_ids):
+        errors.append("PostgreSQL trace cannot be both captured and pending")
+
+    if ogr_trace.get("trace_id") != "ogr-3.11.5-postgresql18-copied-point-v1":
+        errors.append("OGR trace_id is missing or unsupported")
+    if ogr_trace.get("client", {}).get("gdal_ogr_version") != "3.11.5":
+        errors.append("OGR trace must use GDAL/OGR 3.11.5")
+    if ogr_trace.get("oracle", {}).get("postgresql_version") != "18.4":
+        errors.append("OGR trace must use the PostgreSQL 18.4 oracle")
+    for label, value in [
+        ("OGR client image", ogr_trace.get("client", {}).get("image_digest", "")),
+        ("PostGIS image", ogr_trace.get("oracle", {}).get("postgis_image_digest", "")),
+    ]:
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+            errors.append(f"{label} digest is missing or malformed")
+    serialized_trace = json.dumps(ogr_trace).lower()
+    for secret in ["password=", "reference-only"]:
+        if secret in serialized_trace:
+            errors.append(f"OGR trace contains credential material: {secret}")
+    ogr_queries = ogr_trace.get("queries", [])
+    ogr_query_ids = [query.get("id") for query in ogr_queries]
+    if len(ogr_query_ids) != len(set(ogr_query_ids)) or len(ogr_queries) < 20:
+        errors.append("OGR trace query corpus is duplicate, unnamed, or incomplete")
+    required_ogr_queries = {
+        "discover_spatial_type_oids",
+        "empty_geometry_srid",
+        "relation_oid",
+        "primary_key_columns",
+        "column_structure",
+        "geometry_column_metadata",
+        "spatial_extent",
+        "spatial_reference",
+    }
+    missing_ogr_queries = sorted(required_ogr_queries - set(ogr_query_ids))
+    if missing_ogr_queries:
+        errors.append(f"OGR trace missing required query families: {missing_ogr_queries}")
 
 
 def main() -> int:

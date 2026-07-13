@@ -20,6 +20,10 @@ direct DuckDB/ADBC/pgwire benchmark smoke and writes its manifest under `.tmp`.
   RowDescription/type evidence from the digest-pinned PostgreSQL 18.4 oracle.
   `just project-contract-check` validates both files together; they are target
   contracts, not QuackGIS implementation claims.
+- `fixtures/ogr_3_11_5_postgresql18_trace.json` is a credential-free normalized
+  trace from the exact pinned OGR image against digest-pinned PostgreSQL
+  18.4/PostGIS. It freezes copied-point discovery SQL and observed results; it does
+  not claim those queries execute through QuackGIS yet.
 - `fixtures/postgis_curated_cases.rs` is the deliberately bounded expected-value
   source parsed by the native CLI and pgwire gates, not a Cargo integration test.
 

@@ -1,0 +1,170 @@
+{
+  "schema_version": 1,
+  "trace_id": "ogr-3.11.5-postgresql18-copied-point-v1",
+  "capture_date": "2026-07-13",
+  "client": {
+    "command": "ogrinfo -ro -so <connection> public.trace_points",
+    "gdal_ogr_version": "3.11.5",
+    "image": "localhost/quackgis-kind-clients:dev",
+    "image_id": "sha256:088e76209697e8a6dc8df10e4987b75e3e98faaad1394e74ea20185dc6788760",
+    "image_digest": "sha256:ef8d4ece07cf5498360c3d4d58822cf2b78aea015550c141467d8d1127a640d9"
+  },
+  "oracle": {
+    "postgresql_version": "18.4",
+    "postgis_image": "docker.io/postgis/postgis:18-3.6",
+    "postgis_image_digest": "sha256:61b58715ec26f8a365883bd6718f5a007cdf06b0b264162775d3a25a77536821"
+  },
+  "fixture": {
+    "schema": "public",
+    "table": "trace_points",
+    "primary_key": "id",
+    "geometry_column": "geom",
+    "geometry_type": "Point",
+    "srid": 4326,
+    "row_count": 2
+  },
+  "normalization": {
+    ":schema_name": "public",
+    ":table_name": "trace_points",
+    ":geometry_column": "geom",
+    ":relation_oid": "installation-local pg_class OID excluded from equality",
+    ":srid": "4326"
+  },
+  "queries": [
+    {
+      "id": "set_client_encoding",
+      "stage": "C3",
+      "surface": "session",
+      "sql": "SET client_encoding TO 'UTF8'"
+    },
+    {
+      "id": "show_client_encoding",
+      "stage": "C3",
+      "surface": "session",
+      "sql": "SHOW client_encoding"
+    },
+    {
+      "id": "find_postgis_namespace",
+      "stage": "C7",
+      "surface": "routine_catalog",
+      "sql": "SELECT n.nspname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE proname = 'postgis_version'"
+    },
+    {
+      "id": "show_search_path",
+      "stage": "C3",
+      "surface": "session",
+      "sql": "SHOW search_path"
+    },
+    {
+      "id": "server_version",
+      "stage": "C3",
+      "surface": "session",
+      "sql": "SELECT version()"
+    },
+    {
+      "id": "set_standard_conforming_strings",
+      "stage": "C3",
+      "surface": "session",
+      "sql": "SET standard_conforming_strings = ON"
+    },
+    {
+      "id": "discover_spatial_type_oids",
+      "stage": "C3",
+      "surface": "type_catalog",
+      "sql": "SELECT oid, typname FROM pg_type WHERE typname IN ('geometry', 'geography') AND typtype = 'b'"
+    },
+    {
+      "id": "postgis_version",
+      "stage": "C3",
+      "surface": "spatial_compatibility",
+      "sql": "SELECT postgis_version()"
+    },
+    {
+      "id": "geometry_columns_exists",
+      "stage": "C6",
+      "surface": "information_schema",
+      "sql": "SELECT 1 FROM information_schema.tables WHERE table_name = 'geometry_columns' LIMIT 1"
+    },
+    {
+      "id": "spatial_ref_sys_exists",
+      "stage": "C6",
+      "surface": "information_schema",
+      "sql": "SELECT 1 FROM information_schema.tables WHERE table_name = 'spatial_ref_sys' LIMIT 1"
+    },
+    {
+      "id": "empty_geometry_srid",
+      "stage": "C6",
+      "surface": "spatial_metadata",
+      "sql": "SELECT ST_Srid('POINT EMPTY'::GEOMETRY)"
+    },
+    {
+      "id": "current_schema",
+      "stage": "C3",
+      "surface": "session",
+      "sql": "SELECT current_schema()"
+    },
+    {
+      "id": "relation_oid",
+      "stage": "C3",
+      "surface": "relation_catalog",
+      "sql": "SELECT c.oid FROM pg_class c JOIN pg_namespace n ON c.relnamespace = n.oid WHERE c.relname = ':table_name' AND n.nspname = ':schema_name'"
+    },
+    {
+      "id": "primary_key_columns",
+      "stage": "C5",
+      "surface": "constraint_catalog",
+      "sql": "SELECT a.attname, a.attnum, t.typname, t.typname = ANY(ARRAY['int2','int4','int8','serial','bigserial']) AS isfid FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid JOIN pg_index i ON i.indrelid = a.attrelid WHERE a.attnum > 0 AND a.attrelid = :relation_oid AND i.indisprimary = 't' AND t.typname !~ '^geom' AND a.attnum = ANY(i.indkey) ORDER BY a.attnum"
+    },
+    {
+      "id": "column_structure",
+      "stage": "C5",
+      "surface": "column_catalog",
+      "sql": "SELECT a.attname, t.typname, a.attlen, format_type(a.atttypid, a.atttypmod), a.attnotnull, def.def, i.indisunique, descr.description, a.attgenerated FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid LEFT JOIN (SELECT adrelid, adnum, pg_get_expr(adbin, adrelid) AS def FROM pg_attrdef) def ON def.adrelid = a.attrelid AND def.adnum = a.attnum LEFT JOIN (SELECT DISTINCT indrelid, indkey, indisunique FROM pg_index WHERE indisunique) i ON i.indrelid = a.attrelid AND i.indkey[0] = a.attnum AND i.indkey[1] IS NULL LEFT JOIN pg_description descr ON descr.objoid = a.attrelid AND descr.classoid = 'pg_class'::regclass::oid AND descr.objsubid = a.attnum WHERE a.attnum > 0 AND a.attrelid = :relation_oid ORDER BY a.attnum"
+    },
+    {
+      "id": "geometry_column_metadata",
+      "stage": "C6",
+      "surface": "spatial_metadata",
+      "sql": "SELECT type, coord_dimension, srid FROM geometry_columns WHERE f_table_name = ':table_name' AND f_geometry_column = ':geometry_column' AND f_table_schema = ':schema_name'"
+    },
+    {
+      "id": "ogr_metadata_relation",
+      "stage": "C6",
+      "surface": "optional_ogr_metadata",
+      "sql": "SELECT c.oid FROM pg_class c JOIN pg_namespace n ON c.relnamespace = n.oid WHERE c.relname = 'metadata' AND n.nspname = 'ogr_system_tables'"
+    },
+    {
+      "id": "table_description",
+      "stage": "C5",
+      "surface": "description_catalog",
+      "sql": "SELECT d.description FROM pg_class c JOIN pg_namespace n ON c.relnamespace = n.oid JOIN pg_description d ON d.objoid = c.oid AND d.classoid = 'pg_class'::regclass::oid AND d.objsubid = 0 WHERE c.relname = ':table_name' AND n.nspname = ':schema_name' AND c.relkind IN ('r', 'v')"
+    },
+    {
+      "id": "feature_count",
+      "stage": "C6",
+      "surface": "data",
+      "sql": "SELECT count(*) FROM \"trace_points\""
+    },
+    {
+      "id": "spatial_extent",
+      "stage": "C6",
+      "surface": "spatial_data",
+      "sql": "SELECT ST_Extent(\"geom\") FROM \"trace_points\" AS ogrpgextent"
+    },
+    {
+      "id": "spatial_reference",
+      "stage": "C6",
+      "surface": "spatial_metadata",
+      "sql": "SELECT srtext, auth_name, auth_srid FROM spatial_ref_sys WHERE srid = :srid"
+    }
+  ],
+  "observed_result": {
+    "open_succeeded": true,
+    "geometry": "Point",
+    "feature_count": 2,
+    "extent": [0.0, 0.0, 1.0, 1.0],
+    "fid_column": "id",
+    "geometry_column": "geom",
+    "srid": 4326
+  }
+}

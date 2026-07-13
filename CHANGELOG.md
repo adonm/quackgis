@@ -117,6 +117,9 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   one-/two-/three-part COPY targets.
 - A machine-readable `pg18-column-core-v1` contract with digest-pinned PostgreSQL
   18.4 result-description evidence and explicit pending named-client traces.
+- A credential-free 21-query copied-point discovery trace from the exact OGR
+  3.11.5 image against digest-pinned PostgreSQL 18.4/PostGIS, including observed
+  geometry, FID, SRID, feature-count, and extent results.
 - A multi-process DuckDB 1.5.4 identity gate proving DuckLake table UUID/ID and
   column field-ID continuity across rename/reopen plus new identity on name reuse.
 - A registered client-neutral catalog fixture for DuckDB-derived table/column

@@ -41,7 +41,7 @@ Disposition:
 | PostgreSQL RLS | deferred/Rust edge + native exact predicates | none; no RLS claim | separate policy model, catalog consistency, structural injection, adversarial read/write bypass suite |
 | geometry/geography OID discovery | partial Rust edge | relational namespace/type/range rows; structural catalog mapping; seven PostgreSQL 18 result types; ordinary/unknown-OID queries; RowDescription text/binary/NULL pgwire fixture | named QGIS/OGR discovery and subtype/SRID/dimension identity |
 | psql/psycopg | partial | tokio-postgres is maintained test client | version-pinned named workflows |
-| GDAL/OGR | partial | pinned 3.11.5 TLS/SCRAM scalar Kind smoke; copied-data discovery still reaches unsupported optional `ST_SRID` | read + streaming COPY copied-data test without discovery failure |
+| GDAL/OGR | partial | pinned 3.11.5 TLS/SCRAM scalar Kind smoke plus digest-pinned PostgreSQL 18.4/PostGIS copied-point oracle with 21 normalized discovery query families; QuackGIS discovery still reaches unsupported `ST_SRID` | implement traced class/attribute/index/description/spatial metadata, read + streaming COPY copied-data test |
 | QGIS read-only | blocked | prior traces only | discovery/filter/identify/render test |
 | role-aware REST/OpenAPI | blocked/stateless pgwire client | authenticated read-only bearer preview with independent schema cache | JWT role mapping, authenticator role, catalog/privilege discovery, role+epoch cache, packaged replicas |
 | GeoServer/Martin/editing/BI | deferred | historical oracles only | reconsider after Local 1.0 surface is stable |

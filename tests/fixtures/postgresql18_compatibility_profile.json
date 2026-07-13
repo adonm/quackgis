@@ -268,16 +268,19 @@
       ]
     }
   ],
+  "captured_trace_families": [
+    {
+      "id": "ogr_copied_spatial_table",
+      "version": "3.11.5",
+      "fixture": "tests/fixtures/ogr_3_11_5_postgresql18_trace.json",
+      "status": "captured_against_postgresql18_postgis; QuackGIS implementation pending"
+    }
+  ],
   "pending_trace_families": [
     {
       "id": "psql_describe_copied_table",
       "required_version": "18.3",
       "reason": "capture psql catalog SQL and normalized PostgreSQL 18 output"
-    },
-    {
-      "id": "ogr_copied_spatial_table",
-      "required_version": "3.11.5",
-      "reason": "capture exact pg_catalog, geometry_columns, typmod, SRID, and key discovery SQL"
     },
     {
       "id": "qgis_headless_copied_layer",
