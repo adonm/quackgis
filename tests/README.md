@@ -14,6 +14,10 @@ direct DuckDB/ADBC/pgwire benchmark smoke and writes its manifest under `.tmp`.
   RowDescription, binary/text WKB, NULL, unknown OIDs, and ordinary equivalent
   catalog rows/types through pgwire. It also proves namespace owner resolution and
   that ordinary `oid`/`typtype` aliases retain their native values and types.
+  Schema version 4 adds implicit `pg_catalog` lookup, profile/QGIS-required
+  built-ins, PostGIS-shaped spatial scalar/arrays, full-row oracle equality,
+  reciprocal namespace/owner/array/collation references, explicit OID parameters,
+  and fail-closed private/unsupported routing and provenance shapes.
 - `fixtures/postgresql18_compatibility_profile.json` freezes the first target
   catalog/query/wire contract and names every still-pending client trace.
   `fixtures/postgresql18_column_core_reference.json` records normalized

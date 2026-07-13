@@ -129,11 +129,14 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 - A multi-process DuckDB 1.5.4 identity gate proving DuckLake table UUID/ID and
   column field-ID continuity across rename/reopen plus new identity on name reuse.
 - A registered client-neutral catalog fixture for DuckDB-derived table/column
-  metadata and relational geometry/geography namespace/type/range views. Explicit
-  catalog references are structurally mapped and projected fields receive
-  provenance-bound PostgreSQL type metadata; OID parameters and all seven result
-  fields match PostgreSQL 18 types, with owner resolution, typed ordinary scans,
-  alias-safety, unknown-OID, and exact RowDescription/text/binary/NULL behavior.
+  metadata and relational namespace/type/range/collation/owner-role views. Explicit
+  and implicit catalog references are structurally mapped; 24 full-row PostgreSQL
+  18 built-ins and PostGIS-shaped geometry/geography scalar/arrays have complete
+  namespace/owner/array/collation links. Provenance-bound wire metadata, inferred
+  and caller-supplied OID parameters, alias safety, and spatial transport pass.
+  Unimplemented catalog routing, reserved CTE shadowing, and unsupported wildcard/
+  nested/set/derived/implicit-join/cross-database shapes fail closed rather than
+  reaching DuckDB/user objects; private-schema and `TABLE` access are rejected.
 - DuckDB-computed bbox maintenance during COPY for the explicit reserved-column
   layout contract, including NULL, exact-recheck, and reopen evidence.
 - Fail-closed bbox layout validation rejects partial, wrong-type, caller-supplied,

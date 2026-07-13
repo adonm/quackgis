@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "setup_sql": "CREATE TABLE quackgis.main.catalog_fixture(id BIGINT, name VARCHAR, geom_wkb BLOB, geog BLOB)",
   "copy_sql": "COPY quackgis.main.catalog_fixture (id, name, geom_wkb, geog) FROM STDIN",
   "copy_row": "1\torigin\t\\x010100000000000000000000000000000000000000\t\\x0101000000000000000000F03F000000000000F03F\n",
@@ -44,10 +44,33 @@
     }
   ],
   "ordinary_catalog_query": {
-    "sql": "SELECT oid, typname, typnamespace, typtype FROM pg_catalog.pg_type WHERE oid IN (90001, 90002) ORDER BY oid",
+    "sql": "SELECT oid, typname, typnamespace, typtype, typdelim, typarray FROM pg_catalog.pg_type WHERE oid IN (90001, 90002) ORDER BY oid",
     "expected_rows": [
-      { "oid": 90001, "type_name": "geometry", "namespace_oid": 2200, "type_kind": 98 },
-      { "oid": 90002, "type_name": "geography", "namespace_oid": 2200, "type_kind": 98 }
+      { "oid": 90001, "type_name": "geometry", "namespace_oid": 2200, "type_kind": 98, "delimiter": 58, "array_oid": 90003 },
+      { "oid": 90002, "type_name": "geography", "namespace_oid": 2200, "type_kind": 98, "delimiter": 58, "array_oid": 90004 }
     ]
+  },
+  "builtin_type_query": {
+    "sql": "SELECT oid, typname, typtype, typelem, typlen FROM pg_type WHERE oid IN (20, 29, 28, 25, 90001, 27, 26) ORDER BY oid",
+    "expected_rows": [
+      { "oid": 20, "type_name": "int8", "type_kind": 98, "element_oid": 0, "type_length": 8 },
+      { "oid": 25, "type_name": "text", "type_kind": 98, "element_oid": 0, "type_length": -1 },
+      { "oid": 26, "type_name": "oid", "type_kind": 98, "element_oid": 0, "type_length": 4 },
+      { "oid": 27, "type_name": "tid", "type_kind": 98, "element_oid": 0, "type_length": 6 },
+      { "oid": 28, "type_name": "xid", "type_kind": 98, "element_oid": 0, "type_length": 4 },
+      { "oid": 29, "type_name": "cid", "type_kind": 98, "element_oid": 0, "type_length": 4 },
+      { "oid": 90001, "type_name": "geometry", "type_kind": 98, "element_oid": 0, "type_length": -1 }
+    ]
+  },
+  "type_catalog_integrity": {
+    "count_sql": "SELECT count(*)::BIGINT FROM pg_type",
+    "expected_count": 28,
+    "unresolved_queries": [
+      "SELECT count(*)::BIGINT FROM pg_type t LEFT JOIN pg_type e ON e.oid = t.typelem LEFT JOIN pg_type a ON a.oid = t.typarray LEFT JOIN pg_collation c ON c.oid = t.typcollation WHERE (t.typelem <> 0 AND e.oid IS NULL) OR (t.typarray <> 0 AND (a.oid IS NULL OR a.typelem <> t.oid)) OR (t.typcategory = 'A' AND t.typelem <> 0 AND e.typarray <> t.oid) OR (t.typcollation <> 0 AND c.oid IS NULL)",
+      "SELECT count(*)::BIGINT FROM pg_type t LEFT JOIN pg_namespace n ON n.oid = t.typnamespace WHERE n.oid IS NULL",
+      "SELECT count(*)::BIGINT FROM pg_namespace n LEFT JOIN pg_roles r ON r.oid = n.nspowner WHERE r.oid IS NULL",
+      "SELECT count(*)::BIGINT FROM pg_collation c LEFT JOIN pg_namespace n ON n.oid = c.collnamespace LEFT JOIN pg_roles r ON r.oid = c.collowner WHERE n.oid IS NULL OR r.oid IS NULL"
+    ],
+    "expected_unresolved": 0
   }
 }

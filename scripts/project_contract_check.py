@@ -121,11 +121,29 @@ def check_postgresql_profile(errors: list[str]) -> None:
         errors.append("PostgreSQL compatibility profile_id must be pg18-column-core-v1")
     if profile.get("target", {}).get("postgresql_major") != 18:
         errors.append("PostgreSQL compatibility profile must target major version 18")
+    identity = profile.get("identity_policy", {})
+    if [
+        identity.get("geometry_oid"),
+        identity.get("geography_oid"),
+        identity.get("geometry_array_oid"),
+        identity.get("geography_array_oid"),
+    ] != [90_001, 90_002, 90_003, 90_004]:
+        errors.append("PostGIS scalar/array compatibility OIDs drifted")
     if reference.get("profile_id") != profile.get("profile_id"):
         errors.append("PostgreSQL reference output does not name the active profile")
     digest = reference.get("oracle", {}).get("image_digest", "")
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
         errors.append("PostgreSQL reference image digest is missing or malformed")
+    builtin_types = [
+        (item.get("oid"), item.get("name")) for item in reference.get("builtin_types", [])
+    ]
+    builtin_rows = reference.get("builtin_type_rows", [])
+    if len(builtin_types) != 24 or len(builtin_rows) != 24:
+        errors.append("PostgreSQL built-in type oracle must contain 24 profile/QGIS rows")
+    if any(not isinstance(row, list) or len(row) != 18 for row in builtin_rows):
+        errors.append("PostgreSQL built-in type oracle rows must contain all 18 fields")
+    elif [(row[0], row[1]) for row in builtin_rows] != builtin_types:
+        errors.append("PostgreSQL built-in type names drifted from full oracle rows")
 
     relations = profile.get("catalog_relations", [])
     relation_names = [relation.get("name") for relation in relations]
@@ -133,6 +151,7 @@ def check_postgresql_profile(errors: list[str]) -> None:
         "pg_catalog.pg_namespace",
         "pg_catalog.pg_type",
         "pg_catalog.pg_range",
+        "pg_catalog.pg_collation",
         "pg_catalog.pg_class",
         "pg_catalog.pg_attribute",
         "pg_catalog.pg_database",

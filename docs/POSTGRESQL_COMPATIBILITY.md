@@ -444,16 +444,22 @@ Deliver:
 Gate: client-neutral differential fixtures and actual pgwire tests pass for
 scalar, geometry, and geography columns, including restart and rename.
 
-Current progress: the exact whole-query spatial type interception has been
-removed. Explicit `pg_catalog.pg_type`, `pg_range`, and `pg_namespace` references
-are structurally mapped to private process-local views; the custom-type resolver,
-ordinary scans, unknown OIDs, namespace identity, parameter OID, and all seven
-PostgreSQL 18 result types pass through actual pgwire. Catalog wire hints are bound
-to structurally proven source projections, so ordinary aliases cannot coerce or
-truncate values. A minimal `quackgis_owner` row resolves namespace owner OIDs, and
-the private rewrite schema is covered by restricted-metadata policy. Built-in type
-rows, user-object catalogs/OIDs, unqualified implicit `pg_catalog` lookup, and
-RowDescription relation/attribute origins remain open.
+Current progress: exact whole-query interception is removed. Explicit and implicit
+`pg_catalog` namespace/type/range/collation/owner-role references map structurally
+to protected process-local views. Twenty-eight rows cover 24 exact PostgreSQL 18
+profile/QGIS built-ins plus geometry/geography scalars and their PostGIS-shaped
+array partners; all array links resolve, spatial delimiters are `:`, and the
+`default`/`C` collation OIDs close nonzero references. The custom-type resolver,
+ordinary scans, unknown OIDs, namespace/owner identity, OID parameters, and frozen
+result types pass through pgwire, including caller-supplied OID parameter types.
+Provenance-bound wire hints prevent output aliases from coercing values. Any
+unimplemented explicit `pg_catalog` or unqualified `pg_*` relation fails `0A000`
+instead of falling through to DuckDB/user objects. CTE shadowing, wildcard,
+nested/set/derived type-preserving expressions, `USING`/`NATURAL` catalog joins,
+and three-part qualification fail closed until their provenance can be represented.
+Direct private-schema access and the structurally lossy `TABLE` query form are
+rejected. User-object catalogs/OIDs, broader built-ins, `reg*`, and RowDescription
+relation/attribute origins remain open.
 
 ### C4 — implement role and session semantics
 

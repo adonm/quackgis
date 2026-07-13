@@ -42,8 +42,8 @@ use pgwire::messages::extendedquery::Execute;
 use pgwire::messages::response::TransactionStatus;
 use sqlparser::ast::{
     BinaryOperator, CopySource, CopyTarget as AstCopyTarget, Expr, FunctionArg, FunctionArgExpr,
-    FunctionArguments, Ident, ObjectName, ObjectNamePart, SelectItem, Set, SetExpr, Statement,
-    TableFactor, Value, visit_expressions, visit_relations_mut,
+    FunctionArguments, Ident, JoinConstraint, JoinOperator, ObjectName, ObjectNamePart, SelectItem,
+    Set, SetExpr, Statement, TableFactor, Value, visit_expressions, visit_relations_mut,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
@@ -294,6 +294,15 @@ impl QueryParser for DuckDbParser {
                 .iter()
                 .enumerate()
                 .map(|(index, field)| {
+                    if types
+                        .get(index)
+                        .is_some_and(|pg_type| pg_type.as_ref() == Some(&Type::OID))
+                    {
+                        return with_pg_type_hint(
+                            Field::new(field.name(), DataType::UInt32, true),
+                            PgTypeHint::Oid,
+                        );
+                    }
                     if field.data_type() == &DataType::Null
                         && let Some(Some(pg_type)) = types.get(index)
                     {
@@ -361,6 +370,7 @@ fn pg_type_to_arrow(pg_type: &Type) -> Option<DataType> {
         Type::INT2 => Some(DataType::Int16),
         Type::INT4 => Some(DataType::Int32),
         Type::INT8 => Some(DataType::Int64),
+        Type::OID => Some(DataType::UInt32),
         Type::FLOAT4 => Some(DataType::Float32),
         Type::FLOAT8 => Some(DataType::Float64),
         Type::TEXT | Type::VARCHAR => Some(DataType::Utf8),
@@ -934,6 +944,36 @@ fn validate_statement(sql: &str, mode: ProtocolMode) -> PgWireResult<ValidatedSt
             "quoted PostgreSQL catalog identifier does not match the maintained lowercase name",
         ));
     }
+    if private_catalog_reference(&statement) {
+        return Err(user_error(
+            "0A000",
+            "direct references to the private QuackGIS catalog projection are not supported",
+        ));
+    }
+    if let Some(cte) = reserved_catalog_cte(&statement) {
+        return Err(user_error(
+            "0A000",
+            &format!("CTE name {cte} conflicts with the reserved PostgreSQL catalog namespace"),
+        ));
+    }
+    if query_contains_table_command(&statement) {
+        return Err(user_error(
+            "0A000",
+            "TABLE query form is not supported by QuackGIS authorization or catalog routing",
+        ));
+    }
+    if let Some(relation) = unsupported_catalog_relation(&statement) {
+        return Err(user_error(
+            "0A000",
+            &format!("PostgreSQL catalog relation {relation} is not implemented by QuackGIS"),
+        ));
+    }
+    if !catalog_query_shape_supported(&statement) {
+        return Err(user_error(
+            "0A000",
+            "PostgreSQL catalog query shape is outside the maintained projection contract",
+        ));
+    }
     let kind = match &statement {
         Statement::Query(_) => StatementKind::Read,
         Statement::CreateTable(_) => StatementKind::Write("CREATE TABLE"),
@@ -1248,39 +1288,378 @@ fn rewrite_pg_catalog_relations(statement: &mut Statement) {
 }
 
 fn maintained_pg_catalog_relation(name: &ObjectName) -> Option<&'static str> {
-    let [
-        ObjectNamePart::Identifier(schema),
-        ObjectNamePart::Identifier(table),
-    ] = name.0.as_slice()
-    else {
-        return None;
-    };
-    if !pg_identifier_matches(schema, "pg_catalog") {
+    if name.0.len() > 2 {
         return None;
     }
-    ["pg_namespace", "pg_type", "pg_range", "pg_roles"]
+    let (table, _) = catalog_relation_identifier(name)?;
+    [
+        "pg_namespace",
+        "pg_type",
+        "pg_range",
+        "pg_collation",
+        "pg_roles",
+    ]
+    .into_iter()
+    .find(|candidate| pg_identifier_matches(table, candidate))
+}
+
+fn catalog_relation_identifier(name: &ObjectName) -> Option<(&Ident, bool)> {
+    match name.0.as_slice() {
+        [ObjectNamePart::Identifier(table)] => Some((table, false)),
+        [
+            ObjectNamePart::Identifier(schema),
+            ObjectNamePart::Identifier(table),
+        ] if pg_identifier_matches(schema, "pg_catalog") => Some((table, true)),
+        [
+            ObjectNamePart::Identifier(_catalog),
+            ObjectNamePart::Identifier(schema),
+            ObjectNamePart::Identifier(table),
+        ] if pg_identifier_matches(schema, "pg_catalog") => Some((table, true)),
+        _ => None,
+    }
+}
+
+fn unsupported_catalog_relation(statement: &Statement) -> Option<String> {
+    let mut clone = statement.clone();
+    let mut unsupported = None;
+    let _: ControlFlow<()> = visit_relations_mut(&mut clone, |name| {
+        let Some((table, explicitly_catalog)) = catalog_relation_identifier(name) else {
+            return ControlFlow::Continue(());
+        };
+        let lower_table = table.value.to_ascii_lowercase();
+        let unqualified_pg_name =
+            lower_table.starts_with("pg_") && pg_identifier_matches(table, &lower_table);
+        if maintained_pg_catalog_relation(name).is_none()
+            && (explicitly_catalog || unqualified_pg_name)
+        {
+            unsupported = Some(table.value.to_ascii_lowercase());
+        }
+        if unsupported.is_some() {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    unsupported
+}
+
+fn reserved_catalog_cte(statement: &Statement) -> Option<String> {
+    let Statement::Query(query) = statement else {
+        return None;
+    };
+    reserved_catalog_cte_in_query(query)
+}
+
+fn reserved_catalog_cte_in_query(query: &sqlparser::ast::Query) -> Option<String> {
+    if let Some(with) = &query.with {
+        for cte in &with.cte_tables {
+            let name = identifier_key(&cte.alias.name);
+            if name.starts_with("pg_") {
+                return Some(name);
+            }
+            if let Some(name) = reserved_catalog_cte_in_query(&cte.query) {
+                return Some(name);
+            }
+        }
+    }
+    let mut reserved = None;
+    let _: ControlFlow<()> = visit_expressions(query.body.as_ref(), |expression| {
+        let subquery = match expression {
+            Expr::InSubquery { subquery, .. }
+            | Expr::Exists { subquery, .. }
+            | Expr::Subquery(subquery) => Some(subquery),
+            _ => None,
+        };
+        if let Some(subquery) = subquery
+            && let Some(name) = reserved_catalog_cte_in_query(subquery)
+        {
+            reserved = Some(name);
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    });
+    reserved
+}
+
+fn query_contains_table_command(statement: &Statement) -> bool {
+    let Statement::Query(query) = statement else {
+        return false;
+    };
+    query_contains_table_command_inner(query)
+}
+
+fn query_contains_table_command_inner(query: &sqlparser::ast::Query) -> bool {
+    if query.with.as_ref().is_some_and(|with| {
+        with.cte_tables
+            .iter()
+            .any(|cte| query_contains_table_command_inner(&cte.query))
+    }) {
+        return true;
+    }
+    if set_expr_contains_table_command(query.body.as_ref()) {
+        return true;
+    }
+    let mut found = false;
+    let _: ControlFlow<()> = visit_expressions(query, |expression| {
+        let subquery = match expression {
+            Expr::InSubquery { subquery, .. }
+            | Expr::Exists { subquery, .. }
+            | Expr::Subquery(subquery) => Some(subquery),
+            _ => None,
+        };
+        if subquery.is_some_and(|query| query_contains_table_command_inner(query)) {
+            found = true;
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    found
+}
+
+fn set_expr_contains_table_command(expression: &SetExpr) -> bool {
+    match expression {
+        SetExpr::Table(_) => true,
+        SetExpr::Query(query) => query_contains_table_command_inner(query),
+        SetExpr::SetOperation { left, right, .. } => {
+            set_expr_contains_table_command(left) || set_expr_contains_table_command(right)
+        }
+        SetExpr::Select(select) => select.from.iter().any(|table| {
+            table_factor_contains_table_command(&table.relation)
+                || table
+                    .joins
+                    .iter()
+                    .any(|join| table_factor_contains_table_command(&join.relation))
+        }),
+        _ => false,
+    }
+}
+
+fn table_factor_contains_table_command(factor: &TableFactor) -> bool {
+    match factor {
+        TableFactor::Derived { subquery, .. } => query_contains_table_command_inner(subquery),
+        TableFactor::NestedJoin {
+            table_with_joins, ..
+        } => {
+            table_factor_contains_table_command(&table_with_joins.relation)
+                || table_with_joins
+                    .joins
+                    .iter()
+                    .any(|join| table_factor_contains_table_command(&join.relation))
+        }
+        TableFactor::Pivot { table, .. }
+        | TableFactor::Unpivot { table, .. }
+        | TableFactor::MatchRecognize { table, .. } => table_factor_contains_table_command(table),
+        _ => false,
+    }
+}
+
+fn catalog_query_shape_supported(statement: &Statement) -> bool {
+    let mut clone = statement.clone();
+    let mut relation_count = 0usize;
+    let _: ControlFlow<()> = visit_relations_mut(&mut clone, |name| {
+        if maintained_pg_catalog_relation(name).is_some() {
+            relation_count += 1;
+        }
+        ControlFlow::Continue(())
+    });
+    if relation_count == 0 {
+        return true;
+    }
+    let Statement::Query(query) = statement else {
+        return false;
+    };
+    if query.with.is_some() {
+        return false;
+    }
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return false;
+    };
+    if select.from.iter().any(|table| {
+        !matches!(&table.relation, TableFactor::Table { .. })
+            || table.joins.iter().any(|join| {
+                !matches!(&join.relation, TableFactor::Table { .. })
+                    || join_uses_implicit_catalog_columns(&join.join_operator)
+            })
+    }) {
+        return false;
+    }
+    let mut nested_or_stale = false;
+    let _: ControlFlow<()> = visit_expressions(statement, |expression| {
+        if matches!(
+            expression,
+            Expr::InSubquery { .. } | Expr::Exists { .. } | Expr::Subquery(_)
+        ) || stale_catalog_column_qualifier(expression)
+        {
+            nested_or_stale = true;
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    if nested_or_stale {
+        return false;
+    }
+    if select.projection.iter().any(|item| {
+        matches!(
+            item,
+            SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _)
+        )
+    }) {
+        return false;
+    }
+    let aliases = top_level_catalog_aliases(statement);
+    if select.projection.iter().any(|item| {
+        let expression = match item {
+            SelectItem::UnnamedExpr(expression)
+            | SelectItem::ExprWithAlias {
+                expr: expression, ..
+            } => expression,
+            _ => return false,
+        };
+        catalog_expression_hint(expression, &aliases).is_none()
+            && expression_contains_catalog_column(expression, &aliases)
+    }) {
+        return false;
+    }
+    aliases.len() == relation_count
+}
+
+fn join_uses_implicit_catalog_columns(operator: &JoinOperator) -> bool {
+    let constraint = match operator {
+        JoinOperator::Join(constraint)
+        | JoinOperator::Inner(constraint)
+        | JoinOperator::Left(constraint)
+        | JoinOperator::LeftOuter(constraint)
+        | JoinOperator::Right(constraint)
+        | JoinOperator::RightOuter(constraint)
+        | JoinOperator::FullOuter(constraint)
+        | JoinOperator::CrossJoin(constraint)
+        | JoinOperator::Semi(constraint)
+        | JoinOperator::LeftSemi(constraint)
+        | JoinOperator::RightSemi(constraint)
+        | JoinOperator::Anti(constraint)
+        | JoinOperator::LeftAnti(constraint)
+        | JoinOperator::RightAnti(constraint)
+        | JoinOperator::StraightJoin(constraint) => Some(constraint),
+        JoinOperator::AsOf { constraint, .. } => Some(constraint),
+        _ => None,
+    };
+    matches!(
+        constraint,
+        Some(JoinConstraint::Using(_) | JoinConstraint::Natural)
+    )
+}
+
+fn expression_contains_catalog_column(
+    expression: &Expr,
+    aliases: &HashMap<String, &'static str>,
+) -> bool {
+    let mut found = false;
+    let _: ControlFlow<()> = visit_expressions(expression, |nested| {
+        if catalog_expression_hint(nested, aliases).is_some() {
+            found = true;
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    found
+}
+
+fn stale_catalog_column_qualifier(expression: &Expr) -> bool {
+    let Expr::CompoundIdentifier(identifiers) = expression else {
+        return false;
+    };
+    let [schema, table, _column] = identifiers.as_slice() else {
+        return false;
+    };
+    pg_identifier_matches(schema, "pg_catalog")
+        && [
+            "pg_namespace",
+            "pg_type",
+            "pg_range",
+            "pg_collation",
+            "pg_roles",
+        ]
         .into_iter()
-        .find(|candidate| pg_identifier_matches(table, candidate))
+        .any(|candidate| pg_identifier_matches(table, candidate))
+}
+
+fn private_catalog_reference(statement: &Statement) -> bool {
+    let mut clone = statement.clone();
+    let mut found = false;
+    let _: ControlFlow<()> = visit_relations_mut(&mut clone, |name| {
+        let private_schema = match name.0.as_slice() {
+            [
+                ObjectNamePart::Identifier(schema),
+                ObjectNamePart::Identifier(_table),
+            ] => Some(schema),
+            [
+                ObjectNamePart::Identifier(_catalog),
+                ObjectNamePart::Identifier(schema),
+                ObjectNamePart::Identifier(_table),
+            ] => Some(schema),
+            _ => None,
+        };
+        if private_schema
+            .is_some_and(|schema| schema.value.eq_ignore_ascii_case("quackgis_pg_catalog"))
+        {
+            found = true;
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    if found {
+        return true;
+    }
+    let _: ControlFlow<()> = visit_expressions(statement, |expression| {
+        let Expr::CompoundIdentifier(identifiers) = expression else {
+            return ControlFlow::Continue(());
+        };
+        if identifiers
+            .iter()
+            .take(identifiers.len().saturating_sub(1))
+            .any(|identifier| identifier.value.eq_ignore_ascii_case("quackgis_pg_catalog"))
+        {
+            found = true;
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    found
 }
 
 fn invalid_quoted_catalog_reference(statement: &Statement) -> bool {
     let mut clone = statement.clone();
     let mut invalid_relation = false;
     let _: ControlFlow<()> = visit_relations_mut(&mut clone, |name| {
-        let [
-            ObjectNamePart::Identifier(schema),
-            ObjectNamePart::Identifier(table),
-        ] = name.0.as_slice()
-        else {
-            return ControlFlow::Continue(());
+        let (schema, table) = match name.0.as_slice() {
+            [ObjectNamePart::Identifier(table)] => (None, table),
+            [
+                ObjectNamePart::Identifier(schema),
+                ObjectNamePart::Identifier(table),
+            ] => (Some(schema), table),
+            [
+                ObjectNamePart::Identifier(_catalog),
+                ObjectNamePart::Identifier(schema),
+                ObjectNamePart::Identifier(table),
+            ] => (Some(schema), table),
+            _ => return ControlFlow::Continue(()),
         };
-        let catalog_name = ["pg_namespace", "pg_type", "pg_range", "pg_roles"]
-            .into_iter()
-            .any(|candidate| table.value.eq_ignore_ascii_case(candidate));
-        if schema.value.eq_ignore_ascii_case("pg_catalog")
-            && catalog_name
-            && maintained_pg_catalog_relation(name).is_none()
-        {
+        let catalog_schema = schema.is_none()
+            || schema.is_some_and(|schema| schema.value.eq_ignore_ascii_case("pg_catalog"));
+        let invalid_schema = schema.is_some_and(|schema| {
+            schema.value.eq_ignore_ascii_case("pg_catalog")
+                && !pg_identifier_matches(schema, "pg_catalog")
+        });
+        let lower_table = table.value.to_ascii_lowercase();
+        let invalid_table = table.quote_style.is_some()
+            && lower_table.starts_with("pg_")
+            && table.value != lower_table;
+        if catalog_schema && (invalid_schema || invalid_table) {
             invalid_relation = true;
             return ControlFlow::Break(());
         }
@@ -1291,25 +1670,16 @@ fn invalid_quoted_catalog_reference(statement: &Statement) -> bool {
     }
 
     let aliases = top_level_catalog_aliases(statement);
-    let Statement::Query(query) = statement else {
-        return false;
-    };
-    let SetExpr::Select(select) = query.body.as_ref() else {
-        return false;
-    };
-    select.projection.iter().any(|item| {
-        let expression = match item {
-            SelectItem::UnnamedExpr(expression)
-            | SelectItem::ExprWithAlias {
-                expr: expression, ..
-            } => expression,
-            _ => return false,
-        };
-        invalid_quoted_catalog_column(expression, &aliases)
-    }) || select
-        .selection
-        .as_ref()
-        .is_some_and(|selection| invalid_quoted_catalog_column(selection, &aliases))
+    let mut invalid_column = false;
+    let _: ControlFlow<()> = visit_expressions(statement, |expression| {
+        if invalid_quoted_catalog_column(expression, &aliases) {
+            invalid_column = true;
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    invalid_column
 }
 
 fn invalid_quoted_catalog_column(
@@ -1318,14 +1688,25 @@ fn invalid_quoted_catalog_column(
 ) -> bool {
     let invalid = |relation: &str, column: &Ident| {
         column.quote_style.is_some()
-            && catalog_columns(relation)
+            && catalog_column_names(relation)
                 .iter()
-                .any(|(name, _)| column.value.eq_ignore_ascii_case(name) && column.value != *name)
+                .any(|name| column.value.eq_ignore_ascii_case(name) && column.value != *name)
     };
     match expression {
-        Expr::CompoundIdentifier(identifiers) if identifiers.len() == 2 => aliases
-            .get(&identifier_key(&identifiers[0]))
-            .is_some_and(|relation| invalid(relation, &identifiers[1])),
+        Expr::CompoundIdentifier(identifiers) if identifiers.len() == 2 => {
+            let qualifier = &identifiers[0];
+            let key = identifier_key(qualifier);
+            if !aliases.contains_key(&key)
+                && aliases
+                    .keys()
+                    .any(|alias| alias.eq_ignore_ascii_case(&qualifier.value))
+            {
+                return true;
+            }
+            aliases
+                .get(&key)
+                .is_some_and(|relation| invalid(relation, &identifiers[1]))
+        }
         Expr::Identifier(column) if aliases.len() == 1 => aliases
             .values()
             .next()
@@ -1415,7 +1796,57 @@ fn catalog_columns(relation: &str) -> &'static [(&'static str, PgTypeHint)] {
             ("rngtypid", PgTypeHint::Oid),
             ("rngsubtype", PgTypeHint::Oid),
         ],
+        "pg_collation" => &[
+            ("oid", PgTypeHint::Oid),
+            ("collname", PgTypeHint::Name),
+            ("collnamespace", PgTypeHint::Oid),
+            ("collowner", PgTypeHint::Oid),
+            ("collprovider", PgTypeHint::Char),
+        ],
         "pg_roles" => &[("rolname", PgTypeHint::Name), ("oid", PgTypeHint::Oid)],
+        _ => &[],
+    }
+}
+
+fn catalog_column_names(relation: &str) -> &'static [&'static str] {
+    match relation {
+        "pg_namespace" => &["oid", "nspname", "nspowner"],
+        "pg_type" => &[
+            "oid",
+            "typname",
+            "typnamespace",
+            "typlen",
+            "typbyval",
+            "typtype",
+            "typcategory",
+            "typispreferred",
+            "typisdefined",
+            "typdelim",
+            "typrelid",
+            "typelem",
+            "typarray",
+            "typnotnull",
+            "typbasetype",
+            "typtypmod",
+            "typndims",
+            "typcollation",
+        ],
+        "pg_range" => &["rngtypid", "rngsubtype"],
+        "pg_collation" => &[
+            "oid",
+            "collname",
+            "collnamespace",
+            "collowner",
+            "collprovider",
+            "collisdeterministic",
+            "collencoding",
+            "collcollate",
+            "collctype",
+            "colllocale",
+            "collicurules",
+            "collversion",
+        ],
+        "pg_roles" => &["oid", "rolname"],
         _ => &[],
     }
 }
@@ -2459,6 +2890,21 @@ mod tests {
         assert!(ordinary.sql.contains("quackgis_pg_catalog.pg_type"));
         assert!(!ordinary.sql.contains("90001"));
 
+        let implicit = validate_statement(
+            "SELECT oid, typname, typtype, typelem, typlen FROM pg_type \
+             WHERE oid IN (20, 29, 28, 25, 90001, 27, 26)",
+            ProtocolMode::Extended,
+        )
+        .expect("implicit pg_catalog lookup");
+        assert!(implicit.sql.contains("quackgis_pg_catalog.pg_type"));
+
+        let collation = validate_statement(
+            "SELECT c.oid, c.collname FROM pg_collation c WHERE c.oid IN (100, 950)",
+            ProtocolMode::Extended,
+        )
+        .expect("implicit collation lookup");
+        assert!(collation.sql.contains("quackgis_pg_catalog.pg_collation"));
+
         for relational_query in [
             "SELECT t.typname FROM pg_catalog.pg_type t \
              INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid \
@@ -2483,13 +2929,33 @@ mod tests {
             assert!(!validated.sql.contains("WHEN 90001"));
         }
 
-        let future = validate_statement(
+        for unsupported in [
             "SELECT relname FROM pg_catalog.pg_class",
-            ProtocolMode::Extended,
-        )
-        .expect("future catalog query remains parseable");
-        assert!(future.sql.contains("pg_catalog.pg_class"));
-        assert!(!future.sql.contains("quackgis_pg_catalog.pg_class"));
+            "SELECT relname FROM pg_class",
+            "SELECT * FROM pg_catalog.pg_tables",
+            "SELECT * FROM \"pg_tables\"",
+            "TABLE pg_catalog.pg_class",
+            "TABLE pg_catalog.pg_type",
+            "SELECT oid FROM memory.pg_catalog.pg_type",
+            "SELECT EXISTS (SELECT 1 FROM pg_type)",
+            "SELECT * FROM pg_type",
+            "SELECT oid FROM pg_type UNION ALL SELECT oid FROM pg_type",
+            "WITH pg_type AS (SELECT 1 AS oid) SELECT oid FROM pg_type",
+            "SELECT t.typname FROM pg_type t WHERE EXISTS (SELECT 1 FROM quackgis.main.user_oids u WHERE u.oid = t.oid)",
+            "SELECT d.oid FROM pg_type t CROSS JOIN LATERAL (SELECT t.*) d",
+            "SELECT pg_catalog.pg_type.oid FROM pg_catalog.pg_type",
+            "SELECT t.\"TYPLEN\" FROM pg_type t",
+            "SELECT oid FROM quackgis_pg_catalog.pg_type",
+            "SELECT quackgis_pg_catalog.pg_type.oid FROM pg_type",
+            "SELECT t.typname FROM pg_type t JOIN pg_type u USING (oid)",
+            "SELECT CASE WHEN true THEN t.oid ELSE t.oid END FROM pg_type t",
+            "SELECT \"T\".oid FROM pg_type t",
+        ] {
+            assert!(
+                validate_statement(unsupported, ProtocolMode::Extended).is_err(),
+                "unimplemented catalog relation must fail closed: {unsupported}"
+            );
+        }
 
         let user_oid = validate_statement(
             "SELECT p.oid FROM quackgis.main.points p WHERE p.oid = $1",
@@ -2512,6 +2978,23 @@ mod tests {
             )
             .is_err()
         );
+        assert!(
+            validate_statement("SELECT typname FROM \"PG_TYPE\"", ProtocolMode::Extended,).is_err()
+        );
+        assert!(
+            validate_statement(
+                "SELECT relname FROM pg_catalog.\"PG_CLASS\"",
+                ProtocolMode::Extended,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_statement(
+                "SELECT t.oid FROM pg_type t ORDER BY t.\"OID\"",
+                ProtocolMode::Extended,
+            )
+            .is_err()
+        );
 
         let quoted_alias = validate_statement(
             "SELECT \"t\".oid FROM pg_catalog.pg_type AS t",
@@ -2523,14 +3006,6 @@ mod tests {
             annotate_catalog_result_schema(&quoted_alias.ast, &quoted_alias_schema);
         let quoted_alias_field = Arc::new(quoted_alias_schema.field(0).clone());
         assert_eq!(field_into_pg_type(&quoted_alias_field).unwrap(), Type::OID);
-
-        let shadowed = validate_statement(
-            "SELECT t.typname FROM pg_catalog.pg_type t WHERE EXISTS (\
-             SELECT 1 FROM quackgis.main.user_oids t WHERE t.oid = $1)",
-            ProtocolMode::Extended,
-        )
-        .expect("nested alias shadowing query");
-        assert!(catalog_oid_parameter_indexes(&shadowed.ast).is_empty());
 
         let owner = validate_statement(
             "SELECT n.nspname, r.rolname FROM pg_catalog.pg_namespace n \

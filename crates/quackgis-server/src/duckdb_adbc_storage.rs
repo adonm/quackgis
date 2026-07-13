@@ -1991,6 +1991,7 @@ mod tests {
         assert!(sql.contains("quackgis_pg_catalog.pg_namespace"));
         assert!(sql.contains("quackgis_pg_catalog.pg_type"));
         assert!(sql.contains("quackgis_pg_catalog.pg_range"));
+        assert!(sql.contains("quackgis_pg_catalog.pg_collation"));
         assert!(sql.contains("quackgis_pg_catalog.pg_roles"));
         assert!(sql.contains("ducklake_default_data_inlining_row_limit = 0"));
         assert!(sql.contains("AS \"quack\"\"gis\""));

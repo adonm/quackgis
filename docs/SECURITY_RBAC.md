@@ -58,7 +58,11 @@ rotation, revocation infrastructure, and production failure drills remain open.
   until maintained PostgreSQL catalog surfaces exist.
 - Object identity is normalized from the parsed statement, never a raw SQL prefix.
 - Compatibility rewrites may shape SQL/results but may not change the underlying
-  table authorization decision.
+  table authorization decision. Direct, joined (including PIVOT/UNPIVOT wrappers),
+  derived, CTE, set-operation, and select/query-level expression-subquery reads
+  share the same structural target collection; private, explicit, and unqualified
+  catalog names cannot bypass the metadata denial. `TABLE` is rejected before
+  authorization because sqlparser does not retain an equivalent object identity.
 - `QUACKGIS_MAINTENANCE_USER` grants one existing read/write identity the bounded
   compaction call; the write table allowlist still applies. Backup/restore,
   retention, and future shared storage remain offline/operator capabilities and

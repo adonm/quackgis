@@ -37,10 +37,10 @@ sends all 42 original PostGIS expressions through the server-owned rewrite/macro
 edge with maintained scalar results. The pgwire test reads this ledger and the
 curated regress source so the lists cannot drift silently. All 15 non-executable
 cases pass through simple and extended pgwire to prove ledger-pinned errors and
-session reuse. The maintained workflow also proves relational namespace/type/range
-rows reached through structural explicit `pg_catalog` mapping, all seven
-PostgreSQL 18 lookup result types, and geometry RowDescription binary WKB, text
-hex-WKB, and NULL behavior with `tokio-postgres`. Implementing the 10 Rust-edge
-semantics, broader user-object catalog discovery, and named-client traces remains
-M3 work. Geography has the same catalog and wire-identity fixture as geometry, but
-no named GIS-client discovery evidence.
+session reuse. The maintained workflow also proves explicit/implicit relational
+namespace/type/range/collation rows, profile/QGIS-required built-ins with complete
+references, all seven custom lookup result types, and geometry RowDescription
+binary WKB, text hex-WKB, and NULL behavior with `tokio-postgres`. Implementing the
+10 Rust-edge semantics and broader user-object catalog discovery remains M3 work.
+Geography has the same catalog and wire-identity fixture as geometry; captured GIS
+traces are oracles but do not yet execute end to end against QuackGIS.

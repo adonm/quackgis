@@ -16,8 +16,48 @@
     { "oid": 23, "name": "int4" },
     { "oid": 25, "name": "text" },
     { "oid": 26, "name": "oid" },
+    { "oid": 27, "name": "tid" },
+    { "oid": 28, "name": "xid" },
+    { "oid": 29, "name": "cid" },
+    { "oid": 1000, "name": "_bool" },
+    { "oid": 1002, "name": "_char" },
     { "oid": 1003, "name": "_name" },
+    { "oid": 1005, "name": "_int2" },
+    { "oid": 1007, "name": "_int4" },
+    { "oid": 1009, "name": "_text" },
+    { "oid": 1010, "name": "_tid" },
+    { "oid": 1011, "name": "_xid" },
+    { "oid": 1012, "name": "_cid" },
+    { "oid": 1015, "name": "_varchar" },
+    { "oid": 1016, "name": "_int8" },
+    { "oid": 1028, "name": "_oid" },
     { "oid": 1043, "name": "varchar" }
+  ],
+  "builtin_type_rows": [
+    [16, "bool", 11, 1, true, "b", "B", true, true, ",", 0, 0, 1000, false, 0, -1, 0, 0],
+    [18, "char", 11, 1, true, "b", "Z", false, true, ",", 0, 0, 1002, false, 0, -1, 0, 0],
+    [19, "name", 11, 64, false, "b", "S", false, true, ",", 0, 18, 1003, false, 0, -1, 0, 950],
+    [20, "int8", 11, 8, true, "b", "N", false, true, ",", 0, 0, 1016, false, 0, -1, 0, 0],
+    [21, "int2", 11, 2, true, "b", "N", false, true, ",", 0, 0, 1005, false, 0, -1, 0, 0],
+    [23, "int4", 11, 4, true, "b", "N", false, true, ",", 0, 0, 1007, false, 0, -1, 0, 0],
+    [25, "text", 11, -1, false, "b", "S", true, true, ",", 0, 0, 1009, false, 0, -1, 0, 100],
+    [26, "oid", 11, 4, true, "b", "N", true, true, ",", 0, 0, 1028, false, 0, -1, 0, 0],
+    [27, "tid", 11, 6, false, "b", "U", false, true, ",", 0, 0, 1010, false, 0, -1, 0, 0],
+    [28, "xid", 11, 4, true, "b", "U", false, true, ",", 0, 0, 1011, false, 0, -1, 0, 0],
+    [29, "cid", 11, 4, true, "b", "U", false, true, ",", 0, 0, 1012, false, 0, -1, 0, 0],
+    [1000, "_bool", 11, -1, false, "b", "A", false, true, ",", 0, 16, 0, false, 0, -1, 0, 0],
+    [1002, "_char", 11, -1, false, "b", "A", false, true, ",", 0, 18, 0, false, 0, -1, 0, 0],
+    [1003, "_name", 11, -1, false, "b", "A", false, true, ",", 0, 19, 0, false, 0, -1, 0, 950],
+    [1005, "_int2", 11, -1, false, "b", "A", false, true, ",", 0, 21, 0, false, 0, -1, 0, 0],
+    [1007, "_int4", 11, -1, false, "b", "A", false, true, ",", 0, 23, 0, false, 0, -1, 0, 0],
+    [1009, "_text", 11, -1, false, "b", "A", false, true, ",", 0, 25, 0, false, 0, -1, 0, 100],
+    [1010, "_tid", 11, -1, false, "b", "A", false, true, ",", 0, 27, 0, false, 0, -1, 0, 0],
+    [1011, "_xid", 11, -1, false, "b", "A", false, true, ",", 0, 28, 0, false, 0, -1, 0, 0],
+    [1012, "_cid", 11, -1, false, "b", "A", false, true, ",", 0, 29, 0, false, 0, -1, 0, 0],
+    [1015, "_varchar", 11, -1, false, "b", "A", false, true, ",", 0, 1043, 0, false, 0, -1, 0, 100],
+    [1016, "_int8", 11, -1, false, "b", "A", false, true, ",", 0, 20, 0, false, 0, -1, 0, 0],
+    [1028, "_oid", 11, -1, false, "b", "A", false, true, ",", 0, 26, 0, false, 0, -1, 0, 0],
+    [1043, "varchar", 11, -1, false, "b", "S", false, true, ",", 0, 0, 1015, false, 0, -1, 0, 100]
   ],
   "query_descriptions": [
     {
@@ -25,6 +65,16 @@
       "columns": [
         { "name": "nspname", "type_oid": 19 },
         { "name": "rolname", "type_oid": 19 }
+      ]
+    },
+    {
+      "query_id": "trace_required_builtin_type_scan",
+      "columns": [
+        { "name": "oid", "type_oid": 26 },
+        { "name": "typname", "type_oid": 19 },
+        { "name": "typtype", "type_oid": 18 },
+        { "name": "typelem", "type_oid": 26 },
+        { "name": "typlen", "type_oid": 21 }
       ]
     },
     {

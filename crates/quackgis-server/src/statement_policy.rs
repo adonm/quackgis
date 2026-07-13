@@ -2,11 +2,12 @@
 //! Engine-neutral structural authorization for pgwire statements.
 
 use std::collections::HashSet;
+use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use sqlparser::ast::{
-    Delete, FromTable, ObjectName, ObjectNamePart, Query, SetExpr, Statement, TableFactor,
-    TableObject, TableWithJoins,
+    Delete, Expr, FromTable, ObjectName, ObjectNamePart, Query, SetExpr, Statement, TableFactor,
+    TableObject, TableWithJoins, visit_expressions,
 };
 
 use crate::auth::{AccessRole, AuthConfig};
@@ -188,6 +189,18 @@ fn collect_query_targets(query: &Query, targets: &mut ReadTargets) {
             collect_query_targets(&cte.query, targets);
         }
     }
+    let _: ControlFlow<()> = visit_expressions(query, |expression| {
+        let subquery = match expression {
+            Expr::InSubquery { subquery, .. }
+            | Expr::Exists { subquery, .. }
+            | Expr::Subquery(subquery) => Some(subquery),
+            _ => None,
+        };
+        if let Some(subquery) = subquery {
+            collect_query_targets(subquery, targets);
+        }
+        ControlFlow::Continue(())
+    });
     collect_set_targets(query.body.as_ref(), &ctes, targets);
 }
 
@@ -225,6 +238,11 @@ fn collect_table_targets(factor: &TableFactor, ctes: &HashSet<String>, targets: 
                 collect_table_targets(&join.relation, ctes, targets);
             }
         }
+        TableFactor::Pivot { table, .. }
+        | TableFactor::Unpivot { table, .. }
+        | TableFactor::MatchRecognize { table, .. } => {
+            collect_table_targets(table, ctes, targets);
+        }
         _ => {}
     }
 }
@@ -246,12 +264,25 @@ fn collect_name_target(name: &ObjectName, ctes: &HashSet<String>, targets: &mut 
     if matches!(
         schema.as_str(),
         "pg_catalog" | "information_schema" | "quackgis_pg_catalog"
-    ) || sensitive_metadata_name(name)
+    ) || unqualified_pg_catalog_name(name)
+        || sensitive_metadata_name(name)
     {
         targets.sensitive_metadata = true;
     } else if let Some((schema, table)) = table_name_parts(name) {
         targets.tables.push(TableKey { schema, table });
     }
+}
+
+fn unqualified_pg_catalog_name(name: &ObjectName) -> bool {
+    if name.0.len() != 1 {
+        return false;
+    }
+    object_name_last(name).is_some_and(|name| {
+        matches!(
+            name.to_ascii_lowercase().as_str(),
+            "pg_namespace" | "pg_type" | "pg_range" | "pg_collation" | "pg_roles"
+        )
+    })
 }
 
 fn sensitive_metadata_name(name: &ObjectName) -> bool {
@@ -342,9 +373,14 @@ mod tests {
 
         for sql in [
             "SELECT typname FROM pg_catalog.pg_type",
+            "SELECT typname FROM pg_type",
             "SELECT typname FROM quackgis_pg_catalog.pg_type",
             "SELECT typname FROM memory.quackgis_pg_catalog.pg_type",
             "SELECT table_name FROM memory.information_schema.tables",
+            "SELECT EXISTS (SELECT 1 FROM pg_type)",
+            "SELECT (SELECT name FROM denied LIMIT 1)",
+            "SELECT 1 LIMIT (SELECT count(*) FROM denied)",
+            "SELECT * FROM denied PIVOT (count(*) FOR id IN (1))",
         ] {
             let statement = Parser::parse_sql(&PostgreSqlDialect {}, sql)
                 .unwrap()

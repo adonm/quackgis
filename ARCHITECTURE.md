@@ -165,16 +165,22 @@ statement and remains table-structural.
 
 WKB/EWKB is the current transport/interchange format. A binary field may advertise
 a maintained geometry/geography sentinel OID through explicit Arrow metadata or a
-conservative name convention. Process-local relational
-`pg_namespace`/`pg_type`/`pg_range` compatibility views resolve those two sentinel
-OIDs through structurally rewritten explicit catalog references. Proven source
+conservative name convention. Process-local relational namespace/type/range,
+collation, and owner-role views include the PostgreSQL 18 profile and QGIS-required
+built-ins, every referenced array partner, and both sentinel OIDs. Structural
+rewriting honors explicit and implicit `pg_catalog` lookup. Proven source
 projections receive explicit Arrow type hints; output aliases alone never select
-PostgreSQL OID/`name`/internal-`char` encoding. A minimal owner-role row closes the
-published namespace-owner reference, and restricted identities cannot bypass
-metadata policy through the private rewrite schema. The native workflow proves
-PostgreSQL 18 result types plus geometry RowDescription text, binary, and NULL
-transport. User-object catalogs, RowDescription relation origins, named-client
-discovery, and durable subtype/SRID/dimension identity remain open.
+PostgreSQL OID/`name`/internal-`char` encoding. Restricted identities cannot bypass
+metadata policy through either private or unqualified names, and traced but
+unimplemented `pg_catalog`/unqualified `pg_*` relations fail explicit `0A000`
+rather than falling through to DuckDB or a user object. Catalog CTE shadowing,
+wildcards, nested/set/derived type-preserving expressions, implicit-column joins,
+and cross-database qualification are also rejected until provenance can preserve
+PostgreSQL wire identity. Clients cannot address the private rewrite schema, and
+the `TABLE` query form is rejected before authorization because its parser shape
+does not retain sufficient structural identity. User-object catalogs,
+RowDescription relation origins, named-client execution, and durable
+subtype/SRID/dimension identity remain open.
 
 ## Spatial performance
 

@@ -147,11 +147,14 @@ catalog surfaces remain open unless a focused test says otherwise.
   and `DELETE` remains supported.
 - `pg_catalog`, `information_schema`, broad spatial discovery, and GIS client-specific
   metadata are incomplete. A client-neutral executable fixture structurally maps
-  explicit `pg_catalog` namespace/type/range references to private relational
-  views for the maintained geometry/geography OIDs. The parameter and all seven
-  lookup fields use PostgreSQL 18 types; equivalent ordinary scans, unknown OIDs,
-  public namespace, and WKB transport pass. It does not claim built-in/user-object
-  catalogs, implicit lookup, RowDescription origins, or named-client qualification.
+  explicit and implicit namespace/type/range/collation/owner-role references to
+  private views. It proves 24 exact PostgreSQL 18 profile/QGIS built-ins plus
+  PostGIS-shaped geometry/geography scalar/array rows, every namespace/owner/
+  array/collation link, wire/OID parameter types, and WKB transport. All
+  unimplemented/private catalog routing and unsupported wildcard/nested/set/
+  derived/implicit-join/CTE/cross-database shapes fail closed. The structurally
+  lossy `TABLE` form is rejected globally. This does not claim user-object catalogs,
+  RowDescription origins, or named-client execution against QuackGIS.
 - Binary columns named `geom_wkb` use the same geometry sentinel OID as the
   maintained COPY bbox layout. RowDescription plus text hex-WKB, binary WKB, and
   NULL transport are tested through pgwire for geometry and the maintained
