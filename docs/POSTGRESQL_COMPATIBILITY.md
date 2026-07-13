@@ -143,6 +143,21 @@ anchor this mapping. If they cannot, a minimal transactional compatibility OID
 registry is required. Name hashes alone are insufficient because PostgreSQL OIDs
 survive rename.
 
+`just duckdb-catalog-identity-test` closes that feasibility question for the
+pinned runtime. DuckLake `table_id`/`table_uuid` survive table rename and an
+independent process reopen; Parquet `field_id` proves the same column ID before
+and after column rename; drop/recreate receives a new table identity. These are
+durable compatibility-registry keys, not PostgreSQL OIDs: they are not nonzero
+uint32 values with PostgreSQL lifecycle semantics. A small transactional mapping
+for namespace/relation OIDs and durable attribute numbers is therefore required.
+
+The official public metadata API remains incomplete for authoritative extraction:
+`ducklake_table_info` provides table and schema IDs but not qualified schema UUIDs
+or all column IDs, including empty/new columns. C2 must either obtain an upstream
+public catalog-identity function or separately approve a version-pinned adapter
+over the official DuckLake specification. Private attachment names must not leak
+into client SQL.
+
 ### Transaction and cache correctness
 
 - Each catalog snapshot has a monotonic schema/security epoch.
@@ -391,6 +406,11 @@ Deliver:
 Gate: restart and supported rename preserve published identities, rollback
 publishes no catalog change, and every nonzero reference selected by the profile
 resolves.
+
+Current progress: durable table/column identity and name-reuse behavior pass in
+independent DuckDB 1.5.4 processes. The registry decision is closed. C2 remains
+open for the public metadata extraction boundary, transactional OID/attribute
+mapping, immutable snapshot, and commit/rollback epoch behavior.
 
 ### C3 — implement core catalogs and wire identity
 

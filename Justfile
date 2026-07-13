@@ -192,6 +192,13 @@ duckdb-authority-probe workdir=".tmp/duckdb-authority" out=".tmp/duckdb-authorit
     duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; \
     HOME="$duckdb_home_arg" python3 scripts/duckdb_authority_probe.py --duckdb-bin "$duckdb_arg" --workdir "$workdir_arg" --out "$out_arg" --manifest "$manifest_arg"
 
+# Prove durable DuckLake table/column identity across rename, reopen, and name reuse.
+duckdb-catalog-identity-test workdir=".tmp/duckdb-catalog-identity" out=".tmp/duckdb-catalog-identity/README.md" manifest=".tmp/duckdb-catalog-identity/manifest.json" duckdb_bin=duckdb_bin:
+    @set -eu; workdir_arg='{{workdir}}'; out_arg='{{out}}'; manifest_arg='{{manifest}}'; duckdb_arg='{{duckdb_bin}}'; \
+    workdir_arg="${workdir_arg#workdir=}"; out_arg="${out_arg#out=}"; manifest_arg="${manifest_arg#manifest=}"; duckdb_arg="${duckdb_arg#duckdb_bin=}"; \
+    duckdb_arg="$(command -v "$duckdb_arg")"; duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; \
+    HOME="$duckdb_home_arg" python3 scripts/duckdb_catalog_identity_probe.py --duckdb-bin "$duckdb_arg" --workdir "$workdir_arg" --out "$out_arg" --manifest "$manifest_arg"
+
 # Run the real in-process DuckDB ADBC -> official DuckLake slice.
 duckdb-adbc-storage-test driver=duckdb_adbc_driver:
     @set -eu; \
@@ -380,7 +387,7 @@ check: fmt-check clippy test
 check-fast: fmt-check clippy test-fast
 
 # Run the same gate used by GitHub Actions CI.
-ci: check-fast project-contract-check duckdb-adbc-compile-check duckdb-adbc-storage-test duckdb-pgwire-workflow-test rest-postgrest-smoke duckdb-catalog-contract-test duckdb-result-stream-smoke duckdb-wide-result-smoke duckdb-cancellation-smoke duckdb-mixed-concurrency-smoke duckdb-termination-smoke duckdb-tls-rotation-smoke duckdb-copy-smoke evidence-manifest-check probe-static-check runtime-static-check kind-static-check
+ci: check-fast project-contract-check duckdb-adbc-compile-check duckdb-adbc-storage-test duckdb-pgwire-workflow-test rest-postgrest-smoke duckdb-catalog-contract-test duckdb-catalog-identity-test duckdb-result-stream-smoke duckdb-wide-result-smoke duckdb-cancellation-smoke duckdb-mixed-concurrency-smoke duckdb-termination-smoke duckdb-tls-rotation-smoke duckdb-copy-smoke evidence-manifest-check probe-static-check runtime-static-check kind-static-check
 
 # Run the dev QuackGIS server on QUACKGIS_HOST/QUACKGIS_PORT.
 server:
@@ -411,8 +418,9 @@ clean-dev:
 # Static validation for maintained helper scripts.
 probe-static-check:
     mkdir -p .tmp/pycache
-    PYTHONPYCACHEPREFIX=.tmp/pycache python3 -m py_compile scripts/*.py deploy/kind/render.py scripts/tests/test_duckdb_authority_probe.py scripts/tests/test_duckdb_engine_probe.py scripts/tests/test_duckdb_runtime_static_check.py scripts/tests/test_duckdb_spatial_compat_probe.py scripts/tests/test_evidence_manifest_check.py scripts/tests/test_kind_render.py
+    PYTHONPYCACHEPREFIX=.tmp/pycache python3 -m py_compile scripts/*.py deploy/kind/render.py scripts/tests/test_duckdb_authority_probe.py scripts/tests/test_duckdb_catalog_identity_probe.py scripts/tests/test_duckdb_engine_probe.py scripts/tests/test_duckdb_runtime_static_check.py scripts/tests/test_duckdb_spatial_compat_probe.py scripts/tests/test_evidence_manifest_check.py scripts/tests/test_kind_render.py
     python3 scripts/tests/test_duckdb_authority_probe.py
+    python3 scripts/tests/test_duckdb_catalog_identity_probe.py
     python3 scripts/tests/test_duckdb_engine_probe.py
     python3 scripts/tests/test_duckdb_spatial_compat_probe.py
     python3 scripts/tests/test_duckdb_runtime_static_check.py

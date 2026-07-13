@@ -25,6 +25,15 @@ QuackGIS APIs must not expose private DuckLake metadata-table layouts. Snapshot
 and maintenance controls should wrap stable official functions or return explicit
 unsupported errors.
 
+`just duckdb-catalog-identity-test` proves that official DuckLake table IDs/UUIDs
+and Parquet field IDs are durable across supported table/column rename and reopen,
+while drop/recreate gets a new table identity. They are suitable keys for a
+PostgreSQL compatibility registry. They cannot be exposed directly as PostgreSQL
+OIDs, and the current public DuckLake functions do not provide complete qualified
+schema and all-column IDs. Catalog projection must wait for an upstream public
+identity API or an explicitly reviewed, version-pinned official-spec adapter; it
+must not depend casually on hidden attachment names.
+
 ## Authority and migration
 
 One data root has one writer authority. `_quackgis/storage-authority-v1` prevents
