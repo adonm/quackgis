@@ -81,8 +81,10 @@ REST table/column discovery, and maintained session probes. The exact OGR 3.11.5
 copied-point discovery trace is frozen separately in
 `tests/fixtures/ogr_3_11_5_postgresql18_trace.json`; exact psql 18.3 `\d+` SQL and
 rendered table structure are frozen in
-`tests/fixtures/psql_18_3_postgresql18_describe_trace.json`. QGIS 3.44 headless and
-role/OpenAPI traces remain pending; no behavior is inferred from another version.
+`tests/fixtures/psql_18_3_postgresql18_describe_trace.json`; and 32 statements from
+an exact offscreen QGIS 3.44.11 open/inspect/count/extent/read workflow are frozen
+in `tests/fixtures/qgis_3_44_postgresql18_trace.json`. Role/OpenAPI traces remain
+pending on C4/C5; no behavior is inferred from another version.
 
 ## Required invariants
 
@@ -397,8 +399,12 @@ against digest-pinned PostgreSQL 18.4/PostGIS freezes 21 ordered session, catalo
 spatial metadata, count, and extent query families plus the exact observed layer
 result. A real psql 18.3 `\d+` run freezes 12 more namespace, relation, attribute,
 index, constraint, policy, publication, statistics, and inheritance query families
-plus its rendered five-column spatial table structure. C1 remains open for
-headless QGIS 3.44 and the later role/privilege/OpenAPI reference matrix.
+plus its rendered five-column spatial table structure. A real offscreen QGIS
+3.44.11 PostgreSQL provider run freezes 32 statements (26 unique families) for
+layer open, fields, CRS, privilege/ownership inquiry, count, extent, and a binary
+cursor read, with exact successful observed output. The named read-client trace
+corpus is closed; C1 remains open only for the role/privilege/OpenAPI reference
+matrix that depends on C4/C5 semantics.
 
 ### C2 — build catalog snapshot and identity foundations
 

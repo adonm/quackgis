@@ -280,14 +280,15 @@
       "version": "18.3",
       "fixture": "tests/fixtures/psql_18_3_postgresql18_describe_trace.json",
       "status": "captured_against_postgresql18_postgis; QuackGIS implementation pending"
+    },
+    {
+      "id": "qgis_headless_copied_layer",
+      "version": "3.44.11",
+      "fixture": "tests/fixtures/qgis_3_44_postgresql18_trace.json",
+      "status": "captured_against_postgresql18_postgis; QuackGIS implementation pending"
     }
   ],
   "pending_trace_families": [
-    {
-      "id": "qgis_headless_copied_layer",
-      "required_version": "3.44",
-      "reason": "source and runtime trace are not yet present; do not infer from historical clients"
-    },
     {
       "id": "role_privilege_openapi",
       "required_version": "PostgreSQL 18 reference plus QuackGIS REST",

@@ -28,6 +28,7 @@ POSTGRESQL_PROFILE = ROOT / "tests/fixtures/postgresql18_compatibility_profile.j
 POSTGRESQL_REFERENCE = ROOT / "tests/fixtures/postgresql18_column_core_reference.json"
 OGR_TRACE = ROOT / "tests/fixtures/ogr_3_11_5_postgresql18_trace.json"
 PSQL_TRACE = ROOT / "tests/fixtures/psql_18_3_postgresql18_describe_trace.json"
+QGIS_TRACE = ROOT / "tests/fixtures/qgis_3_44_postgresql18_trace.json"
 
 
 def tracked_markdown() -> list[Path]:
@@ -112,6 +113,7 @@ def check_postgresql_profile(errors: list[str]) -> None:
     reference = json.loads(POSTGRESQL_REFERENCE.read_text(encoding="utf-8"))
     ogr_trace = json.loads(OGR_TRACE.read_text(encoding="utf-8"))
     psql_trace = json.loads(PSQL_TRACE.read_text(encoding="utf-8"))
+    qgis_trace = json.loads(QGIS_TRACE.read_text(encoding="utf-8"))
 
     if profile.get("schema_version") != 1:
         errors.append("PostgreSQL compatibility profile schema_version must be 1")
@@ -196,6 +198,8 @@ def check_postgresql_profile(errors: list[str]) -> None:
         errors.append("PostgreSQL compatibility profile does not register the OGR trace")
     if "psql_describe_copied_table" not in captured_ids:
         errors.append("PostgreSQL compatibility profile does not register the psql trace")
+    if "qgis_headless_copied_layer" not in captured_ids:
+        errors.append("PostgreSQL compatibility profile does not register the QGIS trace")
     if set(captured_ids) & set(pending_ids):
         errors.append("PostgreSQL trace cannot be both captured and pending")
 
@@ -266,6 +270,48 @@ def check_postgresql_profile(errors: list[str]) -> None:
     missing_psql_queries = sorted(required_psql_queries - set(psql_query_ids))
     if missing_psql_queries:
         errors.append(f"psql trace missing required query families: {missing_psql_queries}")
+
+    if qgis_trace.get("trace_id") != "qgis-3.44.11-postgresql18-read-point-v1":
+        errors.append("QGIS trace_id is missing or unsupported")
+    if qgis_trace.get("client", {}).get("qgis_version") != "3.44.11-Solothurn":
+        errors.append("QGIS trace must use QGIS 3.44.11")
+    if qgis_trace.get("oracle", {}).get("postgresql_version") != "18.4":
+        errors.append("QGIS trace must use the PostgreSQL 18.4 oracle")
+    for label, value in [
+        ("QGIS client image", qgis_trace.get("client", {}).get("image_digest", "")),
+        ("QGIS PostGIS image", qgis_trace.get("oracle", {}).get("postgis_image_digest", "")),
+    ]:
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+            errors.append(f"{label} digest is missing or malformed")
+    serialized_qgis_trace = json.dumps(qgis_trace).lower()
+    for secret in ["password=", "reference-only"]:
+        if secret in serialized_qgis_trace:
+            errors.append(f"QGIS trace contains credential material: {secret}")
+    qgis_queries = qgis_trace.get("queries", [])
+    qgis_query_ids = [query.get("id") for query in qgis_queries]
+    if (
+        len(qgis_query_ids) != len(set(qgis_query_ids))
+        or len(qgis_queries) != 26
+        or qgis_trace.get("statement_count") != 32
+        or qgis_trace.get("unique_query_count") != 26
+    ):
+        errors.append("QGIS trace query corpus/counts are duplicate, unnamed, or incomplete")
+    required_qgis_queries = {
+        "layer_privileges",
+        "owner_membership",
+        "geometry_metadata",
+        "attribute_structure",
+        "field_type_resolution",
+        "identity_index",
+        "spatial_reference",
+        "spatial_extent",
+        "binary_read_cursor",
+        "binary_read_fetch",
+        "binary_read_close",
+    }
+    missing_qgis_queries = sorted(required_qgis_queries - set(qgis_query_ids))
+    if missing_qgis_queries:
+        errors.append(f"QGIS trace missing required query families: {missing_qgis_queries}")
 
 
 def main() -> int:

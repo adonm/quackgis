@@ -24,6 +24,11 @@ The same oracle now includes exact psql 18.3 `\d+` evidence: 12 normalized catal
 query families and the rendered structure of a five-column spatial table. This is
 also a target corpus, not current QuackGIS describe support.
 
+An offscreen, digest-pinned QGIS 3.44.11 PostgreSQL provider oracle also succeeds
+for layer open, field/CRS discovery, privilege and owner inquiry, count, 3D extent,
+and first-feature binary cursor read. Its 32 statements (26 unique families) are
+frozen as targets; the same workflow does not yet pass against QuackGIS.
+
 ## Proven local contract
 
 The required real-driver workflow proves:
@@ -63,7 +68,8 @@ mise exec -- just ci
 | `tokio-postgres` | maintained real-driver integration client |
 | PostgreSQL text COPY clients | bounded maintained type set supported |
 | GDAL/OGR | 3.11.5 TLS/SCRAM scalar smoke passes in Kind after structural encoding/string/search-path probes; copied-data discovery and optional `ST_SRID` remain open |
-| QGIS, GeoServer, Martin | target; prior legacy traces must be rerun against DuckDB before being claimed |
+| QGIS | PostgreSQL 18.4/PostGIS oracle frozen for exact 3.44.11 headless read workflow; QuackGIS execution remains blocked on traced catalog/privilege/spatial surfaces |
+| GeoServer, Martin | target; client traces and QuackGIS qualification remain open |
 | psycopg | 3.2.13 TLS/SCRAM scalar smoke passes in Kind; copied-data workflow remains open |
 | SQLAlchemy, GeoPandas, pg_featureserv | target; named dependency workflows remain open |
 | `pg_dump`, logical replication, PL/pgSQL, triggers, LISTEN/NOTIFY | unsupported/non-goals |

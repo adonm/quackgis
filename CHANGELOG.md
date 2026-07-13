@@ -123,6 +123,9 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 - A credential-free 12-query `\d+` trace from exact psql 18.3 against the same
   oracle, including normalized relation/attribute/index/constraint/policy queries
   and rendered spatial table structure.
+- A credential-free offscreen QGIS 3.44.11 PostgreSQL provider trace: 32 statements
+  (26 unique families) for layer open, fields, CRS, privileges, ownership, count,
+  3D extent, and a successful binary-cursor feature read.
 - A multi-process DuckDB 1.5.4 identity gate proving DuckLake table UUID/ID and
   column field-ID continuity across rename/reopen plus new identity on name reuse.
 - A registered client-neutral catalog fixture for DuckDB-derived table/column

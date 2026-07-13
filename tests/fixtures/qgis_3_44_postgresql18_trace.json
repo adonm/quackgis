@@ -1,0 +1,207 @@
+{
+  "schema_version": 1,
+  "trace_id": "qgis-3.44.11-postgresql18-read-point-v1",
+  "capture_date": "2026-07-13",
+  "client": {
+    "workflow": "offscreen PyQGIS PostgreSQL provider: open layer, fields, CRS, feature count, extent, first feature",
+    "qgis_version": "3.44.11-Solothurn",
+    "qgis_revision": "f8f5812197f",
+    "gdal_ogr_version": "3.10.3",
+    "image": "docker.io/qgis/qgis:ltr-questing",
+    "image_id": "sha256:5de84700f98132a26f8b64f24a7785c91b53fc91107fb5f28ac98b3aadc160db",
+    "image_digest": "sha256:aa55ce7f4b87d8fd28accc51658fe550667865c2ed088778c35915c2b4347587"
+  },
+  "oracle": {
+    "postgresql_version": "18.4",
+    "postgis_image": "docker.io/postgis/postgis:18-3.6",
+    "postgis_image_digest": "sha256:61b58715ec26f8a365883bd6718f5a007cdf06b0b264162775d3a25a77536821"
+  },
+  "fixture": {
+    "schema": "public",
+    "table": "trace_qgis",
+    "primary_key": "id",
+    "geometry_column": "geom",
+    "geometry_type": "Point",
+    "srid": 4326,
+    "row_count": 2
+  },
+  "normalization": {
+    ":relation_oid": "installation-local pg_class OID excluded from equality",
+    ":geometry_type_oid": "installation-local PostGIS geometry OID excluded from equality",
+    ":index_oid": "installation-local pg_class OID excluded from equality",
+    ":cursor_name": "session-local QGIS cursor identifier",
+    "whitespace": "collapsed without changing tokens"
+  },
+  "statement_count": 32,
+  "unique_query_count": 26,
+  "queries": [
+    {
+      "id": "postgis_version",
+      "stage": "C6",
+      "surface": "spatial_compatibility",
+      "sql": "SELECT postgis_version()"
+    },
+    {
+      "id": "spatial_library_versions",
+      "stage": "C6",
+      "surface": "spatial_compatibility",
+      "sql": "SELECT postgis_geos_version(), postgis_proj_version()"
+    },
+    {
+      "id": "topology_capability",
+      "stage": "C5",
+      "surface": "catalog_privilege_inquiry",
+      "sql": "SELECT has_schema_privilege(n.oid, 'usage') AND has_table_privilege(t.oid, 'select') AND has_table_privilege(l.oid, 'select') FROM pg_namespace n, pg_class t, pg_class l WHERE n.nspname = 'topology' AND t.relnamespace = n.oid AND l.relnamespace = n.oid AND t.relname = 'topology' AND l.relname = 'layer'"
+    },
+    {
+      "id": "pointcloud_capability",
+      "stage": "C5",
+      "surface": "catalog_privilege_inquiry",
+      "sql": "SELECT has_table_privilege(c.oid, 'select') AND has_table_privilege(f.oid, 'select') FROM pg_class c, pg_class f, pg_namespace n, pg_extension e WHERE c.relnamespace = n.oid AND c.relname = 'pointcloud_columns' AND f.relnamespace = n.oid AND f.relname = 'pointcloud_formats' AND n.oid = e.extnamespace AND e.extname = 'pointcloud'"
+    },
+    {
+      "id": "raster_capability",
+      "stage": "C5",
+      "surface": "catalog_privilege_inquiry",
+      "sql": "SELECT has_table_privilege(c.oid, 'select') FROM pg_class c, pg_namespace n, pg_type t WHERE c.relnamespace = n.oid AND n.oid = t.typnamespace AND c.relname = 'raster_columns' AND t.typname = 'raster'"
+    },
+    {
+      "id": "session_bootstrap",
+      "stage": "C3",
+      "surface": "session",
+      "sql": "SET extra_float_digits=3; SET application_name=' external'; SET datestyle='ISO'; SET client_min_messages TO error"
+    },
+    {
+      "id": "layer_privileges",
+      "stage": "C5",
+      "surface": "privilege_session_inquiry",
+      "sql": "SELECT has_table_privilege('\"public\".\"trace_qgis\"','SELECT'), pg_is_in_recovery(), current_schema(), has_any_column_privilege('\"public\".\"trace_qgis\"','INSERT'), has_table_privilege('\"public\".\"trace_qgis\"','DELETE'), has_any_column_privilege('\"public\".\"trace_qgis\"','UPDATE'), has_column_privilege('\"public\".\"trace_qgis\"','geom','UPDATE')"
+    },
+    {
+      "id": "owner_membership",
+      "stage": "C5",
+      "surface": "role_relation_catalog",
+      "sql": "SELECT 1 FROM pg_class, pg_namespace WHERE pg_class.relnamespace = pg_namespace.oid AND pg_has_role(relowner,'MEMBER') AND relname = 'trace_qgis' AND nspname = 'public'"
+    },
+    {
+      "id": "geometry_metadata",
+      "stage": "C6",
+      "surface": "spatial_metadata",
+      "sql": "SELECT upper(type), srid, coord_dimension FROM geometry_columns WHERE f_table_name = 'trace_qgis' AND f_geometry_column = 'geom' AND f_table_schema = 'public'"
+    },
+    {
+      "id": "qgis_metadata_capability",
+      "stage": "C6",
+      "surface": "information_schema",
+      "sql": "SELECT table_schema FROM information_schema.tables WHERE table_name = 'qgis_layer_metadata'"
+    },
+    {
+      "id": "relation_description",
+      "stage": "C5",
+      "surface": "description_catalog",
+      "sql": "SELECT description FROM pg_description WHERE objoid = regclass('\"public\".\"trace_qgis\"')::oid AND objsubid = 0"
+    },
+    {
+      "id": "zero_row_shape",
+      "stage": "C3",
+      "surface": "data_shape",
+      "sql": "SELECT * FROM \"public\".\"trace_qgis\" LIMIT 0"
+    },
+    {
+      "id": "attribute_structure",
+      "stage": "C5",
+      "surface": "attribute_default_index_catalog",
+      "sql": "SELECT attrelid, attnum, pg_catalog.format_type(atttypid,atttypmod), pg_catalog.col_description(attrelid,attnum), pg_catalog.pg_get_expr(adbin,adrelid), atttypid, attnotnull::int, indisunique::int, attidentity, attgenerated FROM pg_attribute LEFT OUTER JOIN pg_attrdef ON attrelid = adrelid AND attnum = adnum LEFT OUTER JOIN (SELECT DISTINCT indrelid, indkey, indisunique FROM pg_index WHERE indisunique) uniq ON attrelid = indrelid AND attnum::text = indkey::text WHERE attrelid IN (:relation_oid)"
+    },
+    {
+      "id": "field_type_resolution",
+      "stage": "C3",
+      "surface": "type_catalog",
+      "sql": "SELECT oid, typname, typtype, typelem, typlen FROM pg_type WHERE oid IN (20, 29, 28, 25, :geometry_type_oid, 27, 26)"
+    },
+    {
+      "id": "serial_sequence",
+      "stage": "C7",
+      "surface": "sequence_catalog",
+      "sql": "SELECT pg_get_serial_sequence('\"public\".\"trace_qgis\"', 'id')"
+    },
+    {
+      "id": "editor_widget_styles_capability",
+      "stage": "C7",
+      "surface": "optional_qgis_metadata",
+      "sql": "SELECT EXISTS (SELECT oid FROM pg_catalog.pg_class WHERE relname = 'qgis_editor_widget_styles')"
+    },
+    {
+      "id": "inheritance_count",
+      "stage": "C7",
+      "surface": "inheritance_catalog",
+      "sql": "SELECT count(*) FROM pg_inherits WHERE inhparent = '\"public\".\"trace_qgis\"'::regclass"
+    },
+    {
+      "id": "identity_index",
+      "stage": "C5",
+      "surface": "index_catalog",
+      "sql": "SELECT indexrelid FROM pg_index WHERE indrelid = '\"public\".\"trace_qgis\"'::regclass AND (indisprimary OR indisunique) ORDER BY CASE WHEN indisprimary THEN 1 ELSE 2 END LIMIT 1"
+    },
+    {
+      "id": "identity_columns",
+      "stage": "C5",
+      "surface": "index_attribute_catalog",
+      "sql": "SELECT attname, attnotnull FROM pg_index, pg_attribute WHERE indexrelid = :index_oid AND indrelid = attrelid AND pg_attribute.attnum = any(pg_index.indkey)"
+    },
+    {
+      "id": "spatial_reference",
+      "stage": "C6",
+      "surface": "spatial_metadata",
+      "sql": "SELECT auth_name, auth_srid, srtext, proj4text FROM spatial_ref_sys WHERE srid = 4326"
+    },
+    {
+      "id": "layer_styles_capability",
+      "stage": "C7",
+      "surface": "optional_qgis_metadata",
+      "sql": "SELECT EXISTS (SELECT oid FROM pg_catalog.pg_class WHERE relname = 'layer_styles')"
+    },
+    {
+      "id": "feature_count",
+      "stage": "C6",
+      "surface": "data",
+      "sql": "SELECT count(*) FROM \"public\".\"trace_qgis\""
+    },
+    {
+      "id": "spatial_extent",
+      "stage": "C6",
+      "surface": "spatial_data",
+      "sql": "SELECT ST_3DExtent(\"geom\") FROM \"public\".\"trace_qgis\""
+    },
+    {
+      "id": "binary_read_cursor",
+      "stage": "C6",
+      "surface": "data",
+      "sql": "BEGIN READ ONLY; DECLARE :cursor_name BINARY CURSOR FOR SELECT st_asbinary(\"geom\",'NDR'), \"id\", \"name\"::text, \"nullable_text\"::text FROM \"public\".\"trace_qgis\""
+    },
+    {
+      "id": "binary_read_fetch",
+      "stage": "C6",
+      "surface": "data",
+      "sql": "FETCH FORWARD 2000 FROM :cursor_name"
+    },
+    {
+      "id": "binary_read_close",
+      "stage": "C6",
+      "surface": "data",
+      "sql": "CLOSE :cursor_name; COMMIT"
+    }
+  ],
+  "observed_result": {
+    "layer_valid": true,
+    "fields": [
+      ["id", "int8"],
+      ["name", "text"],
+      ["nullable_text", "text"]
+    ],
+    "crs": "EPSG:4326",
+    "feature_count": 2,
+    "extent": [0.0, 0.0, 1.0, 1.0],
+    "first_feature": { "id": 1, "name": "origin" }
+  }
+}

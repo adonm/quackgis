@@ -28,6 +28,10 @@ direct DuckDB/ADBC/pgwire benchmark smoke and writes its manifest under `.tmp`.
   query families and rendered structure from exact psql 18.3 `\d+` against the
   same PostgreSQL 18.4/PostGIS oracle. It is a target corpus, not current QuackGIS
   describe support.
+- `fixtures/qgis_3_44_postgresql18_trace.json` freezes 32 statements (26 unique
+  families) from an offscreen QGIS 3.44.11 PostgreSQL provider run that opens,
+  inspects, counts, measures, and reads a spatial layer. The digest-pinned oracle
+  succeeds; QuackGIS support for the traced surface remains staged work.
 - `fixtures/postgis_curated_cases.rs` is the deliberately bounded expected-value
   source parsed by the native CLI and pgwire gates, not a Cargo integration test.
 
