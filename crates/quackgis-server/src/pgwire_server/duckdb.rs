@@ -567,7 +567,7 @@ impl SimpleQueryHandler for DuckDbService {
                         .run_regular(move || storage.commit_transaction())
                         .await
                         .map_err(blocking_worker_error)?
-                        .map_err(anyhow_error)?;
+                        .map_err(fatal_anyhow_error)?;
                     Ok(vec![Response::TransactionEnd(Tag::new("COMMIT"))])
                 }
             }
@@ -961,6 +961,18 @@ fn validate_statement(sql: &str, mode: ProtocolMode) -> PgWireResult<ValidatedSt
         return Err(user_error(
             "0A000",
             "direct references to the private QuackGIS catalog projection are not supported",
+        ));
+    }
+    if internal_control_schema_reference(&statement) {
+        return Err(user_error(
+            "42501",
+            "direct references to the QuackGIS control schema are not permitted",
+        ));
+    }
+    if let Some(function) = forbidden_catalog_table_function(&statement) {
+        return Err(user_error(
+            "0A000",
+            &format!("DuckDB table function {function} is not exposed through pgwire"),
         ));
     }
     if let Some(cte) = reserved_catalog_cte(&statement) {
@@ -1751,6 +1763,144 @@ fn private_catalog_reference(statement: &Statement) -> bool {
     found
 }
 
+fn internal_control_schema_reference(statement: &Statement) -> bool {
+    let mut clone = statement.clone();
+    let mut found = false;
+    let _: ControlFlow<()> = visit_relations_mut(&mut clone, |name| {
+        let schema = match name.0.as_slice() {
+            [
+                ObjectNamePart::Identifier(schema),
+                ObjectNamePart::Identifier(_table),
+            ] => Some(schema),
+            [
+                ObjectNamePart::Identifier(_catalog),
+                ObjectNamePart::Identifier(schema),
+                ObjectNamePart::Identifier(_table),
+            ] => Some(schema),
+            _ => None,
+        };
+        if schema.is_some_and(|schema| {
+            schema
+                .value
+                .eq_ignore_ascii_case(crate::postgres_compat::INTERNAL_SCHEMA)
+        }) {
+            found = true;
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    found
+}
+
+fn forbidden_catalog_table_function(statement: &Statement) -> Option<String> {
+    let mut clone = statement.clone();
+    let mut forbidden = None;
+    let _: ControlFlow<()> = visit_relations_mut(&mut clone, |name| {
+        if let Some(name) = forbidden_catalog_function_name(name) {
+            forbidden = Some(name);
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    if forbidden.is_some() {
+        return forbidden;
+    }
+    match statement {
+        Statement::Query(query) => forbidden_catalog_function_in_query(query),
+        _ => None,
+    }
+}
+
+fn forbidden_catalog_function_name(name: &ObjectName) -> Option<String> {
+    let function = match name.0.last() {
+        Some(ObjectNamePart::Identifier(function)) => function,
+        _ => return None,
+    };
+    let lower = function.value.to_ascii_lowercase();
+    ["query", "query_table", "ducklake_column_info"]
+        .contains(&lower.as_str())
+        .then_some(lower)
+}
+
+fn forbidden_catalog_function_in_query(query: &sqlparser::ast::Query) -> Option<String> {
+    if let Some(found) = query
+        .with
+        .as_ref()
+        .and_then(|with| {
+            with.cte_tables
+                .iter()
+                .find_map(|cte| forbidden_catalog_function_in_query(&cte.query))
+        })
+        .or_else(|| forbidden_catalog_function_in_set(query.body.as_ref()))
+    {
+        return Some(found);
+    }
+    let mut forbidden = None;
+    let _: ControlFlow<()> = visit_expressions(query.body.as_ref(), |expression| {
+        let subquery = match expression {
+            Expr::InSubquery { subquery, .. }
+            | Expr::Exists { subquery, .. }
+            | Expr::Subquery(subquery) => Some(subquery),
+            _ => None,
+        };
+        if let Some(found) = subquery.and_then(|query| forbidden_catalog_function_in_query(query)) {
+            forbidden = Some(found);
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    forbidden
+}
+
+fn forbidden_catalog_function_in_set(expression: &SetExpr) -> Option<String> {
+    match expression {
+        SetExpr::Select(select) => select.from.iter().find_map(|table| {
+            forbidden_catalog_function_in_factor(&table.relation).or_else(|| {
+                table
+                    .joins
+                    .iter()
+                    .find_map(|join| forbidden_catalog_function_in_factor(&join.relation))
+            })
+        }),
+        SetExpr::Query(query) => forbidden_catalog_function_in_query(query),
+        SetExpr::SetOperation { left, right, .. } => forbidden_catalog_function_in_set(left)
+            .or_else(|| forbidden_catalog_function_in_set(right)),
+        _ => None,
+    }
+}
+
+fn forbidden_catalog_function_in_factor(factor: &TableFactor) -> Option<String> {
+    match factor {
+        TableFactor::Table {
+            name,
+            args: Some(_),
+            ..
+        }
+        | TableFactor::Function { name, .. } => forbidden_catalog_function_name(name),
+        TableFactor::TableFunction {
+            expr: Expr::Function(function),
+            ..
+        } => forbidden_catalog_function_name(&function.name),
+        TableFactor::TableFunction { .. } => None,
+        TableFactor::Derived { subquery, .. } => forbidden_catalog_function_in_query(subquery),
+        TableFactor::NestedJoin {
+            table_with_joins, ..
+        } => forbidden_catalog_function_in_factor(&table_with_joins.relation).or_else(|| {
+            table_with_joins
+                .joins
+                .iter()
+                .find_map(|join| forbidden_catalog_function_in_factor(&join.relation))
+        }),
+        TableFactor::Pivot { table, .. }
+        | TableFactor::Unpivot { table, .. }
+        | TableFactor::MatchRecognize { table, .. } => forbidden_catalog_function_in_factor(table),
+        _ => None,
+    }
+}
+
 fn invalid_quoted_catalog_reference(statement: &Statement) -> bool {
     let mut clone = statement.clone();
     let mut invalid_relation = false;
@@ -2455,6 +2605,14 @@ fn anyhow_error(error: anyhow::Error) -> PgWireError {
     user_error("XX000", &error.to_string())
 }
 
+fn fatal_anyhow_error(error: anyhow::Error) -> PgWireError {
+    PgWireError::UserError(Box::new(ErrorInfo::new(
+        "FATAL".to_owned(),
+        "XX000".to_owned(),
+        error.to_string(),
+    )))
+}
+
 async fn client_session<C>(
     client: &C,
     database: Arc<DuckDbAdbcStorage>,
@@ -2958,6 +3116,16 @@ mod tests {
     }
 
     #[test]
+    fn post_commit_control_failure_is_fatal_to_the_connection() {
+        let info: ErrorInfo = fatal_anyhow_error(anyhow::anyhow!(
+            "DuckLake commit succeeded but catalog reconciliation failed"
+        ))
+        .into();
+        assert!(info.is_fatal());
+        assert_eq!(info.code, "XX000");
+    }
+
+    #[test]
     fn unsupported_spatial_functions_are_structurally_rejected() {
         for (function, sql) in [
             ("ST_NDims", "SELECT ST_NDims(ST_Point(1, 2))"),
@@ -3080,6 +3248,15 @@ mod tests {
             "SELECT t.typname FROM pg_type t JOIN pg_type u USING (oid)",
             "SELECT CASE WHEN true THEN t.oid ELSE t.oid END FROM pg_type t",
             "SELECT \"T\".oid FROM pg_type t",
+            "SELECT * FROM quackgis._quackgis.catalog_state",
+            "INSERT INTO quackgis._quackgis.catalog_state VALUES (true, 1, 1, NULL)",
+            "SELECT * FROM _quackgis.relation_oid",
+            "SELECT * FROM query_table('quackgis._quackgis.catalog_state')",
+            "SELECT * FROM query('SELECT * FROM quackgis._quackgis.relation_oid')",
+            "SELECT * FROM ducklake_column_info('quackgis')",
+            "SELECT * FROM LATERAL query('SELECT * FROM quackgis._quackgis.relation_oid')",
+            "SELECT * FROM LATERAL query_table('quackgis._quackgis.catalog_state')",
+            "SELECT * FROM LATERAL ducklake_column_info('quackgis')",
         ] {
             assert!(
                 validate_statement(unsupported, ProtocolMode::Extended).is_err(),

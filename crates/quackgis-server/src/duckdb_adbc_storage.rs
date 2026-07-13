@@ -28,7 +28,7 @@ use sqlparser::ast::{
     FunctionArguments, Ident, ObjectName, ObjectNamePart, Query, SetExpr,
     Statement as SqlStatement, TableFactor, TableObject, UnaryOperator, Value,
 };
-use sqlparser::dialect::PostgreSqlDialect;
+use sqlparser::dialect::{DuckDbDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
 
 use crate::engine_api::{
@@ -325,6 +325,8 @@ pub struct DuckDbAdbcStorage {
     // quarantine the connection by leaving the slot empty.
     connection: Mutex<Option<ManagedConnection>>,
     catalog_name: String,
+    catalog_identity_enabled: bool,
+    catalog_commit_lock: Arc<Mutex<()>>,
     transaction_state: Mutex<EngineTransactionState>,
     lifecycle: Arc<RuntimeLifecycle>,
 }
@@ -470,7 +472,8 @@ impl DuckDbAdbcStorage {
                 config.driver_path.display()
             )
         })?;
-        let database = if config.allows_unsigned_extensions() {
+        let catalog_identity_enabled = config.allows_unsigned_extensions();
+        let database = if catalog_identity_enabled {
             driver.new_database_with_opts([
                 (OptionDatabase::Uri, config.database_uri.clone().into()),
                 (
@@ -500,11 +503,17 @@ impl DuckDbAdbcStorage {
         let bootstrap_sql = config.bootstrap_sql();
         execute_update_on(&mut connection, &bootstrap_sql)
             .context("loading and attaching the official DuckLake extension")?;
+        if catalog_identity_enabled {
+            initialize_catalog_identity_registry_on(&mut connection, &config.catalog_name)
+                .context("initializing transactional PostgreSQL catalog identity")?;
+        }
 
         Ok(Self {
             _database: database,
             connection: Mutex::new(Some(connection)),
             catalog_name: config.catalog_name,
+            catalog_identity_enabled,
+            catalog_commit_lock: Arc::new(Mutex::new(())),
             transaction_state: Mutex::new(EngineTransactionState::Idle),
             lifecycle: Arc::new(RuntimeLifecycle::default()),
         })
@@ -523,6 +532,8 @@ impl DuckDbAdbcStorage {
             _database: self._database.clone(),
             connection: Mutex::new(Some(connection)),
             catalog_name: self.catalog_name.clone(),
+            catalog_identity_enabled: self.catalog_identity_enabled,
+            catalog_commit_lock: Arc::clone(&self.catalog_commit_lock),
             transaction_state: Mutex::new(EngineTransactionState::Idle),
             lifecycle: Arc::clone(&self.lifecycle),
         })
@@ -562,10 +573,30 @@ impl DuckDbAdbcStorage {
     pub fn commit_transaction(&self) -> Result<()> {
         self.require_transaction_state(EngineTransactionState::Active)?;
         let mut connection = self.take_connection()?;
+        let _catalog_commit = match self.catalog_commit_guard() {
+            Ok(guard) => guard,
+            Err(error) => {
+                let _ = connection.rollback();
+                self.set_transaction_state(EngineTransactionState::Quarantined)?;
+                return Err(error).context(
+                    "catalog identity commit serialization failed; the connection was quarantined",
+                );
+            }
+        };
         if let Err(error) = connection.commit() {
             self.set_transaction_state(EngineTransactionState::Quarantined)?;
             return Err(error).context(
                 "DuckDB ADBC commit failed; transaction outcome is indeterminate and the connection was quarantined",
+            );
+        }
+        if self.catalog_identity_enabled
+            && let Err(error) =
+                reconcile_catalog_identity_registry_on(&mut connection, &self.catalog_name)
+        {
+            let _ = connection.rollback();
+            self.set_transaction_state(EngineTransactionState::Quarantined)?;
+            return Err(error).context(
+                "DuckLake commit succeeded but PostgreSQL catalog identity reconciliation failed; the connection was quarantined",
             );
         }
         if let Err(error) = restore_autocommit(&mut connection) {
@@ -598,6 +629,9 @@ impl DuckDbAdbcStorage {
 
     /// Execute DDL or DML in autocommit mode.
     pub fn execute_update(&self, sql: &str) -> Result<Option<i64>> {
+        if self.catalog_identity_enabled {
+            return self.transaction(|transaction| transaction.execute_update(sql));
+        }
         self.with_connection(|connection| execute_update_on(connection, sql))
     }
 
@@ -654,7 +688,7 @@ impl DuckDbAdbcStorage {
                 "prepared execution requires exactly one Arrow parameter row",
             ));
         }
-        validate_sql(sql)?;
+        validate_read_query_sql(sql)?;
         let mut connection = self.take_connection_engine()?;
         let cancellation = Arc::new(DuckDbCancelHandle {
             connection: Mutex::new(connection.clone()),
@@ -733,6 +767,10 @@ impl DuckDbAdbcStorage {
         batches: Vec<RecordBatch>,
         mode: IngestMode,
     ) -> Result<Option<i64>> {
+        if self.catalog_identity_enabled {
+            return self
+                .transaction(|transaction| transaction.ingest(schema, table, batches, mode));
+        }
         self.with_connection(|connection| {
             ingest_on(connection, &self.catalog_name, schema, table, batches, mode)
         })
@@ -777,12 +815,32 @@ impl DuckDbAdbcStorage {
 
         match result {
             Ok(Ok(value)) => {
+                let _catalog_commit = match self.catalog_commit_guard() {
+                    Ok(guard) => guard,
+                    Err(error) => {
+                        let _ = connection.rollback();
+                        self.set_transaction_state(EngineTransactionState::Quarantined)?;
+                        return Err(error).context(
+                            "catalog identity commit serialization failed; the connection was quarantined",
+                        );
+                    }
+                };
                 if let Err(error) = connection.commit() {
                     // A failed commit has an indeterminate durable outcome. Do
                     // not reuse this native connection or imply rollback.
                     self.set_transaction_state(EngineTransactionState::Quarantined)?;
                     return Err(error).context(
                         "DuckDB ADBC commit failed; transaction outcome is indeterminate and the connection was quarantined",
+                    );
+                }
+                if self.catalog_identity_enabled
+                    && let Err(error) =
+                        reconcile_catalog_identity_registry_on(&mut connection, &self.catalog_name)
+                {
+                    let _ = connection.rollback();
+                    self.set_transaction_state(EngineTransactionState::Quarantined)?;
+                    return Err(error).context(
+                        "DuckLake commit succeeded but PostgreSQL catalog identity reconciliation failed; the connection was quarantined",
                     );
                 }
                 if let Err(error) = restore_autocommit(&mut connection) {
@@ -881,6 +939,16 @@ impl DuckDbAdbcStorage {
         }
         *current = state;
         Ok(())
+    }
+
+    fn catalog_commit_guard(&self) -> Result<Option<MutexGuard<'_, ()>>> {
+        self.catalog_identity_enabled
+            .then(|| {
+                self.catalog_commit_lock
+                    .lock()
+                    .map_err(|_| anyhow!("catalog identity commit mutex is poisoned"))
+            })
+            .transpose()
     }
 
     fn with_connection_engine<T>(
@@ -1008,6 +1076,21 @@ impl DuckDbUpdateOperation {
 
         match result {
             Ok(affected) => {
+                let _catalog_commit = match self.owner.catalog_commit_guard() {
+                    Ok(guard) => guard,
+                    Err(error) => {
+                        let _ = connection.rollback();
+                        let _ = self
+                            .owner
+                            .set_transaction_state(EngineTransactionState::Quarantined);
+                        return Err(EngineError::new(
+                            EngineErrorKind::Quarantined,
+                            format!(
+                                "catalog identity commit serialization failed; the session was quarantined: {error}"
+                            ),
+                        ));
+                    }
+                };
                 if let Err(error) = connection.commit() {
                     let _ = self
                         .owner
@@ -1019,6 +1102,24 @@ impl DuckDbUpdateOperation {
                         ),
                     )
                     .with_transaction_outcome(TransactionOutcome::Indeterminate));
+                }
+                if self.owner.catalog_identity_enabled
+                    && let Err(error) = reconcile_catalog_identity_registry_on(
+                        &mut connection,
+                        &self.owner.catalog_name,
+                    )
+                {
+                    let _ = connection.rollback();
+                    let _ = self
+                        .owner
+                        .set_transaction_state(EngineTransactionState::Quarantined);
+                    return Err(EngineError::new(
+                        EngineErrorKind::Quarantined,
+                        format!(
+                            "DuckDB write committed but PostgreSQL catalog identity reconciliation failed; the session was quarantined: {error}"
+                        ),
+                    )
+                    .with_transaction_outcome(TransactionOutcome::Committed));
                 }
                 if let Err(error) = restore_autocommit(&mut connection) {
                     let _ = self
@@ -1303,6 +1404,16 @@ impl EngineStorageKernel for DuckDbAdbcStorage {
     }
 
     fn execute_update_contract(&self, sql: &str) -> EngineResult<Option<i64>> {
+        if self.catalog_identity_enabled {
+            return self
+                .transaction(|transaction| {
+                    let sql = prepare_maintained_bbox_mutation(transaction.connection, sql)
+                        .map_err(anyhow::Error::new)?;
+                    execute_update_engine_on(transaction.connection, &sql)
+                        .map_err(anyhow::Error::new)
+                })
+                .map_err(anyhow_engine_error);
+        }
         self.with_connection_engine(|connection| {
             let sql = prepare_maintained_bbox_mutation(connection, sql)?;
             execute_update_engine_on(connection, &sql)
@@ -1319,6 +1430,16 @@ impl EngineStorageKernel for DuckDbAdbcStorage {
                 EngineErrorKind::InvalidQuery,
                 "prepared execution requires exactly one Arrow parameter row",
             ));
+        }
+        if self.catalog_identity_enabled {
+            return self
+                .transaction(|transaction| {
+                    let sql = prepare_maintained_bbox_mutation(transaction.connection, sql)
+                        .map_err(anyhow::Error::new)?;
+                    execute_update_engine_on_bound(transaction.connection, &sql, parameters)
+                        .map_err(anyhow::Error::new)
+                })
+                .map_err(anyhow_engine_error);
         }
         self.with_connection_engine(|connection| {
             let sql = prepare_maintained_bbox_mutation(connection, sql)?;
@@ -1346,6 +1467,19 @@ impl EngineStorageKernel for DuckDbAdbcStorage {
             IngestDisposition::Append => IngestMode::Append,
             IngestDisposition::Replace => IngestMode::Replace,
         };
+        if self.catalog_identity_enabled {
+            if table.catalog != self.catalog_name {
+                return Err(EngineError::new(
+                    EngineErrorKind::Unsupported,
+                    "catalog identity reconciliation supports only the configured DuckLake catalog",
+                ));
+            }
+            return self
+                .transaction(|transaction| {
+                    transaction.ingest(&table.schema, &table.table, batches, mode)
+                })
+                .map_err(anyhow_engine_error);
+        }
         self.with_connection_engine(|connection| {
             ingest_engine_on(
                 connection,
@@ -2055,10 +2189,87 @@ fn restore_autocommit(connection: &mut ManagedConnection) -> Result<()> {
         .context("restoring DuckDB ADBC autocommit")
 }
 
-fn query_on(connection: &mut ManagedConnection, sql: &str) -> Result<Vec<RecordBatch>> {
-    if sql.trim().is_empty() {
-        bail!("refusing to execute empty DuckDB ADBC SQL");
+fn initialize_catalog_identity_registry_on(
+    connection: &mut ManagedConnection,
+    catalog: &str,
+) -> Result<()> {
+    execute_update_on(
+        connection,
+        &crate::postgres_compat::ducklake_identity_registry_bootstrap_sql(catalog),
+    )
+    .context("creating DuckLake catalog identity registry")?;
+    connection
+        .set_option(OptionConnection::AutoCommit, "false".into())
+        .context("starting DuckLake catalog identity reconciliation")?;
+    match reconcile_catalog_identity_registry_on(connection, catalog) {
+        Ok(()) => restore_autocommit(connection),
+        Err(error) => {
+            let rollback = connection
+                .rollback()
+                .context("rolling back catalog identity initialization");
+            let autocommit = restore_autocommit(connection);
+            if let Err(cleanup_error) = rollback.and(autocommit) {
+                return Err(error.context(format!(
+                    "catalog identity initialization cleanup failed: {cleanup_error}"
+                )));
+            }
+            Err(error)
+        }
     }
+}
+
+/// Reconcile one committed DuckLake snapshot in a separate atomic transaction.
+/// The caller keeps autocommit disabled across the preceding user commit and
+/// this function's registry commit.
+fn reconcile_catalog_identity_registry_on(
+    connection: &mut ManagedConnection,
+    catalog: &str,
+) -> Result<()> {
+    validate_catalog_identity_registry_on(connection, catalog)?;
+    execute_update_on(
+        connection,
+        &crate::postgres_compat::ducklake_identity_registry_reconcile_sql(catalog),
+    )
+    .context("reconciling committed DuckLake identities")?;
+    validate_catalog_identity_registry_on(connection, catalog)?;
+    validate_catalog_identity_coverage_on(connection, catalog)?;
+    connection
+        .commit()
+        .context("committing PostgreSQL catalog identity reconciliation")
+}
+
+fn validate_catalog_identity_registry_on(
+    connection: &mut ManagedConnection,
+    catalog: &str,
+) -> Result<()> {
+    let batches = query_on(
+        connection,
+        &crate::postgres_compat::ducklake_identity_registry_validation_sql(catalog),
+    )
+    .context("validating DuckLake catalog identity registry")?;
+    if batches.len() != 1 || batches[0].num_rows() != 1 {
+        bail!("DuckLake catalog identity validation returned an invalid result shape");
+    }
+    Ok(())
+}
+
+fn validate_catalog_identity_coverage_on(
+    connection: &mut ManagedConnection,
+    catalog: &str,
+) -> Result<()> {
+    let batches = query_on(
+        connection,
+        &crate::postgres_compat::ducklake_identity_registry_coverage_sql(catalog),
+    )
+    .context("validating committed DuckLake catalog identity coverage")?;
+    if batches.len() != 1 || batches[0].num_rows() != 1 {
+        bail!("DuckLake catalog identity coverage returned an invalid result shape");
+    }
+    Ok(())
+}
+
+fn query_on(connection: &mut ManagedConnection, sql: &str) -> Result<Vec<RecordBatch>> {
+    validate_read_query_sql(sql).map_err(anyhow::Error::new)?;
     let sql = prepare_maintained_bbox_query(connection, sql).map_err(anyhow::Error::new)?;
     let mut statement = connection
         .new_statement()
@@ -2095,7 +2306,7 @@ fn query_result_on(
     sql: &str,
     parameters: Option<RecordBatch>,
 ) -> EngineResult<EngineQueryResult> {
-    validate_sql(sql)?;
+    validate_read_query_sql(sql)?;
     let sql = prepare_maintained_bbox_query(connection, sql)?;
     let mut statement = connection.new_statement().map_err(engine_error)?;
     statement.set_sql_query(&sql).map_err(engine_error)?;
@@ -2247,6 +2458,34 @@ fn validate_sql(sql: &str) -> EngineResult<()> {
         ));
     }
     Ok(())
+}
+
+fn validate_read_query_sql(sql: &str) -> EngineResult<()> {
+    validate_sql(sql)?;
+    let statements = Parser::parse_sql(&DuckDbDialect {}, sql).map_err(|error| {
+        EngineError::new(
+            EngineErrorKind::InvalidQuery,
+            format!("query API could not parse SQL: {error}"),
+        )
+    })?;
+    let read_only = match statements.first() {
+        Some(SqlStatement::Query(_)) => true,
+        Some(SqlStatement::Explain { statement, .. }) => {
+            matches!(statement.as_ref(), SqlStatement::Query(_))
+        }
+        _ => false,
+    };
+    if statements.len() != 1 || !read_only {
+        return Err(EngineError::new(
+            EngineErrorKind::InvalidQuery,
+            "query API accepts exactly one read query",
+        ));
+    }
+    Ok(())
+}
+
+fn anyhow_engine_error(error: anyhow::Error) -> EngineError {
+    EngineError::new(EngineErrorKind::Internal, error.to_string())
 }
 
 fn engine_error(error: AdbcError) -> EngineError {
@@ -2493,6 +2732,20 @@ mod tests {
     fn sql_quoting_handles_literals_and_identifiers() {
         assert_eq!(quote_literal("a'b\\c"), "'a''b\\c'");
         assert_eq!(quote_identifier("a\"b"), "\"a\"\"b\"");
+    }
+
+    #[test]
+    fn query_api_rejects_mutations_and_batches() {
+        validate_read_query_sql("SELECT 1").expect("single read query");
+        validate_read_query_sql("SELECT ?").expect("DuckDB bound read query");
+        validate_read_query_sql("EXPLAIN SELECT 1").expect("read-only explain");
+        for sql in [
+            "CREATE TABLE quackgis.main.bypass(id INTEGER)",
+            "INSERT INTO quackgis.main.bypass VALUES (1)",
+            "SELECT 1; SELECT 2",
+        ] {
+            assert!(validate_read_query_sql(sql).is_err(), "{sql}");
+        }
     }
 
     #[test]

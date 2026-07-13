@@ -69,7 +69,52 @@ mise exec -- just duckdb-development-ducklake-test
 
 That gate covers exact output schema, empty and nested columns, view exclusion,
 committed-snapshot behavior during uncommitted DDL, rollback, table and column
-rename identity, added columns, reopen, and drop/recreate identity.
+rename identity, added columns, reopen, and drop/recreate identity. It also
+exercises the development C2 registry through autocommit and explicit commit:
+fixed `public` namespace identity, allocated schema/relation OIDs, durable
+attribute numbers, monotonic schema epoch, retained tombstones, restart, and a
+non-public schema.
+
+## Development C2 registry
+
+When and only when this extension is selected, QuackGIS creates protected
+`quackgis._quackgis` DuckLake tables for registry state, namespace OIDs, relation
+and reserved row-type OIDs, and attribute numbers. Dynamic OIDs start at 100000,
+above maintained built-in/spatial reservations; DuckLake `main` maps to
+PostgreSQL `public` OID 2200. Dropped mappings are retained so names and attribute numbers cannot be
+silently reused.
+
+The selected function intentionally sees the pinned committed snapshot, not
+uncommitted DDL. QuackGIS therefore cannot discover a new DuckLake UUID inside
+the user DDL transaction. After a successful DuckLake commit and before reporting
+success, it reconciles the now-committed identities in one separate registry
+transaction. One process-wide commit lock covers the user commit and registry
+commit across all server sessions, preventing supported concurrent writers from
+allocating against the same state. Every public development write/create path
+uses this boundary. Startup repeats reconciliation to close a process-crash gap.
+A rollback never allocates identity. If post-commit reconciliation fails,
+QuackGIS reports that the user commit succeeded, quarantines the session, and
+fatally closes an explicit pgwire transaction instead of returning a false
+aborted-transaction state.
+
+DuckLake 1.5 does not support primary-key or unique constraints. The state row
+pins control format version 1, and QuackGIS checks the equivalent state-row, key,
+global-OID, attribute-number, range, reference, and committed-snapshot coverage
+invariants before/after reconciliation and fails closed on inconsistency. The gate
+injects a duplicate mapping, requires the post-commit session to quarantine, and
+requires restart rejection. A SHA-256 fingerprint of current identity names/IDs
+advances the schema epoch for create, rename, add, drop, and recreate; direct
+pgwire relation references to the control schema are rejected, as are dynamic
+`query`/`query_table` indirection and direct `ducklake_column_info` calls.
+
+The selected API emits no row for an empty schema, so a standalone empty schema
+cannot receive a durable namespace OID or advance this identity epoch. Pgwire
+does not support `CREATE SCHEMA`; non-public schema evidence creates a table in
+the same transaction. QuackGIS will not substitute an unstable name-based OID:
+empty-schema support requires an upstream durable schema-identity surface.
+
+`pg_class`, `pg_attribute`, row-type projection,
+RowDescription origins, and cache consumers remain the next C3 slices.
 
 ## Runtime trust boundary
 

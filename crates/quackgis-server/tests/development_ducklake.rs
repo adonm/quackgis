@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
-use arrow_array::{Array, Int64Array, RecordBatch, StringArray};
+use std::sync::Arc;
+
+use adbc_core::options::IngestMode;
+use arrow_array::{Array, Int32Array, Int64Array, RecordBatch, StringArray};
+use arrow_schema::{DataType, Field, Schema};
 use quackgis_server::duckdb_adbc_storage::{DuckDbAdbcConfig, DuckDbAdbcStorage, ExtensionPolicy};
-use quackgis_server::engine_api::EngineStorageKernel;
+use quackgis_server::engine_api::{
+    EngineStorageKernel, EngineTableRef, EngineTransactionState, IngestDisposition,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct IdentityRow {
@@ -50,7 +56,71 @@ fn identity_rows(batches: &[RecordBatch]) -> Vec<IdentityRow> {
 
 const COLUMN_IDENTITY_SQL: &str = "SELECT schema_name, schema_id, CAST(schema_uuid AS VARCHAR), table_name, \
             table_id, CAST(table_uuid AS VARCHAR), column_name, column_id \
-     FROM ducklake_column_info('quackgis') ORDER BY table_id, column_id";
+     FROM ducklake_column_info('quackgis') \
+     WHERE schema_name <> '_quackgis' ORDER BY table_id, column_id";
+
+fn first_i64(batches: &[RecordBatch], column: usize) -> i64 {
+    batches[0]
+        .column(column)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("registry BIGINT result")
+        .value(0)
+}
+
+fn registry_state(storage: &DuckDbAdbcStorage) -> (i64, i64) {
+    let rows = storage
+        .query(
+            "SELECT CAST(next_oid AS BIGINT), CAST(schema_epoch AS BIGINT) \
+             FROM quackgis._quackgis.catalog_state WHERE singleton",
+        )
+        .expect("catalog registry state");
+    (first_i64(&rows, 0), first_i64(&rows, 1))
+}
+
+fn registered_columns(
+    storage: &DuckDbAdbcStorage,
+    schema: &str,
+    table: &str,
+) -> Vec<(i64, i64, i64, i64)> {
+    let sql = format!(
+        "SELECT CAST(r.namespace_oid AS BIGINT), CAST(r.oid AS BIGINT), \
+                i.column_id, CAST(a.attnum AS BIGINT) \
+         FROM ducklake_column_info('quackgis') i \
+         JOIN quackgis._quackgis.relation_oid r USING (table_uuid) \
+         JOIN quackgis._quackgis.attribute_number a USING (table_uuid, column_id) \
+         WHERE i.schema_name = '{}' AND i.table_name = '{}' \
+         ORDER BY a.attnum",
+        schema.replace('\'', "''"),
+        table.replace('\'', "''")
+    );
+    storage
+        .query(&sql)
+        .expect("registered catalog columns")
+        .into_iter()
+        .flat_map(|batch| {
+            let columns = (0..4)
+                .map(|column| {
+                    batch
+                        .column(column)
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .expect("registered BIGINT column")
+                })
+                .collect::<Vec<_>>();
+            (0..batch.num_rows())
+                .map(|row| {
+                    (
+                        columns[0].value(row),
+                        columns[1].value(row),
+                        columns[2].value(row),
+                        columns[3].value(row),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
 
 #[test]
 #[ignore = "requires an explicitly selected checksum-pinned development extension"]
@@ -78,7 +148,8 @@ fn development_ducklake_column_identity_contract() {
             sha256: extension_sha256,
         },
     };
-    let storage = DuckDbAdbcStorage::open(config.clone()).expect("open development DuckLake");
+    let storage =
+        Arc::new(DuckDbAdbcStorage::open(config.clone()).expect("open development DuckLake"));
 
     let description = storage
         .describe("SELECT * FROM ducklake_column_info('quackgis')")
@@ -103,9 +174,12 @@ fn development_ducklake_column_identity_contract() {
     );
 
     storage
-        .execute_update(
+        .start_update_operation()
+        .expect("start catalog DDL operation")
+        .execute(
             "CREATE TABLE quackgis.main.identity_probe(\
              id BIGINT, label VARCHAR, payload STRUCT(x INTEGER))",
+            None,
         )
         .expect("create empty identity table");
     storage
@@ -136,17 +210,54 @@ fn development_ducklake_column_identity_contract() {
             .iter()
             .all(|row| row.table_uuid == initial[0].table_uuid)
     );
+    let initial_registry = registered_columns(&storage, "main", "identity_probe");
+    assert_eq!(
+        initial_registry
+            .iter()
+            .map(|row| (row.2, row.3))
+            .collect::<Vec<_>>(),
+        [(1, 1), (2, 2), (3, 3)]
+    );
+    assert!(initial_registry.iter().all(|row| row.0 == 2_200));
+    assert!(initial_registry.iter().all(|row| row.1 >= 100_000));
+    assert!(
+        initial_registry
+            .iter()
+            .all(|row| row.1 == initial_registry[0].1)
+    );
+    let (initial_next_oid, initial_epoch) = registry_state(&storage);
+    let row_type = storage
+        .query(&format!(
+            "SELECT CAST(row_type_oid AS BIGINT) \
+             FROM quackgis._quackgis.relation_oid WHERE oid = {}",
+            initial_registry[0].1
+        ))
+        .expect("reserved relation row type OID");
+    assert_eq!(first_i64(&row_type, 0), initial_registry[0].1 + 1);
+    assert_eq!(initial_next_oid, initial_registry[0].1 + 2);
+    assert_eq!(initial_epoch, 1);
 
     storage
-        .transaction(|transaction| {
-            transaction.execute_update(
-                "ALTER TABLE quackgis.main.identity_probe RENAME TO identity_renamed",
-            )?;
-            transaction.execute_update(
-                "ALTER TABLE quackgis.main.identity_renamed RENAME COLUMN label TO title",
-            )?;
-            Ok(())
-        })
+        .begin_transaction()
+        .expect("begin rename transaction");
+    storage
+        .start_update_operation()
+        .expect("start table rename")
+        .execute(
+            "ALTER TABLE quackgis.main.identity_probe RENAME TO identity_renamed",
+            None,
+        )
+        .expect("rename table in transaction");
+    storage
+        .start_update_operation()
+        .expect("start column rename")
+        .execute(
+            "ALTER TABLE quackgis.main.identity_renamed RENAME COLUMN label TO title",
+            None,
+        )
+        .expect("rename column in transaction");
+    storage
+        .commit_transaction()
         .expect("commit supported renames");
     let renamed = identity_rows(
         &storage
@@ -167,6 +278,12 @@ fn development_ducklake_column_identity_contract() {
         assert_eq!(before.table_uuid, after.table_uuid);
         assert_eq!(before.column_id, after.column_id);
     }
+    assert_eq!(
+        registered_columns(&storage, "main", "identity_renamed"),
+        initial_registry
+    );
+    let renamed_state = registry_state(&storage);
+    assert_eq!(renamed_state, (initial_next_oid, initial_epoch + 1));
 
     let rollback = storage.transaction::<()>(|transaction| {
         transaction
@@ -188,6 +305,11 @@ fn development_ducklake_column_identity_contract() {
         ),
         renamed
     );
+    assert_eq!(registry_state(&storage), renamed_state);
+    assert_eq!(
+        registered_columns(&storage, "main", "identity_renamed"),
+        initial_registry
+    );
 
     storage
         .execute_update("ALTER TABLE quackgis.main.identity_renamed ADD COLUMN added BOOLEAN")
@@ -208,19 +330,52 @@ fn development_ducklake_column_identity_contract() {
             .iter()
             .all(|existing| existing.column_id != added.column_id)
     );
+    let added_registry = registered_columns(&storage, "main", "identity_renamed");
+    assert_eq!(&added_registry[..3], initial_registry.as_slice());
+    assert_eq!(added_registry[3].2, added.column_id);
+    assert_eq!(added_registry[3].3, 4);
+    let added_state = registry_state(&storage);
+    assert_eq!(added_state, (initial_next_oid, renamed_state.1 + 1));
+
+    storage
+        .execute_update("ALTER TABLE quackgis.main.identity_renamed DROP COLUMN added")
+        .expect("drop added column");
+    storage
+        .execute_update("ALTER TABLE quackgis.main.identity_renamed ADD COLUMN added BOOLEAN")
+        .expect("recreate added column");
+    let with_readded = identity_rows(
+        &storage
+            .query(COLUMN_IDENTITY_SQL)
+            .expect("identities with recreated column"),
+    );
+    let readded = with_readded.last().expect("recreated column");
+    assert_eq!(readded.column_name, "added");
+    assert_ne!(readded.column_id, added.column_id);
+    let readded_registry = registered_columns(&storage, "main", "identity_renamed");
+    assert_eq!(&readded_registry[..3], initial_registry.as_slice());
+    assert_eq!(readded_registry[3].2, readded.column_id);
+    assert_eq!(readded_registry[3].3, 5);
+    let readded_state = registry_state(&storage);
+    assert_eq!(readded_state, (initial_next_oid, added_state.1 + 2));
     drop(storage);
 
-    let reopened = DuckDbAdbcStorage::open(config).expect("reopen development DuckLake");
+    let reopened = DuckDbAdbcStorage::open(config.clone()).expect("reopen development DuckLake");
     assert_eq!(
         identity_rows(
             &reopened
                 .query(COLUMN_IDENTITY_SQL)
                 .expect("reopened identities")
         ),
-        with_added
+        with_readded
     );
-    let old_table_id = with_added[0].table_id;
-    let old_table_uuid = with_added[0].table_uuid.clone();
+    assert_eq!(registry_state(&reopened), readded_state);
+    assert_eq!(
+        registered_columns(&reopened, "main", "identity_renamed"),
+        readded_registry
+    );
+    let old_table_id = with_readded[0].table_id;
+    let old_table_uuid = with_readded[0].table_uuid.clone();
+    let old_relation_oid = readded_registry[0].1;
     reopened
         .execute_update("DROP TABLE quackgis.main.identity_renamed")
         .expect("drop identity table");
@@ -235,4 +390,157 @@ fn development_ducklake_column_identity_contract() {
     assert_eq!(recreated.len(), 1);
     assert_ne!(recreated[0].table_id, old_table_id);
     assert_ne!(recreated[0].table_uuid, old_table_uuid);
+    let recreated_registry = registered_columns(&reopened, "main", "identity_renamed");
+    assert_eq!(recreated_registry.len(), 1);
+    assert_eq!(recreated_registry[0].0, 2_200);
+    assert_ne!(recreated_registry[0].1, old_relation_oid);
+    assert_eq!(recreated_registry[0].3, 1);
+    assert_eq!(registry_state(&reopened).1, readded_state.1 + 2);
+    let mappings = reopened
+        .query(
+            "SELECT CAST(count(*) AS BIGINT) \
+             FROM quackgis._quackgis.relation_oid",
+        )
+        .expect("retained relation mappings");
+    assert_eq!(first_i64(&mappings, 0), 2);
+    let attribute_mappings = reopened
+        .query(&format!(
+            "SELECT CAST(count(*) AS BIGINT) \
+             FROM quackgis._quackgis.attribute_number \
+             WHERE table_uuid = CAST('{}' AS UUID)",
+            old_table_uuid.replace('\'', "''")
+        ))
+        .expect("retained attribute mappings");
+    assert_eq!(first_i64(&attribute_mappings, 0), 5);
+
+    EngineStorageKernel::execute_update_contract(
+        &reopened,
+        "CREATE TABLE quackgis.main.contract_identity(flag BOOLEAN)",
+    )
+    .expect("contract DDL reconciliation");
+    assert_eq!(
+        registered_columns(&reopened, "main", "contract_identity").len(),
+        1
+    );
+
+    let ingest_batch = || {
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "value",
+                DataType::Int32,
+                false,
+            )])),
+            vec![Arc::new(Int32Array::from(vec![1]))],
+        )
+        .expect("ingest identity batch")
+    };
+    reopened
+        .ingest(
+            "main",
+            "inherent_ingest_identity",
+            vec![ingest_batch()],
+            IngestMode::Create,
+        )
+        .expect("inherent ingest reconciliation");
+    assert_eq!(
+        registered_columns(&reopened, "main", "inherent_ingest_identity").len(),
+        1
+    );
+    EngineStorageKernel::ingest_contract(
+        &reopened,
+        &EngineTableRef {
+            catalog: "quackgis".to_owned(),
+            schema: "main".to_owned(),
+            table: "contract_ingest_identity".to_owned(),
+        },
+        vec![ingest_batch()],
+        IngestDisposition::Create,
+    )
+    .expect("contract ingest reconciliation");
+    assert_eq!(
+        registered_columns(&reopened, "main", "contract_ingest_identity").len(),
+        1
+    );
+
+    let before_schema = registry_state(&reopened);
+    reopened
+        .transaction(|transaction| {
+            transaction.execute_update("CREATE SCHEMA quackgis.analytics")?;
+            transaction
+                .execute_update("CREATE TABLE quackgis.analytics.measurements(value DOUBLE)")?;
+            Ok(())
+        })
+        .expect("commit schema and table together");
+    let analytics = registered_columns(&reopened, "analytics", "measurements");
+    assert_eq!(analytics.len(), 1);
+    assert!(analytics[0].0 >= 100_000);
+    assert!(analytics[0].1 >= 100_000);
+    assert_ne!(analytics[0].0, analytics[0].1);
+    assert_eq!((analytics[0].2, analytics[0].3), (1, 1));
+    let after_schema = registry_state(&reopened);
+    assert_eq!(after_schema.0, before_schema.0 + 3);
+    assert_eq!(after_schema.1, before_schema.1 + 1);
+
+    let session_a = Arc::new(reopened.open_session().expect("first concurrent session"));
+    let session_b = Arc::new(reopened.open_session().expect("second concurrent session"));
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let create =
+        |storage: Arc<DuckDbAdbcStorage>, barrier: Arc<std::sync::Barrier>, table: &'static str| {
+            std::thread::spawn(move || {
+                barrier.wait();
+                storage.execute_update(&format!("CREATE TABLE quackgis.main.{table}(id BIGINT)"))
+            })
+        };
+    let writer_a = create(
+        Arc::clone(&session_a),
+        Arc::clone(&barrier),
+        "concurrent_identity_a",
+    );
+    let writer_b = create(session_b, barrier, "concurrent_identity_b");
+    writer_a
+        .join()
+        .expect("first writer thread")
+        .expect("first serialized catalog commit");
+    writer_b
+        .join()
+        .expect("second writer thread")
+        .expect("second serialized catalog commit");
+    assert_eq!(
+        registered_columns(&reopened, "main", "concurrent_identity_a").len(),
+        1
+    );
+    assert_eq!(
+        registered_columns(&reopened, "main", "concurrent_identity_b").len(),
+        1
+    );
+    let missing = reopened
+        .query(
+            "SELECT CAST(count(*) AS BIGINT) FROM (\
+               SELECT DISTINCT i.table_uuid \
+               FROM ducklake_column_info('quackgis') i \
+               LEFT JOIN quackgis._quackgis.relation_oid r USING (table_uuid) \
+               WHERE i.schema_name <> '_quackgis' AND r.oid IS NULL\
+             ) missing",
+        )
+        .expect("complete concurrent registry coverage");
+    assert_eq!(first_i64(&missing, 0), 0);
+
+    let corruption = reopened.transaction(|transaction| {
+        transaction.execute_update(
+            "INSERT INTO quackgis._quackgis.relation_oid \
+             SELECT * FROM quackgis._quackgis.relation_oid LIMIT 1",
+        )?;
+        Ok(())
+    });
+    let corruption = corruption.expect_err("duplicate registry key must fail closed");
+    assert!(corruption.to_string().contains("commit succeeded"));
+    assert_eq!(
+        reopened.transaction_state(),
+        EngineTransactionState::Quarantined
+    );
+    drop(reopened);
+    match DuckDbAdbcStorage::open(config) {
+        Ok(_) => panic!("startup must reject a corrupt identity registry"),
+        Err(error) => assert!(error.to_string().contains("catalog identity")),
+    }
 }

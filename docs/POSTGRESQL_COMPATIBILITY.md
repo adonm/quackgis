@@ -180,6 +180,28 @@ checksum-pinned override. Release support remains blocked until the public
 contract is accepted upstream and a version-pinned signed official extension
 reproduces the tests. Private attachment names must not leak into client SQL.
 
+The development lane now implements the first mapping slice in protected
+DuckLake tables under `_quackgis`. `main` maps to namespace OID 2200; other
+namespace, relation, and reserved relation-row-type OIDs allocate from 100000
+above maintained reservations;
+attribute numbers allocate monotonically per durable table UUID. Mappings survive
+rename/restart and remain as tombstones after drop so recreation cannot reuse
+identity. Because the public function exposes committed state by design,
+reconciliation is a separate atomic transaction after the user commit but before
+success is returned. A process-wide lock serializes that commit pair across all
+sessions, and startup reconciliation covers a process-crash gap. A failed
+post-commit reconciliation is reported as a committed change, quarantines the
+session, and fatally closes an explicit pgwire transaction. All public
+development write/create APIs use the same hook. Uniqueness/reference/coverage
+invariants are explicitly validated because DuckLake 1.5 has no primary-key or
+unique constraints. Direct pgwire relation references to the private schema,
+dynamic query indirection, and direct identity-function calls are denied.
+
+`ducklake_column_info` has no row for an empty schema, so this slice deliberately
+does not assign one a name-based OID or advance the identity epoch. Pgwire
+`CREATE SCHEMA` remains unsupported. Durable empty-schema identity needs an
+upstream schema-level API before that surface can be claimed.
+
 ### Transaction and cache correctness
 
 - Each catalog snapshot has a monotonic schema/security epoch.
@@ -191,6 +213,11 @@ reproduces the tests. Private attachment names must not leak into client SQL.
   rollback, failed-transaction cleanup, cancellation, and disconnect.
 - A pooled or reused native connection never inherits another pgwire session's
   role or request context.
+
+The development C2 registry now maintains the schema half of the first invariant:
+a committed identity fingerprint advances one durable epoch for create, rename,
+add, drop, and recreate, while rollback and restart without change do not. No
+cache consumes that epoch yet, and the security epoch remains future C4 work.
 
 ## Compatibility surfaces
 

@@ -9,6 +9,8 @@ pub const BOOTSTRAP_OWNER_OID: u32 = 10;
 pub const QUACKGIS_DATABASE_OID: u32 = 16_384;
 pub const GEOMETRY_ARRAY_OID: u32 = 90_003;
 pub const GEOGRAPHY_ARRAY_OID: u32 = 90_004;
+pub const DYNAMIC_OBJECT_OID_START: u32 = 100_000;
+pub const INTERNAL_SCHEMA: &str = "_quackgis";
 
 #[derive(Clone, Copy)]
 struct PgTypeRow {
@@ -222,6 +224,236 @@ pub fn duckdb_catalog_bootstrap_sql() -> String {
     )
 }
 
+fn quote_identifier(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+fn quote_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+/// Create the durable compatibility identity registry inside the attached
+/// DuckLake catalog. DuckLake 1.5 does not support uniqueness constraints, so
+/// every reconciliation validates the equivalent invariants explicitly.
+pub fn ducklake_identity_registry_bootstrap_sql(catalog: &str) -> String {
+    let catalog = quote_identifier(catalog);
+    let schema = quote_identifier(INTERNAL_SCHEMA);
+    format!(
+        "CREATE SCHEMA IF NOT EXISTS {catalog}.{schema};\n\
+         CREATE TABLE IF NOT EXISTS {catalog}.{schema}.catalog_state(\n\
+           singleton BOOLEAN NOT NULL, format_version USMALLINT NOT NULL,\n\
+           next_oid UINTEGER NOT NULL, schema_epoch UBIGINT NOT NULL,\n\
+           identity_fingerprint VARCHAR);\n\
+         INSERT INTO {catalog}.{schema}.catalog_state\n\
+           SELECT true, 1::USMALLINT, {DYNAMIC_OBJECT_OID_START}::UINTEGER,\n\
+                  0::UBIGINT, NULL::VARCHAR\n\
+           WHERE NOT EXISTS (SELECT 1 FROM {catalog}.{schema}.catalog_state);\n\
+         CREATE TABLE IF NOT EXISTS {catalog}.{schema}.namespace_oid(\n\
+           schema_uuid UUID NOT NULL, schema_id BIGINT NOT NULL, oid UINTEGER NOT NULL);\n\
+         CREATE TABLE IF NOT EXISTS {catalog}.{schema}.relation_oid(\n\
+           table_uuid UUID NOT NULL, table_id BIGINT NOT NULL,\n\
+           namespace_oid UINTEGER NOT NULL, oid UINTEGER NOT NULL,\n\
+           row_type_oid UINTEGER NOT NULL);\n\
+         CREATE TABLE IF NOT EXISTS {catalog}.{schema}.attribute_number(\n\
+           table_uuid UUID NOT NULL, column_id BIGINT NOT NULL, attnum SMALLINT NOT NULL);"
+    )
+}
+
+/// Reconcile committed DuckLake identities into durable PostgreSQL-compatible
+/// OID and attribute-number mappings. The caller owns one native transaction.
+pub fn ducklake_identity_registry_reconcile_sql(catalog: &str) -> String {
+    let catalog_identifier = quote_identifier(catalog);
+    let catalog_literal = quote_literal(catalog);
+    let schema = quote_identifier(INTERNAL_SCHEMA);
+    format!(
+        "CREATE OR REPLACE TEMP TABLE __quackgis_identity AS\n\
+           SELECT * FROM ducklake_column_info({catalog_literal})\n\
+           WHERE schema_name <> {internal_schema_literal};\n\
+         CREATE OR REPLACE TEMP TABLE __quackgis_identity_fingerprint AS\n\
+           SELECT sha256(coalesce(CAST(to_json(list(struct_pack(\n\
+             schema_uuid := schema_uuid, schema_name := schema_name,\n\
+             table_uuid := table_uuid, table_name := table_name,\n\
+             column_id := column_id, column_name := column_name)\n\
+             ORDER BY schema_uuid, table_uuid, column_id)) AS VARCHAR), '[]'))\n\
+             AS fingerprint\n\
+           FROM __quackgis_identity;\n\
+         CREATE OR REPLACE TEMP TABLE __quackgis_new_public_namespace AS\n\
+           SELECT schema_uuid, min(schema_id) AS schema_id\n\
+           FROM __quackgis_identity i\n\
+           WHERE schema_name = 'main'\n\
+             AND NOT EXISTS (\n\
+               SELECT 1 FROM {catalog_identifier}.{schema}.namespace_oid n\n\
+               WHERE n.schema_uuid = i.schema_uuid)\n\
+           GROUP BY schema_uuid;\n\
+         INSERT INTO {catalog_identifier}.{schema}.namespace_oid\n\
+           SELECT schema_uuid, schema_id, {PUBLIC_NAMESPACE_OID}::UINTEGER\n\
+           FROM __quackgis_new_public_namespace;\n\
+         CREATE OR REPLACE TEMP TABLE __quackgis_new_namespaces AS\n\
+           SELECT schema_uuid, schema_id,\n\
+                  row_number() OVER (ORDER BY schema_uuid) AS ordinal\n\
+           FROM (\n\
+             SELECT schema_uuid, min(schema_id) AS schema_id\n\
+             FROM __quackgis_identity i\n\
+             WHERE schema_name <> 'main'\n\
+               AND NOT EXISTS (\n\
+                 SELECT 1 FROM {catalog_identifier}.{schema}.namespace_oid n\n\
+                 WHERE n.schema_uuid = i.schema_uuid)\n\
+             GROUP BY schema_uuid\n\
+           ) missing;\n\
+         INSERT INTO {catalog_identifier}.{schema}.namespace_oid\n\
+           SELECT n.schema_uuid, n.schema_id,\n\
+                  CAST(s.next_oid + n.ordinal - 1 AS UINTEGER)\n\
+           FROM __quackgis_new_namespaces n,\n\
+                {catalog_identifier}.{schema}.catalog_state s;\n\
+         UPDATE {catalog_identifier}.{schema}.catalog_state\n\
+           SET next_oid = next_oid + (SELECT count(*) FROM __quackgis_new_namespaces)\n\
+           WHERE singleton\n\
+             AND (SELECT count(*) FROM __quackgis_new_namespaces) > 0;\n\
+         CREATE OR REPLACE TEMP TABLE __quackgis_new_relations AS\n\
+           SELECT table_uuid, table_id, namespace_oid,\n\
+                  row_number() OVER (ORDER BY table_uuid) AS ordinal\n\
+           FROM (\n\
+             SELECT i.table_uuid, min(i.table_id) AS table_id,\n\
+                    min(n.oid) AS namespace_oid\n\
+             FROM __quackgis_identity i\n\
+             JOIN {catalog_identifier}.{schema}.namespace_oid n USING (schema_uuid)\n\
+             WHERE NOT EXISTS (\n\
+               SELECT 1 FROM {catalog_identifier}.{schema}.relation_oid r\n\
+               WHERE r.table_uuid = i.table_uuid)\n\
+             GROUP BY i.table_uuid\n\
+           ) missing;\n\
+         INSERT INTO {catalog_identifier}.{schema}.relation_oid\n\
+           SELECT r.table_uuid, r.table_id, r.namespace_oid,\n\
+                  CAST(s.next_oid + ((r.ordinal - 1) * 2) AS UINTEGER),\n\
+                  CAST(s.next_oid + ((r.ordinal - 1) * 2) + 1 AS UINTEGER)\n\
+           FROM __quackgis_new_relations r,\n\
+                {catalog_identifier}.{schema}.catalog_state s;\n\
+         UPDATE {catalog_identifier}.{schema}.catalog_state\n\
+           SET next_oid = next_oid + (2 * (SELECT count(*) FROM __quackgis_new_relations))\n\
+           WHERE singleton\n\
+             AND (SELECT count(*) FROM __quackgis_new_relations) > 0;\n\
+         CREATE OR REPLACE TEMP TABLE __quackgis_new_attributes AS\n\
+           SELECT i.table_uuid, i.column_id,\n\
+                  CAST(coalesce(m.max_attnum, 0) + row_number() OVER (\n\
+                    PARTITION BY i.table_uuid ORDER BY i.column_id) AS SMALLINT) AS attnum\n\
+           FROM __quackgis_identity i\n\
+           LEFT JOIN (\n\
+             SELECT table_uuid, max(attnum) AS max_attnum\n\
+             FROM {catalog_identifier}.{schema}.attribute_number\n\
+             GROUP BY table_uuid\n\
+           ) m USING (table_uuid)\n\
+           WHERE NOT EXISTS (\n\
+             SELECT 1 FROM {catalog_identifier}.{schema}.attribute_number a\n\
+             WHERE a.table_uuid = i.table_uuid AND a.column_id = i.column_id);\n\
+         INSERT INTO {catalog_identifier}.{schema}.attribute_number\n\
+           SELECT * FROM __quackgis_new_attributes;\n\
+         UPDATE {catalog_identifier}.{schema}.catalog_state s\n\
+           SET schema_epoch = schema_epoch + CASE\n\
+                 WHEN s.identity_fingerprint IS NULL\n\
+                  AND ({change_count}) = 0 THEN 0 ELSE 1 END,\n\
+               identity_fingerprint = f.fingerprint\n\
+           FROM __quackgis_identity_fingerprint f\n\
+           WHERE s.singleton\n\
+             AND (s.identity_fingerprint IS DISTINCT FROM f.fingerprint\n\
+                  OR ({change_count}) > 0);",
+        internal_schema_literal = quote_literal(INTERNAL_SCHEMA),
+        change_count = "(SELECT count(*) FROM __quackgis_new_public_namespace) + \
+                        (SELECT count(*) FROM __quackgis_new_namespaces) + \
+                        (SELECT count(*) FROM __quackgis_new_relations) + \
+                        (SELECT count(*) FROM __quackgis_new_attributes)",
+    )
+}
+
+/// Return a query that fails inside DuckDB unless the unconstrained DuckLake
+/// registry satisfies all uniqueness, allocation, and reference invariants.
+pub fn ducklake_identity_registry_validation_sql(catalog: &str) -> String {
+    let catalog = quote_identifier(catalog);
+    let schema = quote_identifier(INTERNAL_SCHEMA);
+    format!(
+        "SELECT CASE WHEN\n\
+           (SELECT count(*) FROM {catalog}.{schema}.catalog_state) = 1\n\
+           AND (SELECT count(*) FROM {catalog}.{schema}.catalog_state\n\
+                WHERE singleton AND format_version = 1\n\
+                  AND next_oid >= {DYNAMIC_OBJECT_OID_START}) = 1\n\
+           AND NOT EXISTS (\n\
+             SELECT schema_uuid FROM {catalog}.{schema}.namespace_oid\n\
+             GROUP BY schema_uuid HAVING count(*) <> 1)\n\
+           AND NOT EXISTS (\n\
+             SELECT table_uuid FROM {catalog}.{schema}.relation_oid\n\
+             GROUP BY table_uuid HAVING count(*) <> 1)\n\
+           AND NOT EXISTS (\n\
+             SELECT table_uuid, column_id FROM {catalog}.{schema}.attribute_number\n\
+             GROUP BY table_uuid, column_id HAVING count(*) <> 1)\n\
+           AND NOT EXISTS (\n\
+             SELECT table_uuid, attnum FROM {catalog}.{schema}.attribute_number\n\
+             GROUP BY table_uuid, attnum HAVING count(*) <> 1)\n\
+           AND NOT EXISTS (\n\
+             SELECT oid FROM (\n\
+               SELECT oid FROM {catalog}.{schema}.namespace_oid\n\
+               UNION ALL\n\
+               SELECT oid FROM {catalog}.{schema}.relation_oid\n\
+               UNION ALL\n\
+               SELECT row_type_oid FROM {catalog}.{schema}.relation_oid\n\
+             ) allocated GROUP BY oid HAVING count(*) <> 1)\n\
+           AND NOT EXISTS (\n\
+             SELECT 1 FROM {catalog}.{schema}.namespace_oid\n\
+             WHERE oid <> {PUBLIC_NAMESPACE_OID} AND oid < {DYNAMIC_OBJECT_OID_START})\n\
+           AND NOT EXISTS (\n\
+             SELECT 1 FROM {catalog}.{schema}.relation_oid\n\
+             WHERE oid < {DYNAMIC_OBJECT_OID_START}\n\
+                OR row_type_oid < {DYNAMIC_OBJECT_OID_START})\n\
+           AND NOT EXISTS (\n\
+             SELECT 1 FROM {catalog}.{schema}.relation_oid r\n\
+             WHERE NOT EXISTS (\n\
+               SELECT 1 FROM {catalog}.{schema}.namespace_oid n\n\
+               WHERE n.oid = r.namespace_oid))\n\
+           AND NOT EXISTS (\n\
+             SELECT 1 FROM {catalog}.{schema}.attribute_number a\n\
+             WHERE a.attnum <= 0 OR NOT EXISTS (\n\
+               SELECT 1 FROM {catalog}.{schema}.relation_oid r\n\
+               WHERE r.table_uuid = a.table_uuid))\n\
+           AND (SELECT next_oid FROM {catalog}.{schema}.catalog_state) > coalesce((\n\
+             SELECT max(oid) FROM (\n\
+               SELECT oid FROM {catalog}.{schema}.namespace_oid\n\
+               WHERE oid >= {DYNAMIC_OBJECT_OID_START}\n\
+               UNION ALL\n\
+               SELECT oid FROM {catalog}.{schema}.relation_oid\n\
+               UNION ALL\n\
+               SELECT row_type_oid FROM {catalog}.{schema}.relation_oid\n\
+             ) allocated), {dynamic_predecessor})\n\
+         THEN true ELSE error('QuackGIS catalog identity registry is inconsistent') END\n\
+         AS registry_valid",
+        dynamic_predecessor = DYNAMIC_OBJECT_OID_START - 1,
+    )
+}
+
+/// Validate that every identity in the current committed DuckLake snapshot has
+/// a complete, namespace-consistent registry mapping.
+pub fn ducklake_identity_registry_coverage_sql(catalog: &str) -> String {
+    let catalog_identifier = quote_identifier(catalog);
+    let catalog_literal = quote_literal(catalog);
+    let schema = quote_identifier(INTERNAL_SCHEMA);
+    format!(
+        "SELECT CASE WHEN NOT EXISTS (\n\
+           SELECT 1\n\
+           FROM ducklake_column_info({catalog_literal}) i\n\
+           LEFT JOIN {catalog_identifier}.{schema}.namespace_oid n USING (schema_uuid)\n\
+           LEFT JOIN {catalog_identifier}.{schema}.relation_oid r\n\
+             ON r.table_uuid = i.table_uuid\n\
+           LEFT JOIN {catalog_identifier}.{schema}.attribute_number a\n\
+             ON a.table_uuid = i.table_uuid AND a.column_id = i.column_id\n\
+           WHERE i.schema_name <> {internal_schema_literal}\n\
+             AND (n.oid IS NULL OR r.oid IS NULL OR a.attnum IS NULL\n\
+                  OR r.namespace_oid <> n.oid\n\
+                  OR (i.schema_name = 'main' AND n.oid <> {PUBLIC_NAMESPACE_OID})\n\
+                  OR (i.schema_name <> 'main' AND n.oid = {PUBLIC_NAMESPACE_OID}))\n\
+         ) THEN true\n\
+         ELSE error('QuackGIS catalog identity registry does not cover the committed snapshot')\n\
+         END AS registry_coverage_valid",
+        internal_schema_literal = quote_literal(INTERNAL_SCHEMA),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,5 +526,31 @@ mod tests {
         assert!(sql.contains("quackgis_current_schema"));
         assert!(sql.contains("quackgis_current_schemas"));
         assert!(!sql.contains("CREATE TABLE"));
+    }
+
+    #[test]
+    fn identity_registry_sql_is_reserved_and_explicitly_validated() {
+        let bootstrap = ducklake_identity_registry_bootstrap_sql("quackgis");
+        assert!(bootstrap.contains("\"quackgis\".\"_quackgis\".catalog_state"));
+        assert!(bootstrap.contains("100000::UINTEGER"));
+        assert!(bootstrap.contains("format_version USMALLINT"));
+        assert!(!bootstrap.contains("PRIMARY KEY"));
+        assert!(!bootstrap.contains("UNIQUE"));
+
+        let reconcile = ducklake_identity_registry_reconcile_sql("quackgis");
+        assert!(reconcile.contains("ducklake_column_info('quackgis')"));
+        assert!(reconcile.contains("schema_name <> '_quackgis'"));
+        assert!(reconcile.contains("2200::UINTEGER"));
+        assert!(reconcile.contains("identity_fingerprint"));
+
+        let validation = ducklake_identity_registry_validation_sql("quackgis");
+        assert!(validation.contains("registry is inconsistent"));
+        assert!(validation.contains("GROUP BY table_uuid, attnum"));
+        assert!(validation.contains("oid < 100000"));
+
+        let coverage = ducklake_identity_registry_coverage_sql("quackgis");
+        assert!(coverage.contains("ducklake_column_info('quackgis')"));
+        assert!(coverage.contains("does not cover the committed snapshot"));
+        assert!(coverage.contains("r.namespace_oid <> n.oid"));
     }
 }
