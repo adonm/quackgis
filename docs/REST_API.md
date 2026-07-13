@@ -10,6 +10,12 @@ also exercise QuackGIS pgwire behavior.
 This is an intentionally read-only first slice. It is not yet a claim of complete
 PostgREST compatibility or of upstream's 1,013-case PostgreSQL result.
 
+The durable target is not a REST-specific security/catalog implementation.
+QuackGIS will own PostgreSQL 18 roles, privileges, session identity, catalog
+projection, and bounded request context; REST will exercise those capabilities as
+an ordinary pgwire client. See
+[POSTGRESQL_COMPATIBILITY.md](./POSTGRESQL_COMPATIBILITY.md) for the ordered plan.
+
 ## Trust boundaries
 
 - `/live` and `/ready` are unauthenticated operational endpoints.
@@ -50,6 +56,56 @@ DuckDB's escaped binary JSON string. GeoJSON projection, geometry/SRID metadata,
 relationships/embedding, count preferences, CSV, singular media types, RPC, JWT
 roles, and all mutations remain open. Unsupported HTTP methods fail closed with
 `405`; missing schema-cache resources return `404`.
+
+## Target role-aware architecture
+
+The current bearer token and per-process `information_schema.columns` cache are
+bootstrap controls. The target request path is:
+
+```text
+JWT request
+    │ validate signature/issuer/audience/time/role mapping
+    ▼
+quackgis-rest replica
+    │ BEGIN
+    │ SET LOCAL ROLE <configured API role>
+    │ set_config('request.jwt.claims', <bound JSON>, true)
+    │ catalog or application query
+    │ COMMIT
+    ▼
+QuackGIS pgwire catalog/session/authorization boundary
+    ▼
+DuckDB + official DuckLake
+```
+
+Delivery is intentionally staged as an implementation decomposition of the
+M3/M5 gates in [../ROADMAP.md](../ROADMAP.md):
+
+1. replace direct DuckDB schema assumptions with maintained PostgreSQL catalog
+   discovery while retaining the explicit REST exposure ceiling;
+2. add JWT verification, one authenticator identity, bounded role mapping,
+   transaction-local role/context, and role-aware OpenAPI cached by role and
+   schema/security epoch;
+3. package multiple immutable stateless replicas and prove denial, readiness,
+   load balancing, cache invalidation, and credential rotation; then
+4. add relationships and mutations only after common key metadata, object
+   privileges, cancellation/transaction outcomes, and maintained bbox invariants
+   pass through direct pgwire.
+
+Table and operation RBAC is sufficient for role-specific paths and methods. It is
+not RLS. RLS-protected reads or writes remain blocked until QuackGIS has a
+structural policy model, matching `pg_policy` behavior, and an adversarial bypass
+suite across every maintained read/write shape.
+
+The role-specific OpenAPI cache key is:
+
+```text
+effective role + catalog/security epoch + REST exposure configuration
+```
+
+An operation omitted by OpenAPI must also be denied when requested directly. An
+operation allowed by database grants can still be hidden by the REST exposure
+ceiling, but REST can never widen a database grant.
 
 ## Run locally
 
@@ -103,3 +159,8 @@ Upstream's differential runner still requires a real PostgreSQL fixture and
 PostgREST reference process. It remains useful for parser/HTTP parity, but its
 PostgreSQL roles, RLS, catalogs, LISTEN/NOTIFY, functions, and JSON SQL cannot be
 claimed for DuckDB without explicit QuackGIS implementations and tests.
+
+As common catalog/RBAC work lands, applicable upstream schema-cache, role, and
+HTTP cases should move into two gates: a normalized PostgreSQL/PostgREST reference
+comparison and an actual QuackGIS-pgwire case. Passing parser-only cases does not
+establish database semantics.

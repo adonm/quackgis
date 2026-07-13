@@ -37,8 +37,10 @@ treatment, and rollback. Alternating writers is prohibited.
 
 ## Shared profile gate
 
-Shared PostgreSQL catalog/object storage is a post-Local-1.0 milestone. Enabling it
-requires official DuckLake support plus measured multi-process visibility,
+Using PostgreSQL as the shared DuckLake metadata catalog with object storage is a
+post-Local-1.0 milestone. This is distinct from the PostgreSQL-compatible
+`pg_catalog` client surface. Enabling it requires official DuckLake support plus
+measured multi-process visibility,
 conflict/indeterminate-commit handling, credentials, authority, throttling,
 backup/restore, cleanup, and independent-reader evidence. Emulator wiring alone is
 not a product claim.

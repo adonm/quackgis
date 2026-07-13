@@ -60,13 +60,16 @@ not copied or silently patched. QuackGIS owns a separate read-only backend becau
 upstream's data paths assume PostgreSQL catalogs, roles/RLS, LISTEN/NOTIFY, and
 PostgreSQL-side JSON.
 
-Local divergence is limited to DuckDB `information_schema` discovery, omission of
-PostgreSQL role switching, explicit text parameter typing for pgwire, and exact
-generated-function adaptation from `json_agg`/`to_jsonb` to DuckDB
+Current local divergence is limited to DuckDB `information_schema` discovery,
+omission of PostgreSQL role switching, explicit text parameter typing for pgwire,
+and exact generated-function adaptation from `json_agg`/`to_jsonb` to DuckDB
 `json_group_array`/`to_json`. The native compatibility smoke crosses real pgwire
-and fails closed for mutations. Upstream updates require reviewing the parser,
-SQL generator, schema types, license, and compatibility cases before changing the
-pinned revision.
+and fails closed for mutations. The planned PostgreSQL 18 catalog/RBAC work moves
+schema and authorization semantics into QuackGIS so this backend can become a
+normal authenticator/role-switching pgwire client; it does not make the upstream
+PostgreSQL execution backends QuackGIS dependencies. Upstream updates require
+reviewing the parser, SQL generator, schema types, license, and compatibility
+cases before changing the pinned revision.
 
 ## Retired forks
 

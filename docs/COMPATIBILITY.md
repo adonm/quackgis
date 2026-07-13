@@ -4,6 +4,12 @@ QuackGIS currently exposes an owned PostgreSQL wire edge over DuckDB Spatial and
 official DuckLake. DataFusion and Sedona SQL execution are no longer part of the
 runtime.
 
+The forward target is the bounded PostgreSQL 18 catalog, role, privilege, session,
+and role-aware REST profile in
+[POSTGRESQL_COMPATIBILITY.md](./POSTGRESQL_COMPATIBILITY.md). Nothing in that plan
+is a current compatibility claim unless it is also recorded below and in
+[ROADMAP_STATUS.md](./ROADMAP_STATUS.md).
+
 ## Proven local contract
 
 The required real-driver workflow proves:
@@ -84,8 +90,9 @@ catalog surfaces remain open unless a focused test says otherwise.
 - Query results stream one driver-produced Arrow batch at a time and reject a
   driver batch above the configured byte ceiling before pgwire encoding. Clean
   1M/10M generated-BIGINT reference runs stay below the +128 MiB process RSS
-  budget with one in-flight batch; wider variable-width/native-batch shapes remain
-  open.
+  budget with one in-flight batch; a clean 1M nullable VARCHAR/BLOB reference also
+  passes across 489 native batches. Maximum driver-batch and additional type
+  shapes remain open.
 - A fully exhausted result returns its native connection. Closing a suspended
   portal or otherwise dropping a partially delivered result quarantines that
   session. After cancellation, the same client receives a stable internal error
@@ -129,6 +136,10 @@ catalog surfaces remain open unless a focused test says otherwise.
   NULL transport are tested through pgwire for geometry and the maintained
   `geog` convention for geography; subtype/SRID/dimension catalog identity remains
   open.
+- PostgreSQL roles, memberships, object ownership/grants, `SET ROLE`, privilege
+  inquiry functions, transaction-local request claims, RLS, and role-aware
+  OpenAPI are not implemented. Current startup identities and table allowlists
+  must not be described as PostgreSQL RBAC.
 - Arrow schema mapping and encoding are tested together for Float16, UInt32 OID
   aliases, Float16/fixed-binary lists, WKB, fixed binary, NULLs, invalid JSON, and
   nested error propagation. Unsupported list layouts fail during schema mapping;

@@ -7,7 +7,7 @@ Spatial and official DuckLake, exposed through an owned Rust PostgreSQL wire edg
 PostgreSQL / GIS / application clients
                   │ pgwire
                   ▼
-Rust edge: protocol · TLS/SCRAM · policy · PostGIS compatibility
+Rust edge: protocol · TLS/SCRAM · roles/catalogs · policy · PostGIS compatibility
                   │ Arrow / ADBC
                   ▼
 DuckDB: SQL · Spatial · official DuckLake · Parquet
@@ -16,6 +16,11 @@ DuckDB: SQL · Spatial · official DuckLake · Parquet
 An optional authenticated, read-only [`quackgis-rest`](docs/REST_API.md) sidecar
 extends a pinned `pg-rest-server` query contract and exposes a load-balanceable
 PostgREST-style HTTP read interface through the same pgwire boundary.
+
+The product direction makes PostgreSQL 18 catalog, role, privilege, and session
+semantics first-class QuackGIS capabilities. The REST edge will become a normal
+authenticator/role-switching pgwire client and generate role-aware OpenAPI from
+that common contract; this target is planned, not part of the current preview.
 
 There is no PostgreSQL, DataFusion, or Sedona query engine. DuckDB is the sole
 planner/executor and official DuckLake is the sole writer for new storage.
@@ -50,7 +55,9 @@ Important limits:
   the clean 10M COPY reference passes RSS/throughput/atomicity budgets; writes are
   cancellable before the non-cancellable commit boundary with explicit
   rollback/quarantine outcomes;
-- broad PostgreSQL catalogs and named GIS-client parity are incomplete; and
+- broad PostgreSQL catalogs and named GIS-client parity are incomplete;
+- PostgreSQL roles, object privileges, role switching, and role-aware OpenAPI are
+  planned but not implemented; and
 - remote/shared catalog and object-storage profiles fail closed.
 
 TLS remains optional for local development. Set `QUACKGIS_TLS_MODE=required` with
@@ -132,6 +139,8 @@ Read:
 - [ROADMAP.md](./ROADMAP.md) — ordered milestones and measurable exit gates.
 - [docs/ROADMAP_STATUS.md](./docs/ROADMAP_STATUS.md) — current evidence and gaps.
 - [docs/COMPATIBILITY.md](./docs/COMPATIBILITY.md) — supported surface and limits.
+- [docs/POSTGRESQL_COMPATIBILITY.md](./docs/POSTGRESQL_COMPATIBILITY.md) — target
+  catalog/RBAC contract and ordered implementation plan.
 - [docs/OPERATIONS.md](./docs/OPERATIONS.md) — local runtime and security baseline.
 - [docs/QUICKSTART.md](./docs/QUICKSTART.md) — guided setup.
 - [DIVERGENCE.md](./DIVERGENCE.md) — retained `arrow-pg` divergence.

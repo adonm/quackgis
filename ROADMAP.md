@@ -4,6 +4,8 @@ This is the ordered forward roadmap for the DuckDB-only product. Current evidenc
 lives in [docs/ROADMAP_STATUS.md](./docs/ROADMAP_STATUS.md); durable direction and
 the extension decision ladder live in
 [docs/PROJECT_DIRECTION.md](./docs/PROJECT_DIRECTION.md).
+The detailed PostgreSQL catalog, RBAC, and REST dependency plan lives in
+[docs/POSTGRESQL_COMPATIBILITY.md](./docs/POSTGRESQL_COMPATIBILITY.md).
 
 A milestone closes only when:
 
@@ -45,7 +47,11 @@ profile ID and level, native artifact digests, host/cgroup capacity, data shape,
 budgets, exact-result oracles, measurements, and pass/fail status. A reduced local
 run must use the same implementation and oracle as its reference counterpart.
 
-## Ordered closure program
+## Closure workstreams
+
+The identifiers below preserve the established work-package names. Completed
+foundations remain listed; remaining dependencies are C0, then H0, while P0 can
+proceed after its evidence/layout prerequisites.
 
 1. **E0 — evidence harness:** split reusable runtime/client/fixture/oracle/evidence
    support from monolithic native scenarios; add smoke/local/reference entrypoints.
@@ -54,13 +60,16 @@ run must use the same implementation and oracle as its reference counterpart.
 3. **K0 — minimal Local 1.0 Kind topology:** one QuackGIS workload, local durable
    volume, TLS secret, and pinned psql/psycopg/GDAL client jobs; no service mesh or
    deferred clients.
-4. **C0 — focused clients:** capture client-neutral catalog fixtures, then qualify
-   psql, psycopg, OGR, and headless QGIS against copied data.
-5. **P0 — M4 host profiles:** conservative predicate/layout work followed by two
+4. **C0 — PostgreSQL compatibility program:** freeze a PostgreSQL 18 profile,
+   implement stable catalog identity and role/privilege/session semantics, then
+   qualify psql, psycopg, OGR, and headless QGIS against copied data.
+5. **H0 — role-aware HTTP:** migrate schema discovery and OpenAPI to the common
+   catalog/authorization boundary, then package multiple stateless replicas.
+6. **P0 — M4 host profiles:** conservative predicate/layout work followed by two
    10M runs; introduce 100M only after those runs pass.
-6. **K1 — operations and shared rehearsal:** termination, rotation, upgrade,
-   recovery, mixed workload and soak locally; PostgreSQL/MinIO rehearsal only after
-   Local 1.0 functional gates are green.
+7. **K1 — operations and shared rehearsal:** termination, rotation, upgrade,
+   recovery, mixed workload and soak locally; PostgreSQL/MinIO shared-profile
+   rehearsal begins only after Local 1.0 closes.
 
 ## Baseline
 
@@ -68,11 +77,13 @@ run must use the same implementation and oracle as its reference counterpart.
 |---|---|---|
 | Engine/storage | pinned DuckDB 1.5.4 through ADBC and local official DuckLake | local paths only |
 | Protocol | bounded simple/extended pgwire | narrow statements and parameter types |
-| Results | one driver Arrow batch at a time through pgwire with fail-closed byte ceiling; clean 1M/10M generated-BIGINT reference profile stays below the +128 MiB budget | wider variable-width/native-batch RSS profiles open |
+| Results | one driver Arrow batch at a time through pgwire with fail-closed byte ceiling; clean 1M/10M BIGINT and 1M nullable VARCHAR/BLOB reference profiles pass RSS and exact-value gates | maximum native-batch and additional type/shape RSS profiles open |
 | COPY | pre-body bounded pgwire frames, incremental bounded text decoding to one ADBC stream, atomic DuckLake publication, and a clean passing 10M RSS/throughput reference | total COPY remains unbounded while each frame/chunk/row/Arrow batch is bounded; idle clients observe cancellation when they resume or disconnect |
 | Transactions | independent sessions, commit/rollback/isolation, failed-transaction `25P02`, cancellable pre-commit writes, and a non-cancellable indeterminate-failure commit boundary | commit response-loss reconciliation remains a Local 1.0 operations gate |
 | Spatial | 42 native/rewrite/macro cases through pgwire | 10 edge gaps and 5 extension candidates |
 | Security | SCRAM, read/write table allowlists, and actual-process required-TLS/restart-rotation evidence | incomplete metadata filtering and packaged rotation/revocation drills |
+| PostgreSQL catalogs/RBAC | DuckDB-derived column metadata plus exact geometry/geography type lookup | no coherent `pg_catalog`, stable relation OIDs, roles, grants, role switching, or privilege inquiry |
+| REST | authenticated read-only PostgREST-style subset through pgwire | bearer service identity, separate schema cache, no JWT roles or role-aware OpenAPI, not packaged in Kind |
 | Operations | restart/reopen, snapshot inspection, adjacent-file merge, checksummed offline exact-path backup/restore | no online/relocated production recovery or shared profile |
 | Performance | fixture-level bbox/exact-recheck oracle | no current scale or layout-maintenance claim |
 | Metrics/status | policy, classed admission, lifecycle, cancellation, timeout, quarantine, COPY rows/bytes/batches/latency, sampled DuckDB memory/temporary storage, liveness, and DuckLake-probed readiness/drain state | probe is local/read-only; no write-capacity SLO |
@@ -159,7 +170,9 @@ Exit gates:
 
 ## M3 — focused compatibility product
 
-**Outcome:** the first named client set works without DuckDB-specific setup.
+**Outcome:** the first named client set and HTTP read edge share one coherent
+PostgreSQL 18 catalog, role, privilege, session, and wire-identity contract without
+DuckDB-specific setup.
 
 Release-required clients:
 
@@ -170,27 +183,63 @@ Release-required clients:
 
 Deliver:
 
-- derive the required `pg_catalog`/`information_schema` surfaces from DuckDB;
+- freeze a PostgreSQL 18 compatibility manifest and differential oracle for every
+  maintained catalog relation/function/cast;
+- derive user-object metadata from DuckDB/DuckLake into an immutable,
+  schema-epoch catalog snapshot;
+- select and prove a stable OID lifecycle across restart, rename, DDL commit, and
+  rollback without making QuackGIS a second user-schema authority;
+- implement relational `pg_namespace`, `pg_class`, `pg_attribute`, `pg_type`, and
+  required database/search-path/`reg*` behavior rather than exact query matching;
+- attach source relation OID and attribute number to RowDescription;
+- implement configuration-backed LOGIN/NOLOGIN roles, memberships, ownership,
+  schema/table/operation grants, `SET ROLE`, `SET LOCAL ROLE`, `RESET ROLE`, and
+  bounded transaction-local request context;
+- make `pg_roles`, `pg_auth_members`, privilege inquiry, maintained
+  `information_schema`, and statement authorization use one policy engine;
+- add constraints, keys, comments, defaults, and spatial metadata only as required
+  by the named clients and role-aware REST; relationship embedding remains a
+  follow-on slice;
 - stabilize geometry RowDescription OIDs and text/binary WKB behavior;
 - define or explicitly bound family, subtype, SRID, and dimension metadata;
 - assign each release spatial requirement to native, macro/rewrite, Rust edge,
   DuckDB extension, or unsupported;
 - replace text signatures with reusable AST/catalog/protocol rules;
-- add fuzz/property coverage for the Arrow-to-pgwire encoder; and
+- add fuzz/property coverage for the Arrow-to-pgwire encoder;
 - run version-pinned psql, psycopg, OGR, and headless QGIS jobs in the minimal Kind
   topology while keeping catalog fixtures client-neutral; and
+- migrate `quackgis-rest` to catalog-backed discovery, JWT-to-role mapping, one
+  authenticator identity, transaction-local role/context, and role-aware OpenAPI;
+- package at least two stateless REST replicas behind the local test Service; and
 - keep GeoServer, editing, Martin, BI, and broad ORM compatibility deferred unless
   they fit without materially widening the first-release surface.
 
 Exit gates:
 
+- every maintained catalog row and reference is internally consistent and has a
+  PostgreSQL 18 differential fixture;
+- relation/type OIDs survive normal restart and supported rename; configured role
+  OIDs survive restart and configuration reordering; rollback publishes no
+  identity or epoch change;
+- `current_user`, privilege inquiry, catalog/information-schema visibility,
+  OpenAPI, and actual statement authorization agree for denied, anonymous,
+  reader, and editor roles;
+- role and bounded request context cannot leak across commit, rollback,
+  cancellation, disconnect, failed transactions, or native connection reuse;
 - each required client has a version-pinned copied-data end-to-end test;
 - required catalog queries are fixture-tested independently of client names;
 - every supported spatial function has exactly one implementation disposition;
 - all supported cases pass through pgwire with exact expected results;
 - QGIS and OGR observe maintained geometry fields rather than generic `bytea`;
+- two REST replicas expose the same role-specific OpenAPI, stay within both the
+  HTTP exposure ceiling and database grants, and access data only through pgwire;
 - unsupported functions/shapes return stable errors; and
 - no release query uses row-wise Rust spatial fallback.
+
+Mutable role/grant DDL, PostgreSQL RLS, REST mutations/RPC, and full PostgREST
+parity are explicitly outside this M3 exit. They follow the ordered security
+slices in `docs/POSTGRESQL_COMPATIBILITY.md`; table/operation RBAC must not be
+described as RLS.
 
 ## M4 — spatial analytical performance
 
@@ -233,7 +282,10 @@ Deliver:
 - health, readiness, graceful shutdown, and transaction drain;
 - backup, restore, compaction, capacity, spill, and incident procedures;
 - supported DuckDB/extension upgrade and reopen tests;
-- TLS and secret-rotation evidence; and
+- TLS and secret-rotation evidence;
+- catalog/control-metadata backup, restore, upgrade, and cache-invalidation
+  evidence;
+- authenticator/JWT/database credential rotation and multi-replica REST readiness;
 - mixed read/COPY/mutation/cancel/compaction/restart/restore workloads; and
 - maintain a minimal Kind topology for packaged functional evidence while keeping
   performance budgets on the host/reference profile.
@@ -246,7 +298,9 @@ Exit gates:
 - restart recovery completes within 60 seconds for the release catalog;
 - a 24-hour mixed workload has no correctness failure, leaked transaction, or
   unbounded memory growth;
-- required client and 10M performance gates remain green after packaging; and
+- required client and 10M performance gates remain green after packaging;
+- role-aware REST and catalog/RBAC gates remain green after restart, restore, and
+  upgrade; and
 - statement/type/transaction/concurrency limits are published.
 
 ## M6 — Shared DuckLake 1.x
@@ -258,7 +312,7 @@ This begins only after Local 1.0.
 
 Deliver:
 
-- official PostgreSQL catalog and object-storage configuration;
+- official DuckLake PostgreSQL metadata-catalog and object-storage configuration;
 - shared credentials and writer-authority validation;
 - measured multi-process readers/writers using supported DuckLake behavior;
 - reader visibility and writer consistency policy;
@@ -307,6 +361,9 @@ Exit gates:
 | native/extension supply-chain or ABI drift | pin artifacts, verify checksums, prohibit production downloads, test upgrades/mixed-version refusal |
 | unbounded ADBC materialization or blocking work | M1 streaming, cancellation, admission, memory/spill budgets before broader clients |
 | compatibility sprawl | require client traces, implementation disposition, stable errors, and delete shims replaced upstream |
+| metadata and authorization drift | one policy engine plus cross-surface tests for privilege inquiry, information schema, execution, and OpenAPI |
+| unstable PostgreSQL identity | prohibit transient DuckDB OIDs and name-only hashes; require restart/rename/rollback identity gates before client claims |
+| unsafe RLS shortcut | ship table/operation RBAC first; require a separate structural predicate-injection and adversarial bypass milestone |
 | incorrect spatial pruning | conservative candidate oracle plus visible exact recheck for every optimized shape |
 | DuckLake API/semantics drift | use official primitives, independent reopen, backup/restore, versioned upgrade gates |
 | shared claims outrun local product | Local 1.0 is a hard prerequisite for M6 |

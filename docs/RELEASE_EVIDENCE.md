@@ -55,11 +55,19 @@ The release packet must include:
 - source SHA, version, Rust lockfile, DuckDB/extension versions and digests;
 - server binary checksum and runtime image digest;
 - all M1–M4 test/client/performance reports;
+- the declared PostgreSQL 18 compatibility manifest and normalized differential
+  catalog/session fixtures;
+- stable OID, RowDescription origin, schema/security epoch, restart, rename,
+  rollback, backup/restore, and upgrade evidence;
+- denied/anonymous/reader/editor role matrices proving privilege inquiry,
+  catalog/information-schema visibility, execution, and OpenAPI agree;
 - named client versions and copied-data manifests;
 - exact 10M profile hardware/data/budget/results;
 - query/COPY memory, spill, cancellation, and admission evidence;
 - backup/restore and upgrade/rollback transcripts;
 - TLS/auth/secret-rotation evidence;
+- authenticator/JWT role-mapping, request-context cleanup, multi-replica REST,
+  cache-invalidation, and credential-rotation evidence;
 - 24-hour soak summary and raw metrics/log locations; and
 - known limits copied from `COMPATIBILITY.md` and `ROADMAP_STATUS.md`.
 

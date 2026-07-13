@@ -1,6 +1,12 @@
 # Security and authorization
 
-QuackGIS currently implements a small service-identity model, not PostgreSQL RBAC.
+QuackGIS currently implements a small service-identity and table-allowlist model,
+not PostgreSQL RBAC. The target is the bounded PostgreSQL 18 role, privilege,
+session, catalog, and request-context contract in
+[POSTGRESQL_COMPATIBILITY.md](./POSTGRESQL_COMPATIBILITY.md).
+
+Target design is not current evidence. This document separates the implemented
+floor from the ordered security work.
 
 ## Implemented controls
 
@@ -18,29 +24,38 @@ QuackGIS currently implements a small service-identity model, not PostgreSQL RBA
 | optional private metrics endpoint | metrics unit tests |
 | native driver digest/version validation | storage unit/native tests |
 
-Broad catalog filtering, administrative permissions, explicit channel-binding
-policy, packaged secret rotation, revocation infrastructure, and production
-failure drills remain open.
+PostgreSQL roles, memberships, owners, ACLs, `SET ROLE`, privilege inquiry,
+request claims, RLS, broad catalog behavior, administrative SQL, packaged secret
+rotation, revocation infrastructure, and production failure drills remain open.
 
 ## Trust boundaries
 
 1. **Client → pgwire:** use SCRAM and `QUACKGIS_TLS_MODE=required` outside local
    development. `preferred` mode permits plaintext for development; required mode
    needs paired certificate/key material and rejects insecure startup before auth.
-2. **Server → native DuckDB:** the driver path loads native code and must remain
-   operator-controlled; startup verifies exact digest/version.
-3. **SQL → ADBC:** exactly one structurally parsed statement is authorized before
-   prepare/schema access. Unknown write/read shapes fail closed.
-4. **Storage:** local data roots carry one authority marker. Remote credentials and
+2. **HTTP client → REST:** the current bearer token is a preview control. The
+   target validates JWT signature, issuer, audience, time bounds, and a bounded
+   role claim before opening a database transaction. HTTP authentication does not
+   itself authorize a database object.
+3. **REST → pgwire:** the target authenticator credential is a privileged service
+   secret because its holder can assume configured API roles and set request
+   context. REST never receives ADBC or storage access.
+4. **SQL → policy → ADBC:** exactly one structurally parsed statement is
+   authorized before prepare/schema access. Unknown write/read/catalog/policy
+   shapes fail closed.
+5. **Catalog/control metadata:** user schema comes from DuckDB/DuckLake. Protected
+   QuackGIS metadata may hold roles, memberships, grants, policy, compatibility
+   OIDs, and epochs, but must not become an independent user-schema authority.
+6. **Storage:** local data roots carry one authority marker. Remote credentials and
    shared profiles are disabled.
-5. **Metrics/audit:** never include SQL text, parameters, WKB, credentials, signed
-   URIs, or sensitive paths.
+7. **Metrics/audit:** never include SQL text, parameters, request claims, WKB,
+   credentials, signed URIs, or sensitive paths.
 
-## Authorization model
+## Current authorization model
 
 - `QUACKGIS_WRITE_ALLOWLIST` restricts write-capable identities.
 - `QUACKGIS_READ_ALLOWLIST` restricts table reads and denies broad metadata access
-  until filtered metadata surfaces exist.
+  until maintained PostgreSQL catalog surfaces exist.
 - Object identity is normalized from the parsed statement, never a raw SQL prefix.
 - Compatibility rewrites may shape SQL/results but may not change the underlying
   table authorization decision.
@@ -49,19 +64,200 @@ failure drills remain open.
   retention, and future shared storage remain offline/operator capabilities and
   do not inherit SQL access.
 
+These settings remain an outer non-widening ceiling during migration. They are not
+PostgreSQL grants and must not be reported as such in `pg_catalog` before the
+common privilege engine exists.
+
+## Target role model
+
+The first role slice is configuration-backed and immutable during one server run.
+That deliberately separates runtime authorization correctness from mutable role
+DDL, credential persistence, and administrative recovery.
+
+Each role has:
+
+- a unique normalized name and stable compatibility OID;
+- LOGIN or NOLOGIN;
+- optional SCRAM credential reference for LOGIN roles;
+- role-level `INHERIT`, used as the provisioning default for membership edges;
+- direct membership edges with PostgreSQL 18 `inherit_option`, `set_option`, and
+  `admin_option` (`admin_option` is false in the initial immutable model);
+- owned objects and explicit grants; and
+- no implicit superuser, database creation, replication, or RLS-bypass behavior.
+
+The graph must reject duplicate names, unknown members, cycles, privilege names
+unsupported by the target object, and an authenticator with unbounded role
+assumption.
+
+Every session tracks:
+
+- authenticated login role and `session_user`;
+- effective `current_user`/`current_role`;
+- session role selected by `SET ROLE`;
+- transaction-local role selected by `SET LOCAL ROLE`;
+- bounded transaction-local request settings; and
+- transaction failure/cleanup state.
+
+Role assumption is evaluated from the original `session_user` through edges with
+`set_option`; assuming one role cannot expand the roles selectable by a later
+`SET ROLE`. `SET ROLE NONE` restores `session_user`. `RESET ROLE` restores the
+connection-time role default, which is `session_user` in the initial profile
+because role/database default-role settings are unsupported. Local state
+disappears on commit and rollback; all state disappears on disconnect.
+Cancellation and quarantine cannot publish or retain a role transition.
+
+## Target object privileges
+
+The initial maintained object model is intentionally smaller than PostgreSQL's
+complete ACL system:
+
+| Object | Initial privileges |
+|---|---|
+| schema | `USAGE` |
+| table/view | `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `MAINTAIN` where the operation exists |
+| column | `SELECT`, `INSERT`, `UPDATE` only when a maintained client requires it |
+| role | membership/inheritance and explicit role-assumption capability |
+
+Ownership, direct grants, inherited grants, and explicitly configured `PUBLIC`
+grants feed one pure authorization decision. Unsupported PostgreSQL privileges
+must return a stable error rather than silently map to a broader capability.
+COPY TO derives from `SELECT`; COPY FROM derives from `INSERT`. QuackGIS may keep
+an additional bulk-ingest ceiling, but it is not exposed as a PostgreSQL ACL bit.
+
+The same decision must drive:
+
+- structural statement authorization before native prepare;
+- COPY and maintenance authorization;
+- `pg_has_role` and `has_*_privilege`;
+- privilege-aware `information_schema` views;
+- role-aware OpenAPI path/method/column generation; and
+- REST request execution.
+
+A cross-surface test must fail if any two answers differ.
+
+The surfaces remain PostgreSQL-specific where required: `has_table_privilege`
+may report `MAINTAIN`, but PostgreSQL 18
+`information_schema.table_privileges` does not list `MAINTAIN` and QuackGIS must
+not add it there.
+
+## Catalog visibility and secrets
+
+PostgreSQL does not globally hide all catalog object names from roles lacking table
+access. QuackGIS will therefore implement relation-specific PostgreSQL behavior:
+
+- maintained `pg_catalog` relations expose the PostgreSQL-compatible structural
+  rows defined by the selected profile;
+- maintained `information_schema` views apply role/ownership filters;
+- `pg_roles` never returns a password verifier;
+- `pg_authid`, internal role configuration, JWT material, SCRAM verifier storage,
+  compatibility OID state, and policy definitions are denied except where an
+  explicit future administrator contract requires access; and
+- HTTP exposure configuration can omit a resource without changing direct pgwire
+  catalog behavior.
+
+Object-name confidentiality, if added, is a deliberate restrictive mode and a
+published PostgreSQL divergence—not an accidental consequence of table denial.
+
+## REST authenticator and request context
+
+The target REST flow is:
+
+```sql
+BEGIN;
+SET LOCAL ROLE api_reader;
+SELECT set_config('request.jwt.claims', $1, true);
+-- discovery/application query
+COMMIT;
+```
+
+Security requirements:
+
+- JWT algorithms and keys are operator-configured; token-provided algorithms are
+  not trusted.
+- Issuer, audience, expiry, not-before, size, and role mapping are validated.
+- A claim can select only a statically configured role that the authenticator may
+  assume.
+- Credentials are never carried in the token.
+- Only allowlisted setting namespaces are accepted, values are byte-bounded, and
+  initial support is transaction-local only.
+- Claims are bound values, never SQL text or identifiers.
+- Database authorization is based on the effective role. Claims influence row
+  policy only after the independent RLS milestone.
+- Context and role reset is tested on success, database error, failed transaction,
+  timeout, cancellation, disconnect, and connection reuse.
+- OpenAPI caches are keyed by effective role, catalog/security epoch, and REST
+  exposure configuration.
+
+Possession of the authenticator database credential permits forged request
+context. It therefore receives the same secret handling, rotation, audit, and
+network restrictions as a signing key.
+
+## Row-level security boundary
+
+Table and operation RBAC ships before RLS. QuackGIS must not label table allowlists,
+grants, REST filters, or bbox injection as row-level security.
+
+RLS requires a separate security-reviewed implementation with:
+
+- versioned `USING` and `WITH CHECK` policy representation;
+- owner, membership, policy-composition, and administration semantics;
+- structural injection before DuckDB planning for every supported read/write
+  shape;
+- request-context access only through bounded transaction-local settings;
+- consistent `pg_policy`, `pg_class.relrowsecurity`, and
+  `row_security_active` behavior;
+- fail-closed handling of aliases, CTEs, subqueries, joins, views, COPY, prepared
+  statements, UPDATE, DELETE, and unknown AST forms; and
+- an adversarial bypass suite proving the exact DuckDB predicate remains present.
+
+REST mutations protected by RLS remain blocked until direct pgwire reads and
+writes pass that suite.
+
+## Mutable role and grant administration
+
+`CREATE/ALTER/DROP ROLE` and `GRANT/REVOKE` are later capabilities. Before exposure
+they require:
+
+- protected transactional control metadata written through DuckDB/DuckLake;
+- atomic role/grant change plus schema/security epoch publication;
+- credential creation, expiry, rotation, revocation, and secure backup;
+- an explicit administrator role and no ambient superuser;
+- redacted audit events;
+- concurrent change and stale-cache behavior;
+- backup/restore and upgrade migrations; and
+- deterministic recovery after response loss or interrupted commit.
+
+Configuration-backed provisioning remains the supported path until those gates
+pass.
+
 ## Required Local 1.0 evidence
+
+Existing requirements remain:
 
 - malformed/half-configured TLS fails startup;
 - wrong password never falls back to trust;
 - a real encrypted client and plaintext-denial workflow is verified by
   `just duckdb-tls-rotation-profile`;
-- read-only and allowlist denials return stable SQLSTATE `42501` before ADBC;
+- current read-only and allowlist denials return stable SQLSTATE `42501` before
+  ADBC;
 - query timeout/cancel and connection quarantine do not bypass policy;
-- restart-based certificate/password rotation has host-process evidence;
-  packaged rotation and revocation remain required;
-- online backup/restore and all maintenance actions emit redacted administrative
-  events (the current offline backup tool runs outside the server audit stream); and
-- metadata visible to restricted identities is trace-tested and filtered.
+- restart-based certificate/password rotation has host-process evidence; and
+- packaged rotation, revocation, and administrative audit remain required.
 
-Do not claim full PostgreSQL object privileges. Add only the permissions required
-by maintained service/client workflows.
+The expanded PostgreSQL/RBAC commitment additionally requires:
+
+- role graph and grant validation fails startup without partial service;
+- direct pgwire role switching and privilege inquiry agree with actual execution;
+- catalog and information-schema visibility match the declared PostgreSQL 18
+  profile for denied, anonymous, reader, and editor roles;
+- role/request state never leaks across transaction or connection lifecycle;
+- role/schema epoch changes invalidate REST and pgwire metadata safely;
+- role-aware OpenAPI cannot expose or execute an operation denied by either the
+  REST ceiling or database privileges;
+- `pg_roles`, errors, metrics, logs, and OpenAPI disclose no credential or raw
+  request claim; and
+- backup/restore, restart, upgrade, and packaged rotation preserve the exact role,
+  membership, grant, OID, and epoch contract.
+
+Do not claim complete PostgreSQL object privileges, RLS, mutable role SQL, or full
+PostgREST security. Publish only the selected profile and executable gates.

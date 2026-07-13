@@ -6,6 +6,8 @@ This document defines the durable product direction.
 - [ARCHITECTURE.md](../ARCHITECTURE.md) owns current implementation boundaries.
 - [ROADMAP_STATUS.md](./ROADMAP_STATUS.md) owns the implemented evidence floor.
 - [COMPATIBILITY.md](./COMPATIBILITY.md) owns current client and SQL claims.
+- [POSTGRESQL_COMPATIBILITY.md](./POSTGRESQL_COMPATIBILITY.md) owns the target
+  catalog, role, privilege, and REST delivery contract.
 
 ## Product thesis
 
@@ -15,17 +17,19 @@ edge for DuckDB Spatial and official DuckLake.
 It lets PostgreSQL-oriented spatial tools use DuckDB's analytical and spatial
 execution without introducing another query engine, storage writer, distributed
 database, or row-wise geometry runtime. The Rust service owns protocol
-compatibility, authorization, resource control, and operational policy. DuckDB
-owns planning, vectorized execution, exact spatial computation, and official
-DuckLake persistence.
+compatibility, PostgreSQL-facing catalog and session semantics, authorization,
+resource control, and operational policy. DuckDB owns planning, vectorized
+execution, exact spatial computation, and official DuckLake persistence.
 
-The product advantage is the combination of:
+The intended product advantage is the combination of:
 
 1. maintained pgwire/PostGIS workflows at the edge;
 2. DuckDB-native analytical and spatial performance;
 3. official DuckLake storage and snapshot semantics;
-4. bounded, trace-driven compatibility rather than broad emulation; and
-5. predictable streaming, cancellation, admission, and bulk-ingest behavior.
+4. bounded, trace-driven compatibility rather than broad emulation;
+5. one role, privilege, and metadata contract shared by pgwire, GIS clients, and
+   a load-balanceable PostgREST-style HTTP edge; and
+6. predictable streaming, cancellation, admission, and bulk-ingest behavior.
 
 ## Current reality
 
@@ -40,21 +44,23 @@ The repository proves a bounded local runtime:
 - Forty-two native, rewrite, or macro spatial cases execute through pgwire.
 - DuckDB and extension artifacts are version- and checksum-pinned.
 
-It is not yet a resource-bounded service:
+M1 bounded execution and M2 streaming ingest now have reference evidence:
 
-- query results stream one native Arrow batch at a time, but strict byte/RSS
-  evidence remains open;
-- COPY incrementally builds bounded Arrow batches and atomically publishes through
-  session-local staging; scale/RSS/throughput evidence remains open;
-- pgwire cancellation and deadlines interrupt active native result and COPY
-  workers, but an idle COPY client receives the error only on its next frame or
-  disconnect; broader write cancellation and 100-cancel latency evidence remain
-  open;
-- connection, queue, global active-query, and reader/writer-class admission are
-  bounded; native calls use a fixed worker budget with reserved control capacity;
-- DuckDB memory, CPU threads, temporary storage, and spill are autosized from the
-  effective cgroup/host capacity and remain explicitly configurable;
+- clean 1M/10M BIGINT and 1M nullable VARCHAR/BLOB result profiles stay within
+  their RSS/batch gates;
+- a clean 10M COPY profile passes RSS, throughput, exact publication, and atomic
+  abort gates;
+- active native query/COPY cancellation and cancellable pre-commit writes have
+  explicit rollback/reuse/quarantine outcomes, and the 100-cancel reference passes
+  its latency budget; an idle COPY client still receives cancellation only when it
+  sends another frame or disconnects;
+- connection, queue, global active-query, reader/writer/maintenance admission,
+  native worker, DuckDB memory/thread/temp/spill controls, and sampled resource
+  metrics are implemented;
+- maximum native-batch and additional type/shape resource profiles remain open;
 - PostgreSQL catalogs, geometry identity, and named GIS clients are incomplete;
+- the REST preview has a separate read-only schema cache and bearer identity; it
+  does not yet use database role switching or role-aware OpenAPI;
 - shared catalog/object-storage profiles fail closed; and
 - current scale evidence is fixture-level, not a product performance claim.
 
@@ -62,22 +68,28 @@ Direction starts from these constraints, not from capabilities of retired engine
 
 ## First release
 
-The first release is a single-process, read-mostly spatial analytical service with
-controlled bulk ingestion over local official DuckLake.
+The first release has one state-owning, read-mostly spatial analytical server with
+controlled bulk ingestion over local official DuckLake, plus optional stateless
+HTTP read replicas that reach it only through pgwire.
 
 Release-required outcomes:
 
 - bounded streaming query results and COPY;
 - native cancellation, deadlines, admission, memory limits, and spill policy;
 - `psql`, `psycopg`, GDAL/OGR read and COPY load, and QGIS read-only workflows;
+- a focused PostgreSQL 18 catalog/session profile with configuration-backed
+  roles, memberships, table/operation privileges, and stable object/type identity;
 - a focused, versioned PostGIS function/catalog/type surface;
+- a packaged stateless HTTP read edge whose JWT role mapping, schema discovery,
+  authorization, and role-aware OpenAPI run through the same pgwire contract;
 - selective spatial reads and ordinary DuckDB OLAP with measured plans;
 - restart, backup, restore, compaction, and upgrade procedures; and
 - reproducible packages with no runtime extension downloads.
 
-Shared PostgreSQL catalog/object-storage operation is a later capability. It must
-not block a useful local release or be claimed before official DuckLake
-concurrency, visibility, and recovery evidence exists.
+Using PostgreSQL as a shared DuckLake metadata catalog and object storage is a
+later storage capability. It is distinct from QuackGIS's PostgreSQL-compatible
+`pg_catalog` surface and must not block a useful local release or be claimed
+before official DuckLake concurrency, visibility, and recovery evidence exists.
 
 ## Ownership rules
 
@@ -86,8 +98,15 @@ concurrency, visibility, and recovery evidence exists.
 - Rust does not implement row-wise spatial kernels or pull arbitrary table rows
   out of DuckDB for fallback execution.
 - Rust does not maintain an independent table catalog, optimizer, or data cache.
+- QuackGIS may persist protected control metadata for roles, memberships, grants,
+  policy, catalog epochs, and compatibility OID identity through the supported
+  DuckDB/DuckLake transaction path. This metadata may project authoritative user
+  schema but may not become a second user-table authority.
 - PostgreSQL compatibility exists only at observable protocol, SQL, type, and
-  catalog boundaries required by maintained workflows.
+  catalog boundaries in the declared versioned compatibility profile.
+- PostgreSQL catalog visibility, information-schema filtering, privilege inquiry,
+  statement authorization, and role-aware OpenAPI must agree through one
+  authorization implementation.
 - WKB/EWKB remains the wire/interchange contract until a measured native geometry
   representation proves better interoperability and performance.
 - Candidate filters may over-select but never replace exact DuckDB predicates.
@@ -185,7 +204,8 @@ Passing an earlier ring does not imply a later claim.
 ## Product horizons
 
 - **Local 1.0:** resource-bounded single-process vector analytics over local
-  official DuckLake with bulk ingest and maintained read clients.
+  official DuckLake with bulk ingest, a PostgreSQL 18 catalog/RBAC profile,
+  maintained read clients, and packaged role-aware HTTP read/OpenAPI replicas.
 - **Shared 1.x:** official shared DuckLake using managed catalog/object storage,
   enabled only after concurrency, visibility, backup, and restore gates.
 - **Dataset lifecycle 1.x:** protected versions, promotion, rollback, retention,

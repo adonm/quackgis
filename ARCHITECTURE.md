@@ -6,7 +6,9 @@ of new durable catalogs and Parquet data.
 
 Forward outcomes belong in [ROADMAP.md](./ROADMAP.md). Current evidence belongs in
 [docs/ROADMAP_STATUS.md](./docs/ROADMAP_STATUS.md). Product ownership and extension
-rules belong in [docs/PROJECT_DIRECTION.md](./docs/PROJECT_DIRECTION.md).
+rules belong in [docs/PROJECT_DIRECTION.md](./docs/PROJECT_DIRECTION.md). The
+target PostgreSQL catalog/RBAC design belongs in
+[docs/POSTGRESQL_COMPATIBILITY.md](./docs/POSTGRESQL_COMPATIBILITY.md).
 
 ## Layer model
 
@@ -17,8 +19,9 @@ PostgreSQL / GIS / application clients
 ┌──────────────────────────────────────────────────────────────┐
 │ Rust protocol and control edge                               │
 │ startup · TLS/SCRAM · simple/extended protocol · COPY        │
-│ structural SQL policy · portals · Arrow↔PostgreSQL encoding  │
-│ bounded PostGIS rewrites/macros · audit/metrics              │
+│ target: roles/session · catalogs/privileges · shared policy  │
+│ portals · Arrow↔PostgreSQL encoding · PostGIS compatibility  │
+│ bounded request context · audit/metrics                      │
 └──────────────────────────────────────────────────────────────┘
                   │ Arrow / ADBC
                   ▼
@@ -35,11 +38,15 @@ PostgreSQL / GIS / application clients
 
 ## Component ownership
 
+The table includes target ownership explicitly; a target owner does not imply the
+capability is implemented in the current preview.
+
 | Component | Owns | Must not own |
 |---|---|---|
-| Rust pgwire edge | protocol state, TLS/SCRAM, parsed table policy, COPY framing, PostgreSQL types/errors, connection lifecycle | SQL planning, spatial kernels, table data, independent catalogs |
+| Rust pgwire edge | protocol state, TLS/SCRAM, target PostgreSQL-facing roles/session/catalog projection, parsed policy, COPY framing, PostgreSQL types/errors, connection lifecycle | SQL planning, spatial kernels, table data, an independent user-schema authority |
 | DuckDB | SQL planning, vectorized execution, exact spatial operations, transactions, resource/spill behavior | PostgreSQL protocol or identity policy |
 | official DuckLake | catalog, snapshots, Parquet publication, maintenance primitives | client compatibility or authorization |
+| planned QuackGIS control metadata | role membership/grants, compatibility OID mapping, policy and schema/security epochs, written through supported DuckDB/DuckLake transactions | user table definitions/data, SQL planning, independent snapshot publication |
 | `vendor/arrow-pg` | Arrow field/row encoding and maintained WKB wire identity | planning, catalogs, DataFusion support |
 | optional future QuackGIS DuckDB extension | measured vectorized functions unavailable through native SQL/macros | pgwire, auth, policy, COPY, catalogs, snapshots, DuckLake writes |
 
@@ -57,6 +64,13 @@ uses preinstalled signed `spatial` and `ducklake` extensions with `LOAD` only.
 Pgwire startup terminates at the Rust edge. Trust mode is development-only;
 password mode uses SCRAM-SHA-256. TLS certificate and key must be configured
 together. Parsed read/write policy runs before ADBC prepare or schema lookup.
+
+The target identity model distinguishes authenticated `session_user` from the
+effective `current_user`. Configuration-backed LOGIN/NOLOGIN roles, memberships,
+object grants, `SET ROLE`, transaction-local role/context, and catalog privilege
+queries will be implemented at this boundary before mutable role DDL or RLS is
+considered. Cleanup on commit, rollback, cancellation, disconnect, and native
+connection reuse is part of the target security contract.
 
 ### SQL admission
 
@@ -92,8 +106,9 @@ delivered result quarantines the session. Driver batches larger than the
 configured byte ceiling fail with SQLSTATE `54000` before pgwire encoding. This
 bounds the protocol edge but does not prevent a native driver from temporarily
 allocating that batch. Clean 1M/10M generated-BIGINT profiles prove cardinality-
-independent process RSS for that shape; wider variable-width and maximum native
-batch shapes remain open.
+independent process RSS for BIGINT, and the 1M nullable VARCHAR/BLOB profile
+crosses hundreds of native batches within budget. Additional type shapes and the
+maximum driver-produced batch remain open.
 
 ## Session and transaction ownership
 
@@ -128,10 +143,11 @@ decodes geometry rows. The reserved columns must be nullable, the table must hav
 exactly one recognized geometry field, and clients may not supply bbox values.
 Partial, wrong-type, caller-supplied, or ambiguous layouts fail closed before
 staging; tables with no reserved bbox columns are copied unchanged. Direct INSERT,
-geometry assignments, and reserved bbox assignments fail closed until schema-aware
-recomputation exists. UPDATEs touching only ordinary columns are permitted and
-leave maintained geometry/bounds unchanged; COPY remains the supported spatial
-write path.
+reserved bbox assignments, tuple geometry assignment, and arbitrary geometry
+expressions fail closed. A numbered-bound parameter or NULL geometry UPDATE
+recomputes all four bounds in the same DuckDB statement. UPDATEs touching only
+ordinary columns preserve maintained geometry/bounds; COPY remains the primary
+spatial write path.
 
 ## Spatial compatibility
 
@@ -173,16 +189,25 @@ partitioning, and geometry representation are preferred when measurements pass.
 
 Compatibility is surface-oriented and trace-driven:
 
+- target a declared PostgreSQL 18 profile for maintained clients and REST;
 - preserve observed row labels, OIDs, parameter types, nullability, formats,
-  SQLSTATEs, and transaction behavior;
-- derive catalog data from DuckDB rather than maintain a second catalog;
+  SQLSTATEs, source relation/attribute identity, and transaction behavior;
+- derive user schema from DuckDB/DuckLake rather than maintain a second table
+  catalog;
+- maintain only protected role/grant/policy/epoch and compatibility identity
+  control metadata required for coherent PostgreSQL behavior;
+- keep `pg_catalog` visibility, privilege-filtered `information_schema`, privilege
+  inquiry functions, execution authorization, and OpenAPI mutually consistent;
 - use synthetic rows only for PostgreSQL concepts that do not exist and are safe;
 - never branch on a client name; and
 - remove shims when DuckDB or pgwire provides the same contract.
 
-Broad PostgreSQL emulation is not a goal. The first release targets only the
-catalog/type/protocol queries required by psql, psycopg, GDAL/OGR, and QGIS
-read-only workflows.
+Catalog queries must execute relationally over maintained rows rather than match
+one complete SQL string. Standard built-in OIDs are fixed by the profile;
+installation-local compatibility and user-object OIDs need only be internally
+stable and self-consistent. DuckDB's transient object OIDs are not suitable
+because they change across rename/reopen. Broad PostgreSQL emulation remains a
+non-goal.
 
 ## Resource model
 
@@ -202,14 +227,15 @@ parameters, credentials, and object paths.
 
 ## Optional REST edge
 
-`quackgis-rest` is a separate, stateless, read-only HTTP process. It reuses an
-immutable revision of `pg-rest-server`'s URL parser/query engine but reaches data
+`quackgis-rest` is currently a separate, stateless, read-only HTTP process. It
+reuses an immutable revision of `pg-rest-server`'s URL parser/query engine but reaches data
 only through the maintained QuackGIS pgwire boundary. It does not link ADBC,
-publish DuckLake state, emulate PostgreSQL roles, or become a second catalog
-authority. Each replica has an independently reloadable `information_schema`
-cache, requires bearer authentication for data/discovery routes, and is intended
-to sit behind a TLS-terminating load balancer. Unsupported PostgREST behavior
-fails closed until an actual-pgwire compatibility case exists.
+publish DuckLake state, or become a second catalog/security authority. The
+current bearer identity and independently reloadable `information_schema` cache
+are bootstrap behavior. The target uses JWT validation, one authenticator pgwire
+identity, transaction-local role/context, role-aware catalog/OpenAPI discovery,
+and caches keyed by role plus schema/security epoch. Unsupported PostgREST
+behavior fails closed until an actual-pgwire compatibility case exists.
 
 ## Deployment model
 
