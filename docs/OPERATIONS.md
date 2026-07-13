@@ -283,13 +283,15 @@ One-table `ST_Intersects` reads over a valid maintained layout automatically gai
 four planner-visible bbox overlap candidates when the data geometry is the
 maintained WKB column and the other geometry is a bounded literal envelope/text
 value or numbered-bound WKB. The original exact predicate remains in the plan.
-The native gate checks holes, an outer boundary, NULL geometry, literal and bound
-probes, reopen, and `EXPLAIN`; the pgwire workflow executes the literal form
-without client-written bbox SQL. OR/NOT placement, joins, subqueries, multiple
-matching predicates, and arbitrary or oversized geometry expressions are not
-optimized; malformed or ambiguous reserved layouts fail closed. Automatic DDL,
-general geometry-expression maintenance, compaction refresh, scan-byte evidence,
-and scale profiles remain roadmap work.
+The native gate checks holes, an outer boundary, NULL and empty data, an empty
+probe, invalid bow-tie data/probe, literal and bound probes, reopen, and `EXPLAIN`.
+Every edge case compares the injected result to a deliberately unoptimized exact
+oracle; the pgwire workflow executes the literal form without client-written bbox
+SQL. OR/NOT placement, joins, subqueries, multiple matching predicates, and
+arbitrary or oversized geometry expressions are not optimized; malformed or
+ambiguous reserved layouts fail closed. Automatic DDL, general geometry-expression
+maintenance, compaction refresh, scan-byte evidence, and scale profiles remain
+roadmap work.
 
 ## Maintained checks
 

@@ -154,7 +154,8 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   filters while retaining the original exact predicate; OR/NOT, joins,
   subqueries, multiple matches, and arbitrary/oversized probes stay unoptimized;
   malformed or ambiguous reserved layouts fail closed. Native
-  hole/boundary/NULL/bound/reopen/`EXPLAIN` and actual pgwire literal cases pass.
+  hole/boundary/NULL/empty/invalid/bound/reopen/`EXPLAIN` exact-oracle comparisons
+  and actual pgwire literal cases pass.
 - COPY deadline evidence after flushed batches, with an explicit pre-publication
   cancellation check preventing aborted ADBC EOF normalization from publishing.
 - A generated 220k-row, greater-than-20-MiB pgwire COPY regression using bounded

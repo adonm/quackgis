@@ -23,6 +23,29 @@ fn point_wkb(x: f64, y: f64) -> Vec<u8> {
     wkb
 }
 
+fn empty_point_wkb() -> Vec<u8> {
+    point_wkb(f64::NAN, f64::NAN)
+}
+
+fn invalid_bowtie_wkb() -> Vec<u8> {
+    let mut wkb = Vec::new();
+    wkb.push(1);
+    wkb.extend_from_slice(&3_u32.to_le_bytes());
+    wkb.extend_from_slice(&1_u32.to_le_bytes());
+    wkb.extend_from_slice(&5_u32.to_le_bytes());
+    for (x, y) in [
+        (0.0_f64, 0.0_f64),
+        (2.0, 2.0),
+        (0.0, 2.0),
+        (2.0, 0.0),
+        (0.0, 0.0),
+    ] {
+        wkb.extend_from_slice(&x.to_le_bytes());
+        wkb.extend_from_slice(&y.to_le_bytes());
+    }
+    wkb
+}
+
 fn first_i64(batch: &RecordBatch, column: usize) -> i64 {
     batch
         .column(column)
@@ -88,7 +111,7 @@ fn layout_point_batch(points: &[(i32, f64, f64)]) -> RecordBatch {
     .expect("layout point batch")
 }
 
-fn layout_null_geometry_batch(id: i32) -> RecordBatch {
+fn layout_edge_geometry_batch() -> RecordBatch {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int32, false),
         Field::new("geom_wkb", DataType::Binary, true),
@@ -97,18 +120,24 @@ fn layout_null_geometry_batch(id: i32) -> RecordBatch {
         Field::new("_qg_maxx", DataType::Float64, true),
         Field::new("_qg_maxy", DataType::Float64, true),
     ]));
+    let empty = empty_point_wkb();
+    let invalid = invalid_bowtie_wkb();
     RecordBatch::try_new(
         schema,
         vec![
-            Arc::new(Int32Array::from(vec![id])),
-            Arc::new(BinaryArray::from(vec![None::<&[u8]>])),
-            Arc::new(Float64Array::from(vec![None])),
-            Arc::new(Float64Array::from(vec![None])),
-            Arc::new(Float64Array::from(vec![None])),
-            Arc::new(Float64Array::from(vec![None])),
+            Arc::new(Int32Array::from(vec![6, 7, 8])),
+            Arc::new(BinaryArray::from_opt_vec(vec![
+                None,
+                Some(empty.as_slice()),
+                Some(invalid.as_slice()),
+            ])),
+            Arc::new(Float64Array::from(vec![None, None, Some(0.0)])),
+            Arc::new(Float64Array::from(vec![None, None, Some(0.0)])),
+            Arc::new(Float64Array::from(vec![None, None, Some(2.0)])),
+            Arc::new(Float64Array::from(vec![None, None, Some(2.0)])),
         ],
     )
-    .expect("layout NULL geometry batch")
+    .expect("layout edge geometry batch")
 }
 
 #[test]
@@ -420,17 +449,17 @@ fn duckdb_hidden_bbox_candidates_keep_exact_spatial_recheck() {
         .ingest(
             "main",
             "layout_points",
-            vec![layout_null_geometry_batch(6)],
+            vec![layout_edge_geometry_batch()],
             IngestMode::Append,
         )
-        .expect("append NULL geometry fixture");
+        .expect("append NULL/empty/invalid geometry fixture");
 
     let polygon = "POLYGON ((-1 -1, 6 -1, 6 6, -1 6, -1 -1), \
                    (1 1, 3 1, 3 3, 1 3, 1 1))";
     let candidates = storage
         .query(
             "SELECT count(*) FROM quackgis.main.layout_points \
-             WHERE _qg_maxx >= -1 AND _qg_minx <= 6 \
+             WHERE id < 8 AND _qg_maxx >= -1 AND _qg_minx <= 6 \
                AND _qg_maxy >= -1 AND _qg_miny <= 6",
         )
         .expect("bbox candidate query");
@@ -438,7 +467,8 @@ fn duckdb_hidden_bbox_candidates_keep_exact_spatial_recheck() {
 
     let exact_sql = format!(
         "SELECT count(*) FROM quackgis.main.layout_points \
-         WHERE ST_Intersects(ST_GeomFromWKB(geom_wkb), ST_GeomFromText('{polygon}'))"
+         WHERE id < 8 AND \
+           ST_Intersects(ST_GeomFromWKB(geom_wkb), ST_GeomFromText('{polygon}'))"
     );
     let exact = storage
         .query(&exact_sql)
@@ -466,6 +496,41 @@ fn duckdb_hidden_bbox_candidates_keep_exact_spatial_recheck() {
         .query_bound(bound_sql, parameters)
         .expect("bound bbox query");
     assert_eq!(first_i64(&bound.batches[0], 0), 1);
+
+    for (label, injected, exact_only) in [
+        (
+            "NULL and empty data",
+            "SELECT count(*) FROM quackgis.main.layout_points WHERE id IN (6, 7) AND ST_Intersects(ST_GeomFromWKB(geom_wkb), ST_MakeEnvelope(-1, -1, 1, 1))",
+            "SELECT count(*) FROM quackgis.main.layout_points WHERE id IN (6, 7) AND (ST_Intersects(ST_GeomFromWKB(geom_wkb), ST_MakeEnvelope(-1, -1, 1, 1))) IS TRUE",
+        ),
+        (
+            "empty probe",
+            "SELECT count(*) FROM quackgis.main.layout_points WHERE ST_Intersects(ST_GeomFromWKB(geom_wkb), ST_GeomFromText('POINT EMPTY'))",
+            "SELECT count(*) FROM quackgis.main.layout_points WHERE (ST_Intersects(ST_GeomFromWKB(geom_wkb), ST_GeomFromText('POINT EMPTY'))) IS TRUE",
+        ),
+        (
+            "invalid data",
+            "SELECT count(*) FROM quackgis.main.layout_points WHERE id = 8 AND ST_Intersects(ST_GeomFromWKB(geom_wkb), ST_GeomFromText('POINT (1 1)'))",
+            "SELECT count(*) FROM quackgis.main.layout_points WHERE id = 8 AND (ST_Intersects(ST_GeomFromWKB(geom_wkb), ST_GeomFromText('POINT (1 1)'))) IS TRUE",
+        ),
+        (
+            "invalid probe",
+            "SELECT count(*) FROM quackgis.main.layout_points WHERE id < 8 AND ST_Intersects(ST_GeomFromWKB(geom_wkb), ST_GeomFromText('POLYGON((0 0,2 2,0 2,2 0,0 0))'))",
+            "SELECT count(*) FROM quackgis.main.layout_points WHERE id < 8 AND (ST_Intersects(ST_GeomFromWKB(geom_wkb), ST_GeomFromText('POLYGON((0 0,2 2,0 2,2 0,0 0))'))) IS TRUE",
+        ),
+    ] {
+        let injected = storage
+            .query(injected)
+            .unwrap_or_else(|error| panic!("{label} injected query: {error}"));
+        let exact_only = storage
+            .query(exact_only)
+            .unwrap_or_else(|error| panic!("{label} exact-only query: {error}"));
+        assert_eq!(
+            first_i64(&injected[0], 0),
+            first_i64(&exact_only[0], 0),
+            "{label} candidate must equal exact oracle"
+        );
+    }
 
     let explain = storage
         .query(&format!("EXPLAIN {exact_sql}"))

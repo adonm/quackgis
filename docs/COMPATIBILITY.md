@@ -152,11 +152,12 @@ catalog surfaces remain open unless a focused test says otherwise.
 - A one-table exact `ST_Intersects` over the maintained WKB column gains
   conservative four-axis bbox candidates for bounded literal envelopes/text
   geometries and numbered-bound WKB. The exact DuckDB predicate remains in the
-  plan, and native plus pgwire tests cover holes, boundaries, NULL, bound/literal
-  probes, and reopen. OR/NOT placement, joins, subqueries, multiple matching
-  predicates, and arbitrary or oversized probe expressions are deliberately left
-  unoptimized; malformed/ambiguous reserved layouts fail closed. This is
-  functional evidence, not a scan-byte or scale claim.
+  plan. Native exact-oracle comparisons cover holes, boundaries, NULL/empty data,
+  empty probes, invalid bow-tie data/probes, bound/literal probes, and reopen;
+  pgwire covers the literal path. OR/NOT placement, joins, subqueries, multiple
+  matching predicates, and arbitrary or oversized probe expressions are
+  deliberately left unoptimized; malformed/ambiguous reserved layouts fail
+  closed. This is functional evidence, not a scan-byte or scale claim.
 - `pg_catalog`, `information_schema`, broad spatial discovery, and GIS client-specific
   metadata are incomplete. A client-neutral executable fixture structurally maps
   explicit and implicit namespace/database/type/range/collation/owner-role
