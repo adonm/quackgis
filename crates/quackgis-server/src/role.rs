@@ -11,6 +11,9 @@ use serde::Deserialize;
 const MAX_ROLE_CONFIG_BYTES: usize = 1_048_576;
 const MAX_ROLE_NAME_BYTES: usize = 63;
 const BOOTSTRAP_OWNER_OID: u32 = 10;
+pub const REQUEST_JWT_CLAIMS: &str = "request.jwt.claims";
+const MAX_REQUEST_SETTING_BYTES: usize = 16_384;
+const MAX_REQUEST_CONTEXT_BYTES: usize = 32_768;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Role {
@@ -140,6 +143,7 @@ pub struct SessionIdentity {
     pub session_user: String,
     pub current_user: String,
     pub epoch: u64,
+    pub request_context: HashMap<String, String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -154,6 +158,7 @@ struct RoleSession {
     session_role: RoleSelection,
     local_role: Option<RoleSelection>,
     epoch: u64,
+    request_context: HashMap<String, String>,
 }
 
 #[derive(Debug)]
@@ -167,6 +172,7 @@ pub enum RoleSessionErrorKind {
     UnknownRole,
     PermissionDenied,
     NoTransaction,
+    InvalidInput,
     Internal,
 }
 
@@ -210,6 +216,7 @@ impl RoleSessionState {
                 session_role: RoleSelection::SessionUser,
                 local_role: None,
                 epoch: 0,
+                request_context: HashMap::new(),
             }),
         })
     }
@@ -225,6 +232,7 @@ impl RoleSessionState {
             session_user: session.session_user.clone(),
             current_user: effective_role(&session).to_owned(),
             epoch: session.epoch,
+            request_context: session.request_context.clone(),
         })
     }
 
@@ -309,7 +317,63 @@ impl RoleSessionState {
                 "PostgreSQL role session state is unavailable",
             )
         })?;
-        if session.local_role.take().is_some() {
+        if session.local_role.take().is_some() || !session.request_context.is_empty() {
+            session.request_context.clear();
+            session.epoch = session.epoch.wrapping_add(1);
+        }
+        Ok(())
+    }
+
+    pub fn set_request_setting(
+        &self,
+        name: &str,
+        value: &str,
+        in_transaction: bool,
+    ) -> Result<(), RoleSessionError> {
+        if !in_transaction {
+            return Err(RoleSessionError::new(
+                RoleSessionErrorKind::NoTransaction,
+                "transaction-local request context requires an explicit transaction",
+            ));
+        }
+        if name != REQUEST_JWT_CLAIMS {
+            return Err(RoleSessionError::new(
+                RoleSessionErrorKind::InvalidInput,
+                format!("request setting {name:?} is not allowlisted"),
+            ));
+        }
+        if value.len() > MAX_REQUEST_SETTING_BYTES || value.contains('\0') {
+            return Err(RoleSessionError::new(
+                RoleSessionErrorKind::InvalidInput,
+                "request setting exceeds 16384 bytes or contains NUL",
+            ));
+        }
+        let mut session = self.session.lock().map_err(|_| {
+            RoleSessionError::new(
+                RoleSessionErrorKind::Internal,
+                "PostgreSQL role session state is unavailable",
+            )
+        })?;
+        let replaced_bytes = session
+            .request_context
+            .get(name)
+            .map_or(0, |current| name.len() + current.len());
+        let current_bytes = session
+            .request_context
+            .iter()
+            .map(|(name, value)| name.len() + value.len())
+            .sum::<usize>();
+        let next_bytes = current_bytes - replaced_bytes + name.len() + value.len();
+        if next_bytes > MAX_REQUEST_CONTEXT_BYTES {
+            return Err(RoleSessionError::new(
+                RoleSessionErrorKind::InvalidInput,
+                "request context exceeds the 32768-byte session limit",
+            ));
+        }
+        if session.request_context.get(name).map(String::as_str) != Some(value) {
+            session
+                .request_context
+                .insert(name.to_owned(), value.to_owned());
             session.epoch = session.epoch.wrapping_add(1);
         }
         Ok(())
@@ -769,6 +833,7 @@ mod tests {
                 session_user: "authenticator".to_owned(),
                 current_user: "authenticator".to_owned(),
                 epoch: 0,
+                request_context: HashMap::new(),
             }
         );
 
@@ -829,5 +894,44 @@ mod tests {
             .set_role(Some("target"), false, false)
             .expect_err("current role cannot expand assumption graph");
         assert_eq!(denied.kind, RoleSessionErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn request_context_is_transaction_local_allowlisted_and_bounded() {
+        let state = RoleSessionState::new("postgres".to_owned(), None).expect("role session");
+        let outside = state
+            .set_request_setting(REQUEST_JWT_CLAIMS, "{}", false)
+            .expect_err("context outside transaction");
+        assert_eq!(outside.kind, RoleSessionErrorKind::NoTransaction);
+        let unknown = state
+            .set_request_setting("arbitrary.setting", "value", true)
+            .expect_err("unknown request setting");
+        assert_eq!(unknown.kind, RoleSessionErrorKind::InvalidInput);
+        let oversized = "x".repeat(MAX_REQUEST_SETTING_BYTES + 1);
+        assert!(
+            state
+                .set_request_setting(REQUEST_JWT_CLAIMS, &oversized, true)
+                .is_err()
+        );
+
+        state
+            .set_request_setting(REQUEST_JWT_CLAIMS, r#"{"sub":"reader"}"#, true)
+            .expect("bounded request context");
+        let identity = state.identity().expect("context identity snapshot");
+        assert_eq!(
+            identity
+                .request_context
+                .get(REQUEST_JWT_CLAIMS)
+                .map(String::as_str),
+            Some(r#"{"sub":"reader"}"#)
+        );
+        state.end_transaction().expect("context cleanup");
+        assert!(
+            state
+                .identity()
+                .expect("clean identity")
+                .request_context
+                .is_empty()
+        );
     }
 }

@@ -33,7 +33,9 @@ configuration-backed role switching/identity, official DuckLake reopen, and the
 curated spatial subset. Role configuration requires password authentication; see
 `docs/SECURITY_RBAC.md` for its bounded JSON schema. Configured owner/grant
 declarations are validated but not enforced until the common privilege engine
-lands.
+lands. The exact transaction-local
+`set_config('request.jwt.claims', $1, true)`/`current_setting(..., true)` flow is
+bounded at the protocol edge; arbitrary DuckDB settings are not exposed.
 
 Query results stream from ADBC with native cancellation, deadlines, bounded
 admission, and autosized DuckDB resource controls. COPY incrementally decodes

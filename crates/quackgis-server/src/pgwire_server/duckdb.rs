@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arrow_array::{
-    ArrayRef, BinaryArray, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array,
+    Array, ArrayRef, BinaryArray, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array,
     Int64Array, RecordBatch, RecordBatchReader, StringArray, UInt32Array,
 };
 use arrow_pg::datatypes::{
@@ -42,10 +42,10 @@ use pgwire::messages::extendedquery::Execute;
 use pgwire::messages::response::TransactionStatus;
 use sqlparser::ast::{
     BinaryOperator, ContextModifier, CopySource, CopyTarget as AstCopyTarget, Expr, Function,
-    FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, Ident, JoinConstraint,
-    JoinOperator, ObjectName, ObjectNamePart, Reset, SelectItem, SelectItemQualifiedWildcardKind,
-    Set, SetExpr, Statement, TableFactor, Value, WildcardAdditionalOptions, visit_expressions,
-    visit_expressions_mut, visit_relations_mut,
+    FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, GroupByExpr, Ident,
+    JoinConstraint, JoinOperator, ObjectName, ObjectNamePart, Reset, SelectFlavor, SelectItem,
+    SelectItemQualifiedWildcardKind, Set, SetExpr, Statement, TableFactor, Value,
+    WildcardAdditionalOptions, visit_expressions, visit_expressions_mut, visit_relations_mut,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
@@ -65,7 +65,9 @@ use crate::execution_control::{
     ActiveQueryRegistry, AdmissionController, AdmissionError, BlockingWorkerError,
     BlockingWorkerPool, OperationClass, OperationDeadline,
 };
-use crate::role::{RoleSessionError, RoleSessionErrorKind, RoleSessionState, SessionIdentity};
+use crate::role::{
+    REQUEST_JWT_CLAIMS, RoleSessionError, RoleSessionErrorKind, RoleSessionState, SessionIdentity,
+};
 
 pub async fn serve_duckdb(
     storage: Arc<DuckDbAdbcStorage>,
@@ -224,6 +226,7 @@ struct DuckDbStatement {
     result_origins: Vec<Option<CatalogColumnOrigin>>,
     catalog_epoch: Option<u64>,
     role_command: Option<RoleCommand>,
+    request_command: Option<RequestContextCommand>,
     session_epoch: u64,
 }
 
@@ -277,6 +280,7 @@ impl QueryParser for DuckDbParser {
                 result_origins: Vec::new(),
                 catalog_epoch: None,
                 role_command: None,
+                request_command: None,
                 session_epoch: identity.epoch,
             });
         }
@@ -288,6 +292,43 @@ impl QueryParser for DuckDbParser {
         )?;
         let oid_parameters = catalog_oid_parameter_indexes(&validated.ast);
         authorize_statement(client, &self.auth, &validated.ast)?;
+        if validated.kind == StatementKind::RequestContext {
+            let request_command = validated.request_command.clone().ok_or_else(|| {
+                user_error(
+                    "XX000",
+                    "validated request context statement has no command",
+                )
+            })?;
+            let parameter_schema = match request_command.value {
+                RequestContextValue::Literal(_) => Arc::new(Schema::empty()),
+                RequestContextValue::Parameter => Arc::new(Schema::new(vec![with_pg_type_hint(
+                    Field::new("request_value", DataType::Utf8, false),
+                    PgTypeHint::Text,
+                )])),
+            };
+            let parameter_types = parameter_schema
+                .fields()
+                .iter()
+                .map(field_into_pg_type)
+                .collect::<PgWireResult<Vec<_>>>()?;
+            let result_schema = Arc::new(Schema::new(vec![with_pg_type_hint(
+                Field::new(&request_command.result_name, DataType::Utf8, false),
+                PgTypeHint::Text,
+            )]));
+            return Ok(DuckDbStatement {
+                sql: validated.sql,
+                copy_target: None,
+                kind: validated.kind,
+                parameter_schema,
+                result_schema,
+                parameter_types,
+                result_origins: vec![None],
+                catalog_epoch: None,
+                role_command: None,
+                request_command: Some(request_command),
+                session_epoch: identity.epoch,
+            });
+        }
         if matches!(
             validated.kind,
             StatementKind::SessionSet | StatementKind::Role
@@ -303,6 +344,7 @@ impl QueryParser for DuckDbParser {
                 result_origins: Vec::new(),
                 catalog_epoch: None,
                 role_command: validated.role_command,
+                request_command: None,
                 session_epoch: identity.epoch,
             });
         }
@@ -400,6 +442,7 @@ impl QueryParser for DuckDbParser {
             result_origins,
             catalog_epoch,
             role_command: None,
+            request_command: None,
             session_epoch: identity.epoch,
         })
     }
@@ -740,6 +783,26 @@ impl SimpleQueryHandler for DuckDbService {
                 )?;
                 Ok(vec![Response::Execution(Tag::new(command.tag()))])
             }
+            SimpleStatementKind::RequestContext(command) => {
+                let RequestContextValue::Literal(value) = &command.value else {
+                    return Err(user_error(
+                        "08P01",
+                        "simple query request context cannot contain a bound parameter",
+                    ));
+                };
+                role_session
+                    .set_request_setting(
+                        &command.name,
+                        value,
+                        storage.transaction_state() == EngineTransactionState::Active,
+                    )
+                    .map_err(role_session_error)?;
+                Ok(vec![Response::Query(single_text_query_response(
+                    &command.result_name,
+                    value,
+                    &Format::UnifiedText,
+                )?)])
+            }
             SimpleStatementKind::Copy(target) => begin_copy(client, storage, target, &self.control)
                 .await
                 .map(|response| vec![response]),
@@ -955,6 +1018,27 @@ impl ExtendedQueryHandler for DuckDbService {
                 )?;
                 Ok(Response::Execution(Tag::new(command.tag())))
             }
+            StatementKind::RequestContext => {
+                let command = statement.request_command.as_ref().ok_or_else(|| {
+                    user_error(
+                        "XX000",
+                        "validated request context statement has no session command",
+                    )
+                })?;
+                let value = request_context_value(command, parameters.as_ref())?;
+                role_session
+                    .set_request_setting(
+                        &command.name,
+                        &value,
+                        storage.transaction_state() == EngineTransactionState::Active,
+                    )
+                    .map_err(role_session_error)?;
+                Ok(Response::Query(single_text_query_response(
+                    &command.result_name,
+                    &value,
+                    &portal.result_column_format,
+                )?))
+            }
             StatementKind::Copy
             | StatementKind::Begin
             | StatementKind::Commit
@@ -976,6 +1060,7 @@ enum StatementKind {
     Rollback,
     SessionSet,
     Role,
+    RequestContext,
     Maintenance,
     Copy,
 }
@@ -983,7 +1068,9 @@ enum StatementKind {
 impl StatementKind {
     fn operation_class(self) -> OperationClass {
         match self {
-            Self::Read | Self::SessionSet | Self::Role => OperationClass::Reader,
+            Self::Read | Self::SessionSet | Self::Role | Self::RequestContext => {
+                OperationClass::Reader
+            }
             Self::Write(_) | Self::Begin | Self::Commit | Self::Rollback | Self::Copy => {
                 OperationClass::Writer
             }
@@ -1010,6 +1097,19 @@ enum RoleCommand {
     Reset,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RequestContextValue {
+    Literal(String),
+    Parameter,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RequestContextCommand {
+    name: String,
+    value: RequestContextValue,
+    result_name: String,
+}
+
 impl RoleCommand {
     const fn tag(&self) -> &'static str {
         match self {
@@ -1024,6 +1124,7 @@ struct ValidatedStatement {
     kind: StatementKind,
     ast: Statement,
     role_command: Option<RoleCommand>,
+    request_command: Option<RequestContextCommand>,
 }
 
 #[cfg(test)]
@@ -1068,6 +1169,14 @@ fn validate_simple_sql_with_catalog_identity(
                 .clone()
                 .ok_or_else(|| user_error("XX000", "validated role statement has no command"))?,
         ),
+        StatementKind::RequestContext => SimpleStatementKind::RequestContext(
+            validated.request_command.clone().ok_or_else(|| {
+                user_error(
+                    "XX000",
+                    "validated request context statement has no command",
+                )
+            })?,
+        ),
         StatementKind::Maintenance => SimpleStatementKind::Maintenance(
             parse_maintenance_call(&validated.ast)?
                 .ok_or_else(|| user_error("XX000", "validated maintenance call has no command"))?,
@@ -1086,6 +1195,7 @@ enum SimpleStatementKind {
     SessionSet,
     SessionSetBatch(usize),
     Role(RoleCommand),
+    RequestContext(RequestContextCommand),
     Maintenance(MaintenanceCommand),
     Copy(CopyTarget),
 }
@@ -1140,6 +1250,13 @@ fn validate_statement_with_catalog_identity(
         return Err(user_error(
             "0A000",
             "unsupported PostgreSQL session identity expression shape",
+        ));
+    }
+    let request_command = parse_request_context_command(&statement)?;
+    if invalid_request_context_function(&statement, request_command.is_some()) {
+        return Err(user_error(
+            "0A000",
+            "unsupported or non-transaction-local PostgreSQL request-context expression",
         ));
     }
     if let Some(function) = invalid_maintained_function(&statement) {
@@ -1198,6 +1315,7 @@ fn validate_statement_with_catalog_identity(
     }
     let role_command = parse_role_command(&statement);
     let kind = match &statement {
+        Statement::Query(_) if request_command.is_some() => StatementKind::RequestContext,
         Statement::Query(_) => StatementKind::Read,
         Statement::CreateTable(_) => StatementKind::Write("CREATE TABLE"),
         Statement::Insert(_) => StatementKind::Write("INSERT"),
@@ -1253,6 +1371,7 @@ fn validate_statement_with_catalog_identity(
         kind,
         ast: statement,
         role_command,
+        request_command,
     })
 }
 
@@ -1488,6 +1607,190 @@ fn parse_role_command(statement: &Statement) -> Option<RoleCommand> {
     }
 }
 
+fn parse_request_context_command(
+    statement: &Statement,
+) -> PgWireResult<Option<RequestContextCommand>> {
+    let Statement::Query(query) = statement else {
+        return Ok(None);
+    };
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return Ok(None);
+    };
+    let function = select.projection.first().and_then(|item| match item {
+        SelectItem::UnnamedExpr(Expr::Function(function))
+        | SelectItem::ExprWithAlias {
+            expr: Expr::Function(function),
+            ..
+        } => Some(function),
+        _ => None,
+    });
+    if !function.is_some_and(|function| pg_function_name_matches(&function.name, "set_config")) {
+        return Ok(None);
+    }
+    if !request_context_query_shape(query, select) {
+        return Err(user_error(
+            "0A000",
+            "set_config request context must be one standalone SELECT expression",
+        ));
+    }
+    let item = &select.projection[0];
+    let (function, result_name) = match item {
+        SelectItem::UnnamedExpr(Expr::Function(function)) => (function, "set_config".to_owned()),
+        SelectItem::ExprWithAlias {
+            expr: Expr::Function(function),
+            alias,
+        } => (function, alias.value.clone()),
+        _ => unreachable!("request context shape checked above"),
+    };
+    if result_name.len() > 63 || result_name.chars().any(char::is_control) {
+        return Err(user_error(
+            "42601",
+            "request context result alias is invalid",
+        ));
+    }
+    let arguments = plain_function_arguments(function).ok_or_else(|| {
+        user_error(
+            "0A000",
+            "set_config request context requires three plain arguments",
+        )
+    })?;
+    let [name, value, local] = arguments.as_slice() else {
+        return Err(user_error(
+            "42601",
+            "set_config request context requires exactly three arguments",
+        ));
+    };
+    let name = string_literal_expression(name)
+        .filter(|name| *name == REQUEST_JWT_CLAIMS)
+        .ok_or_else(|| user_error("42501", "request setting is not allowlisted"))?;
+    if !matches!(local, Expr::Value(value) if value.value == Value::Boolean(true)) {
+        return Err(user_error(
+            "0A000",
+            "request context must be transaction-local",
+        ));
+    }
+    let value = if let Some(value) = string_literal_expression(value) {
+        RequestContextValue::Literal(value.to_owned())
+    } else if matches!(value, Expr::Value(value) if value.value == Value::Placeholder("$1".to_owned()))
+    {
+        RequestContextValue::Parameter
+    } else {
+        return Err(user_error(
+            "0A000",
+            "request context value must be one string literal or parameter $1",
+        ));
+    };
+    Ok(Some(RequestContextCommand {
+        name: name.to_owned(),
+        value,
+        result_name,
+    }))
+}
+
+fn request_context_query_shape(
+    query: &sqlparser::ast::Query,
+    select: &sqlparser::ast::Select,
+) -> bool {
+    query.with.is_none()
+        && query.order_by.is_none()
+        && query.limit_clause.is_none()
+        && query.fetch.is_none()
+        && query.locks.is_empty()
+        && query.for_clause.is_none()
+        && query.settings.is_none()
+        && query.format_clause.is_none()
+        && query.pipe_operators.is_empty()
+        && select.optimizer_hints.is_empty()
+        && select.distinct.is_none()
+        && select.select_modifiers.is_none()
+        && select.top.is_none()
+        && !select.top_before_distinct
+        && select.projection.len() == 1
+        && select.exclude.is_none()
+        && select.into.is_none()
+        && select.from.is_empty()
+        && select.lateral_views.is_empty()
+        && select.prewhere.is_none()
+        && select.selection.is_none()
+        && select.connect_by.is_empty()
+        && matches!(&select.group_by, GroupByExpr::Expressions(expressions, modifiers) if expressions.is_empty() && modifiers.is_empty())
+        && select.cluster_by.is_empty()
+        && select.distribute_by.is_empty()
+        && select.sort_by.is_empty()
+        && select.having.is_none()
+        && select.named_window.is_empty()
+        && select.qualify.is_none()
+        && !select.window_before_qualify
+        && select.value_table_mode.is_none()
+        && select.flavor == SelectFlavor::Standard
+}
+
+fn plain_function_arguments(function: &Function) -> Option<Vec<&Expr>> {
+    if function.uses_odbc_syntax
+        || !matches!(function.parameters, FunctionArguments::None)
+        || function.filter.is_some()
+        || function.null_treatment.is_some()
+        || function.over.is_some()
+        || !function.within_group.is_empty()
+    {
+        return None;
+    }
+    let FunctionArguments::List(arguments) = &function.args else {
+        return None;
+    };
+    if arguments.duplicate_treatment.is_some() || !arguments.clauses.is_empty() {
+        return None;
+    }
+    arguments
+        .args
+        .iter()
+        .map(|argument| match argument {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(expression)) => Some(expression),
+            _ => None,
+        })
+        .collect()
+}
+
+fn string_literal_expression(expression: &Expr) -> Option<&str> {
+    let Expr::Value(value) = expression else {
+        return None;
+    };
+    match &value.value {
+        Value::SingleQuotedString(value) => Some(value),
+        _ => None,
+    }
+}
+
+fn pg_function_name_matches(name: &ObjectName, expected: &str) -> bool {
+    match name.0.as_slice() {
+        [ObjectNamePart::Identifier(function)] => pg_identifier_matches(function, expected),
+        [
+            ObjectNamePart::Identifier(schema),
+            ObjectNamePart::Identifier(function),
+        ] => {
+            pg_identifier_matches(schema, "pg_catalog") && pg_identifier_matches(function, expected)
+        }
+        _ => false,
+    }
+}
+
+fn request_setting_function(function: &Function) -> Option<&str> {
+    if !pg_function_name_matches(&function.name, "current_setting") {
+        return None;
+    }
+    let arguments = plain_function_arguments(function)?;
+    let [name, missing_ok] = arguments.as_slice() else {
+        return None;
+    };
+    let name = string_literal_expression(name)?;
+    if name != REQUEST_JWT_CLAIMS
+        || !matches!(missing_ok, Expr::Value(value) if value.value == Value::Boolean(true))
+    {
+        return None;
+    }
+    Some(name)
+}
+
 fn validate_session_set_batch(sql: &str) -> PgWireResult<Option<usize>> {
     let normalized = normalize_sql(sql)?;
     let statements = Parser::parse_sql(&PostgreSqlDialect {}, &normalized)
@@ -1571,22 +1874,34 @@ fn rewrite_public_relations(statement: &mut Statement) {
 fn rewrite_session_identity(statement: &mut Statement, identity: &SessionIdentity) {
     let _: ControlFlow<()> = visit_expressions_mut(statement, |expression| {
         let value = match expression {
-            Expr::Function(function) => {
-                session_identity_function(function).map(|name| match name {
-                    "session_user" => identity.session_user.as_str(),
-                    _ => identity.current_user.as_str(),
+            Expr::Function(function) => session_identity_function(function)
+                .map(|name| match name {
+                    "session_user" => Some(identity.session_user.as_str()),
+                    _ => Some(identity.current_user.as_str()),
                 })
-            }
+                .or_else(|| {
+                    request_setting_function(function)
+                        .map(|name| identity.request_context.get(name).map(String::as_str))
+                }),
             Expr::Identifier(identifier)
                 if identifier.quote_style.is_none()
                     && identifier.value.eq_ignore_ascii_case("current_role") =>
             {
-                Some(identity.current_user.as_str())
+                Some(Some(identity.current_user.as_str()))
             }
             _ => None,
         };
         if let Some(value) = value {
-            *expression = Expr::Value(Value::SingleQuotedString(value.to_owned()).into());
+            *expression = value.map_or_else(
+                || Expr::Cast {
+                    kind: sqlparser::ast::CastKind::Cast,
+                    expr: Box::new(Expr::Value(Value::Null.into())),
+                    data_type: sqlparser::ast::DataType::Varchar(None),
+                    array: false,
+                    format: None,
+                },
+                |value| Expr::Value(Value::SingleQuotedString(value.to_owned()).into()),
+            );
         }
         ControlFlow::Continue(())
     });
@@ -2422,6 +2737,33 @@ fn invalid_session_identity_function(statement: &Statement) -> bool {
     invalid
 }
 
+fn invalid_request_context_function(statement: &Statement, accepted_set_config: bool) -> bool {
+    let mut invalid = false;
+    let _: ControlFlow<()> = visit_expressions(statement, |expression| {
+        let Expr::Function(function) = expression else {
+            return ControlFlow::Continue(());
+        };
+        let is_set = function_name_ends_with(&function.name, "set_config");
+        let is_get = function_name_ends_with(&function.name, "current_setting");
+        if (is_set
+            && (!accepted_set_config || !pg_function_name_matches(&function.name, "set_config")))
+            || (is_get && request_setting_function(function).is_none())
+        {
+            invalid = true;
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    invalid
+}
+
+fn function_name_ends_with(name: &ObjectName, expected: &str) -> bool {
+    name.0.last().is_some_and(|part| {
+        matches!(part, ObjectNamePart::Identifier(identifier) if pg_identifier_matches(identifier, expected))
+    })
+}
+
 fn internal_control_schema_reference(statement: &Statement) -> bool {
     let mut clone = statement.clone();
     let mut found = false;
@@ -3194,6 +3536,10 @@ fn maintained_function_hint(expression: &Expr) -> Option<PgTypeHint> {
     match expression {
         Expr::Function(function) => session_identity_function(function)
             .map(|_| PgTypeHint::Name)
+            .or_else(|| request_setting_function(function).map(|_| PgTypeHint::Text))
+            .or_else(|| {
+                pg_function_name_matches(&function.name, "set_config").then_some(PgTypeHint::Text)
+            })
             .or_else(|| {
                 maintained_pg_function(&function.name).map(MaintainedPgFunction::result_hint)
             }),
@@ -3584,6 +3930,55 @@ fn query_response(
     Ok(QueryResponse::new(fields, rows))
 }
 
+fn request_context_value(
+    command: &RequestContextCommand,
+    parameters: Option<&RecordBatch>,
+) -> PgWireResult<String> {
+    match &command.value {
+        RequestContextValue::Literal(value) => {
+            if parameters.is_some() {
+                return Err(user_error("08P01", "unexpected request context parameter"));
+            }
+            Ok(value.clone())
+        }
+        RequestContextValue::Parameter => {
+            let parameters = parameters
+                .ok_or_else(|| user_error("08P01", "request context parameter $1 was not bound"))?;
+            let values = parameters
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| user_error("08P01", "request context parameter must be text"))?;
+            if values.is_null(0) {
+                return Err(user_error(
+                    "22004",
+                    "request context parameter cannot be NULL",
+                ));
+            }
+            Ok(values.value(0).to_owned())
+        }
+    }
+}
+
+fn single_text_query_response(
+    name: &str,
+    value: &str,
+    format: &Format,
+) -> PgWireResult<QueryResponse> {
+    let schema = Arc::new(Schema::new(vec![with_pg_type_hint(
+        Field::new(name, DataType::Utf8, false),
+        PgTypeHint::Text,
+    )]));
+    let fields = Arc::new(arrow_schema_to_pg_fields(schema.as_ref(), format, None)?);
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![Arc::new(StringArray::from(vec![value])) as ArrayRef],
+    )
+    .map_err(|error| user_error("XX000", &error.to_string()))?;
+    let rows = futures::stream::iter(encode_recordbatch(Arc::clone(&fields), batch));
+    Ok(QueryResponse::new(fields, rows))
+}
+
 fn engine_error(error: EngineError) -> PgWireError {
     let sqlstate = error.sqlstate.clone().unwrap_or_else(|| match error.kind {
         EngineErrorKind::Unsupported => "0A000".to_owned(),
@@ -3625,6 +4020,7 @@ fn role_session_error(error: RoleSessionError) -> PgWireError {
         RoleSessionErrorKind::UnknownRole => "42704",
         RoleSessionErrorKind::PermissionDenied => "42501",
         RoleSessionErrorKind::NoTransaction => "25001",
+        RoleSessionErrorKind::InvalidInput => "22023",
         RoleSessionErrorKind::Internal => "XX000",
     };
     user_error(sqlstate, &error.to_string())
@@ -4722,6 +5118,7 @@ mod tests {
             session_user: "authenticator".to_owned(),
             current_user: "api_reader".to_owned(),
             epoch: 7,
+            request_context: HashMap::new(),
         };
         let validated = validate_statement_with_catalog_identity(
             "SELECT session_user, current_user, current_role, user",
@@ -4795,6 +5192,76 @@ mod tests {
             assert!(
                 validate_statement(unsupported, ProtocolMode::Simple).is_err(),
                 "unsupported session command: {unsupported}"
+            );
+        }
+    }
+
+    #[test]
+    fn request_context_is_structural_transaction_local_and_typed() {
+        let mut request_context = HashMap::new();
+        request_context.insert(
+            REQUEST_JWT_CLAIMS.to_owned(),
+            r#"{"sub":"reader"}"#.to_owned(),
+        );
+        let identity = SessionIdentity {
+            session_user: "authenticator".to_owned(),
+            current_user: "api_reader".to_owned(),
+            epoch: 9,
+            request_context,
+        };
+        let current = validate_statement_with_catalog_identity(
+            "SELECT current_setting('request.jwt.claims', true) AS claims",
+            ProtocolMode::Extended,
+            false,
+            Some(&identity),
+        )
+        .expect("bounded current_setting");
+        assert!(current.sql.contains(r#"{"sub":"reader"}"#));
+        let schema = annotate_catalog_result_schema(
+            &current.ast,
+            &Schema::new(vec![Field::new("claims", DataType::Utf8, true)]),
+        );
+        assert_eq!(
+            field_into_pg_type(&schema.fields()[0]).expect("current_setting type"),
+            Type::TEXT
+        );
+
+        for (sql, value) in [
+            (
+                "SELECT set_config('request.jwt.claims', '{}', true)",
+                RequestContextValue::Literal("{}".to_owned()),
+            ),
+            (
+                "SELECT pg_catalog.set_config('request.jwt.claims', $1, true) AS claims",
+                RequestContextValue::Parameter,
+            ),
+        ] {
+            let validated = validate_statement(sql, ProtocolMode::Extended)
+                .unwrap_or_else(|error| panic!("request context {sql}: {error}"));
+            assert_eq!(validated.kind, StatementKind::RequestContext);
+            assert_eq!(
+                validated
+                    .request_command
+                    .expect("request context command")
+                    .value,
+                value
+            );
+        }
+        for invalid in [
+            "SELECT set_config('arbitrary.setting', '{}', true)",
+            "SELECT set_config('request.jwt.claims', '{}', false)",
+            "SELECT set_config('request.jwt.claims', column_value, true)",
+            "SELECT set_config('request.jwt.claims', '{}', true) WHERE false",
+            "SELECT set_config('request.jwt.claims', '{}', true), 1",
+            "SELECT current_setting('arbitrary.setting', true)",
+            "SELECT current_setting('request.jwt.claims', false)",
+            "SELECT current_setting('request.jwt.claims')",
+            "SELECT main.set_config('request.jwt.claims', '{}', true)",
+            "SELECT main.current_setting('request.jwt.claims', true)",
+        ] {
+            assert!(
+                validate_statement(invalid, ProtocolMode::Extended).is_err(),
+                "invalid request context accepted: {invalid}"
             );
         }
     }

@@ -53,6 +53,11 @@ The required real-driver workflow proves:
   `current_role`/`user`, `SET [SESSION|LOCAL] ROLE`, `NONE`, reset, assumption
   denial, connection isolation, prepared invalidation, and local cleanup after
   commit/rollback/failed-transaction rollback;
+- exact transaction-local `request.jwt.claims` assignment through one text literal
+  or `$1`, bounded at 16 KiB/setting and 32 KiB/session, plus PostgreSQL `text`
+  retrieval with NULL-on-missing behavior; actual pgwire proves outside-
+  transaction and oversized denial, stale-prepare rejection, and commit/
+  failed-transaction rollback cleanup;
 - portal paging, transaction isolation, failed-transaction `25P02` enforcement,
   `COMMIT`-as-rollback after failure, disconnect rollback, restart, and reopen;
 - the simple-protocol, server-owned
@@ -114,6 +119,10 @@ catalog surfaces remain open unless a focused test says otherwise.
   boundary until C5. Role switching therefore changes PostgreSQL session identity
   but does not widen object access. `SET LOCAL ROLE` outside a transaction fails
   with `25001`, a bounded divergence from PostgreSQL's warning/no-op behavior.
+- Arbitrary `set_config`/`current_setting` names, non-local assignment, embedded
+  setter query shapes, NUL, and DuckDB-qualified setting functions fail before
+  native execution. Request context is not a row policy and has no authorization
+  effect before the independent RLS milestone.
 - Global and reader/writer/maintenance admission are bounded. Native gates prove
   the default eight-reader ceiling under 32 clients and simultaneous all-class
   queueing/completion at reduced smoke scale; this is not mixed-workload soak

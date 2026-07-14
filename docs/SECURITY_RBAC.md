@@ -25,6 +25,7 @@ floor from the ordered security work.
 | native driver digest/version validation | storage unit/native tests |
 | bounded immutable role configuration and graph validation | auth/role unit tests |
 | session/effective identity, role switching, and transaction-local cleanup | real pgwire workflow + role units |
+| bounded transaction-local `request.jwt.claims` context | real pgwire workflow + role/parser units |
 
 The role configuration parser validates stable explicit OIDs, LOGIN/NOLOGIN,
 INHERIT defaults, PostgreSQL 18 membership-edge options, cycles, owners, and the
@@ -32,7 +33,7 @@ bounded schema/table privilege vocabulary. Sessions expose PostgreSQL `name`
 identity for `session_user`, `current_user`, `current_role`, and `user`; implement
 `SET ROLE`, `SET SESSION ROLE`, `SET LOCAL ROLE`, `SET ROLE NONE`, and
 `RESET ROLE`; and clear local role state on commit/rollback. Privilege
-enforcement/inquiry, request claims, role catalogs, RLS, administrative SQL,
+enforcement/inquiry, role catalogs, RLS, administrative SQL,
 packaged secret rotation, revocation infrastructure, and production failure
 drills remain open.
 
@@ -306,6 +307,28 @@ Session role survives transaction end, while a local role (including local
 Identity changes invalidate already prepared statements instead of executing a
 statement authorized or rendered under a stale effective role. Disconnect drops
 all role state, and independent pgwire connections have independent state.
+
+The maintained request-context surface is exactly:
+
+```sql
+BEGIN;
+SELECT set_config('request.jwt.claims', $1, true);
+SELECT current_setting('request.jwt.claims', true);
+COMMIT;
+```
+
+The setter accepts one text literal or `$1`, requires the third argument to be
+literal `true`, and requires an explicit transaction. One value is limited to
+16 KiB, total per-session request context to 32 KiB, and NUL is rejected. Values
+remain bound data and are never reparsed as SQL. Only `request.jwt.claims` is
+allowlisted; arbitrary names, non-local settings, additional query clauses,
+embedded setters, and DuckDB-qualified setting functions fail before native
+execution. The getter requires `missing_ok=true`, returns PostgreSQL `text`, and
+returns NULL when unset. Commit, rollback, and failed-transaction rollback clear
+the value; a change invalidates prepared statements rendered under an older
+session epoch. Cancellation paths already quarantine uncertain native sessions,
+so context cannot cross into a reusable native connection; a focused context-set
+cancellation oracle remains part of the final C4 closure evidence.
 
 ## Required Local 1.0 evidence
 

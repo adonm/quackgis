@@ -530,6 +530,110 @@ async fn cli_duckdb_backend_serves_an_official_local_catalog() {
             .get::<_, String>(0),
         "writer"
     );
+    let context_outside_transaction = client
+        .query_one(
+            "SELECT set_config('request.jwt.claims', $1, true)",
+            &[&r#"{"sub":"reader"}"#],
+        )
+        .await
+        .expect_err("request context outside transaction");
+    assert_eq!(
+        context_outside_transaction.code(),
+        Some(&tokio_postgres::error::SqlState::ACTIVE_SQL_TRANSACTION)
+    );
+    client
+        .batch_execute("BEGIN")
+        .await
+        .expect("request context begin");
+    let context_before = client
+        .prepare("SELECT current_setting('request.jwt.claims', true)")
+        .await
+        .expect("prepare context before assignment");
+    let claims = r#"{"sub":"reader","aud":"quackgis"}"#;
+    let assigned = client
+        .query_one(
+            "SELECT set_config('request.jwt.claims', $1, true)",
+            &[&claims],
+        )
+        .await
+        .expect("set transaction-local request context");
+    assert_eq!(assigned.get::<_, String>(0), claims);
+    assert_eq!(
+        assigned.columns()[0].type_(),
+        &tokio_postgres::types::Type::TEXT
+    );
+    let current_claims = client
+        .query_one("SELECT current_setting('request.jwt.claims', true)", &[])
+        .await
+        .expect("read transaction-local request context");
+    assert_eq!(current_claims.get::<_, String>(0), claims);
+    assert_eq!(
+        current_claims.columns()[0].type_(),
+        &tokio_postgres::types::Type::TEXT
+    );
+    let stale_context = client
+        .query(&context_before, &[])
+        .await
+        .expect_err("request context invalidates prior prepared statement");
+    assert_eq!(
+        stale_context.code(),
+        Some(&tokio_postgres::error::SqlState::FEATURE_NOT_SUPPORTED)
+    );
+    client
+        .batch_execute("ROLLBACK")
+        .await
+        .expect("failed request context rollback");
+    assert_eq!(
+        client
+            .query_one("SELECT current_setting('request.jwt.claims', true)", &[])
+            .await
+            .expect("context after failed rollback")
+            .get::<_, Option<String>>(0),
+        None
+    );
+    client
+        .batch_execute("BEGIN")
+        .await
+        .expect("request context commit begin");
+    client
+        .query_one(
+            "SELECT set_config('request.jwt.claims', $1, true)",
+            &[&claims],
+        )
+        .await
+        .expect("set request context before commit");
+    client
+        .batch_execute("COMMIT")
+        .await
+        .expect("request context commit cleanup");
+    assert_eq!(
+        client
+            .query_one("SELECT current_setting('request.jwt.claims', true)", &[])
+            .await
+            .expect("context after commit")
+            .get::<_, Option<String>>(0),
+        None
+    );
+    client
+        .batch_execute("BEGIN")
+        .await
+        .expect("oversized context begin");
+    let oversized_claims = "x".repeat(16_385);
+    let oversized_context = client
+        .query_one(
+            "SELECT set_config('request.jwt.claims', $1, true)",
+            &[&oversized_claims],
+        )
+        .await
+        .expect_err("oversized request context");
+    assert_eq!(
+        oversized_context.code(),
+        Some(&tokio_postgres::error::SqlState::INVALID_PARAMETER_VALUE)
+    );
+    client
+        .batch_execute("ROLLBACK")
+        .await
+        .expect("oversized context rollback");
 
     client
         .batch_execute(

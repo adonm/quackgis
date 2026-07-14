@@ -567,9 +567,14 @@ errors. Local identity is removed after commit, rollback, and failed-transaction
 rollback; independent connections remain isolated. A role/context epoch rejects
 prepared execution after an identity change rather than reusing stale
 authorization. Existing allowlists are still the enforcement boundary, and the
-declarations do not yet alter statement authorization or catalog rows. Bounded
-request context plus cancellation/quarantine cleanup remain before the C4 gate;
-privilege integration and role catalogs are C5.
+declarations do not yet alter statement authorization or catalog rows. The exact
+transaction-local `set_config('request.jwt.claims', $1, true)` and
+`current_setting(..., true)` path now stores bound text only at the pgwire session
+edge, allows one 16 KiB setting under a 32 KiB aggregate ceiling, rejects NUL and
+arbitrary/non-local settings, returns PostgreSQL `text`, invalidates stale
+prepared work, and clears on commit/rollback/failed-transaction rollback. A
+focused cancellation/quarantine context oracle remains before the C4 evidence
+gate; privilege integration and role catalogs are C5.
 
 ### C5 — implement privilege and discovery semantics
 
