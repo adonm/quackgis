@@ -265,6 +265,7 @@ semantics, including safe handling of unqualified catalog functions and relation
 | key/constraint information-schema views | client and REST relationship discovery |
 | table/column privilege views | portable role-aware API discovery |
 | `pg_table_is_visible`, `pg_relation_is_updatable` | search-path and mutation capability queries |
+| `geometry_columns`, `spatial_ref_sys` | bounded PostGIS-compatible geometry/CRS discovery |
 
 The development identity lane implements the table/column subset of
 `pg_attrdef` and `pg_description` plus `pg_get_expr`, `col_description`, and
@@ -288,6 +289,18 @@ not support primary keys, unique keys, foreign keys, check constraints, or
 indexes. QuackGIS does not infer a key from a non-null integer or claim uniqueness
 it cannot enforce. Constraint/index rows and helper functions use the same
 effective-role plus legacy-login metadata ceiling as defaults/comments.
+
+The bounded spatial slice advertises `geometry_columns` and `spatial_ref_sys`
+through `information_schema.tables`. `geometry_columns` includes native DuckDB
+`GEOMETRY` columns and established QuackGIS WKB geometry-name sentinels, filtered
+through the same effective-role/session-login relation ceiling. DuckLake does not
+enforce a column-wide subtype, coordinate dimension, or integer SRID, so rows are
+deliberately generic `GEOMETRY`, dimension 2, SRID 0. `spatial_ref_sys` preserves
+the traced PostgreSQL-compatible column types but is empty until QuackGIS owns an
+authoritative CRS registry. `ST_SRID('POINT EMPTY'::GEOMETRY)`, DuckDB-backed
+GEOS/PROJ compatibility probes, and textual `ST_Extent`/`ST_3DExtent` execute;
+SRID assignment, `Find_SRID`, PostGIS box type identity, and inferred typemods
+remain unsupported.
 
 PostgreSQL 18 `has_table_privilege` can report `MAINTAIN`, while
 `information_schema.table_privileges` does not list it. The compatibility view
@@ -559,8 +572,9 @@ descriptions for every foundation catalog are checked against the client-neutral
 functions, complex provenance outside the maintained shape, and baseline startup
 without identity fail closed. This remains development-only until upstream
 acceptance and a signed official bundle. The later bounded C5 structural slices
-are described below; spatial metadata, broader privilege-aware structure, and
-expression provenance remain later M3 work, while key/index semantics require
+are described below; authoritative spatial typemod/CRS metadata, broader
+privilege-aware structure, and expression provenance remain later M3 work, while
+key/index semantics require
 upstream DuckLake support or an explicit client limitation policy.
 
 The exact QGIS 3.44 four-statement session bootstrap now passes as the only
@@ -660,16 +674,17 @@ Role changes invalidate prepared discovery statements rather than retaining a
 stale role literal. The first shared traced structural slice now projects
 DuckLake defaults and table/column comments through `pg_attrdef`,
 `pg_description`, `pg_get_expr`, `col_description`, and `obj_description`.
-Default/comment/nullability/constraint-name values participate in the guarded
-catalog fingerprint epoch; actual pgwire checks durable relation/attribute
+Column type/default/comment/nullability/constraint-name values participate in the
+guarded catalog fingerprint epoch; actual pgwire checks durable relation/attribute
 references, exact PostgreSQL `oid`/`int2`/`pg_node_tree`/`text` result identity,
 owner and SELECT-granted visibility, and legacy-allowlist denial despite a table
 grant. Durable NOT-NULL constraint rows and definitions now carry PostgreSQL
 `name`, internal `char`, `int2[]`, and OID references; rename continuity passes.
 The maintained `pg_index`/`pg_get_indexdef` shape returns no rows/definitions in
-agreement with DuckLake. Spatial catalogs, generated-column semantics, wider
-traced query shapes, and any future upstream key/index support remain open C5
-work.
+agreement with DuckLake. Generic spatial catalog/version/SRID/extent shapes pass
+focused actual pgwire with role and legacy filtering. Authoritative CRS/subtype/
+dimension metadata, generated-column semantics, wider traced query shapes, and
+any future upstream key/index support remain open C5 work.
 
 ### C6 — qualify named clients
 

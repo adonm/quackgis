@@ -6,7 +6,7 @@ run through `just ci` or the pinned native recipes.
 `duckdb_wire_read::current_duckdb_transport_profile` owns the required 100k-row
 direct DuckDB/ADBC/pgwire benchmark smoke and writes its manifest under `.tmp`.
 
-- `duckdb_spatial_compat.json` is the maintained 57-case disposition ledger; 42
+- `duckdb_spatial_compat.json` is the maintained 57-case disposition ledger; 43
   cases currently execute through pgwire.
 - `fixtures/duckdb_catalog_contract.json` is the client-neutral executable
   catalog/type fixture. It covers DuckDB-derived table/column metadata, bounded

@@ -1441,11 +1441,10 @@ fn unsupported_spatial_function(statement: &Statement) -> Option<&'static str> {
         ("st_coorddim", "ST_CoordDim"),
         ("st_geometryn", "ST_GeometryN"),
         ("st_asewkt", "ST_AsEWKT"),
-        ("st_srid", "ST_SRID"),
         ("st_zmflag", "ST_Zmflag"),
         ("st_xmax", "ST_XMax"),
         ("st_ymax", "ST_YMax"),
-        ("st_extent", "ST_Extent"),
+        ("st_setsrid", "ST_SetSRID"),
         ("find_srid", "Find_SRID"),
     ];
     let mut unsupported = None;
@@ -1459,6 +1458,12 @@ fn unsupported_spatial_function(statement: &Statement) -> Option<&'static str> {
         }) else {
             return ControlFlow::Continue(());
         };
+        if name.eq_ignore_ascii_case("st_makeenvelope")
+            && matches!(&function.args, FunctionArguments::List(arguments) if arguments.args.len() == 5)
+        {
+            unsupported = Some("ST_MakeEnvelope(..., SRID)");
+            return ControlFlow::Break(());
+        }
         unsupported = UNSUPPORTED
             .iter()
             .find_map(|(candidate, label)| name.eq_ignore_ascii_case(candidate).then_some(*label));
@@ -2068,6 +2073,7 @@ impl VisitorMut for RoleStructuralCatalogRewriter<'_> {
             "pg_description" => "quackgis_pg_description_visible",
             "pg_constraint" => "quackgis_pg_constraint_visible",
             "pg_index" => "quackgis_pg_index_visible",
+            "geometry_columns" => "quackgis_pg_geometry_columns_visible",
             _ => return ControlFlow::Continue(()),
         };
         *name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(macro_name))]);
@@ -3270,6 +3276,8 @@ fn maintained_pg_catalog_relation(name: &ObjectName) -> Option<&'static str> {
         "pg_collation",
         "pg_roles",
         "pg_auth_members",
+        "geometry_columns",
+        "spatial_ref_sys",
     ]
     .into_iter()
     .find(|candidate| pg_identifier_matches(table, candidate))
@@ -3312,6 +3320,8 @@ fn identity_catalog_relation(relation: &str) -> bool {
             | "pg_description"
             | "pg_constraint"
             | "pg_index"
+            | "geometry_columns"
+            | "spatial_ref_sys"
     )
 }
 
@@ -4205,6 +4215,18 @@ fn catalog_columns(relation: &str) -> &'static [(&'static str, PgTypeHint)] {
             ("indrelid", PgTypeHint::Oid),
             ("indkey", PgTypeHint::Int2Vector),
         ],
+        "geometry_columns" => &[
+            ("f_table_catalog", PgTypeHint::Varchar),
+            ("f_table_schema", PgTypeHint::Name),
+            ("f_table_name", PgTypeHint::Name),
+            ("f_geometry_column", PgTypeHint::Name),
+            ("type", PgTypeHint::Varchar),
+        ],
+        "spatial_ref_sys" => &[
+            ("auth_name", PgTypeHint::Varchar),
+            ("srtext", PgTypeHint::Varchar),
+            ("proj4text", PgTypeHint::Varchar),
+        ],
         "pg_range" => &[
             ("rngtypid", PgTypeHint::Oid),
             ("rngsubtype", PgTypeHint::Oid),
@@ -4372,6 +4394,16 @@ fn catalog_column_names(relation: &str) -> &'static [&'static str] {
             "indisreplident",
             "indkey",
         ],
+        "geometry_columns" => &[
+            "f_table_catalog",
+            "f_table_schema",
+            "f_table_name",
+            "f_geometry_column",
+            "coord_dimension",
+            "srid",
+            "type",
+        ],
+        "spatial_ref_sys" => &["srid", "auth_name", "auth_srid", "srtext", "proj4text"],
         "pg_range" => &["rngtypid", "rngsubtype"],
         "pg_collation" => &[
             "oid",
@@ -5953,11 +5985,14 @@ mod tests {
                 "SELECT ST_AsText(ST_GeometryN(ST_Point(1, 2), 1))",
             ),
             ("ST_AsEWKT", "SELECT ST_AsEWKT(ST_Point(1, 2))"),
-            ("ST_SRID", "SELECT ST_SRID(ST_Point(1, 2))"),
+            ("ST_SetSRID", "SELECT ST_SetSRID(ST_Point(1, 2), 4326)"),
+            (
+                "ST_MakeEnvelope(..., SRID)",
+                "SELECT ST_MakeEnvelope(0, 0, 1, 1, 4326)",
+            ),
             ("ST_Zmflag", "SELECT ST_Zmflag(ST_Point(1, 2))"),
             ("ST_XMax", "SELECT ST_XMax(ST_Extent(geom)) FROM points"),
             ("ST_YMax", "SELECT ST_YMax(ST_Extent(geom)) FROM points"),
-            ("ST_Extent", "SELECT ST_Extent(geom) FROM points"),
             ("Find_SRID", "SELECT Find_SRID('public', 'points', 'geom')"),
         ] {
             let error = match validate_statement(sql, ProtocolMode::Simple) {
@@ -5971,6 +6006,10 @@ mod tests {
             "SELECT 'ST_NDims(g)'",
             "SELECT 1 /* ST_CoordDim(g) */",
             "SELECT ST_Dimension(ST_Point(1, 2))",
+            "SELECT ST_SRID('POINT EMPTY'::GEOMETRY)",
+            "SELECT ST_Extent(geom) FROM points",
+            "SELECT ST_3DExtent(geom) FROM points",
+            "SELECT postgis_geos_version(), postgis_proj_version()",
         ] {
             validate_statement(sql, ProtocolMode::Simple)
                 .unwrap_or_else(|error| panic!("supported SQL {sql}: {error}"));
@@ -6527,6 +6566,149 @@ mod tests {
                 "unsupported constraint/index shape: {invalid}"
             );
         }
+    }
+
+    #[test]
+    fn spatial_metadata_is_identity_gated_role_bound_and_typed() {
+        let catalog = RoleCatalog::from_json(
+            r#"{
+              "roles":[{"oid":100001,"name":"writer","login":true}],
+              "table_owners":[{"table":"places","role":"writer"}]
+            }"#,
+        )
+        .expect("role catalog");
+        let identity = SessionIdentity {
+            session_user: "writer".to_owned(),
+            current_user: "writer".to_owned(),
+            epoch: 4,
+            request_context: HashMap::new(),
+        };
+        let geometry = validate_statement_with_catalog_identity(
+            "SELECT f_table_catalog, f_table_schema, f_table_name, f_geometry_column, \
+                    coord_dimension, srid, type FROM geometry_columns \
+             WHERE f_table_schema = 'public' AND f_table_name = 'places'",
+            ProtocolMode::Extended,
+            true,
+            Some(&identity),
+            Some(&catalog),
+        )
+        .expect("role-bound geometry metadata");
+        assert!(
+            geometry
+                .sql
+                .contains("quackgis_pg_geometry_columns_visible('writer', 'writer')")
+        );
+        let geometry_schema = annotate_catalog_result_schema(
+            &geometry.ast,
+            &Schema::new(vec![
+                Field::new("f_table_catalog", DataType::Utf8, false),
+                Field::new("f_table_schema", DataType::Utf8, false),
+                Field::new("f_table_name", DataType::Utf8, false),
+                Field::new("f_geometry_column", DataType::Utf8, false),
+                Field::new("coord_dimension", DataType::Int32, false),
+                Field::new("srid", DataType::Int32, false),
+                Field::new("type", DataType::Utf8, false),
+            ]),
+        );
+        assert_eq!(
+            geometry_schema
+                .fields()
+                .iter()
+                .map(field_into_pg_type)
+                .collect::<PgWireResult<Vec<_>>>()
+                .expect("geometry metadata wire types"),
+            [
+                Type::VARCHAR,
+                Type::NAME,
+                Type::NAME,
+                Type::NAME,
+                Type::INT4,
+                Type::INT4,
+                Type::VARCHAR,
+            ]
+        );
+
+        let references = validate_statement_with_catalog_identity(
+            "SELECT srid, auth_name, auth_srid, srtext, proj4text \
+             FROM spatial_ref_sys WHERE srid = 4326",
+            ProtocolMode::Extended,
+            true,
+            Some(&identity),
+            Some(&catalog),
+        )
+        .expect("typed empty reference-system metadata");
+        assert!(
+            references
+                .sql
+                .contains("quackgis_pg_catalog.spatial_ref_sys")
+        );
+        let reference_schema = annotate_catalog_result_schema(
+            &references.ast,
+            &Schema::new(vec![
+                Field::new("srid", DataType::Int32, false),
+                Field::new("auth_name", DataType::Utf8, false),
+                Field::new("auth_srid", DataType::Int32, false),
+                Field::new("srtext", DataType::Utf8, false),
+                Field::new("proj4text", DataType::Utf8, false),
+            ]),
+        );
+        assert_eq!(
+            reference_schema
+                .fields()
+                .iter()
+                .map(field_into_pg_type)
+                .collect::<PgWireResult<Vec<_>>>()
+                .expect("reference metadata wire types"),
+            [
+                Type::INT4,
+                Type::VARCHAR,
+                Type::INT4,
+                Type::VARCHAR,
+                Type::VARCHAR,
+            ]
+        );
+
+        let existence = validate_statement_with_catalog_identity(
+            "SELECT table_name FROM information_schema.tables \
+             WHERE table_name IN ('geometry_columns', 'spatial_ref_sys')",
+            ProtocolMode::Extended,
+            true,
+            Some(&identity),
+            Some(&catalog),
+        )
+        .expect("spatial metadata presence discovery");
+        assert!(
+            existence
+                .sql
+                .contains("quackgis_information_schema_tables('writer', 'writer')")
+        );
+
+        for invalid in [
+            "SELECT * FROM geometry_columns",
+            "SELECT * FROM spatial_ref_sys",
+        ] {
+            assert!(
+                validate_statement_with_catalog_identity(
+                    invalid,
+                    ProtocolMode::Extended,
+                    false,
+                    Some(&identity),
+                    Some(&catalog),
+                )
+                .is_err(),
+                "identity-gated spatial catalog: {invalid}"
+            );
+        }
+        assert!(
+            validate_statement_with_catalog_identity(
+                "SELECT * FROM quackgis_pg_geometry_columns_visible('writer', 'writer')",
+                ProtocolMode::Extended,
+                true,
+                Some(&identity),
+                Some(&catalog),
+            )
+            .is_err()
+        );
     }
 
     #[test]

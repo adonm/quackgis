@@ -228,10 +228,21 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
         .batch_execute(
             "CREATE TABLE quackgis.main.catalog_projection(\
              id BIGINT NOT NULL DEFAULT 7, label VARCHAR, geom_wkb BLOB, \
-             score DOUBLE, active BOOLEAN)",
+             native_geom GEOMETRY, score DOUBLE, active BOOLEAN)",
         )
         .await
         .expect("create projected catalog table");
+    client
+        .batch_execute(
+            "INSERT INTO quackgis.main.catalog_projection(\
+             id, label, geom_wkb, native_geom) VALUES \
+             (8, 'first', ST_AsWKB(ST_GeomFromText('POINT Z (0 0 5)')), \
+                           ST_GeomFromText('POINT Z (0 0 5)')), \
+             (9, 'second', ST_AsWKB(ST_GeomFromText('POINT Z (2 3 9)')), \
+                            ST_GeomFromText('POINT Z (2 3 9)'))",
+        )
+        .await
+        .expect("insert projected spatial rows");
     let epoch_before_comments = storage
         .catalog_schema_epoch()
         .expect("catalog epoch before comments")
@@ -255,7 +266,8 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
     );
     execute_storage_update(
         &storage,
-        "CREATE TABLE quackgis.main.private_metadata(id BIGINT NOT NULL DEFAULT 9)",
+        "CREATE TABLE quackgis.main.private_metadata(\
+         id BIGINT NOT NULL DEFAULT 9, geom_wkb BLOB)",
     )
     .await;
     execute_storage_update(
@@ -326,6 +338,17 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
              WHERE indrelid = 'catalog_projection'::regclass",
         ),
         (
+            "geometry_columns",
+            "SELECT f_table_catalog, f_table_schema, f_table_name, f_geometry_column, \
+                    coord_dimension, srid, type FROM geometry_columns \
+             WHERE f_table_name = 'catalog_projection' AND f_geometry_column = 'geom_wkb'",
+        ),
+        (
+            "spatial_ref_sys",
+            "SELECT srid, auth_name, auth_srid, srtext, proj4text \
+             FROM spatial_ref_sys WHERE srid = 4326",
+        ),
+        (
             "pg_catalog.pg_type",
             "SELECT t.oid, t.typname, t.typnamespace, t.typlen, t.typbyval, t.typtype, \
                     t.typcategory, t.typispreferred, t.typisdefined, t.typdelim, \
@@ -370,6 +393,90 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
             );
         }
     }
+
+    let geometry_metadata = client
+        .query_one(
+            "SELECT f_table_catalog, f_table_schema, f_table_name, f_geometry_column, \
+                    coord_dimension, srid, type FROM geometry_columns \
+             WHERE f_table_name = 'catalog_projection' AND f_geometry_column = 'geom_wkb'",
+            &[],
+        )
+        .await
+        .expect("generic geometry metadata");
+    assert_eq!(geometry_metadata.get::<_, String>(0), "quackgis");
+    assert_eq!(geometry_metadata.get::<_, String>(1), "public");
+    assert_eq!(geometry_metadata.get::<_, String>(2), "catalog_projection");
+    assert_eq!(geometry_metadata.get::<_, String>(3), "geom_wkb");
+    assert_eq!(geometry_metadata.get::<_, i32>(4), 2);
+    assert_eq!(geometry_metadata.get::<_, i32>(5), 0);
+    assert_eq!(geometry_metadata.get::<_, String>(6), "GEOMETRY");
+    for column_name in ["geom_wkb", "native_geom"] {
+        let information_schema_geometry = client
+            .query_one(
+                &format!(
+                    "SELECT data_type, udt_schema, udt_name \
+                 FROM information_schema.columns \
+                 WHERE table_schema = 'public' AND table_name = 'catalog_projection' \
+                   AND column_name = '{column_name}'"
+                ),
+                &[],
+            )
+            .await
+            .unwrap_or_else(|error| panic!("information schema geometry {column_name}: {error:?}"));
+        assert_eq!(
+            information_schema_geometry.get::<_, String>(0),
+            "USER-DEFINED"
+        );
+        assert_eq!(information_schema_geometry.get::<_, String>(1), "public");
+        assert_eq!(information_schema_geometry.get::<_, String>(2), "geometry");
+    }
+    assert_eq!(
+        client
+            .query_one(
+                "SELECT count(*)::BIGINT FROM information_schema.tables \
+                 WHERE table_name IN ('geometry_columns', 'spatial_ref_sys')",
+                &[],
+            )
+            .await
+            .expect("spatial metadata relations are discoverable")
+            .get::<_, i64>(0),
+        2
+    );
+    assert!(
+        client
+            .query(
+                "SELECT auth_name, auth_srid, srtext, proj4text \
+                 FROM spatial_ref_sys WHERE srid = 4326",
+                &[],
+            )
+            .await
+            .expect("typed empty reference-system catalog")
+            .is_empty()
+    );
+    let spatial_functions = client
+        .query_one(
+            "SELECT ST_SRID('POINT EMPTY'::GEOMETRY), \
+                    postgis_geos_version(), postgis_proj_version()",
+            &[],
+        )
+        .await
+        .expect("bounded PostGIS metadata functions");
+    assert_eq!(spatial_functions.get::<_, i32>(0), 0);
+    assert_eq!(spatial_functions.get::<_, String>(1), "QUACKGIS-DUCKDB");
+    assert!(!spatial_functions.get::<_, String>(2).is_empty());
+    let extents = client
+        .query_one(
+            "SELECT ST_Extent(geom_wkb), ST_3DExtent(geom_wkb), \
+                    ST_Extent(native_geom), ST_3DExtent(native_geom) \
+             FROM public.catalog_projection",
+            &[],
+        )
+        .await
+        .expect("PostGIS extent compatibility");
+    assert_eq!(extents.get::<_, String>(0), "BOX(0 0,2 3)");
+    assert_eq!(extents.get::<_, String>(1), "BOX3D(0 0 5,2 3 9)");
+    assert_eq!(extents.get::<_, String>(2), "BOX(0 0,2 3)");
+    assert_eq!(extents.get::<_, String>(3), "BOX3D(0 0 5,2 3 9)");
 
     let catalog_sql = "SELECT c.oid, c.relname, c.relnamespace, c.reltype, c.relowner, \
                 c.relkind, c.relnatts, c.relrowsecurity, a.attrelid, a.attname, \
@@ -423,7 +530,7 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
         .query(&catalog, &[])
         .await
         .expect("registry-backed catalog rows");
-    assert_eq!(rows.len(), 5);
+    assert_eq!(rows.len(), 6);
     let relation_oid = rows[0].get::<_, u32>(0);
     let row_type_oid = rows[0].get::<_, u32>(3);
     assert!(relation_oid >= 100_000);
@@ -433,6 +540,7 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
         ("id", 20_u32, 8_i16, true),
         ("label", 25, -1, false),
         ("geom_wkb", 90_001, -1, false),
+        ("native_geom", 90_001, -1, false),
         ("score", 701, 8, false),
         ("active", 16, 1, false),
     ];
@@ -443,7 +551,7 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
         assert_eq!(row.get::<_, u32>(3), row_type_oid);
         assert_eq!(row.get::<_, u32>(4), 110_001);
         assert_eq!(row.get::<_, i8>(5), b'r' as i8);
-        assert_eq!(row.get::<_, i16>(6), 5);
+        assert_eq!(row.get::<_, i16>(6), 6);
         assert!(!row.get::<_, bool>(7));
         assert_eq!(row.get::<_, u32>(8), relation_oid);
         assert_eq!(row.get::<_, String>(9), expected.0);
@@ -612,6 +720,30 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
             )
             .await
             .expect("legacy-hidden defaults")
+            .get::<_, i64>(0),
+        0
+    );
+    assert_eq!(
+        reader
+            .query_one(
+                "SELECT count(*)::BIGINT FROM geometry_columns \
+                 WHERE f_table_name = 'catalog_projection'",
+                &[],
+            )
+            .await
+            .expect("reader-visible geometry metadata")
+            .get::<_, i64>(0),
+        2
+    );
+    assert_eq!(
+        reader
+            .query_one(
+                "SELECT count(*)::BIGINT FROM geometry_columns \
+                 WHERE f_table_name = 'private_metadata'",
+                &[],
+            )
+            .await
+            .expect("legacy-hidden geometry metadata")
             .get::<_, i64>(0),
         0
     );
@@ -888,7 +1020,7 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
         .prepare("SELECT p.* FROM public.catalog_projection p")
         .await
         .expect("prepare wildcard origins");
-    assert_eq!(wildcard.columns().len(), 5);
+    assert_eq!(wildcard.columns().len(), 6);
     for (index, column) in wildcard.columns().iter().enumerate() {
         assert_eq!(column.table_oid(), Some(relation_oid));
         assert_eq!(column.column_id(), Some(i16::try_from(index + 1).unwrap()));
@@ -930,7 +1062,7 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
         )
         .await
         .expect("catalog rows after rename");
-    assert_eq!(renamed_catalog.len(), 5);
+    assert_eq!(renamed_catalog.len(), 6);
     assert!(
         renamed_catalog
             .iter()
@@ -998,8 +1130,8 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
         )
         .await
         .expect("catalog tombstone attribute numbering");
-    assert_eq!(readded.get::<_, i16>(0), 6);
-    assert_eq!(readded.get::<_, i16>(1), 6);
+    assert_eq!(readded.get::<_, i16>(0), 7);
+    assert_eq!(readded.get::<_, i16>(1), 7);
 
     execute_storage_update(
         &storage,

@@ -365,7 +365,8 @@ pub fn duckdb_role_catalog_sql(
             .join(",\n");
         format!("SELECT * FROM (VALUES\n{rows}\n) AS o(schema_name, table_name, role_oid)")
     };
-    let information_schema_sql = duckdb_role_information_schema_sql(catalog, auth);
+    let information_schema_sql =
+        duckdb_role_information_schema_sql(catalog, auth, catalog_identity_enabled);
     let structural_catalog_sql = if catalog_identity_enabled {
         duckdb_role_structural_catalog_sql()
     } else {
@@ -418,6 +419,14 @@ fn duckdb_role_structural_catalog_sql() -> &'static str {
            SELECT indexes.* FROM quackgis_pg_catalog.pg_index indexes
            JOIN quackgis_pg_visible_relations(effective_role, session_identity) visible
              ON visible.relation_oid = indexes.indrelid;
+         CREATE OR REPLACE MACRO quackgis_pg_geometry_columns_visible(effective_role, session_identity) AS TABLE
+           SELECT geometry_columns.f_table_catalog, geometry_columns.f_table_schema,
+                  geometry_columns.f_table_name, geometry_columns.f_geometry_column,
+                  geometry_columns.coord_dimension, geometry_columns.srid,
+                  geometry_columns.type
+           FROM quackgis_pg_catalog.geometry_columns geometry_columns
+           JOIN quackgis_pg_visible_relations(effective_role, session_identity) visible
+             ON visible.relation_oid = geometry_columns._qg_relation_oid;
          CREATE OR REPLACE MACRO quackgis_pg_col_description_visible(
            relation_value, column_value, effective_role, session_identity
          ) AS (SELECT description
@@ -468,6 +477,7 @@ fn duckdb_role_structural_catalog_sql() -> &'static str {
 fn duckdb_role_information_schema_sql(
     catalog: &crate::role::RoleCatalog,
     auth: &crate::auth::AuthConfig,
+    catalog_identity_enabled: bool,
 ) -> String {
     use crate::role::{RolePrivilege, SchemaPrivilege, TablePrivilege};
     use std::collections::BTreeSet;
@@ -657,6 +667,17 @@ fn duckdb_role_information_schema_sql(
     let data_type = duckdb_information_schema_data_type_sql();
     let udt_schema = duckdb_information_schema_udt_schema_sql();
     let udt_name = duckdb_information_schema_udt_name_sql();
+    let spatial_table_rows = if catalog_identity_enabled {
+        " UNION ALL\n\
+           SELECT 'quackgis'::VARCHAR, 'public'::VARCHAR, metadata.table_name,\n\
+                  'VIEW'::VARCHAR, NULL::VARCHAR, NULL::VARCHAR, NULL::VARCHAR,\n\
+                  NULL::VARCHAR, NULL::VARCHAR, 'NO'::VARCHAR, 'NO'::VARCHAR,\n\
+                  NULL::VARCHAR\n\
+           FROM (VALUES ('geometry_columns'::VARCHAR), ('spatial_ref_sys'::VARCHAR))\n\
+                metadata(table_name)"
+    } else {
+        ""
+    };
 
     format!(
         "CREATE OR REPLACE VIEW quackgis_pg_catalog.information_schema_schema_visibility AS\n\
@@ -702,7 +723,8 @@ fn duckdb_role_information_schema_sql(
              AND legacy.session_user = CAST(session_identity AS VARCHAR)\n\
              AND (v.can_select AND legacy.can_read\n\
                   OR (v.can_insert OR v.can_update OR v.can_delete) AND legacy.can_write)\n\
-             AND t.table_catalog = 'quackgis';\n\
+             AND t.table_catalog = 'quackgis'\n\
+           {spatial_table_rows};\n\
          CREATE OR REPLACE MACRO quackgis_information_schema_columns(effective_role, session_identity) AS TABLE\n\
            SELECT 'quackgis'::VARCHAR AS table_catalog,\n\
                   CASE WHEN c.table_schema = 'main' THEN 'public' ELSE c.table_schema END\n\
@@ -791,6 +813,7 @@ fn duckdb_information_schema_data_type_sql() -> &'static str {
        WHEN c.data_type = 'INTERVAL' THEN 'interval'
        WHEN c.data_type = 'JSON' AND lower(c.column_name) = 'properties' THEN 'jsonb'
        WHEN c.data_type IN ('VARCHAR', 'JSON') THEN 'text'
+       WHEN c.data_type = 'GEOMETRY' THEN 'USER-DEFINED'
        WHEN c.data_type = 'BLOB' AND lower(c.column_name) IN
          ('geog', 'geography', 'the_geog', 'geom', 'geometry', 'the_geom',
           'wkb_geometry', 'wkb_geom', 'geom_wkb', 'shape', 'footprint', 'way')
@@ -801,7 +824,7 @@ fn duckdb_information_schema_data_type_sql() -> &'static str {
 }
 
 fn duckdb_information_schema_udt_schema_sql() -> &'static str {
-    "CASE WHEN c.data_type = 'BLOB' AND lower(c.column_name) IN
+    "CASE WHEN c.data_type = 'GEOMETRY' OR c.data_type = 'BLOB' AND lower(c.column_name) IN
        ('geog', 'geography', 'the_geog', 'geom', 'geometry', 'the_geom',
         'wkb_geometry', 'wkb_geom', 'geom_wkb', 'shape', 'footprint', 'way')
        THEN 'public' ELSE 'pg_catalog' END"
@@ -827,6 +850,7 @@ fn duckdb_information_schema_udt_name_sql() -> &'static str {
        WHEN c.data_type = 'INTERVAL' THEN 'interval'
        WHEN c.data_type = 'JSON' AND lower(c.column_name) = 'properties' THEN 'jsonb'
        WHEN c.data_type IN ('VARCHAR', 'JSON') THEN 'text'
+       WHEN c.data_type = 'GEOMETRY' THEN 'geometry'
        WHEN c.data_type = 'BLOB' AND lower(c.column_name) IN
          ('geog', 'geography', 'the_geog') THEN 'geography'
        WHEN c.data_type = 'BLOB' AND lower(c.column_name) IN
@@ -856,6 +880,7 @@ fn duckdb_information_schema_udt_name_sql() -> &'static str {
 
 fn duckdb_column_type_oid_sql() -> &'static str {
     "CASE
+       WHEN data_type = 'GEOMETRY' THEN 90001
        WHEN data_type = 'BLOB' AND lower(column_name) IN
          ('geog', 'geography', 'the_geog') THEN 90002
        WHEN data_type = 'BLOB' AND lower(column_name) IN
@@ -1161,7 +1186,8 @@ pub fn duckdb_identity_catalog_bootstrap_sql(catalog: &str) -> String {
     format!(
         "CREATE OR REPLACE VIEW quackgis_pg_catalog._current_columns AS\n\
          WITH identity AS (\n\
-           SELECT identity.*, nullif(columns.column_default, 'NULL') AS column_default,\n\
+           SELECT identity.*, columns.data_type AS data_type,\n\
+                  nullif(columns.column_default, 'NULL') AS column_default,\n\
                   columns.comment AS column_comment, tables.comment AS table_comment,\n\
                   NOT columns.is_nullable AS column_not_null,\n\
                   constraints.constraint_name AS not_null_constraint_name\n\
@@ -1188,6 +1214,7 @@ pub fn duckdb_identity_catalog_bootstrap_sql(catalog: &str) -> String {
              schema_uuid := schema_uuid, schema_name := schema_name,\n\
              table_uuid := table_uuid, table_name := table_name,\n\
              column_id := column_id, column_name := column_name,\n\
+             data_type := data_type,\n\
              column_default := column_default, column_comment := column_comment,\n\
              table_comment := table_comment, column_not_null := column_not_null,\n\
              not_null_constraint_name := not_null_constraint_name)\n\
@@ -1213,7 +1240,8 @@ pub fn duckdb_identity_catalog_bootstrap_sql(catalog: &str) -> String {
                WHERE i.schema_name IN ('public', 'pg_catalog', 'information_schema',\n\
                                        'quackgis_pg_catalog')\n\
                   OR (i.schema_name = 'main' AND lower(i.table_name) IN\n\
-                      ('geometry', 'geography', '_geometry', '_geography'))\n\
+                      ('geometry', 'geography', '_geometry', '_geography',\n\
+                       'geometry_columns', 'spatial_ref_sys'))\n\
                   OR n.oid IS NULL OR r.oid IS NULL OR a.attnum IS NULL\n\
                   OR c.column_name IS NULL OR r.namespace_oid <> n.oid\n\
                   OR i.column_not_null <> (constraint_oid.oid IS NOT NULL)\n\
@@ -1320,6 +1348,22 @@ pub fn duckdb_identity_catalog_bootstrap_sql(catalog: &str) -> String {
                 false AS indimmediate, false AS indisclustered, false AS indisvalid,\n\
                 false AS indcheckxmin, false AS indisready, false AS indislive,\n\
                 false AS indisreplident, NULL::SMALLINT[] AS indkey WHERE false;\n\
+         CREATE OR REPLACE VIEW quackgis_pg_catalog.geometry_columns AS\n\
+         SELECT 'quackgis'::VARCHAR AS f_table_catalog,\n\
+                CASE WHEN schema_name = 'main' THEN 'public' ELSE schema_name END::VARCHAR\n\
+                  AS f_table_schema,\n\
+                table_name::VARCHAR AS f_table_name,\n\
+                column_name::VARCHAR AS f_geometry_column,\n\
+                2::INTEGER AS coord_dimension, 0::INTEGER AS srid,\n\
+                'GEOMETRY'::VARCHAR AS type, relation_oid AS _qg_relation_oid\n\
+         FROM quackgis_pg_catalog._current_columns\n\
+         WHERE data_type = 'GEOMETRY' OR data_type = 'BLOB' AND lower(column_name) IN\n\
+           ('geom', 'geometry', 'the_geom', 'wkb_geometry', 'wkb_geom',\n\
+            'geom_wkb', 'shape', 'footprint', 'way');\n\
+         CREATE OR REPLACE VIEW quackgis_pg_catalog.spatial_ref_sys AS\n\
+         SELECT NULL::INTEGER AS srid, NULL::VARCHAR AS auth_name,\n\
+                NULL::INTEGER AS auth_srid, NULL::VARCHAR AS srtext,\n\
+                NULL::VARCHAR AS proj4text WHERE false;\n\
          {macros}",
         internal_schema_literal = quote_literal(INTERNAL_SCHEMA),
     )
@@ -1371,7 +1415,8 @@ pub fn ducklake_identity_registry_reconcile_sql(catalog: &str) -> String {
     let schema = quote_identifier(INTERNAL_SCHEMA);
     format!(
         "CREATE OR REPLACE TEMP TABLE __quackgis_identity AS\n\
-           SELECT identity.*, nullif(columns.column_default, 'NULL') AS column_default,\n\
+           SELECT identity.*, columns.data_type AS data_type,\n\
+                  nullif(columns.column_default, 'NULL') AS column_default,\n\
                   columns.comment AS column_comment, tables.comment AS table_comment,\n\
                   NOT columns.is_nullable AS column_not_null,\n\
                   constraints.constraint_name AS not_null_constraint_name\n\
@@ -1398,6 +1443,7 @@ pub fn ducklake_identity_registry_reconcile_sql(catalog: &str) -> String {
              schema_uuid := schema_uuid, schema_name := schema_name,\n\
              table_uuid := table_uuid, table_name := table_name,\n\
              column_id := column_id, column_name := column_name,\n\
+             data_type := data_type,\n\
              column_default := column_default, column_comment := column_comment,\n\
              table_comment := table_comment, column_not_null := column_not_null,\n\
              not_null_constraint_name := not_null_constraint_name)\n\
@@ -1619,7 +1665,8 @@ pub fn ducklake_identity_registry_coverage_sql(catalog: &str) -> String {
              AND (i.schema_name IN ('public', 'pg_catalog', 'information_schema',\n\
                                     'quackgis_pg_catalog')\n\
                   OR (i.schema_name = 'main' AND lower(i.table_name) IN\n\
-                      ('geometry', 'geography', '_geometry', '_geography'))\n\
+                      ('geometry', 'geography', '_geometry', '_geography',\n\
+                       'geometry_columns', 'spatial_ref_sys'))\n\
                   OR n.oid IS NULL OR r.oid IS NULL OR a.attnum IS NULL\n\
                   OR r.namespace_oid <> n.oid\n\
                   OR (i.schema_name = 'main' AND n.oid <> {PUBLIC_NAMESPACE_OID})\n\
@@ -1743,6 +1790,9 @@ mod tests {
         assert!(sql.contains("quackgis_pg_description_visible"));
         assert!(sql.contains("quackgis_pg_constraint_visible"));
         assert!(sql.contains("quackgis_pg_index_visible"));
+        assert!(sql.contains("quackgis_pg_geometry_columns_visible"));
+        assert!(sql.contains("'geometry_columns'::VARCHAR"));
+        assert!(sql.contains("'spatial_ref_sys'::VARCHAR"));
         assert!(sql.contains("NULL::VARCHAR"));
         assert!(!sql.contains("password-secret"));
     }
@@ -1772,7 +1822,7 @@ mod tests {
         assert!(coverage.contains("does not cover the committed snapshot"));
         assert!(coverage.contains("r.namespace_oid <> n.oid"));
         assert!(coverage.contains("'public', 'pg_catalog', 'information_schema'"));
-        assert!(coverage.contains("'geometry', 'geography', '_geometry', '_geography'"));
+        assert!(coverage.contains("'geometry_columns', 'spatial_ref_sys'"));
 
         let catalogs = duckdb_identity_catalog_bootstrap_sql("quackgis");
         for relation in [
@@ -1785,6 +1835,8 @@ mod tests {
             "pg_description",
             "pg_constraint",
             "pg_index",
+            "geometry_columns",
+            "spatial_ref_sys",
         ] {
             assert!(
                 catalogs.contains(&format!("quackgis_pg_catalog.{relation}")),
@@ -1809,6 +1861,8 @@ mod tests {
         assert!(catalogs.contains("quackgis_pg_get_constraintdef"));
         assert!(catalogs.contains("quackgis_pg_get_indexdef"));
         assert!(catalogs.contains("column_default := column_default"));
+        assert!(catalogs.contains("data_type := data_type"));
+        assert!(catalogs.contains("WHEN data_type = 'GEOMETRY' THEN 90001"));
         assert!(catalogs.contains("not_null_constraint_oid"));
     }
 }

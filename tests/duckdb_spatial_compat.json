@@ -8,11 +8,11 @@
     {"name":"point_constructor","disposition":"native_duckdb"},
     {"name":"point_constructor_srid","disposition":"rust_edge","unsupported":{"sqlstate":"0A000","message":"PostGIS function ST_AsEWKT is not supported by QuackGIS"}},
     {"name":"makepoint_constructor","disposition":"sql_rewrite","duckdb_sql":"SELECT ST_AsText(ST_Point(5.0, 6.0))"},
-    {"name":"setsrid_srid","disposition":"rust_edge","unsupported":{"sqlstate":"0A000","message":"PostGIS function ST_SRID is not supported by QuackGIS"}},
+    {"name":"setsrid_srid","disposition":"rust_edge","unsupported":{"sqlstate":"0A000","message":"PostGIS function ST_SetSRID is not supported by QuackGIS"}},
     {"name":"asewkt_srid_point","disposition":"rust_edge","unsupported":{"sqlstate":"0A000","message":"PostGIS function ST_AsEWKT is not supported by QuackGIS"}},
     {"name":"ashexewkb_point","disposition":"sql_rewrite","duckdb_sql":"SELECT hex(ST_AsWKB(ST_GeomFromText('POINT(1 2)')))"},
-    {"name":"transform_sets_target_srid","disposition":"rust_edge","unsupported":{"sqlstate":"0A000","message":"PostGIS function ST_SRID is not supported by QuackGIS"}},
-    {"name":"makeenvelope_srid","disposition":"rust_edge","unsupported":{"sqlstate":"0A000","message":"PostGIS function ST_SRID is not supported by QuackGIS"}},
+    {"name":"transform_sets_target_srid","disposition":"rust_edge","unsupported":{"sqlstate":"0A000","message":"PostGIS function ST_SetSRID is not supported by QuackGIS"}},
+    {"name":"makeenvelope_srid","disposition":"rust_edge","unsupported":{"sqlstate":"0A000","message":"PostGIS function ST_MakeEnvelope(..., SRID) is not supported by QuackGIS"}},
     {"name":"force2d_point_identity","disposition":"native_duckdb"},
     {"name":"curvetoline_point_identity","disposition":"quackgis_macro","duckdb_sql":"SELECT ST_AsText(ST_GeomFromText('POINT(1 2)'))"},
     {"name":"hasarc_point_false","disposition":"quackgis_macro","duckdb_sql":"SELECT CAST(false AS TEXT)"},
@@ -56,7 +56,7 @@
     {"name":"xmax_extent_accessor","disposition":"rust_edge","unsupported":{"sqlstate":"0A000","message":"PostGIS function ST_XMax is not supported by QuackGIS"}},
     {"name":"ymax_extent_accessor","disposition":"rust_edge","unsupported":{"sqlstate":"0A000","message":"PostGIS function ST_YMax is not supported by QuackGIS"}},
     {"name":"intersects_disjoint_points","disposition":"native_duckdb"},
-    {"name":"extent_points","disposition":"rust_edge","unsupported":{"sqlstate":"0A000","message":"PostGIS function ST_Extent is not supported by QuackGIS"}},
+    {"name":"extent_points","disposition":"quackgis_macro","duckdb_sql":"SELECT replace(CAST(ST_Extent(ST_Extent_Agg(geom)) AS VARCHAR), ', ', ',') FROM (VALUES (ST_Point(0, 0)), (ST_Point(2, 3))) points(geom)","expected":"BOX(0 0,2 3)"},
     {"name":"find_srid_metadata","disposition":"rust_edge","unsupported":{"sqlstate":"0A000","message":"PostGIS function Find_SRID is not supported by QuackGIS"}}
   ]
 }

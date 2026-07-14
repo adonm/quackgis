@@ -29,6 +29,25 @@ CREATE OR REPLACE MACRO quackgis_st_geometry_type(g) AS
     END;
 CREATE OR REPLACE MACRO quackgis_st_curvetoline(g) AS g;
 CREATE OR REPLACE MACRO quackgis_st_hasarc(g) AS false;
+CREATE OR REPLACE MACRO quackgis_st_srid(g) AS
+    CASE WHEN g IS NULL THEN NULL
+         ELSE coalesce(try_cast(regexp_extract(ST_CRS(g), '^EPSG:([0-9]+)$', 1) AS INTEGER), 0)
+    END;
+CREATE OR REPLACE MACRO quackgis_st_extent(g) AS
+    replace(CAST(ST_Extent(ST_Extent_Agg(ST_GeomFromWKB(CAST(g AS BLOB)))) AS VARCHAR),
+            ', ', ',');
+CREATE OR REPLACE MACRO quackgis_st_3dextent(g) AS
+    CASE WHEN count(g) = 0 THEN NULL ELSE
+      'BOX3D(' ||
+      printf('%.17g', min(ST_XMin(ST_GeomFromWKB(CAST(g AS BLOB))))) || ' ' ||
+      printf('%.17g', min(ST_YMin(ST_GeomFromWKB(CAST(g AS BLOB))))) || ' ' ||
+      printf('%.17g', coalesce(min(ST_ZMin(ST_GeomFromWKB(CAST(g AS BLOB)))), 0)) || ',' ||
+      printf('%.17g', max(ST_XMax(ST_GeomFromWKB(CAST(g AS BLOB))))) || ' ' ||
+      printf('%.17g', max(ST_YMax(ST_GeomFromWKB(CAST(g AS BLOB))))) || ' ' ||
+      printf('%.17g', coalesce(max(ST_ZMax(ST_GeomFromWKB(CAST(g AS BLOB)))), 0)) || ')'
+    END;
+CREATE OR REPLACE MACRO quackgis_postgis_geos_version() AS 'QUACKGIS-DUCKDB';
+CREATE OR REPLACE MACRO quackgis_postgis_proj_version() AS DuckDB_Proj_Version();
 "#;
 
 /// Rewrite PostGIS function spellings to DuckDB-native or QuackGIS-owned names.
@@ -104,6 +123,16 @@ fn rewrite_function_name(identifier: &str) -> Option<&'static str> {
         Some("quackgis_st_curvetoline")
     } else if identifier.eq_ignore_ascii_case("st_hasarc") {
         Some("quackgis_st_hasarc")
+    } else if identifier.eq_ignore_ascii_case("st_srid") {
+        Some("quackgis_st_srid")
+    } else if identifier.eq_ignore_ascii_case("st_extent") {
+        Some("quackgis_st_extent")
+    } else if identifier.eq_ignore_ascii_case("st_3dextent") {
+        Some("quackgis_st_3dextent")
+    } else if identifier.eq_ignore_ascii_case("postgis_geos_version") {
+        Some("quackgis_postgis_geos_version")
+    } else if identifier.eq_ignore_ascii_case("postgis_proj_version") {
+        Some("quackgis_postgis_proj_version")
     } else {
         None
     }

@@ -103,8 +103,8 @@ global-OID, attribute-number, range, reference, and committed-snapshot coverage
 invariants before/after reconciliation and fails closed on inconsistency. The gate
 injects a duplicate mapping, requires the post-commit session to quarantine, and
 requires restart rejection. A SHA-256 fingerprint of current identity names/IDs
-plus DuckDB-reported column defaults, comments, nullability, and constraint names
-advances the schema epoch for create, rename, add, drop, recreate, constraint,
+plus DuckDB-reported column types, defaults, comments, nullability, and constraint
+names advances the schema epoch for create, rename, add, drop, recreate, constraint,
 and metadata changes; direct
 pgwire relation references to the control schema are rejected, as are dynamic
 `query`/`query_table` indirection and direct `ducklake_column_info` calls.
@@ -152,10 +152,21 @@ typed catalog and `pg_get_indexdef` returns NULL because DuckLake exposes no
 primary, unique, foreign-key, check, or index implementation. QuackGIS does not
 synthesize those semantics from names or data scans.
 
+The lane also projects recognized geometry-family columns through a role-bound
+`geometry_columns` compatibility view and advertises it with `spatial_ref_sys`
+through `information_schema.tables`; those two public relation names are reserved
+and fail identity validation if user tables collide with them. Because DuckLake columns do not enforce one
+subtype, dimension, or integer SRID, every row is deliberately generic
+`GEOMETRY`, dimension 2, SRID 0. `spatial_ref_sys` is typed but empty because no
+authoritative maintained CRS registry exists. Focused actual-pgwire coverage
+executes empty-geometry `ST_SRID`, DuckDB-backed version probes, and textual
+`ST_Extent`/`ST_3DExtent` over stored WKB. SRID assignment, PostGIS box wire
+types, and inferred CRS/subtype claims remain unsupported.
+
 C3 implementation is complete in this gated lane. Durable empty-schema identity
 still needs upstream API support. Role semantics and role-aware information
-schema now execute independently of the development override; spatial metadata,
-generated-column semantics, REST cache consumers, and broader expression
+schema now execute independently of the development override; authoritative
+spatial typemod/CRS metadata, generated-column semantics, REST cache consumers, and broader expression
 provenance remain C5 or later M3 slices.
 
 ## Runtime trust boundary

@@ -40,7 +40,7 @@ planner/executor and official DuckLake is the sole writer for new storage.
   `ST_Intersects` shapes;
 - explicitly authorized adjacent-file compaction through a server-owned call;
 - SCRAM and parsed read/write table policy; and
-- 42 curated spatial cases using original PostGIS spellings through DuckDB native
+- 43 curated spatial cases using original PostGIS spellings through DuckDB native
   functions or bounded QuackGIS rewrites/macros, with stable `0A000` behavior for
   all 15 classified gaps.
 

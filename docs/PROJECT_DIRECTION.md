@@ -43,7 +43,7 @@ The repository proves a bounded local runtime:
 - Parameterized reads/mutations, transactions, text COPY, SCRAM, table policy,
   maintained session settings/search path, `public` mapping, quoted COPY, restart,
   and reopen have pinned native integration tests.
-- Forty-two native, rewrite, or macro spatial cases execute through pgwire.
+- Forty-three native, rewrite, or macro spatial cases execute through pgwire.
 - DuckDB and extension artifacts are version- and checksum-pinned.
 
 M1 bounded execution and M2 streaming ingest now have reference evidence:

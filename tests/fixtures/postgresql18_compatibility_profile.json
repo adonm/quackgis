@@ -3,14 +3,14 @@
   "profile_id": "pg18-column-core-v1",
   "target": {
     "postgresql_major": 18,
-    "postgis_scope": "geometry/geography type identity and WKB transport only"
+    "postgis_scope": "geometry/geography identity and WKB transport plus bounded generic geometry metadata, SRID helpers, and extents"
   },
   "purpose": "Freeze the first client-neutral PostgreSQL catalog and wire contract that replaces exact pg_type interception and DuckDB-main REST discovery.",
   "consumer_versions": {
     "psql": "18.3",
     "psycopg": "3.2.13",
     "gdal_ogr": "3.11.5",
-    "qgis": "3.44 target; trace pending",
+    "qgis": "3.44.11-Solothurn",
     "pg_rest_server_revision": "b7915d3c3361f0fee45de6e292e62f6f6186375f"
   },
   "identity_policy": {
@@ -176,6 +176,32 @@
         { "name": "indisvalid", "type_oid": 16, "nullable": false },
         { "name": "indisreplident", "type_oid": 16, "nullable": false },
         { "name": "indkey", "type_oid": 22, "nullable": false }
+      ]
+    },
+    {
+      "name": "geometry_columns",
+      "stage": "C5",
+      "trace_status": "implemented_generic_role_aware_pgwire",
+      "required_columns": [
+        { "name": "f_table_catalog", "type_oid": 1043, "nullable": false },
+        { "name": "f_table_schema", "type_oid": 19, "nullable": false },
+        { "name": "f_table_name", "type_oid": 19, "nullable": false },
+        { "name": "f_geometry_column", "type_oid": 19, "nullable": false },
+        { "name": "coord_dimension", "type_oid": 23, "nullable": false },
+        { "name": "srid", "type_oid": 23, "nullable": false },
+        { "name": "type", "type_oid": 1043, "nullable": false }
+      ]
+    },
+    {
+      "name": "spatial_ref_sys",
+      "stage": "C5",
+      "trace_status": "implemented_typed_empty_no_authoritative_crs_registry",
+      "required_columns": [
+        { "name": "srid", "type_oid": 23, "nullable": true },
+        { "name": "auth_name", "type_oid": 1043, "nullable": true },
+        { "name": "auth_srid", "type_oid": 23, "nullable": true },
+        { "name": "srtext", "type_oid": 1043, "nullable": true },
+        { "name": "proj4text", "type_oid": 1043, "nullable": true }
       ]
     },
     {
@@ -464,6 +490,35 @@
         { "name": "indisreplident", "type_oid": 16, "nullable": false },
         { "name": "indkey", "type_oid": 22, "nullable": false },
         { "name": "definition", "type_oid": 25, "nullable": true }
+      ]
+    },
+    {
+      "id": "generic_spatial_column_discovery",
+      "stage": "C5",
+      "trace_status": "implemented_role_aware_pgwire",
+      "protocol": "extended",
+      "consumers": ["GDAL/OGR 3.11.5", "QGIS 3.44.11"],
+      "sql": "SELECT type, coord_dimension, srid FROM geometry_columns WHERE f_table_name = $1 AND f_geometry_column = $2 AND f_table_schema = $3",
+      "parameter_type_oids": [25, 25, 25],
+      "expected_columns": [
+        { "name": "type", "type_oid": 1043, "nullable": false },
+        { "name": "coord_dimension", "type_oid": 23, "nullable": false },
+        { "name": "srid", "type_oid": 23, "nullable": false }
+      ]
+    },
+    {
+      "id": "spatial_reference_discovery",
+      "stage": "C5",
+      "trace_status": "implemented_typed_empty_no_authoritative_crs_registry",
+      "protocol": "extended",
+      "consumers": ["GDAL/OGR 3.11.5", "QGIS 3.44.11"],
+      "sql": "SELECT auth_name, auth_srid, srtext, proj4text FROM spatial_ref_sys WHERE srid = $1",
+      "parameter_type_oids": [23],
+      "expected_columns": [
+        { "name": "auth_name", "type_oid": 1043, "nullable": true },
+        { "name": "auth_srid", "type_oid": 23, "nullable": true },
+        { "name": "srtext", "type_oid": 1043, "nullable": true },
+        { "name": "proj4text", "type_oid": 1043, "nullable": true }
       ]
     },
     {

@@ -413,6 +413,8 @@ fn unqualified_pg_catalog_name(name: &ObjectName) -> bool {
                 | "pg_collation"
                 | "pg_roles"
                 | "pg_auth_members"
+                | "geometry_columns"
+                | "spatial_ref_sys"
         )
     })
 }

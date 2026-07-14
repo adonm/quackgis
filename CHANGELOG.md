@@ -79,8 +79,12 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   portal paging.
 - Failed explicit transactions reject subsequent simple/extended work with
   `25P02`; `COMMIT` rolls back prior writes and returns the session to service.
-- DuckDB Spatial execution with 42 curated original-PostGIS expressions routed
+- DuckDB Spatial execution with 43 curated original-PostGIS expressions routed
   through native functions or bounded server-owned rewrites/macros.
+- Role-bound generic `geometry_columns`, discoverable `geometry_columns` and
+  typed-empty `spatial_ref_sys` metadata relations, CRS/SRID and DuckDB version
+  probes, plus textual 2D/3D extent aggregates over WKB. Subtype/dimension/SRID
+  claims are not inferred, and SRID assignment remains fail-closed.
 - Checksum/version validation for `libduckdb` and signed `spatial`/`ducklake`
   extensions, plus a load-only runtime image contract.
 - DataFusion-free Arrow-to-pgwire encoder with maintained WKB sentinel identity.

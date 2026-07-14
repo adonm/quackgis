@@ -87,6 +87,11 @@ The required real-driver workflow proves:
   `pg_get_constraintdef`; `pg_index` has its maintained PostgreSQL shape and
   OID-22 `int2vector` wire identity but is empty, because DuckLake cannot enforce
   primary, unique, foreign-key, check, or index semantics;
+- role-bound generic `geometry_columns` rows for native geometry and maintained
+  WKB geometry-name sentinels, typed-empty `spatial_ref_sys`, discoverability
+  through `information_schema.tables`, empty-geometry `ST_SRID`, DuckDB-backed
+  version probes, and textual `ST_Extent`/`ST_3DExtent`; the contract reports
+  `GEOMETRY`, dimension 2, SRID 0 rather than inferring unenforced metadata;
 - exact transaction-local `request.jwt.claims` assignment through one text literal
   or `$1`, bounded at 16 KiB/setting and 32 KiB/session, plus PostgreSQL `text`
   retrieval with NULL-on-missing behavior; actual pgwire proves outside-
@@ -101,7 +106,7 @@ The required real-driver workflow proves:
   explicitly configured identity; arbitrary procedures remain unsupported;
 - Arrow result encoding for maintained scalar types, with generated WKB payload/
   null and fixed-binary properties; and
-- 42 curated spatial cases sent with their original PostGIS spelling through the
+- 43 curated spatial cases sent with their original PostGIS spelling through the
   real server, using DuckDB Spatial plus bounded QuackGIS rewrites/macros.
 
 Run the evidence:
@@ -118,8 +123,8 @@ mise exec -- just ci
 | `psql` / PostgreSQL protocol clients | bounded simple/extended protocol supported; TLS/SCRAM scalar smoke passes with psql 18.3 in rootless-Podman Kind |
 | `tokio-postgres` | maintained real-driver integration client |
 | PostgreSQL text COPY clients | bounded maintained type set supported |
-| GDAL/OGR | 3.11.5 TLS/SCRAM scalar smoke passes in Kind after structural encoding/string/search-path probes; copied-data discovery and optional `ST_SRID` remain open |
-| QGIS | PostgreSQL 18.4/PostGIS oracle frozen for exact 3.44.11 headless read workflow; QuackGIS execution remains blocked on traced catalog/privilege/spatial surfaces |
+| GDAL/OGR | 3.11.5 TLS/SCRAM scalar smoke passes in Kind; traced generic spatial metadata/SRID/extent query shapes pass focused actual pgwire, while the copied-data client workflow and no-FID behavior remain open |
+| QGIS | PostgreSQL 18.4/PostGIS oracle frozen for exact 3.44.11 headless read workflow; focused traced spatial metadata/version/extent surfaces pass, but full QuackGIS client execution and generic SRID 0 behavior remain unqualified |
 | GeoServer, Martin | target; client traces and QuackGIS qualification remain open |
 | psycopg | 3.2.13 TLS/SCRAM scalar smoke passes in Kind; copied-data workflow remains open |
 | SQLAlchemy, GeoPandas, pg_featureserv | target; named dependency workflows remain open |
@@ -134,15 +139,18 @@ function spellings without touching quoted SQL text or comments:
 - `ST_MakePoint` → `ST_Point`;
 - `ST_NumPoints` → `ST_NPoints`;
 - `ST_GeomFromEWKT`, `ST_AsHEXEWKB`, `GeometryType`, `ST_GeometryType`,
-  `ST_CurveToLine`, and `ST_HasArc` → bounded QuackGIS-owned DuckDB macros; and
-- `postgis_lib_version()` / `postgis_version()` → compatibility markers.
+  `ST_CurveToLine`, `ST_HasArc`, `ST_SRID`, `ST_Extent`, and `ST_3DExtent` →
+  bounded QuackGIS-owned DuckDB macros; and
+- `postgis_lib_version()`, `postgis_version()`, `postgis_geos_version()`, and
+  `postgis_proj_version()` → compatibility/runtime markers.
 
 The 57-case ledger currently classifies 31 native DuckDB cases, five rewrites,
-six macros, 10 Rust/catalog-edge gaps, and five extension candidates. The first
-42 execute through pgwire; the remaining 15 have ledger-pinned `0A000` behavior
-through simple and extended protocol. SRID-preserving EWKB behavior, geography,
-dimensions, general `ST_GeometryN`, extent/catalog helpers, MVT, and broad PostGIS
-catalog surfaces remain open unless a focused test says otherwise.
+seven macros, nine Rust/catalog-edge gaps, and five extension candidates. The first
+43 execute through pgwire; the remaining 14 have ledger-pinned `0A000` behavior
+through simple and extended protocol. SRID assignment/preservation, geography,
+authoritative subtype/dimension/CRS metadata, PostGIS box wire identity, general
+`ST_GeometryN`, `Find_SRID`, MVT, and broad PostGIS catalog surfaces remain open
+unless a focused test says otherwise.
 
 ## Deliberate runtime limits
 
