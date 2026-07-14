@@ -68,6 +68,13 @@ The required real-driver workflow proves:
   PUBLIC grants, and false grant/admin options; name-literal objects work in the
   official lane, while OID/catalog-expression and exact column lookup require
   durable catalog identity;
+- role-bound PostgreSQL 18 `information_schema.schemata`, `tables`, `columns`,
+  `table_privileges`, `role_table_grants`, `column_privileges`, and
+  `role_column_grants`; authoritative DuckDB metadata supplies existing objects
+  and columns, effective-role decisions are intersected with the legacy
+  identity/allowlist ceiling, identifier/character fields advertise
+  `name`/`varchar`, PUBLIC is excluded from `role_*`, and `MAINTAIN` is excluded
+  from the standard privilege views;
 - exact transaction-local `request.jwt.claims` assignment through one text literal
   or `$1`, bounded at 16 KiB/setting and 32 KiB/session, plus PostgreSQL `text`
   retrieval with NULL-on-missing behavior; actual pgwire proves outside-
@@ -132,8 +139,8 @@ catalog surfaces remain open unless a focused test says otherwise.
   it remains constrained by the write table allowlist and cannot run inside an
   explicit transaction.
 - Configured owners and grants now enforce maintained table operations and feed
-  bounded privilege inquiry, but privilege-aware information schema remains
-  open. Legacy read/write/maintenance identities and table allowlists remain an
+  bounded privilege inquiry plus role-aware schema/table/column/grant discovery.
+  Legacy read/write/maintenance identities and table allowlists remain an
   outer ceiling. Role switching cannot inherit the login's coarse access unless
   the effective role has the matching configured grant. `SET LOCAL ROLE` outside a transaction fails
   with `25001`, a bounded divergence from PostgreSQL's warning/no-op behavior.
@@ -196,9 +203,9 @@ catalog surfaces remain open unless a focused test says otherwise.
   matching predicates, and arbitrary or oversized probe expressions are
   deliberately left unoptimized; malformed/ambiguous reserved layouts fail
   closed. This is functional evidence, not a scan-byte or scale claim.
-- `pg_catalog`, `information_schema`, broad spatial discovery, and GIS client-specific
-  metadata are incomplete. A client-neutral executable fixture structurally maps
-  explicit and implicit namespace/database/type/range/collation/owner-role
+- `pg_catalog`, unmaintained `information_schema`, broad spatial discovery, and
+  GIS client-specific metadata are incomplete. A client-neutral executable
+  fixture structurally maps explicit and implicit namespace/database/type/range/collation/owner-role
   references to private views. It proves stable logical database/schema/search-path
   discovery with `name`/`name[]` wire types, 24 exact PostgreSQL 18 profile/QGIS
   built-ins plus
@@ -233,10 +240,10 @@ catalog surfaces remain open unless a focused test says otherwise.
   NULL transport are tested through pgwire for geometry and the maintained
   `geog` convention for geography; subtype/SRID/dimension catalog identity remains
   open.
-- PostgreSQL roles, memberships, object ownership/grants, `SET ROLE`, privilege
-  inquiry functions, transaction-local request claims, RLS, and role-aware
-  OpenAPI are not implemented. Current startup identities and table allowlists
-  must not be described as PostgreSQL RBAC.
+- Mutable PostgreSQL role/grant DDL, RLS, and role-aware OpenAPI are not
+  implemented. The immutable configured role model is table/operation RBAC, not
+  RLS; legacy startup identities and table allowlists remain a separate outer
+  ceiling.
 - Arrow schema mapping and encoding are tested together for Float16, UInt32 OID
   aliases, Float16/fixed-binary lists, WKB, fixed binary, NULLs, invalid JSON, and
   nested error propagation. Unsupported list layouts fail during schema mapping;

@@ -38,8 +38,10 @@ maintenance while legacy allowlists remain an outer ceiling. Relational
 credential material. Bounded `pg_has_role`, `has_schema_privilege`,
 `has_table_privilege`, `has_any_column_privilege`, and `has_column_privilege`
 inquiry consumes the same immutable decisions; OID/expression object lookup is
-available only with durable catalog identity. The exact
-transaction-local
+available only with durable catalog identity. Maintained role-aware
+`information_schema` views expose visible schemas, tables, columns, table grants,
+and table-derived column grants with PostgreSQL `name`/`varchar` wire identity.
+The exact transaction-local
 `set_config('request.jwt.claims', $1, true)`/`current_setting(..., true)` flow is
 bounded at the protocol edge; arbitrary DuckDB settings are not exposed.
 

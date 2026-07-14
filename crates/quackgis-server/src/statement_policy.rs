@@ -95,7 +95,9 @@ pub fn authorize_statement(
 
     if auth.read_policy_restricted() || auth.role_catalog().is_some() {
         let targets = read_targets(statement);
-        if targets.sensitive_metadata {
+        if targets.sensitive_metadata
+            || (targets.maintained_information_schema && auth.role_catalog().is_none())
+        {
             record_denial(
                 effective_role,
                 statement_kind(statement),
@@ -270,6 +272,7 @@ fn required_write_privilege(statement: &Statement) -> Option<TableWritePrivilege
 struct ReadTargets {
     tables: Vec<TableKey>,
     sensitive_metadata: bool,
+    maintained_information_schema: bool,
 }
 
 fn read_targets(statement: &Statement) -> ReadTargets {
@@ -362,7 +365,9 @@ fn collect_name_target(name: &ObjectName, ctes: &HashSet<String>, targets: &mut 
         .unwrap_or_default()
         .trim_matches('"')
         .to_ascii_lowercase();
-    if schema == "information_schema" || sensitive_metadata_name(name) {
+    if schema == "information_schema" && maintained_information_schema_name(name) {
+        targets.maintained_information_schema = true;
+    } else if schema == "information_schema" || sensitive_metadata_name(name) {
         targets.sensitive_metadata = true;
     } else if !matches!(schema.as_str(), "pg_catalog" | "quackgis_pg_catalog")
         && !unqualified_pg_catalog_name(name)
@@ -370,6 +375,22 @@ fn collect_name_target(name: &ObjectName, ctes: &HashSet<String>, targets: &mut 
     {
         targets.tables.push(TableKey { schema, table });
     }
+}
+
+fn maintained_information_schema_name(name: &ObjectName) -> bool {
+    name.0.len() == 2
+        && object_name_last(name).is_some_and(|name| {
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                "schemata"
+                    | "tables"
+                    | "columns"
+                    | "table_privileges"
+                    | "role_table_grants"
+                    | "column_privileges"
+                    | "role_column_grants"
+            )
+        })
 }
 
 fn unqualified_pg_catalog_name(name: &ObjectName) -> bool {

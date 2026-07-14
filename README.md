@@ -64,9 +64,10 @@ Important limits:
   statements behind the legacy allowlist ceiling; relational `pg_roles` and
   `pg_auth_members` project stable identities/options without credentials, and
   bounded `pg_has_role`/schema/table/column inquiry uses the same role decisions;
-  privilege-aware information schema and role-aware OpenAPI remain open; bounded
-  transaction-local `request.jwt.claims` context is implemented for the future
-  authenticator flow; and
+  role-filtered `information_schema` schema/table/column and portable table/column
+  grant views use those decisions and PostgreSQL 18 wire types; role-aware OpenAPI
+  remains open; bounded transaction-local `request.jwt.claims` context is
+  implemented for the future authenticator flow; and
 - remote/shared catalog and object-storage profiles fail closed.
 
 TLS remains optional for local development. Set `QUACKGIS_TLS_MODE=required` with

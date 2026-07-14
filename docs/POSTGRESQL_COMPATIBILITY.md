@@ -55,20 +55,25 @@ and complete PostgREST compatibility remain non-goals.
 
 ## Current floor
 
-The current runtime has only a bootstrap contract:
+The current runtime has a bounded compatibility contract:
 
-- DuckDB-derived `information_schema.columns` supports the read-only REST preview;
+- when an immutable role file is configured, DuckDB-derived role-bound maintained
+  `information_schema` views expose visible schemas, tables, columns, table
+  grants, and table-derived column grants;
 - `public` relation names are structurally mapped to DuckDB/DuckLake `main`;
 - geometry and geography use two maintained pgwire type OIDs;
 - process-local relational `pg_namespace`, `pg_type`, and `pg_range` views expose
   the two spatial OIDs through structurally rewritten explicit catalog references;
-- RowDescription and text/binary/NULL WKB transport are tested; and
-- broad `pg_catalog` and restricted-user metadata access fail closed.
+- RowDescription and text/binary/NULL WKB transport are tested;
+- immutable roles, memberships, grants, role switching, and privilege inquiry
+  use one authorization decision; and
+- broad unmaintained `pg_catalog`/`information_schema` access fails closed.
 
-This does not yet provide user-object PostgreSQL catalogs, stable relation OIDs,
-source relation/attribute identity in RowDescription, PostgreSQL roles, ACLs,
-role switching, or role-aware OpenAPI. The spatial type views are the first
-relational C3 slice, not a broad catalog claim.
+The checksum-pinned development identity lane additionally provides stable
+user-object relation/attribute identity and RowDescription origins. That lane is
+not release-supported until the upstream identity API ships in a signed bundle.
+Constraints/indexes/defaults/comments/spatial metadata and role-aware OpenAPI
+remain incomplete; this is not a broad PostgreSQL catalog claim.
 
 The first target contract is frozen in
 `tests/fixtures/postgresql18_compatibility_profile.json`. Its normalized result
@@ -615,9 +620,19 @@ inherited USAGE, and SET reachability. Name-literal object inquiry passes the
 official DuckLake SCRAM workflow; OID/catalog-expression inquiry and exact column
 existence resolve through durable catalog identity and fail closed without it.
 Actual pgwire cases prove writer ownership, PUBLIC schema usage, ungranted denial,
-and SELECT-only inquiry agree with allowed SELECT and denied INSERT. Privilege-
-aware information-schema visibility and the traced constraint/index/default/
-comment/spatial catalogs remain open C5 work.
+and SELECT-only inquiry agree with allowed SELECT and denied INSERT. Role-aware
+`information_schema.schemata`, `tables`, `columns`, `table_privileges`,
+`role_table_grants`, `column_privileges`, and `role_column_grants` bind the
+effective role at the structural pgwire edge, derive object/column existence from
+DuckDB, and advertise PostgreSQL 18 `name`/`varchar` result identity. Table
+visibility intersects the common schema-USAGE/table-operation decision with the
+legacy identity/allowlist ceiling; owner, direct, inherited, and PUBLIC cases pass
+actual pgwire alongside ungranted denial. Standard privilege views omit
+QuackGIS-only `MAINTAIN`, expand eligible table grants across columns, exclude
+PUBLIC from the `role_*` variants, and report immutable grants as non-grantable.
+Role changes invalidate prepared discovery statements rather than retaining a
+stale role literal. The traced constraint/index/default/comment/spatial catalogs
+remain open C5 work.
 
 ### C6 — qualify named clients
 

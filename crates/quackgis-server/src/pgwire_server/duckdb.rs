@@ -44,8 +44,9 @@ use sqlparser::ast::{
     BinaryOperator, ContextModifier, CopySource, CopyTarget as AstCopyTarget, Expr, Function,
     FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, GroupByExpr, Ident,
     JoinConstraint, JoinOperator, ObjectName, ObjectNamePart, Reset, SelectFlavor, SelectItem,
-    SelectItemQualifiedWildcardKind, Set, SetExpr, Statement, TableFactor, Value,
-    WildcardAdditionalOptions, visit_expressions, visit_expressions_mut, visit_relations_mut,
+    SelectItemQualifiedWildcardKind, Set, SetExpr, Statement, TableFactor, Value, VisitMut,
+    VisitorMut, WildcardAdditionalOptions, visit_expressions, visit_expressions_mut,
+    visit_relations_mut,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
@@ -126,12 +127,14 @@ impl DuckDbHandlerFactory {
         options: &ServerOptions,
     ) -> Result<Self, std::io::Error> {
         if let Some(catalog) = auth.role_catalog() {
-            storage.install_role_catalog(catalog).map_err(|error| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("invalid PostgreSQL role catalog: {error}"),
-                )
-            })?;
+            storage
+                .install_role_catalog(catalog, &auth)
+                .map_err(|error| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("invalid PostgreSQL role catalog: {error}"),
+                    )
+                })?;
         }
         let manager = Arc::new(ConnectionManager::new());
         let admission = Arc::new(AdmissionController::new(
@@ -1325,6 +1328,12 @@ fn validate_statement_with_catalog_identity(
             &format!("PostgreSQL catalog relation {relation} is not implemented by QuackGIS"),
         ));
     }
+    if invalid_information_schema_factor(&statement) {
+        return Err(user_error(
+            "0A000",
+            "PostgreSQL information-schema relations do not accept table-function modifiers",
+        ));
+    }
     if !catalog_query_shape_supported(&statement) {
         return Err(user_error(
             "0A000",
@@ -1376,6 +1385,13 @@ fn validate_statement_with_catalog_identity(
     } else {
         let mut execution = statement.clone();
         rewrite_public_relations(&mut execution);
+        if let (Some(identity), Some(_)) = (identity, role_catalog) {
+            rewrite_information_schema_relations(
+                &mut execution,
+                &identity.current_user,
+                &identity.session_user,
+            );
+        }
         rewrite_pg_catalog_relations(&mut execution);
         if let (Some(identity), Some(role_catalog)) = (identity, role_catalog) {
             rewrite_privilege_inquiry(
@@ -1962,6 +1978,66 @@ fn rewrite_pg_catalog_relations(statement: &mut Statement) {
         }
         ControlFlow::Continue(())
     });
+}
+
+struct InformationSchemaRewriter<'a> {
+    effective_role: &'a str,
+    session_user: &'a str,
+}
+
+impl VisitorMut for InformationSchemaRewriter<'_> {
+    type Break = ();
+
+    fn pre_visit_table_factor(
+        &mut self,
+        table_factor: &mut TableFactor,
+    ) -> ControlFlow<Self::Break> {
+        let TableFactor::Table { name, args, .. } = table_factor else {
+            return ControlFlow::Continue(());
+        };
+        let Some(relation) = maintained_information_schema_relation(name) else {
+            return ControlFlow::Continue(());
+        };
+        *name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(
+            information_schema_macro(relation),
+        ))]);
+        *args = Some(sqlparser::ast::TableFunctionArgs {
+            args: [self.effective_role, self.session_user]
+                .into_iter()
+                .map(|value| {
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
+                        Value::SingleQuotedString(value.to_owned()).into(),
+                    )))
+                })
+                .collect(),
+            settings: None,
+        });
+        ControlFlow::Continue(())
+    }
+}
+
+fn rewrite_information_schema_relations(
+    statement: &mut Statement,
+    effective_role: &str,
+    session_user: &str,
+) {
+    let _ = statement.visit(&mut InformationSchemaRewriter {
+        effective_role,
+        session_user,
+    });
+}
+
+fn information_schema_macro(relation: &str) -> &'static str {
+    match relation {
+        "schemata" => "quackgis_information_schema_schemata",
+        "tables" => "quackgis_information_schema_tables",
+        "columns" => "quackgis_information_schema_columns",
+        "table_privileges" => "quackgis_information_schema_table_privileges",
+        "role_table_grants" => "quackgis_information_schema_role_table_grants",
+        "column_privileges" => "quackgis_information_schema_column_privileges",
+        "role_column_grants" => "quackgis_information_schema_role_column_grants",
+        _ => unreachable!("maintained information-schema relation"),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3052,6 +3128,34 @@ fn maintained_pg_catalog_relation(name: &ObjectName) -> Option<&'static str> {
     .find(|candidate| pg_identifier_matches(table, candidate))
 }
 
+fn maintained_information_schema_relation(name: &ObjectName) -> Option<&'static str> {
+    let [
+        ObjectNamePart::Identifier(schema),
+        ObjectNamePart::Identifier(table),
+    ] = name.0.as_slice()
+    else {
+        return None;
+    };
+    if !pg_identifier_matches(schema, "information_schema") {
+        return None;
+    }
+    [
+        "schemata",
+        "tables",
+        "columns",
+        "table_privileges",
+        "role_table_grants",
+        "column_privileges",
+        "role_column_grants",
+    ]
+    .into_iter()
+    .find(|candidate| pg_identifier_matches(table, candidate))
+}
+
+fn maintained_catalog_relation(name: &ObjectName) -> Option<&'static str> {
+    maintained_pg_catalog_relation(name).or_else(|| maintained_information_schema_relation(name))
+}
+
 fn identity_catalog_relation(relation: &str) -> bool {
     matches!(relation, "pg_class" | "pg_attribute")
 }
@@ -3080,6 +3184,14 @@ fn unsupported_catalog_relation(
     let mut unsupported = None;
     let _: ControlFlow<()> = visit_relations_mut(&mut clone, |name| {
         let Some((table, explicitly_catalog)) = catalog_relation_identifier(name) else {
+            if information_schema_relation_identifier(name).is_some()
+                && maintained_information_schema_relation(name).is_none()
+            {
+                unsupported = information_schema_relation_identifier(name).map(|table| {
+                    format!("information_schema.{}", table.value.to_ascii_lowercase())
+                });
+                return ControlFlow::Break(());
+            }
             return ControlFlow::Continue(());
         };
         let lower_table = table.value.to_ascii_lowercase();
@@ -3098,6 +3210,75 @@ fn unsupported_catalog_relation(
         }
     });
     unsupported
+}
+
+fn information_schema_relation_identifier(name: &ObjectName) -> Option<&Ident> {
+    match name.0.as_slice() {
+        [
+            ObjectNamePart::Identifier(schema),
+            ObjectNamePart::Identifier(table),
+        ] if pg_identifier_matches(schema, "information_schema") => Some(table),
+        _ => None,
+    }
+}
+
+fn invalid_information_schema_factor(statement: &Statement) -> bool {
+    struct Validator {
+        invalid: bool,
+    }
+
+    impl sqlparser::ast::Visitor for Validator {
+        type Break = ();
+
+        fn pre_visit_table_factor(
+            &mut self,
+            table_factor: &TableFactor,
+        ) -> ControlFlow<Self::Break> {
+            let invalid = match table_factor {
+                TableFactor::Table {
+                    name,
+                    alias,
+                    args,
+                    with_hints,
+                    version,
+                    with_ordinality,
+                    partitions,
+                    json_path,
+                    sample,
+                    index_hints,
+                } if maintained_information_schema_relation(name).is_some() => {
+                    args.is_some()
+                        || alias
+                            .as_ref()
+                            .is_some_and(|alias| !alias.columns.is_empty())
+                        || !with_hints.is_empty()
+                        || version.is_some()
+                        || *with_ordinality
+                        || !partitions.is_empty()
+                        || json_path.is_some()
+                        || sample.is_some()
+                        || !index_hints.is_empty()
+                }
+                TableFactor::Function { name, .. }
+                    if maintained_information_schema_relation(name).is_some() =>
+                {
+                    true
+                }
+                _ => false,
+            };
+            if invalid {
+                self.invalid = true;
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        }
+    }
+
+    use sqlparser::ast::Visit;
+    let mut validator = Validator { invalid: false };
+    let _ = statement.visit(&mut validator);
+    validator.invalid
 }
 
 fn reserved_catalog_cte(statement: &Statement) -> Option<String> {
@@ -3215,7 +3396,7 @@ fn catalog_query_shape_supported(statement: &Statement) -> bool {
     let mut clone = statement.clone();
     let mut relation_count = 0usize;
     let _: ControlFlow<()> = visit_relations_mut(&mut clone, |name| {
-        if maintained_pg_catalog_relation(name).is_some() {
+        if maintained_catalog_relation(name).is_some() {
             relation_count += 1;
         }
         ControlFlow::Continue(())
@@ -3257,15 +3438,16 @@ fn catalog_query_shape_supported(statement: &Statement) -> bool {
     if nested_or_stale {
         return false;
     }
+    let aliases = top_level_catalog_aliases(statement);
     if select.projection.iter().any(|item| {
         matches!(
             item,
             SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _)
         )
     }) {
-        return false;
+        return information_schema_wildcard_projection(select, &aliases)
+            && aliases.len() == relation_count;
     }
-    let aliases = top_level_catalog_aliases(statement);
     if select.projection.iter().any(|item| {
         let expression = match item {
             SelectItem::UnnamedExpr(expression)
@@ -3280,6 +3462,46 @@ fn catalog_query_shape_supported(statement: &Statement) -> bool {
         return false;
     }
     aliases.len() == relation_count
+}
+
+fn information_schema_wildcard_projection(
+    select: &sqlparser::ast::Select,
+    aliases: &HashMap<String, &'static str>,
+) -> bool {
+    if aliases.len() != 1 {
+        return false;
+    }
+    let (alias, relation) = aliases.iter().next().expect("one catalog alias");
+    if !information_schema_relation(relation) {
+        return false;
+    }
+    match select.projection.as_slice() {
+        [SelectItem::Wildcard(options)] => plain_wildcard(options),
+        [
+            SelectItem::QualifiedWildcard(
+                SelectItemQualifiedWildcardKind::ObjectName(name),
+                options,
+            ),
+        ] => {
+            plain_wildcard(options)
+                && matches!(name.0.as_slice(), [ObjectNamePart::Identifier(identifier)]
+                    if identifier_key(identifier).as_str() == alias.as_str())
+        }
+        _ => false,
+    }
+}
+
+fn information_schema_relation(relation: &str) -> bool {
+    matches!(
+        relation,
+        "schemata"
+            | "tables"
+            | "columns"
+            | "table_privileges"
+            | "role_table_grants"
+            | "column_privileges"
+            | "role_column_grants"
+    )
 }
 
 fn join_uses_implicit_catalog_columns(operator: &JoinOperator) -> bool {
@@ -3527,9 +3749,9 @@ fn forbidden_catalog_function_name(name: &ObjectName) -> Option<String> {
         _ => return None,
     };
     let lower = function.value.to_ascii_lowercase();
-    ["query", "query_table", "ducklake_column_info"]
-        .contains(&lower.as_str())
-        .then_some(lower)
+    (["query", "query_table", "ducklake_column_info"].contains(&lower.as_str())
+        || lower.starts_with("quackgis_information_schema_"))
+    .then_some(lower)
 }
 
 fn forbidden_catalog_function_in_query(query: &sqlparser::ast::Query) -> Option<String> {
@@ -3627,15 +3849,22 @@ fn invalid_quoted_catalog_reference(statement: &Statement) -> bool {
             _ => return ControlFlow::Continue(()),
         };
         let catalog_schema = schema.is_none()
-            || schema.is_some_and(|schema| schema.value.eq_ignore_ascii_case("pg_catalog"));
+            || schema.is_some_and(|schema| {
+                schema.value.eq_ignore_ascii_case("pg_catalog")
+                    || schema.value.eq_ignore_ascii_case("information_schema")
+            });
         let invalid_schema = schema.is_some_and(|schema| {
-            schema.value.eq_ignore_ascii_case("pg_catalog")
-                && !pg_identifier_matches(schema, "pg_catalog")
+            (schema.value.eq_ignore_ascii_case("pg_catalog")
+                && !pg_identifier_matches(schema, "pg_catalog"))
+                || (schema.value.eq_ignore_ascii_case("information_schema")
+                    && !pg_identifier_matches(schema, "information_schema"))
         });
         let lower_table = table.value.to_ascii_lowercase();
         let invalid_table = table.quote_style.is_some()
-            && lower_table.starts_with("pg_")
-            && table.value != lower_table;
+            && table.value != lower_table
+            && (lower_table.starts_with("pg_")
+                || schema
+                    .is_some_and(|schema| schema.value.eq_ignore_ascii_case("information_schema")));
         if catalog_schema && (invalid_schema || invalid_table) {
             invalid_relation = true;
             return ControlFlow::Break(());
@@ -3734,7 +3963,7 @@ fn collect_catalog_alias(factor: &TableFactor, aliases: &mut HashMap<String, &'s
     let TableFactor::Table { name, alias, .. } = factor else {
         return;
     };
-    let Some(relation) = maintained_pg_catalog_relation(name) else {
+    let Some(relation) = maintained_catalog_relation(name) else {
         return;
     };
     let identifier = alias
@@ -3806,6 +4035,62 @@ fn catalog_columns(relation: &str) -> &'static [(&'static str, PgTypeHint)] {
             ("roleid", PgTypeHint::Oid),
             ("member", PgTypeHint::Oid),
             ("grantor", PgTypeHint::Oid),
+        ],
+        "schemata" => &[
+            ("catalog_name", PgTypeHint::Name),
+            ("schema_name", PgTypeHint::Name),
+            ("schema_owner", PgTypeHint::Name),
+            ("default_character_set_catalog", PgTypeHint::Name),
+            ("default_character_set_schema", PgTypeHint::Name),
+            ("default_character_set_name", PgTypeHint::Name),
+            ("sql_path", PgTypeHint::Varchar),
+        ],
+        "tables" => &[
+            ("table_catalog", PgTypeHint::Name),
+            ("table_schema", PgTypeHint::Name),
+            ("table_name", PgTypeHint::Name),
+            ("table_type", PgTypeHint::Varchar),
+            ("self_referencing_column_name", PgTypeHint::Name),
+            ("reference_generation", PgTypeHint::Varchar),
+            ("user_defined_type_catalog", PgTypeHint::Name),
+            ("user_defined_type_schema", PgTypeHint::Name),
+            ("user_defined_type_name", PgTypeHint::Name),
+            ("is_insertable_into", PgTypeHint::Varchar),
+            ("is_typed", PgTypeHint::Varchar),
+            ("commit_action", PgTypeHint::Varchar),
+        ],
+        "columns" => &[
+            ("table_catalog", PgTypeHint::Name),
+            ("table_schema", PgTypeHint::Name),
+            ("table_name", PgTypeHint::Name),
+            ("column_name", PgTypeHint::Name),
+            ("column_default", PgTypeHint::Varchar),
+            ("is_nullable", PgTypeHint::Varchar),
+            ("data_type", PgTypeHint::Varchar),
+            ("udt_schema", PgTypeHint::Name),
+            ("udt_name", PgTypeHint::Name),
+            ("is_identity", PgTypeHint::Varchar),
+            ("is_generated", PgTypeHint::Varchar),
+        ],
+        "table_privileges" | "role_table_grants" => &[
+            ("grantor", PgTypeHint::Name),
+            ("grantee", PgTypeHint::Name),
+            ("table_catalog", PgTypeHint::Name),
+            ("table_schema", PgTypeHint::Name),
+            ("table_name", PgTypeHint::Name),
+            ("privilege_type", PgTypeHint::Varchar),
+            ("is_grantable", PgTypeHint::Varchar),
+            ("with_hierarchy", PgTypeHint::Varchar),
+        ],
+        "column_privileges" | "role_column_grants" => &[
+            ("grantor", PgTypeHint::Name),
+            ("grantee", PgTypeHint::Name),
+            ("table_catalog", PgTypeHint::Name),
+            ("table_schema", PgTypeHint::Name),
+            ("table_name", PgTypeHint::Name),
+            ("column_name", PgTypeHint::Name),
+            ("privilege_type", PgTypeHint::Varchar),
+            ("is_grantable", PgTypeHint::Varchar),
         ],
         _ => &[],
     }
@@ -3896,6 +4181,63 @@ fn catalog_column_names(relation: &str) -> &'static [&'static str] {
             "inherit_option",
             "set_option",
         ],
+        "schemata" => &[
+            "catalog_name",
+            "schema_name",
+            "schema_owner",
+            "default_character_set_catalog",
+            "default_character_set_schema",
+            "default_character_set_name",
+            "sql_path",
+        ],
+        "tables" => &[
+            "table_catalog",
+            "table_schema",
+            "table_name",
+            "table_type",
+            "self_referencing_column_name",
+            "reference_generation",
+            "user_defined_type_catalog",
+            "user_defined_type_schema",
+            "user_defined_type_name",
+            "is_insertable_into",
+            "is_typed",
+            "commit_action",
+        ],
+        "columns" => &[
+            "table_catalog",
+            "table_schema",
+            "table_name",
+            "column_name",
+            "ordinal_position",
+            "column_default",
+            "is_nullable",
+            "data_type",
+            "udt_schema",
+            "udt_name",
+            "is_identity",
+            "is_generated",
+        ],
+        "table_privileges" | "role_table_grants" => &[
+            "grantor",
+            "grantee",
+            "table_catalog",
+            "table_schema",
+            "table_name",
+            "privilege_type",
+            "is_grantable",
+            "with_hierarchy",
+        ],
+        "column_privileges" | "role_column_grants" => &[
+            "grantor",
+            "grantee",
+            "table_catalog",
+            "table_schema",
+            "table_name",
+            "column_name",
+            "privilege_type",
+            "is_grantable",
+        ],
         _ => &[],
     }
 }
@@ -3918,6 +4260,11 @@ fn catalog_expression_hint(
         Expr::Identifier(column) if aliases.len() == 1 => {
             catalog_column_hint(aliases.values().next()?, column)
         }
+        Expr::Cast {
+            expr,
+            data_type: sqlparser::ast::DataType::Varchar(_),
+            ..
+        } => catalog_expression_hint(expr, aliases).map(|_| PgTypeHint::Varchar),
         Expr::Cast { data_type, .. } => maintained_cast_hint(data_type),
         Expr::Function(_) => maintained_function_hint(expression),
         Expr::Nested(expression) => catalog_expression_hint(expression, aliases),
@@ -3943,6 +4290,27 @@ fn annotate_catalog_result_schema(statement: &Statement, schema: &Schema) -> Sch
     let SetExpr::Select(select) = query.body.as_ref() else {
         return schema.clone();
     };
+    if select.projection.len() != schema.fields().len()
+        && information_schema_wildcard_projection(select, &aliases)
+    {
+        let relation = aliases
+            .values()
+            .next()
+            .expect("information-schema wildcard has one relation");
+        return Schema::new(
+            schema
+                .fields()
+                .iter()
+                .map(|field| {
+                    catalog_columns(relation)
+                        .iter()
+                        .find_map(|(name, hint)| (field.name() == *name).then_some(*hint))
+                        .map(|hint| with_pg_type_hint(field.as_ref().clone(), hint))
+                        .unwrap_or_else(|| field.as_ref().clone())
+                })
+                .collect::<Vec<_>>(),
+        );
+    }
     if select.projection.len() != schema.fields().len() {
         return schema.clone();
     }
@@ -6041,6 +6409,113 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn information_schema_is_role_bound_structural_and_typed() {
+        let catalog = RoleCatalog::from_json(
+            r#"{
+              "roles":[
+                {"oid":100001,"name":"writer","login":true},
+                {"oid":100002,"name":"reader"}
+              ],
+              "table_owners":[{"table":"places","role":"writer"}],
+              "schema_grants":[
+                {"schema":"public","role":"PUBLIC","privileges":["USAGE"]}
+              ],
+              "table_grants":[
+                {"table":"places","role":"reader","privileges":["SELECT"]}
+              ]
+            }"#,
+        )
+        .expect("role catalog");
+        let identity = SessionIdentity {
+            session_user: "writer".to_owned(),
+            current_user: "reader".to_owned(),
+            epoch: 2,
+            request_context: HashMap::new(),
+        };
+        let validated = validate_statement_with_catalog_identity(
+            "SELECT table_catalog, table_schema, table_name, column_name, \
+                    ordinal_position, data_type, udt_schema, udt_name \
+             FROM information_schema.columns WHERE table_schema = 'public'",
+            ProtocolMode::Extended,
+            false,
+            Some(&identity),
+            Some(&catalog),
+        )
+        .expect("role-aware information schema");
+        assert!(
+            validated
+                .sql
+                .contains("quackgis_information_schema_columns('reader', 'writer')")
+        );
+        let schema = annotate_catalog_result_schema(
+            &validated.ast,
+            &Schema::new(vec![
+                Field::new("table_catalog", DataType::Utf8, false),
+                Field::new("table_schema", DataType::Utf8, false),
+                Field::new("table_name", DataType::Utf8, false),
+                Field::new("column_name", DataType::Utf8, false),
+                Field::new("ordinal_position", DataType::Int32, false),
+                Field::new("data_type", DataType::Utf8, false),
+                Field::new("udt_schema", DataType::Utf8, false),
+                Field::new("udt_name", DataType::Utf8, false),
+            ]),
+        );
+        let expected = [
+            Type::NAME,
+            Type::NAME,
+            Type::NAME,
+            Type::NAME,
+            Type::INT4,
+            Type::VARCHAR,
+            Type::NAME,
+            Type::NAME,
+        ];
+        for (field, expected) in schema.fields().iter().zip(expected) {
+            assert_eq!(
+                field_into_pg_type(field).expect("information-schema type"),
+                expected
+            );
+        }
+
+        for invalid in [
+            "SELECT table_name FROM information_schema.views",
+            "SELECT table_name FROM information_schema.tables()",
+            "SELECT * FROM quackgis_information_schema_tables('writer')",
+        ] {
+            assert!(
+                validate_statement_with_catalog_identity(
+                    invalid,
+                    ProtocolMode::Extended,
+                    false,
+                    Some(&identity),
+                    Some(&catalog),
+                )
+                .is_err(),
+                "unsupported information-schema route accepted: {invalid}"
+            );
+        }
+        validate_statement_with_catalog_identity(
+            "SELECT columns.* FROM information_schema.columns",
+            ProtocolMode::Extended,
+            false,
+            Some(&identity),
+            Some(&catalog),
+        )
+        .expect("maintained information-schema wildcard");
+        validate_statement_with_catalog_identity(
+            "SELECT table_name::VARCHAR, column_name::VARCHAR, data_type::VARCHAR, \
+                    is_nullable::VARCHAR, column_default::VARCHAR \
+             FROM information_schema.columns WHERE table_schema = 'main' \
+             ORDER BY table_name, ordinal_position",
+            ProtocolMode::Extended,
+            false,
+            Some(&identity),
+            Some(&catalog),
+        )
+        .expect("maintained REST information-schema projection");
     }
 
     #[test]

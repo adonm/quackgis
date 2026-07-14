@@ -22,6 +22,7 @@ pub enum PgTypeHint {
     NameArray,
     Char,
     Text,
+    Varchar,
     Regclass,
     Regtype,
     Regnamespace,
@@ -36,6 +37,7 @@ impl PgTypeHint {
             Self::NameArray => "name_array",
             Self::Char => "char",
             Self::Text => "text",
+            Self::Varchar => "varchar",
             Self::Regclass => "regclass",
             Self::Regtype => "regtype",
             Self::Regnamespace => "regnamespace",
@@ -346,6 +348,14 @@ pub fn field_into_pg_type(field: &Arc<Field>) -> PgWireResult<Type> {
             {
                 Type::TEXT
             }
+            "varchar"
+                if matches!(
+                    arrow_type,
+                    DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+                ) =>
+            {
+                Type::VARCHAR
+            }
             "regclass" if matches!(arrow_type, DataType::Int32 | DataType::UInt32) => {
                 Type::REGCLASS
             }
@@ -526,6 +536,12 @@ mod tests {
             ("typname", DataType::Utf8, PgTypeHint::Name, Type::NAME),
             ("typtype", DataType::Utf8, PgTypeHint::Char, Type::CHAR),
             ("formatted", DataType::Utf8, PgTypeHint::Text, Type::TEXT),
+            (
+                "character_data",
+                DataType::Utf8,
+                PgTypeHint::Varchar,
+                Type::VARCHAR,
+            ),
             (
                 "relation",
                 DataType::UInt32,

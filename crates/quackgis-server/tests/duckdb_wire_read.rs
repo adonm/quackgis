@@ -742,6 +742,94 @@ async fn cli_duckdb_backend_serves_an_official_local_catalog() {
     assert!(writer_privileges.get::<_, bool>(2));
     assert!(writer_privileges.get::<_, bool>(3));
     assert!(!writer_privileges.get::<_, bool>(4));
+    let schema = client
+        .prepare(
+            "SELECT catalog_name, schema_name, schema_owner \
+             FROM information_schema.schemata WHERE schema_name = 'public'",
+        )
+        .await
+        .expect("prepare role-aware schema discovery");
+    assert!(
+        schema
+            .columns()
+            .iter()
+            .all(|column| column.type_() == &tokio_postgres::types::Type::NAME)
+    );
+    let schema = client
+        .query_one(&schema, &[])
+        .await
+        .expect("role-aware schema discovery");
+    assert_eq!(schema.get::<_, String>(0), "quackgis");
+    assert_eq!(schema.get::<_, String>(1), "public");
+    assert_eq!(schema.get::<_, String>(2), "quackgis_owner");
+    let information_columns = client
+        .prepare(
+            "SELECT table_catalog, table_schema, table_name, column_name, \
+                    ordinal_position, column_default, is_nullable, data_type, \
+                    udt_schema, udt_name, is_identity, is_generated \
+             FROM information_schema.columns \
+             WHERE table_schema = 'public' AND table_name = 'cli_points' \
+             ORDER BY ordinal_position",
+        )
+        .await
+        .expect("prepare role-aware column discovery");
+    let information_column_types = [
+        tokio_postgres::types::Type::NAME,
+        tokio_postgres::types::Type::NAME,
+        tokio_postgres::types::Type::NAME,
+        tokio_postgres::types::Type::NAME,
+        tokio_postgres::types::Type::INT4,
+        tokio_postgres::types::Type::VARCHAR,
+        tokio_postgres::types::Type::VARCHAR,
+        tokio_postgres::types::Type::VARCHAR,
+        tokio_postgres::types::Type::NAME,
+        tokio_postgres::types::Type::NAME,
+        tokio_postgres::types::Type::VARCHAR,
+        tokio_postgres::types::Type::VARCHAR,
+    ];
+    for (column, expected) in information_columns
+        .columns()
+        .iter()
+        .zip(information_column_types)
+    {
+        assert_eq!(column.type_(), &expected, "{}", column.name());
+    }
+    let information_columns = client
+        .query(&information_columns, &[])
+        .await
+        .expect("role-aware column discovery");
+    assert_eq!(information_columns.len(), 2);
+    assert_eq!(information_columns[0].get::<_, String>(0), "quackgis");
+    assert_eq!(information_columns[0].get::<_, String>(1), "public");
+    assert_eq!(information_columns[0].get::<_, String>(2), "cli_points");
+    assert_eq!(information_columns[0].get::<_, String>(3), "id");
+    assert_eq!(information_columns[0].get::<_, i32>(4), 1);
+    assert_eq!(information_columns[0].get::<_, String>(7), "integer");
+    assert_eq!(information_columns[0].get::<_, String>(8), "pg_catalog");
+    assert_eq!(information_columns[0].get::<_, String>(9), "int4");
+    assert_eq!(information_columns[1].get::<_, String>(3), "name");
+    assert_eq!(information_columns[1].get::<_, String>(7), "text");
+    assert_eq!(information_columns[1].get::<_, String>(9), "text");
+    let writer_information_privileges = client
+        .query(
+            "SELECT grantee, privilege_type, is_grantable, with_hierarchy \
+             FROM information_schema.table_privileges \
+             WHERE table_schema = 'public' AND table_name = 'cli_points' \
+             ORDER BY grantee, privilege_type",
+            &[],
+        )
+        .await
+        .expect("writer-visible table privileges");
+    assert_eq!(writer_information_privileges.len(), 6);
+    assert!(writer_information_privileges.iter().all(|row| {
+        row.get::<_, String>(2) == "NO"
+            && (row.get::<_, String>(1) == "SELECT") == (row.get::<_, String>(3) == "YES")
+    }));
+    assert!(
+        writer_information_privileges
+            .iter()
+            .all(|row| row.get::<_, String>(1) != "MAINTAIN")
+    );
     let denied_maintenance = client
         .batch_execute(
             "CALL quackgis_merge_adjacent_files('main', 'cli_points', 8, 16777216, NULL)",
@@ -768,6 +856,30 @@ async fn cli_duckdb_backend_serves_an_official_local_catalog() {
         .batch_execute("SET ROLE analyst")
         .await
         .expect("assume role without grants");
+    assert_eq!(
+        client
+            .query_one(
+                "SELECT count(*)::BIGINT FROM information_schema.tables \
+                 WHERE table_schema = 'public'",
+                &[],
+            )
+            .await
+            .expect("ungranted role table discovery")
+            .get::<_, i64>(0),
+        0
+    );
+    assert_eq!(
+        client
+            .query_one(
+                "SELECT count(*)::BIGINT FROM information_schema.table_privileges \
+                 WHERE table_schema = 'public'",
+                &[],
+            )
+            .await
+            .expect("ungranted role privilege discovery")
+            .get::<_, i64>(0),
+        0
+    );
     assert!(
         !client
             .query_one(
@@ -790,6 +902,77 @@ async fn cli_duckdb_backend_serves_an_official_local_catalog() {
         .batch_execute("SET ROLE granted_reader")
         .await
         .expect("assume role with SELECT grant");
+    let granted_tables = client
+        .query(
+            "SELECT table_name, is_insertable_into FROM information_schema.tables \
+             WHERE table_schema = 'public' ORDER BY table_name",
+            &[],
+        )
+        .await
+        .expect("SELECT-only role table discovery");
+    assert_eq!(granted_tables.len(), 1);
+    assert_eq!(granted_tables[0].get::<_, String>(0), "cli_points");
+    let granted_information_privileges = client
+        .query(
+            "SELECT grantee, privilege_type FROM information_schema.role_table_grants \
+             WHERE table_schema = 'public' AND table_name = 'cli_points'",
+            &[],
+        )
+        .await
+        .expect("SELECT-only role grant discovery");
+    assert_eq!(granted_information_privileges.len(), 1);
+    assert_eq!(
+        granted_information_privileges[0].get::<_, String>(0),
+        "granted_reader"
+    );
+    assert_eq!(
+        granted_information_privileges[0].get::<_, String>(1),
+        "SELECT"
+    );
+    let wildcard_grants = client
+        .prepare(
+            "SELECT * FROM information_schema.role_table_grants \
+             WHERE table_schema = 'public' AND table_name = 'cli_points'",
+        )
+        .await
+        .expect("prepare information-schema wildcard");
+    let wildcard_grant_types = [
+        tokio_postgres::types::Type::NAME,
+        tokio_postgres::types::Type::NAME,
+        tokio_postgres::types::Type::NAME,
+        tokio_postgres::types::Type::NAME,
+        tokio_postgres::types::Type::NAME,
+        tokio_postgres::types::Type::VARCHAR,
+        tokio_postgres::types::Type::VARCHAR,
+        tokio_postgres::types::Type::VARCHAR,
+    ];
+    for (column, expected) in wildcard_grants.columns().iter().zip(wildcard_grant_types) {
+        assert_eq!(column.type_(), &expected, "{}", column.name());
+    }
+    assert_eq!(
+        client
+            .query(&wildcard_grants, &[])
+            .await
+            .expect("information-schema wildcard rows")
+            .len(),
+        1
+    );
+    let granted_column_privileges = client
+        .query(
+            "SELECT column_name, privilege_type \
+             FROM information_schema.role_column_grants \
+             WHERE table_schema = 'public' AND table_name = 'cli_points' \
+             ORDER BY column_name",
+            &[],
+        )
+        .await
+        .expect("SELECT-only role column grants");
+    assert_eq!(granted_column_privileges.len(), 2);
+    assert!(
+        granted_column_privileges
+            .iter()
+            .all(|row| row.get::<_, String>(1) == "SELECT")
+    );
     let granted_privileges = client
         .query_one(
             "SELECT has_table_privilege('public.cli_points', 'select'), \
@@ -845,6 +1028,16 @@ async fn cli_duckdb_backend_serves_an_official_local_catalog() {
             .get::<_, String>(0),
         "reader"
     );
+    let reader_tables = reader
+        .query(
+            "SELECT table_name FROM information_schema.tables \
+             WHERE table_schema = 'public' ORDER BY table_name",
+            &[],
+        )
+        .await
+        .expect("restricted reader role-aware discovery");
+    assert_eq!(reader_tables.len(), 1);
+    assert_eq!(reader_tables[0].get::<_, String>(0), "cli_points");
     let reader_role_denial = reader
         .batch_execute("SET ROLE analyst")
         .await

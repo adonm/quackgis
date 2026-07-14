@@ -132,9 +132,10 @@ output, `format_type`, aliases/arrays/typmods, and OID casts. The exact
 `pg18-column-core-v1` catalog descriptions execute through the same pgwire test.
 
 C3 implementation is complete in this gated lane. Durable empty-schema identity
-still needs upstream API support. Constraints/indexes/defaults/comments,
-privilege-aware information schema, role semantics, REST cache consumers, and
-broader expression provenance belong to C4/C5 or later M3 slices.
+still needs upstream API support. Role semantics and role-aware information
+schema now execute independently of the development override; constraints,
+indexes, richer defaults/comments, REST cache consumers, and broader expression
+provenance remain C5 or later M3 slices.
 
 ## Runtime trust boundary
 

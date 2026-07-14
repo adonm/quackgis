@@ -1,9 +1,10 @@
 # Security and authorization
 
-QuackGIS currently implements a small service-identity and table-allowlist model,
-not PostgreSQL RBAC. The target is the bounded PostgreSQL 18 role, privilege,
-session, catalog, and request-context contract in
-[POSTGRESQL_COMPATIBILITY.md](./POSTGRESQL_COMPATIBILITY.md).
+QuackGIS implements immutable configuration-backed PostgreSQL table/operation
+RBAC behind a separate service-identity and table-allowlist ceiling. It does not
+implement PostgreSQL RLS or mutable role/grant administration. The target is the
+bounded PostgreSQL 18 role, privilege, session, catalog, and request-context
+contract in [POSTGRESQL_COMPATIBILITY.md](./POSTGRESQL_COMPATIBILITY.md).
 
 Target design is not current evidence. This document separates the implemented
 floor from the ordered security work.
@@ -27,16 +28,17 @@ floor from the ordered security work.
 | session/effective identity, role switching, and transaction-local cleanup | real pgwire workflow + role units |
 | bounded transaction-local `request.jwt.claims` context | real pgwire workflow + role/parser units |
 | common schema/table privilege enforcement | role/policy units + real pgwire role-denial/grant cases |
+| role-aware schema/table/column/grant discovery | real pgwire workflow + catalog/parser units |
 
 The role configuration parser validates stable explicit OIDs, LOGIN/NOLOGIN,
 INHERIT defaults, PostgreSQL 18 membership-edge options, cycles, owners, and the
 bounded schema/table privilege vocabulary. Sessions expose PostgreSQL `name`
 identity for `session_user`, `current_user`, `current_role`, and `user`; implement
 `SET ROLE`, `SET SESSION ROLE`, `SET LOCAL ROLE`, `SET ROLE NONE`, and
-`RESET ROLE`; and clear local role state on commit/rollback. Privilege
-privilege inquiry/catalogs, RLS, administrative SQL,
-packaged secret rotation, revocation infrastructure, and production failure
-drills remain open.
+`RESET ROLE`; and clear local role state on commit/rollback. Privilege inquiry
+and role-aware schema/table/column/grant discovery are also implemented. RLS,
+role-aware OpenAPI, administrative SQL, packaged secret rotation, revocation
+infrastructure, and production failure drills remain open.
 
 ## Trust boundaries
 
@@ -313,9 +315,9 @@ lists, report immutable grants as non-grantable/non-admin, and preserve MEMBER,
 INHERIT/USAGE, and SET edge semantics. Name-literal object inquiry works in the
 official lane; OID or catalog-expression object inquiry and exact column
 existence require the durable identity lane and otherwise fail with `0A000`.
-Column grants are not provisioned, so maintained column inquiry succeeds only
-through a matching table privilege. Privilege-aware information schema and
-OpenAPI remain open.
+Column grants are not provisioned, so maintained column inquiry and
+`column_privileges` rows derive from matching table privileges. Role-aware
+OpenAPI remains open.
 
 With a valid role file, role assumption walks only `set_option=true` membership
 edges from the original authenticated `session_user`. A changed `current_user`

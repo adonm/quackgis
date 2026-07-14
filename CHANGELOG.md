@@ -144,6 +144,12 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   structurally rewritten `current_database`, `current_schema`, and
   `current_schemas`; actual pgwire evidence checks owner references and exact
   PostgreSQL `oid`, `name`, and `name[]` result types.
+- Role-bound PostgreSQL 18 `information_schema.schemata`, `tables`, `columns`,
+  `table_privileges`, `role_table_grants`, `column_privileges`, and
+  `role_column_grants` projections. They bind the effective role structurally,
+  derive object existence from DuckDB, preserve `public` naming and exact
+  `name`/`varchar` wire types, hide ungranted objects, expand table grants to
+  eligible columns, and omit QuackGIS-only `MAINTAIN` from the standard views.
 - DuckDB-computed bbox maintenance during COPY for the explicit reserved-column
   layout contract, including NULL, exact-recheck, and reopen evidence.
 - Fail-closed bbox layout validation rejects partial, wrong-type, caller-supplied,

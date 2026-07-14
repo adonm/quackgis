@@ -158,6 +158,11 @@ def check_postgresql_profile(errors: list[str]) -> None:
         "pg_catalog.pg_roles",
         "information_schema.tables",
         "information_schema.columns",
+        "information_schema.schemata",
+        "information_schema.table_privileges",
+        "information_schema.role_table_grants",
+        "information_schema.column_privileges",
+        "information_schema.role_column_grants",
     }
     if len(relation_names) != len(set(relation_names)):
         errors.append("PostgreSQL compatibility profile contains duplicate relations")

@@ -20,8 +20,9 @@ Local ownership:
   binary lists have parity regressions; unsupported list layouts fail during
   schema mapping;
 - structurally proven catalog projections carry explicit Arrow metadata for
-  PostgreSQL OID, `name`, `name[]`, and internal `char` wire types; ordinary
-  aliases retain their native scalar type and value;
+  PostgreSQL OID, `name`, `name[]`, internal `char`, and information-schema
+  `varchar` wire types; ordinary aliases retain their native scalar type and
+  value;
 - invalid JSON fails closed instead of silently becoming JSON `null`; and
 - nested struct failures propagate without panicking; and
 - the crate's tests are an explicit `just ci` prerequisite.

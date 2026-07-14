@@ -140,8 +140,8 @@
     },
     {
       "name": "information_schema.tables",
-      "stage": "C3",
-      "trace_status": "captured_rest_bootstrap",
+      "stage": "C5",
+      "trace_status": "implemented_role_aware_pgwire",
       "required_columns": [
         { "name": "table_catalog", "type_oid": 19, "nullable": true },
         { "name": "table_schema", "type_oid": 19, "nullable": true },
@@ -152,8 +152,8 @@
     },
     {
       "name": "information_schema.columns",
-      "stage": "C3",
-      "trace_status": "captured_rest_bootstrap",
+      "stage": "C5",
+      "trace_status": "implemented_role_aware_pgwire",
       "required_columns": [
         { "name": "table_catalog", "type_oid": 19, "nullable": true },
         { "name": "table_schema", "type_oid": 19, "nullable": true },
@@ -167,6 +167,80 @@
         { "name": "udt_name", "type_oid": 19, "nullable": true },
         { "name": "is_identity", "type_oid": 1043, "nullable": true },
         { "name": "is_generated", "type_oid": 1043, "nullable": true }
+      ]
+    },
+    {
+      "name": "information_schema.schemata",
+      "stage": "C5",
+      "trace_status": "implemented_role_aware_pgwire",
+      "required_columns": [
+        { "name": "catalog_name", "type_oid": 19, "nullable": true },
+        { "name": "schema_name", "type_oid": 19, "nullable": true },
+        { "name": "schema_owner", "type_oid": 19, "nullable": true },
+        { "name": "default_character_set_catalog", "type_oid": 19, "nullable": true },
+        { "name": "default_character_set_schema", "type_oid": 19, "nullable": true },
+        { "name": "default_character_set_name", "type_oid": 19, "nullable": true },
+        { "name": "sql_path", "type_oid": 1043, "nullable": true }
+      ]
+    },
+    {
+      "name": "information_schema.table_privileges",
+      "stage": "C5",
+      "trace_status": "implemented_role_aware_pgwire",
+      "required_columns": [
+        { "name": "grantor", "type_oid": 19, "nullable": true },
+        { "name": "grantee", "type_oid": 19, "nullable": true },
+        { "name": "table_catalog", "type_oid": 19, "nullable": true },
+        { "name": "table_schema", "type_oid": 19, "nullable": true },
+        { "name": "table_name", "type_oid": 19, "nullable": true },
+        { "name": "privilege_type", "type_oid": 1043, "nullable": true },
+        { "name": "is_grantable", "type_oid": 1043, "nullable": true },
+        { "name": "with_hierarchy", "type_oid": 1043, "nullable": true }
+      ]
+    },
+    {
+      "name": "information_schema.role_table_grants",
+      "stage": "C5",
+      "trace_status": "implemented_role_aware_pgwire",
+      "required_columns": [
+        { "name": "grantor", "type_oid": 19, "nullable": true },
+        { "name": "grantee", "type_oid": 19, "nullable": true },
+        { "name": "table_catalog", "type_oid": 19, "nullable": true },
+        { "name": "table_schema", "type_oid": 19, "nullable": true },
+        { "name": "table_name", "type_oid": 19, "nullable": true },
+        { "name": "privilege_type", "type_oid": 1043, "nullable": true },
+        { "name": "is_grantable", "type_oid": 1043, "nullable": true },
+        { "name": "with_hierarchy", "type_oid": 1043, "nullable": true }
+      ]
+    },
+    {
+      "name": "information_schema.column_privileges",
+      "stage": "C5",
+      "trace_status": "implemented_role_aware_pgwire",
+      "required_columns": [
+        { "name": "grantor", "type_oid": 19, "nullable": true },
+        { "name": "grantee", "type_oid": 19, "nullable": true },
+        { "name": "table_catalog", "type_oid": 19, "nullable": true },
+        { "name": "table_schema", "type_oid": 19, "nullable": true },
+        { "name": "table_name", "type_oid": 19, "nullable": true },
+        { "name": "column_name", "type_oid": 19, "nullable": true },
+        { "name": "privilege_type", "type_oid": 1043, "nullable": true },
+        { "name": "is_grantable", "type_oid": 1043, "nullable": true }
+      ]
+    },
+    {
+      "name": "information_schema.role_column_grants",
+      "stage": "C5",
+      "trace_status": "implemented_role_aware_pgwire",
+      "required_columns": [
+        { "name": "grantor", "type_oid": 19, "nullable": true },
+        { "name": "grantee", "type_oid": 19, "nullable": true },
+        { "name": "table_catalog", "type_oid": 19, "nullable": true },
+        { "name": "table_schema", "type_oid": 19, "nullable": true },
+        { "name": "table_name", "type_oid": 19, "nullable": true },
+        { "name": "column_name", "type_oid": 19, "nullable": true },
+        { "name": "privilege_type", "type_oid": 1043, "nullable": true },
+        { "name": "is_grantable", "type_oid": 1043, "nullable": true }
       ]
     }
   ],
@@ -235,8 +309,8 @@
     },
     {
       "id": "information_schema_table_discovery",
-      "stage": "C3",
-      "trace_status": "required_consistency",
+      "stage": "C5",
+      "trace_status": "implemented_role_aware_pgwire",
       "protocol": "extended",
       "consumers": ["quackgis-rest", "client-neutral catalog contract"],
       "sql": "SELECT table_catalog, table_schema, table_name, table_type, is_insertable_into FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name",
@@ -251,7 +325,7 @@
     },
     {
       "id": "rest_table_column_discovery",
-      "stage": "C3",
+      "stage": "C5",
       "trace_status": "captured_duckdb_form_target_postgresql_form_frozen",
       "protocol": "extended",
       "consumers": ["quackgis-rest"],

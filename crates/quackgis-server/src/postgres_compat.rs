@@ -284,7 +284,10 @@ pub fn duckdb_catalog_bootstrap_sql() -> String {
 }
 
 /// Replace bootstrap role catalogs with one immutable configured role graph.
-pub fn duckdb_role_catalog_sql(catalog: &crate::role::RoleCatalog) -> String {
+pub fn duckdb_role_catalog_sql(
+    catalog: &crate::role::RoleCatalog,
+    auth: &crate::auth::AuthConfig,
+) -> String {
     let mut role_rows = vec![format!(
         "({BOOTSTRAP_OWNER_OID}::UINTEGER, 'quackgis_owner'::VARCHAR, false, true, false, false, \
          false, false, -1::INTEGER, NULL::VARCHAR, NULL::TIMESTAMP WITH TIME ZONE, \
@@ -357,6 +360,7 @@ pub fn duckdb_role_catalog_sql(catalog: &crate::role::RoleCatalog) -> String {
             .join(",\n");
         format!("SELECT * FROM (VALUES\n{rows}\n) AS o(schema_name, table_name, role_oid)")
     };
+    let information_schema_sql = duckdb_role_information_schema_sql(catalog, auth);
     format!(
         "CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_roles AS\n\
          SELECT * FROM (VALUES\n{}\n\
@@ -366,9 +370,399 @@ pub fn duckdb_role_catalog_sql(catalog: &crate::role::RoleCatalog) -> String {
          CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_auth_members AS\n\
          {membership_sql};\n\
          CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_table_owners AS\n\
-         {owner_sql};",
+         {owner_sql};\n\
+         {information_schema_sql}",
         role_rows.join(",\n"),
     )
+}
+
+fn duckdb_role_information_schema_sql(
+    catalog: &crate::role::RoleCatalog,
+    auth: &crate::auth::AuthConfig,
+) -> String {
+    use crate::role::{RolePrivilege, SchemaPrivilege, TablePrivilege};
+    use std::collections::BTreeSet;
+
+    let schemas = catalog
+        .schema_grants()
+        .iter()
+        .map(|grant| grant.schema.as_str())
+        .collect::<BTreeSet<_>>();
+    let schema_rows = catalog
+        .roles()
+        .iter()
+        .flat_map(|role| {
+            schemas
+                .iter()
+                .filter(move |schema| {
+                    catalog.has_schema_privilege(&role.name, schema, SchemaPrivilege::Usage)
+                })
+                .map(move |schema| {
+                    format!(
+                        "({}::VARCHAR, {}::VARCHAR)",
+                        quote_literal(&role.name),
+                        quote_literal(schema),
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+    let schema_visibility = values_or_empty(
+        &schema_rows,
+        "v(role_name, schema_name)",
+        "SELECT NULL::VARCHAR AS role_name, NULL::VARCHAR AS schema_name WHERE false",
+    );
+
+    let tables = catalog
+        .table_owners()
+        .iter()
+        .map(|owner| (owner.schema.as_str(), owner.table.as_str()))
+        .chain(
+            catalog
+                .table_grants()
+                .iter()
+                .map(|grant| (grant.schema.as_str(), grant.table.as_str())),
+        )
+        .collect::<BTreeSet<_>>();
+    let table_rows = catalog
+        .roles()
+        .iter()
+        .flat_map(|role| {
+            tables.iter().filter_map(move |(schema, table)| {
+                let allowed = |privilege| {
+                    catalog.allows_table_operation(&role.name, schema, table, privilege)
+                };
+                let select = allowed(TablePrivilege::Select);
+                let insert = allowed(TablePrivilege::Insert);
+                let update = allowed(TablePrivilege::Update);
+                let delete = allowed(TablePrivilege::Delete);
+                if select || insert || update || delete {
+                    Some(format!(
+                        "({}::VARCHAR, {}::VARCHAR, {}::VARCHAR, {}, {}, {}, {})",
+                        quote_literal(&role.name),
+                        quote_literal(schema),
+                        quote_literal(table),
+                        select,
+                        insert,
+                        update,
+                        delete,
+                    ))
+                } else {
+                    None
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let table_visibility = values_or_empty(
+        &table_rows,
+        "v(role_name, schema_name, table_name, can_select, can_insert, can_update, can_delete)",
+        "SELECT NULL::VARCHAR AS role_name, NULL::VARCHAR AS schema_name, \
+         NULL::VARCHAR AS table_name, false AS can_select, false AS can_insert, \
+         false AS can_update, false AS can_delete WHERE false",
+    );
+    let legacy_rows = catalog
+        .roles()
+        .iter()
+        .filter(|role| role.login)
+        .flat_map(|role| {
+            tables.iter().map(move |(schema, table)| {
+                format!(
+                    "({}::VARCHAR, {}::VARCHAR, {}::VARCHAR, {}, {})",
+                    quote_literal(&role.name),
+                    quote_literal(schema),
+                    quote_literal(table),
+                    auth.allows_read(Some(&role.name), (schema, table)),
+                    auth.allows_write(Some(&role.name), Some((schema, table))),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let legacy_visibility = values_or_empty(
+        &legacy_rows,
+        "v(session_user, schema_name, table_name, can_read, can_write)",
+        "SELECT NULL::VARCHAR AS session_user, NULL::VARCHAR AS schema_name, \
+         NULL::VARCHAR AS table_name, false AS can_read, false AS can_write WHERE false",
+    );
+
+    let mut grants = BTreeSet::new();
+    for owner in catalog.table_owners() {
+        for privilege in ["SELECT", "INSERT", "UPDATE", "DELETE"] {
+            grants.insert((
+                owner.schema.as_str(),
+                owner.table.as_str(),
+                owner.role.as_str(),
+                owner.role.as_str(),
+                privilege,
+            ));
+        }
+    }
+    for grant in catalog.table_grants() {
+        let grantor = catalog
+            .table_owners()
+            .iter()
+            .find(|owner| {
+                owner.schema.eq_ignore_ascii_case(&grant.schema)
+                    && owner.table.eq_ignore_ascii_case(&grant.table)
+            })
+            .map_or("quackgis_owner", |owner| owner.role.as_str());
+        let grantee = grant.role.as_deref().unwrap_or("PUBLIC");
+        for privilege in &grant.privileges {
+            let privilege = match privilege {
+                TablePrivilege::Select => "SELECT",
+                TablePrivilege::Insert => "INSERT",
+                TablePrivilege::Update => "UPDATE",
+                TablePrivilege::Delete => "DELETE",
+                TablePrivilege::Maintain => continue,
+            };
+            grants.insert((
+                grant.schema.as_str(),
+                grant.table.as_str(),
+                grantor,
+                grantee,
+                privilege,
+            ));
+        }
+    }
+    let privilege_rows = catalog
+        .roles()
+        .iter()
+        .flat_map(|observer| {
+            grants
+                .iter()
+                .filter_map(move |(schema, table, grantor, grantee, privilege)| {
+                    let grantee_enabled = *grantee == "PUBLIC"
+                        || catalog.has_role_privilege(
+                            &observer.name,
+                            grantee,
+                            RolePrivilege::Usage,
+                        );
+                    let grantor_enabled = catalog.role(grantor).is_some()
+                        && catalog.has_role_privilege(
+                            &observer.name,
+                            grantor,
+                            RolePrivilege::Usage,
+                        );
+                    if grantee_enabled || grantor_enabled {
+                        Some(format!(
+                            "({}::VARCHAR, {}::VARCHAR, {}::VARCHAR, {}::VARCHAR, \
+                         {}::VARCHAR, {}::VARCHAR)",
+                            quote_literal(&observer.name),
+                            quote_literal(grantor),
+                            quote_literal(grantee),
+                            quote_literal(schema),
+                            quote_literal(table),
+                            quote_literal(privilege),
+                        ))
+                    } else {
+                        None
+                    }
+                })
+        })
+        .collect::<Vec<_>>();
+    let table_privileges = values_or_empty(
+        &privilege_rows,
+        "p(observer_role, grantor, grantee, schema_name, table_name, privilege_type)",
+        "SELECT NULL::VARCHAR AS observer_role, NULL::VARCHAR AS grantor, \
+         NULL::VARCHAR AS grantee, NULL::VARCHAR AS schema_name, \
+         NULL::VARCHAR AS table_name, NULL::VARCHAR AS privilege_type WHERE false",
+    );
+    let data_type = duckdb_information_schema_data_type_sql();
+    let udt_schema = duckdb_information_schema_udt_schema_sql();
+    let udt_name = duckdb_information_schema_udt_name_sql();
+
+    format!(
+        "CREATE OR REPLACE VIEW quackgis_pg_catalog.information_schema_schema_visibility AS\n\
+         {schema_visibility};\n\
+         CREATE OR REPLACE VIEW quackgis_pg_catalog.information_schema_table_visibility AS\n\
+         {table_visibility};\n\
+         CREATE OR REPLACE VIEW quackgis_pg_catalog.information_schema_legacy_visibility AS\n\
+         {legacy_visibility};\n\
+         CREATE OR REPLACE VIEW quackgis_pg_catalog.information_schema_table_privileges AS\n\
+         {table_privileges};\n\
+         CREATE OR REPLACE MACRO quackgis_information_schema_schemata(effective_role, session_identity) AS TABLE\n\
+           SELECT 'quackgis'::VARCHAR AS catalog_name,\n\
+                  CASE WHEN s.schema_name = 'main' THEN 'public' ELSE s.schema_name END\n\
+                    AS schema_name,\n\
+                  'quackgis_owner'::VARCHAR AS schema_owner,\n\
+                  NULL::VARCHAR AS default_character_set_catalog,\n\
+                  NULL::VARCHAR AS default_character_set_schema,\n\
+                  NULL::VARCHAR AS default_character_set_name,\n\
+                  NULL::VARCHAR AS sql_path\n\
+           FROM information_schema.schemata s\n\
+           JOIN quackgis_pg_catalog.information_schema_schema_visibility v\n\
+             ON v.schema_name = s.schema_name\n\
+           WHERE v.role_name = CAST(effective_role AS VARCHAR)\n\
+             AND s.catalog_name = 'quackgis';\n\
+         CREATE OR REPLACE MACRO quackgis_information_schema_tables(effective_role, session_identity) AS TABLE\n\
+           SELECT 'quackgis'::VARCHAR AS table_catalog,\n\
+                  CASE WHEN t.table_schema = 'main' THEN 'public' ELSE t.table_schema END\n\
+                    AS table_schema,\n\
+                  t.table_name::VARCHAR AS table_name, t.table_type::VARCHAR AS table_type,\n\
+                  NULL::VARCHAR AS self_referencing_column_name,\n\
+                  NULL::VARCHAR AS reference_generation,\n\
+                  NULL::VARCHAR AS user_defined_type_catalog,\n\
+                  NULL::VARCHAR AS user_defined_type_schema,\n\
+                  NULL::VARCHAR AS user_defined_type_name,\n\
+                  t.is_insertable_into::VARCHAR AS is_insertable_into,\n\
+                  t.is_typed::VARCHAR AS is_typed, NULL::VARCHAR AS commit_action\n\
+           FROM information_schema.tables t\n\
+           JOIN quackgis_pg_catalog.information_schema_table_visibility v\n\
+             ON v.schema_name = t.table_schema AND lower(v.table_name) = lower(t.table_name)\n\
+           JOIN quackgis_pg_catalog.information_schema_legacy_visibility legacy\n\
+             ON legacy.schema_name = v.schema_name AND lower(legacy.table_name) = lower(v.table_name)\n\
+           WHERE v.role_name = CAST(effective_role AS VARCHAR)\n\
+             AND legacy.session_user = CAST(session_identity AS VARCHAR)\n\
+             AND (v.can_select AND legacy.can_read\n\
+                  OR (v.can_insert OR v.can_update OR v.can_delete) AND legacy.can_write)\n\
+             AND t.table_catalog = 'quackgis';\n\
+         CREATE OR REPLACE MACRO quackgis_information_schema_columns(effective_role, session_identity) AS TABLE\n\
+           SELECT 'quackgis'::VARCHAR AS table_catalog,\n\
+                  CASE WHEN c.table_schema = 'main' THEN 'public' ELSE c.table_schema END\n\
+                    AS table_schema,\n\
+                  c.table_name::VARCHAR AS table_name, c.column_name::VARCHAR AS column_name,\n\
+                  c.ordinal_position::INTEGER AS ordinal_position,\n\
+                  c.column_default::VARCHAR AS column_default,\n\
+                  c.is_nullable::VARCHAR AS is_nullable, ({data_type})::VARCHAR AS data_type,\n\
+                  ({udt_schema})::VARCHAR AS udt_schema, ({udt_name})::VARCHAR AS udt_name,\n\
+                  CASE WHEN c.is_identity THEN 'YES' ELSE 'NO' END::VARCHAR AS is_identity,\n\
+                  c.is_generated::VARCHAR AS is_generated\n\
+           FROM information_schema.columns c\n\
+           JOIN quackgis_pg_catalog.information_schema_table_visibility v\n\
+             ON v.schema_name = c.table_schema AND lower(v.table_name) = lower(c.table_name)\n\
+           JOIN quackgis_pg_catalog.information_schema_legacy_visibility legacy\n\
+             ON legacy.schema_name = v.schema_name AND lower(legacy.table_name) = lower(v.table_name)\n\
+           WHERE v.role_name = CAST(effective_role AS VARCHAR)\n\
+             AND legacy.session_user = CAST(session_identity AS VARCHAR)\n\
+             AND (v.can_select AND legacy.can_read\n\
+                  OR (v.can_insert OR v.can_update OR v.can_delete) AND legacy.can_write)\n\
+             AND c.table_catalog = 'quackgis';\n\
+         CREATE OR REPLACE MACRO quackgis_information_schema_table_privileges(effective_role, session_identity) AS TABLE\n\
+           SELECT p.grantor, p.grantee, 'quackgis'::VARCHAR AS table_catalog,\n\
+                  CASE WHEN p.schema_name = 'main' THEN 'public' ELSE p.schema_name END\n\
+                    AS table_schema,\n\
+                  p.table_name, p.privilege_type, 'NO'::VARCHAR AS is_grantable,\n\
+                  CASE WHEN p.privilege_type = 'SELECT' THEN 'YES' ELSE 'NO' END::VARCHAR\n\
+                    AS with_hierarchy\n\
+           FROM quackgis_pg_catalog.information_schema_table_privileges p\n\
+           JOIN information_schema.tables t\n\
+             ON t.table_catalog = 'quackgis' AND t.table_schema = p.schema_name\n\
+            AND lower(t.table_name) = lower(p.table_name)\n\
+           JOIN quackgis_pg_catalog.information_schema_legacy_visibility legacy\n\
+             ON legacy.schema_name = p.schema_name AND lower(legacy.table_name) = lower(p.table_name)\n\
+           WHERE p.observer_role = CAST(effective_role AS VARCHAR)\n\
+             AND legacy.session_user = CAST(session_identity AS VARCHAR)\n\
+             AND (p.privilege_type = 'SELECT' AND legacy.can_read\n\
+                  OR p.privilege_type <> 'SELECT' AND legacy.can_write);\n\
+         CREATE OR REPLACE MACRO quackgis_information_schema_role_table_grants(effective_role, session_identity) AS TABLE\n\
+           SELECT * FROM quackgis_information_schema_table_privileges(effective_role, session_identity)\n\
+           WHERE grantee <> 'PUBLIC';\n\
+         CREATE OR REPLACE MACRO quackgis_information_schema_column_privileges(effective_role, session_identity) AS TABLE\n\
+           SELECT p.grantor, p.grantee, p.table_catalog, p.table_schema, p.table_name,\n\
+                  c.column_name::VARCHAR AS column_name, p.privilege_type, p.is_grantable\n\
+           FROM quackgis_information_schema_table_privileges(effective_role, session_identity) p\n\
+           JOIN information_schema.columns c\n\
+             ON c.table_catalog = 'quackgis'\n\
+            AND c.table_schema = CASE WHEN p.table_schema = 'public' THEN 'main' ELSE p.table_schema END\n\
+            AND lower(c.table_name) = lower(p.table_name)\n\
+           WHERE p.privilege_type IN ('SELECT', 'INSERT', 'UPDATE');\n\
+         CREATE OR REPLACE MACRO quackgis_information_schema_role_column_grants(effective_role, session_identity) AS TABLE\n\
+           SELECT * FROM quackgis_information_schema_column_privileges(effective_role, session_identity)\n\
+           WHERE grantee <> 'PUBLIC';"
+    )
+}
+
+fn values_or_empty(rows: &[String], columns: &str, empty: &str) -> String {
+    if rows.is_empty() {
+        empty.to_owned()
+    } else {
+        format!(
+            "SELECT * FROM (VALUES\n{}\n) AS {columns}",
+            rows.join(",\n")
+        )
+    }
+}
+
+fn duckdb_information_schema_data_type_sql() -> &'static str {
+    "CASE
+       WHEN c.data_type LIKE '%[]' THEN 'ARRAY'
+       WHEN c.data_type = 'BOOLEAN' THEN 'boolean'
+       WHEN c.data_type = 'TINYINT' THEN '\"char\"'
+       WHEN c.data_type IN ('SMALLINT', 'UTINYINT') THEN 'smallint'
+       WHEN c.data_type IN ('INTEGER', 'USMALLINT') THEN 'integer'
+       WHEN c.data_type IN ('BIGINT', 'UINTEGER') THEN 'bigint'
+       WHEN c.data_type IN ('HUGEINT', 'UHUGEINT', 'UBIGINT')
+         OR (starts_with(c.data_type, 'DECIMAL(') AND NOT ends_with(c.data_type, '[]'))
+         THEN 'numeric'
+       WHEN c.data_type = 'FLOAT' THEN 'real'
+       WHEN c.data_type = 'DOUBLE' THEN 'double precision'
+       WHEN c.data_type = 'DATE' THEN 'date'
+       WHEN c.data_type = 'TIME' THEN 'time without time zone'
+       WHEN c.data_type IN ('TIMESTAMP', 'TIMESTAMP_S', 'TIMESTAMP_MS', 'TIMESTAMP_NS')
+         THEN 'timestamp without time zone'
+       WHEN c.data_type = 'TIMESTAMP WITH TIME ZONE' THEN 'timestamp with time zone'
+       WHEN c.data_type = 'INTERVAL' THEN 'interval'
+       WHEN c.data_type = 'JSON' AND lower(c.column_name) = 'properties' THEN 'jsonb'
+       WHEN c.data_type IN ('VARCHAR', 'JSON') THEN 'text'
+       WHEN c.data_type = 'BLOB' AND lower(c.column_name) IN
+         ('geog', 'geography', 'the_geog', 'geom', 'geometry', 'the_geom',
+          'wkb_geometry', 'wkb_geom', 'geom_wkb', 'shape', 'footprint', 'way')
+         THEN 'USER-DEFINED'
+       WHEN c.data_type = 'BLOB' THEN 'bytea'
+       ELSE error('unsupported DuckLake column type in PostgreSQL information schema')
+     END"
+}
+
+fn duckdb_information_schema_udt_schema_sql() -> &'static str {
+    "CASE WHEN c.data_type = 'BLOB' AND lower(c.column_name) IN
+       ('geog', 'geography', 'the_geog', 'geom', 'geometry', 'the_geom',
+        'wkb_geometry', 'wkb_geom', 'geom_wkb', 'shape', 'footprint', 'way')
+       THEN 'public' ELSE 'pg_catalog' END"
+}
+
+fn duckdb_information_schema_udt_name_sql() -> &'static str {
+    "CASE
+       WHEN c.data_type = 'BOOLEAN' THEN 'bool'
+       WHEN c.data_type = 'TINYINT' THEN 'char'
+       WHEN c.data_type IN ('SMALLINT', 'UTINYINT') THEN 'int2'
+       WHEN c.data_type IN ('INTEGER', 'USMALLINT') THEN 'int4'
+       WHEN c.data_type IN ('BIGINT', 'UINTEGER') THEN 'int8'
+       WHEN c.data_type IN ('HUGEINT', 'UHUGEINT', 'UBIGINT')
+         OR (starts_with(c.data_type, 'DECIMAL(') AND NOT ends_with(c.data_type, '[]'))
+         THEN 'numeric'
+       WHEN c.data_type = 'FLOAT' THEN 'float4'
+       WHEN c.data_type = 'DOUBLE' THEN 'float8'
+       WHEN c.data_type = 'DATE' THEN 'date'
+       WHEN c.data_type = 'TIME' THEN 'time'
+       WHEN c.data_type IN ('TIMESTAMP', 'TIMESTAMP_S', 'TIMESTAMP_MS', 'TIMESTAMP_NS')
+         THEN 'timestamp'
+       WHEN c.data_type = 'TIMESTAMP WITH TIME ZONE' THEN 'timestamptz'
+       WHEN c.data_type = 'INTERVAL' THEN 'interval'
+       WHEN c.data_type = 'JSON' AND lower(c.column_name) = 'properties' THEN 'jsonb'
+       WHEN c.data_type IN ('VARCHAR', 'JSON') THEN 'text'
+       WHEN c.data_type = 'BLOB' AND lower(c.column_name) IN
+         ('geog', 'geography', 'the_geog') THEN 'geography'
+       WHEN c.data_type = 'BLOB' AND lower(c.column_name) IN
+         ('geom', 'geometry', 'the_geom', 'wkb_geometry', 'wkb_geom',
+          'geom_wkb', 'shape', 'footprint', 'way') THEN 'geometry'
+       WHEN c.data_type = 'BLOB' THEN 'bytea'
+       WHEN c.data_type = 'BOOLEAN[]' THEN '_bool'
+       WHEN c.data_type IN ('TINYINT[]', 'SMALLINT[]', 'UTINYINT[]') THEN '_int2'
+       WHEN c.data_type IN ('INTEGER[]', 'USMALLINT[]') THEN '_int4'
+       WHEN c.data_type IN ('BIGINT[]', 'UINTEGER[]') THEN '_int8'
+       WHEN c.data_type IN ('HUGEINT[]', 'UHUGEINT[]', 'UBIGINT[]')
+         OR (starts_with(c.data_type, 'DECIMAL(') AND ends_with(c.data_type, '[]'))
+         THEN '_numeric'
+       WHEN c.data_type = 'FLOAT[]' THEN '_float4'
+       WHEN c.data_type = 'DOUBLE[]' THEN '_float8'
+       WHEN c.data_type = 'DATE[]' THEN '_date'
+       WHEN c.data_type = 'TIME[]' THEN '_time'
+       WHEN c.data_type IN ('TIMESTAMP[]', 'TIMESTAMP_S[]', 'TIMESTAMP_MS[]', 'TIMESTAMP_NS[]')
+         THEN '_timestamp'
+       WHEN c.data_type = 'TIMESTAMP WITH TIME ZONE[]' THEN '_timestamptz'
+       WHEN c.data_type = 'INTERVAL[]' THEN '_interval'
+       WHEN c.data_type IN ('VARCHAR[]', 'JSON[]') THEN '_text'
+       WHEN c.data_type = 'BLOB[]' THEN '_bytea'
+       ELSE error('unsupported DuckLake column type in PostgreSQL information schema')
+     END"
 }
 
 fn duckdb_column_type_oid_sql() -> &'static str {
@@ -1044,12 +1438,23 @@ mod tests {
             }"#,
         )
         .expect("role catalog");
-        let sql = duckdb_role_catalog_sql(&catalog);
+        let auth =
+            crate::auth::AuthConfig::password("authenticator", "secret", None::<(&str, &str)>)
+                .expect("password auth")
+                .with_role_catalog(catalog.clone())
+                .expect("role auth");
+        let sql = duckdb_role_catalog_sql(&catalog, &auth);
         assert!(sql.contains("100001::UINTEGER"));
         assert!(sql.contains("200001::UINTEGER"));
         assert!(sql.contains("pg_auth_members"));
         assert!(sql.contains("pg_table_owners"));
         assert!(sql.contains("'places'::VARCHAR, 100001::UINTEGER"));
+        assert!(sql.contains("information_schema_table_visibility"));
+        assert!(sql.contains("quackgis_information_schema_schemata"));
+        assert!(sql.contains("quackgis_information_schema_tables"));
+        assert!(sql.contains("quackgis_information_schema_columns"));
+        assert!(sql.contains("quackgis_information_schema_table_privileges"));
+        assert!(sql.contains("quackgis_information_schema_column_privileges"));
         assert!(sql.contains("NULL::VARCHAR"));
         assert!(!sql.contains("password-secret"));
     }
