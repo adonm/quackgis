@@ -72,9 +72,10 @@ The current runtime has a bounded compatibility contract:
 The checksum-pinned development identity lane additionally provides stable
 user-object relation/attribute identity and RowDescription origins. That lane is
 not release-supported until the upstream identity API ships in a signed bundle.
-Constraints/indexes/spatial metadata and role-aware OpenAPI remain incomplete;
-the development lane now covers the first traced defaults/comments slice, but
-this is not a broad PostgreSQL catalog claim.
+Spatial metadata, key/index semantics, and role-aware OpenAPI remain incomplete.
+The development lane covers defaults/comments and DuckLake's only supported
+constraint (`NOT NULL`), while publishing an empty index catalog rather than
+inventing primary/unique identity; this is not a broad PostgreSQL catalog claim.
 
 The first target contract is frozen in
 `tests/fixtures/postgresql18_compatibility_profile.json`. Its normalized result
@@ -276,6 +277,17 @@ implicit string `NULL` default marker is normalized to SQL NULL, so explicit
 `DEFAULT NULL` is not separately represented. Generated expressions, routine
 comments, mutable comment/default DDL over pgwire, and exact PostgreSQL deparser
 normalization remain outside this slice.
+
+The next structural slice maps DuckLake's native named `NOT NULL` constraints to
+PostgreSQL 18 `pg_constraint` rows with durable registry OIDs, relation/namespace/
+attribute references, `int2[]` keys, and `pg_get_constraintdef`. Constraint OIDs
+survive table and column rename. `pg_index` has the maintained PostgreSQL wire
+shape, including OID 22 `int2vector` identity for `indkey`, but returns no rows;
+`pg_get_indexdef` therefore returns NULL. This is intentional: DuckLake 1.x does
+not support primary keys, unique keys, foreign keys, check constraints, or
+indexes. QuackGIS does not infer a key from a non-null integer or claim uniqueness
+it cannot enforce. Constraint/index rows and helper functions use the same
+effective-role plus legacy-login metadata ceiling as defaults/comments.
 
 PostgreSQL 18 `has_table_privilege` can report `MAINTAIN`, while
 `information_schema.table_privileges` does not list it. The compatibility view
@@ -546,9 +558,10 @@ descriptions for every foundation catalog are checked against the client-neutral
 `pg18-column-core-v1` fixture. Unsupported column types, malformed/private
 functions, complex provenance outside the maintained shape, and baseline startup
 without identity fail closed. This remains development-only until upstream
-acceptance and a signed official bundle. The later C5 defaults/comments slice is
-described below; constraints/indexes, broader privilege-aware structure, and
-expression provenance remain later M3 work, not C3 blockers.
+acceptance and a signed official bundle. The later bounded C5 structural slices
+are described below; spatial metadata, broader privilege-aware structure, and
+expression provenance remain later M3 work, while key/index semantics require
+upstream DuckLake support or an explicit client limitation policy.
 
 The exact QGIS 3.44 four-statement session bootstrap now passes as the only
 multi-statement exception: simple-protocol batches are limited to eight structurally
@@ -647,11 +660,15 @@ Role changes invalidate prepared discovery statements rather than retaining a
 stale role literal. The first shared traced structural slice now projects
 DuckLake defaults and table/column comments through `pg_attrdef`,
 `pg_description`, `pg_get_expr`, `col_description`, and `obj_description`.
-Default/comment values participate in the guarded catalog fingerprint epoch;
-actual pgwire checks durable relation/attribute references, exact PostgreSQL
-`oid`/`int2`/`pg_node_tree`/`text` result identity, owner and SELECT-granted
-visibility, and legacy-allowlist denial despite a table grant. The traced
-constraint/index/spatial catalogs and generated-column semantics remain open C5
+Default/comment/nullability/constraint-name values participate in the guarded
+catalog fingerprint epoch; actual pgwire checks durable relation/attribute
+references, exact PostgreSQL `oid`/`int2`/`pg_node_tree`/`text` result identity,
+owner and SELECT-granted visibility, and legacy-allowlist denial despite a table
+grant. Durable NOT-NULL constraint rows and definitions now carry PostgreSQL
+`name`, internal `char`, `int2[]`, and OID references; rename continuity passes.
+The maintained `pg_index`/`pg_get_indexdef` shape returns no rows/definitions in
+agreement with DuckLake. Spatial catalogs, generated-column semantics, wider
+traced query shapes, and any future upstream key/index support remain open C5
 work.
 
 ### C6 — qualify named clients

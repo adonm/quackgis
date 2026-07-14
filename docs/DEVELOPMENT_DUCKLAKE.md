@@ -103,8 +103,9 @@ global-OID, attribute-number, range, reference, and committed-snapshot coverage
 invariants before/after reconciliation and fails closed on inconsistency. The gate
 injects a duplicate mapping, requires the post-commit session to quarantine, and
 requires restart rejection. A SHA-256 fingerprint of current identity names/IDs
-plus DuckDB-reported column defaults and table/column comments advances the schema
-epoch for create, rename, add, drop, recreate, and metadata changes; direct
+plus DuckDB-reported column defaults, comments, nullability, and constraint names
+advances the schema epoch for create, rename, add, drop, recreate, constraint,
+and metadata changes; direct
 pgwire relation references to the control schema are rejected, as are dynamic
 `query`/`query_table` indirection and direct `ducklake_column_info` calls.
 
@@ -143,10 +144,18 @@ semantically preserved as no default rather than distinguished as a separate
 catalog row. Comment/default DDL is not added to the bounded pgwire statement
 surface by this discovery slice.
 
+DuckLake's one native constraint type, `NOT NULL`, receives a separate durable
+OID registry keyed to durable table/column identity. Current constraints project
+through PostgreSQL 18 `pg_constraint`; dropped mappings become inactive
+tombstones, and table/column rename preserves the OID. `pg_index` is an empty
+typed catalog and `pg_get_indexdef` returns NULL because DuckLake exposes no
+primary, unique, foreign-key, check, or index implementation. QuackGIS does not
+synthesize those semantics from names or data scans.
+
 C3 implementation is complete in this gated lane. Durable empty-schema identity
 still needs upstream API support. Role semantics and role-aware information
-schema now execute independently of the development override; constraints,
-indexes, generated-column semantics, REST cache consumers, and broader expression
+schema now execute independently of the development override; spatial metadata,
+generated-column semantics, REST cache consumers, and broader expression
 provenance remain C5 or later M3 slices.
 
 ## Runtime trust boundary

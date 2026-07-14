@@ -2066,6 +2066,8 @@ impl VisitorMut for RoleStructuralCatalogRewriter<'_> {
         let macro_name = match relation {
             "pg_attrdef" => "quackgis_pg_attrdef_visible",
             "pg_description" => "quackgis_pg_description_visible",
+            "pg_constraint" => "quackgis_pg_constraint_visible",
+            "pg_index" => "quackgis_pg_index_visible",
             _ => return ControlFlow::Continue(()),
         };
         *name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(macro_name))]);
@@ -2117,6 +2119,8 @@ enum MaintainedPgFunction {
     GetExpr,
     ColDescription,
     ObjDescription,
+    GetConstraintDef,
+    GetIndexDef,
     ToRegclass,
     Regclass,
     ToRegtype,
@@ -2137,6 +2141,8 @@ impl MaintainedPgFunction {
             Self::GetExpr => "quackgis_pg_get_expr",
             Self::ColDescription => "quackgis_pg_col_description",
             Self::ObjDescription => "quackgis_pg_obj_description",
+            Self::GetConstraintDef => "quackgis_pg_get_constraintdef",
+            Self::GetIndexDef => "quackgis_pg_get_indexdef",
             Self::ToRegclass => "quackgis_pg_to_regclass",
             Self::Regclass => "quackgis_pg_regclass",
             Self::ToRegtype => "quackgis_pg_to_regtype",
@@ -2152,9 +2158,12 @@ impl MaintainedPgFunction {
         match self {
             Self::Database | Self::Schema => PgTypeHint::Name,
             Self::Schemas => PgTypeHint::NameArray,
-            Self::FormatType | Self::GetExpr | Self::ColDescription | Self::ObjDescription => {
-                PgTypeHint::Text
-            }
+            Self::FormatType
+            | Self::GetExpr
+            | Self::ColDescription
+            | Self::ObjDescription
+            | Self::GetConstraintDef
+            | Self::GetIndexDef => PgTypeHint::Text,
             Self::ToRegclass | Self::Regclass => PgTypeHint::Regclass,
             Self::ToRegtype | Self::Regtype => PgTypeHint::Regtype,
             Self::ToRegnamespace | Self::Regnamespace => PgTypeHint::Regnamespace,
@@ -2179,7 +2188,7 @@ impl MaintainedPgFunction {
             | Self::ToRegrole
             | Self::Regrole => 1,
             Self::FormatType | Self::GetExpr | Self::ColDescription => 2,
-            Self::ObjDescription => 1,
+            Self::ObjDescription | Self::GetConstraintDef | Self::GetIndexDef => 1,
         }
     }
 
@@ -2187,6 +2196,8 @@ impl MaintainedPgFunction {
         match self {
             Self::GetExpr => matches!(count, 2 | 3),
             Self::ObjDescription => matches!(count, 1 | 2),
+            Self::GetConstraintDef => matches!(count, 1 | 2),
+            Self::GetIndexDef => matches!(count, 1 | 3),
             _ => count == self.argument_count(),
         }
     }
@@ -2195,6 +2206,8 @@ impl MaintainedPgFunction {
         match self {
             Self::ColDescription => Some("quackgis_pg_col_description_visible"),
             Self::ObjDescription => Some("quackgis_pg_obj_description_visible"),
+            Self::GetConstraintDef => Some("quackgis_pg_get_constraintdef_visible"),
+            Self::GetIndexDef => Some("quackgis_pg_get_indexdef_visible"),
             _ => None,
         }
     }
@@ -2233,6 +2246,10 @@ fn maintained_pg_function(name: &ObjectName) -> Option<MaintainedPgFunction> {
         Some(MaintainedPgFunction::ColDescription)
     } else if pg_identifier_matches(function, "obj_description") {
         Some(MaintainedPgFunction::ObjDescription)
+    } else if pg_identifier_matches(function, "pg_get_constraintdef") {
+        Some(MaintainedPgFunction::GetConstraintDef)
+    } else if pg_identifier_matches(function, "pg_get_indexdef") {
+        Some(MaintainedPgFunction::GetIndexDef)
     } else if pg_identifier_matches(function, "to_regclass") {
         Some(MaintainedPgFunction::ToRegclass)
     } else if pg_identifier_matches(function, "regclass") {
@@ -2465,12 +2482,19 @@ fn rewrite_pg_catalog_functions(statement: &mut Statement, role_context: Option<
                 role_context.filter(|_| maintained.role_filtered_private_name().is_some())
                 && let FunctionArguments::List(arguments) = &mut function.args
             {
-                if maintained == MaintainedPgFunction::ObjDescription && arguments.args.len() == 1 {
-                    arguments
-                        .args
-                        .push(FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
-                            Value::Null.into(),
-                        ))));
+                let defaults = match (maintained, arguments.args.len()) {
+                    (MaintainedPgFunction::ObjDescription, 1)
+                    | (MaintainedPgFunction::GetConstraintDef, 1) => 1,
+                    (MaintainedPgFunction::GetIndexDef, 1) => 2,
+                    _ => 0,
+                };
+                arguments.args.extend((0..defaults).map(|_| {
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(Value::Null.into())))
+                }));
+                if maintained == MaintainedPgFunction::GetIndexDef && defaults == 2 {
+                    arguments.args[1] = FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
+                        Value::Number("0".to_owned(), false).into(),
+                    )));
                 }
                 arguments
                     .args
@@ -3240,6 +3264,8 @@ fn maintained_pg_catalog_relation(name: &ObjectName) -> Option<&'static str> {
         "pg_attribute",
         "pg_attrdef",
         "pg_description",
+        "pg_constraint",
+        "pg_index",
         "pg_range",
         "pg_collation",
         "pg_roles",
@@ -3280,7 +3306,12 @@ fn maintained_catalog_relation(name: &ObjectName) -> Option<&'static str> {
 fn identity_catalog_relation(relation: &str) -> bool {
     matches!(
         relation,
-        "pg_class" | "pg_attribute" | "pg_attrdef" | "pg_description"
+        "pg_class"
+            | "pg_attribute"
+            | "pg_attrdef"
+            | "pg_description"
+            | "pg_constraint"
+            | "pg_index"
     )
 }
 
@@ -3686,6 +3717,8 @@ fn stale_catalog_column_qualifier(expression: &Expr) -> bool {
             "pg_attribute",
             "pg_attrdef",
             "pg_description",
+            "pg_constraint",
+            "pg_index",
             "pg_range",
             "pg_collation",
             "pg_roles",
@@ -4157,6 +4190,21 @@ fn catalog_columns(relation: &str) -> &'static [(&'static str, PgTypeHint)] {
             ("classoid", PgTypeHint::Oid),
             ("description", PgTypeHint::Text),
         ],
+        "pg_constraint" => &[
+            ("oid", PgTypeHint::Oid),
+            ("conname", PgTypeHint::Name),
+            ("connamespace", PgTypeHint::Oid),
+            ("contype", PgTypeHint::Char),
+            ("conrelid", PgTypeHint::Oid),
+            ("conindid", PgTypeHint::Oid),
+            ("conparentid", PgTypeHint::Oid),
+            ("confrelid", PgTypeHint::Oid),
+        ],
+        "pg_index" => &[
+            ("indexrelid", PgTypeHint::Oid),
+            ("indrelid", PgTypeHint::Oid),
+            ("indkey", PgTypeHint::Int2Vector),
+        ],
         "pg_range" => &[
             ("rngtypid", PgTypeHint::Oid),
             ("rngsubtype", PgTypeHint::Oid),
@@ -4288,6 +4336,42 @@ fn catalog_column_names(relation: &str) -> &'static [&'static str] {
         ],
         "pg_attrdef" => &["adrelid", "adnum", "adbin"],
         "pg_description" => &["objoid", "classoid", "objsubid", "description"],
+        "pg_constraint" => &[
+            "oid",
+            "conname",
+            "connamespace",
+            "contype",
+            "condeferrable",
+            "condeferred",
+            "convalidated",
+            "conrelid",
+            "conindid",
+            "conparentid",
+            "confrelid",
+            "conislocal",
+            "coninhcount",
+            "connoinherit",
+            "conperiod",
+            "conkey",
+        ],
+        "pg_index" => &[
+            "indexrelid",
+            "indrelid",
+            "indnatts",
+            "indnkeyatts",
+            "indisunique",
+            "indisnullsnotdistinct",
+            "indisprimary",
+            "indisexclusion",
+            "indimmediate",
+            "indisclustered",
+            "indisvalid",
+            "indcheckxmin",
+            "indisready",
+            "indislive",
+            "indisreplident",
+            "indkey",
+        ],
         "pg_range" => &["rngtypid", "rngsubtype"],
         "pg_collation" => &[
             "oid",
@@ -6306,6 +6390,141 @@ mod tests {
                 )
                 .is_err(),
                 "unsupported structural metadata shape: {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn constraints_and_empty_indexes_are_identity_gated_role_bound_and_typed() {
+        let catalog = RoleCatalog::from_json(
+            r#"{
+              "roles":[{"oid":100001,"name":"writer","login":true}],
+              "table_owners":[{"table":"places","role":"writer"}]
+            }"#,
+        )
+        .expect("role catalog");
+        let identity = SessionIdentity {
+            session_user: "writer".to_owned(),
+            current_user: "writer".to_owned(),
+            epoch: 4,
+            request_context: HashMap::new(),
+        };
+        let sql = "SELECT c.oid, c.conname, c.contype, c.conrelid, c.conkey, \
+                          pg_get_constraintdef(c.oid, true) AS definition \
+                   FROM pg_constraint c WHERE c.conrelid = $1";
+        let constraint = validate_statement_with_catalog_identity(
+            sql,
+            ProtocolMode::Extended,
+            true,
+            Some(&identity),
+            Some(&catalog),
+        )
+        .expect("role-bound constraints");
+        assert!(
+            constraint
+                .sql
+                .contains("quackgis_pg_constraint_visible('writer', 'writer')")
+        );
+        assert!(
+            constraint
+                .sql
+                .contains("quackgis_pg_get_constraintdef_visible")
+        );
+        let constraint_schema = annotate_catalog_result_schema(
+            &constraint.ast,
+            &Schema::new(vec![
+                Field::new("oid", DataType::UInt32, false),
+                Field::new("conname", DataType::Utf8, false),
+                Field::new("contype", DataType::Utf8, false),
+                Field::new("conrelid", DataType::UInt32, false),
+                Field::new(
+                    "conkey",
+                    DataType::List(Arc::new(Field::new("item", DataType::Int16, false))),
+                    false,
+                ),
+                Field::new("definition", DataType::Utf8, true),
+            ]),
+        );
+        let constraint_types = constraint_schema
+            .fields()
+            .iter()
+            .map(field_into_pg_type)
+            .collect::<PgWireResult<Vec<_>>>()
+            .expect("constraint wire types");
+        assert_eq!(
+            constraint_types,
+            [
+                Type::OID,
+                Type::NAME,
+                Type::CHAR,
+                Type::OID,
+                Type::INT2_ARRAY,
+                Type::TEXT,
+            ]
+        );
+
+        let index = validate_statement_with_catalog_identity(
+            "SELECT indexrelid, indrelid, indisprimary, indisunique, indkey, \
+                    pg_get_indexdef(indexrelid, 0, true) AS definition \
+             FROM pg_index WHERE indrelid = $1",
+            ProtocolMode::Extended,
+            true,
+            Some(&identity),
+            Some(&catalog),
+        )
+        .expect("role-bound empty index catalog");
+        assert!(
+            index
+                .sql
+                .contains("quackgis_pg_index_visible('writer', 'writer')")
+        );
+        let index_schema = annotate_catalog_result_schema(
+            &index.ast,
+            &Schema::new(vec![
+                Field::new("indexrelid", DataType::UInt32, false),
+                Field::new("indrelid", DataType::UInt32, false),
+                Field::new("indisprimary", DataType::Boolean, false),
+                Field::new("indisunique", DataType::Boolean, false),
+                Field::new(
+                    "indkey",
+                    DataType::List(Arc::new(Field::new("item", DataType::Int16, false))),
+                    false,
+                ),
+                Field::new("definition", DataType::Utf8, true),
+            ]),
+        );
+        assert_eq!(
+            index_schema
+                .fields()
+                .iter()
+                .map(field_into_pg_type)
+                .collect::<PgWireResult<Vec<_>>>()
+                .expect("index wire types"),
+            [
+                Type::OID,
+                Type::OID,
+                Type::BOOL,
+                Type::BOOL,
+                Type::INT2_VECTOR,
+                Type::TEXT,
+            ]
+        );
+
+        for invalid in [
+            "SELECT pg_get_constraintdef(1, true, false)",
+            "SELECT pg_get_indexdef(1, 0)",
+            "SELECT * FROM quackgis_pg_constraint_visible('writer', 'writer')",
+        ] {
+            assert!(
+                validate_statement_with_catalog_identity(
+                    invalid,
+                    ProtocolMode::Extended,
+                    true,
+                    Some(&identity),
+                    Some(&catalog),
+                )
+                .is_err(),
+                "unsupported constraint/index shape: {invalid}"
             );
         }
     }

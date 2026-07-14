@@ -81,6 +81,12 @@ The required real-driver workflow proves:
   PostgreSQL `oid`/`int2`/`pg_node_tree`/`text` identity, metadata participates in
   the schema fingerprint epoch, and effective-role visibility is intersected
   with the login identity's legacy allowlist ceiling;
+- durable PostgreSQL 18 `pg_constraint` rows for DuckLake's native named
+  `NOT NULL` constraints, including rename-stable OIDs, resolving namespace/
+  relation/attribute references, `int2[]` column keys, and
+  `pg_get_constraintdef`; `pg_index` has its maintained PostgreSQL shape and
+  OID-22 `int2vector` wire identity but is empty, because DuckLake cannot enforce
+  primary, unique, foreign-key, check, or index semantics;
 - exact transaction-local `request.jwt.claims` assignment through one text literal
   or `$1`, bounded at 16 KiB/setting and 32 KiB/session, plus PostgreSQL `text`
   retrieval with NULL-on-missing behavior; actual pgwire proves outside-
@@ -242,8 +248,10 @@ catalog surfaces remain open unless a focused test says otherwise.
   comment rows/functions. DuckDB's implicit string `NULL` default marker is
   normalized to no catalog row; explicit `DEFAULT NULL` is not separately
   distinguished, and pgwire comment/default DDL remains unsupported. This closes
-  the first shared traced structural slice. Baseline startup still rejects those
-  user-object catalogs explicitly. This lane is not loaded by default, packaged,
+  the first shared traced structural slice. It also exposes stable NOT-NULL
+  constraint identity and a truthfully empty index catalog; QuackGIS does not
+  infer primary/unique keys from data or non-null columns. Baseline startup still
+  rejects those user-object catalogs explicitly. This lane is not loaded by default, packaged,
   or release-supported.
 - Binary columns named `geom_wkb` use the same geometry sentinel OID as the
   maintained COPY bbox layout. RowDescription plus text hex-WKB, binary WKB, and

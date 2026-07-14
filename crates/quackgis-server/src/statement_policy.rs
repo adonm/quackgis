@@ -407,6 +407,8 @@ fn unqualified_pg_catalog_name(name: &ObjectName) -> bool {
                 | "pg_attribute"
                 | "pg_attrdef"
                 | "pg_description"
+                | "pg_constraint"
+                | "pg_index"
                 | "pg_range"
                 | "pg_collation"
                 | "pg_roles"

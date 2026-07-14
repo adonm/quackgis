@@ -21,6 +21,7 @@ pub enum PgTypeHint {
     Name,
     NameArray,
     Char,
+    Int2Vector,
     PgNodeTree,
     Text,
     Varchar,
@@ -37,6 +38,7 @@ impl PgTypeHint {
             Self::Name => "name",
             Self::NameArray => "name_array",
             Self::Char => "char",
+            Self::Int2Vector => "int2vector",
             Self::PgNodeTree => "pg_node_tree",
             Self::Text => "text",
             Self::Varchar => "varchar",
@@ -342,6 +344,15 @@ pub fn field_into_pg_type(field: &Arc<Field>) -> PgWireResult<Type> {
             {
                 Type::CHAR
             }
+            "int2vector"
+                if matches!(
+                    arrow_type,
+                    DataType::List(field) | DataType::LargeList(field)
+                        if matches!(field.data_type(), DataType::Int16)
+                ) =>
+            {
+                Type::INT2_VECTOR
+            }
             "pg_node_tree"
                 if matches!(
                     arrow_type,
@@ -550,6 +561,12 @@ mod tests {
                 DataType::Utf8,
                 PgTypeHint::PgNodeTree,
                 Type::PG_NODE_TREE,
+            ),
+            (
+                "indkey",
+                DataType::List(Arc::new(Field::new("item", DataType::Int16, false))),
+                PgTypeHint::Int2Vector,
+                Type::INT2_VECTOR,
             ),
             ("formatted", DataType::Utf8, PgTypeHint::Text, Type::TEXT),
             (

@@ -255,7 +255,7 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
     );
     execute_storage_update(
         &storage,
-        "CREATE TABLE quackgis.main.private_metadata(id BIGINT DEFAULT 9)",
+        "CREATE TABLE quackgis.main.private_metadata(id BIGINT NOT NULL DEFAULT 9)",
     )
     .await;
     execute_storage_update(
@@ -309,6 +309,21 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
             "pg_catalog.pg_description",
             "SELECT objoid, classoid, objsubid, description FROM pg_description \
              WHERE objoid = 'catalog_projection'::regclass ORDER BY objsubid",
+        ),
+        (
+            "pg_catalog.pg_constraint",
+            "SELECT c.oid, c.conname, c.connamespace, c.contype, c.condeferrable, \
+                    c.condeferred, c.convalidated, c.conrelid, c.conindid, \
+                    c.conparentid, c.confrelid, c.conislocal, c.coninhcount, \
+                    c.connoinherit, c.conperiod, c.conkey \
+             FROM pg_constraint c JOIN pg_class r ON r.oid = c.conrelid \
+             WHERE r.relname = 'catalog_projection' ORDER BY c.conname",
+        ),
+        (
+            "pg_catalog.pg_index",
+            "SELECT indexrelid, indrelid, indisunique, indisprimary, indisclustered, \
+                    indisvalid, indisreplident, indkey FROM pg_index \
+             WHERE indrelid = 'catalog_projection'::regclass",
         ),
         (
             "pg_catalog.pg_type",
@@ -441,6 +456,68 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
         assert_eq!(row.get::<_, u32>(19), relation_oid);
         assert_eq!(row.get::<_, String>(20), "public");
     }
+    let not_null = client
+        .prepare(
+            "SELECT c.oid, c.conname, c.connamespace, c.contype, c.conrelid, \
+                    c.conkey, pg_get_constraintdef(c.oid, true) \
+             FROM pg_constraint c \
+             WHERE c.conrelid = 'catalog_projection'::regclass",
+        )
+        .await
+        .expect("prepare registry-backed not-null constraint");
+    let not_null_types = [
+        tokio_postgres::types::Type::OID,
+        tokio_postgres::types::Type::NAME,
+        tokio_postgres::types::Type::OID,
+        tokio_postgres::types::Type::CHAR,
+        tokio_postgres::types::Type::OID,
+        tokio_postgres::types::Type::INT2_ARRAY,
+        tokio_postgres::types::Type::TEXT,
+    ];
+    for (column, expected) in not_null.columns().iter().zip(not_null_types) {
+        assert_eq!(column.type_(), &expected, "{}", column.name());
+    }
+    let not_null = client
+        .query_one(&not_null, &[])
+        .await
+        .expect("registry-backed not-null constraint");
+    let not_null_oid = not_null.get::<_, u32>(0);
+    assert!(not_null_oid >= 100_000);
+    assert_eq!(
+        not_null.get::<_, String>(1),
+        "catalog_projection_id_not_null"
+    );
+    assert_eq!(not_null.get::<_, u32>(2), 2_200);
+    assert_eq!(not_null.get::<_, i8>(3), b'n' as i8);
+    assert_eq!(not_null.get::<_, u32>(4), relation_oid);
+    assert_eq!(not_null.get::<_, Vec<i16>>(5), vec![1]);
+    assert_eq!(not_null.get::<_, String>(6), "NOT NULL id");
+    let empty_indexes = client
+        .prepare(
+            "SELECT indexrelid, indrelid, indisprimary, indisunique, indkey, \
+                    pg_get_indexdef(indexrelid, 0, true) AS definition \
+             FROM pg_index WHERE indrelid = 'catalog_projection'::regclass",
+        )
+        .await
+        .expect("prepare truthfully empty index catalog");
+    let empty_index_types = [
+        tokio_postgres::types::Type::OID,
+        tokio_postgres::types::Type::OID,
+        tokio_postgres::types::Type::BOOL,
+        tokio_postgres::types::Type::BOOL,
+        tokio_postgres::types::Type::INT2_VECTOR,
+        tokio_postgres::types::Type::TEXT,
+    ];
+    for (column, expected) in empty_indexes.columns().iter().zip(empty_index_types) {
+        assert_eq!(column.type_(), &expected, "{}", column.name());
+    }
+    assert!(
+        client
+            .query(&empty_indexes, &[])
+            .await
+            .expect("truthfully empty index catalog")
+            .is_empty()
+    );
     let structural_metadata = client
         .prepare(
             "SELECT d.adrelid, d.adnum, d.adbin, \
@@ -535,6 +612,30 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
             )
             .await
             .expect("legacy-hidden defaults")
+            .get::<_, i64>(0),
+        0
+    );
+    assert_eq!(
+        reader
+            .query_one(
+                "SELECT count(*)::BIGINT FROM pg_constraint \
+                 WHERE conrelid = to_regclass('catalog_projection')",
+                &[],
+            )
+            .await
+            .expect("reader-visible constraints")
+            .get::<_, i64>(0),
+        1
+    );
+    assert_eq!(
+        reader
+            .query_one(
+                "SELECT count(*)::BIGINT FROM pg_constraint \
+                 WHERE conrelid = to_regclass('private_metadata')",
+                &[],
+            )
+            .await
+            .expect("legacy-hidden constraints")
             .get::<_, i64>(0),
         0
     );
@@ -837,6 +938,19 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
     );
     assert_eq!(renamed_catalog[1].get::<_, String>(1), "title");
     assert_eq!(renamed_catalog[1].get::<_, i16>(2), 2);
+    assert_eq!(
+        client
+            .query_one(
+                "SELECT oid FROM pg_constraint \
+                 WHERE conrelid = 'catalog_projection_renamed'::regclass \
+                   AND contype = 'n'",
+                &[],
+            )
+            .await
+            .expect("not-null identity after table rename")
+            .get::<_, u32>(0),
+        not_null_oid
+    );
     let renamed_resolution = client
         .query_one(
             &format!(

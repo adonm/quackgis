@@ -172,6 +172,9 @@ access. QuackGIS will therefore implement relation-specific PostgreSQL behavior:
   additionally intersect effective-role visibility with the login identity's
   legacy allowlist ceiling so defaults/comments cannot bypass configured metadata
   confidentiality;
+- `pg_constraint` and `pg_index` use the same structural role/login ceiling;
+  unsupported key/index types produce no rows rather than fabricated identifiers
+  that could mislead authorization or mutation clients;
 - maintained `information_schema` views apply role/ownership filters;
 - `pg_roles` never returns a password verifier;
 - `pg_authid`, internal role configuration, JWT material, SCRAM verifier storage,

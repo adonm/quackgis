@@ -158,8 +158,10 @@ const TYPE_ROWS: &[PgTypeRow] = &[
 // an official bundle.
 const IDENTITY_TYPE_ROWS: &[PgTypeRow] = &[
     builtin_scalar(17, "bytea", -1, 'U', 1001),
+    builtin_scalar(22, "int2vector", -1, 'A', 1006).element(21),
     builtin_scalar(194, "pg_node_tree", -1, 'S', 0).collation(100),
     builtin_array(1001, "_bytea", 17, 0),
+    builtin_array(1006, "_int2vector", 22, 0),
     builtin_scalar(700, "float4", 4, 'N', 1021).by_value(),
     builtin_scalar(701, "float8", 8, 'N', 1022)
         .by_value()
@@ -408,6 +410,14 @@ fn duckdb_role_structural_catalog_sql() -> &'static str {
            SELECT descriptions.* FROM quackgis_pg_catalog.pg_description descriptions
            JOIN quackgis_pg_visible_relations(effective_role, session_identity) visible
              ON visible.relation_oid = descriptions.objoid;
+         CREATE OR REPLACE MACRO quackgis_pg_constraint_visible(effective_role, session_identity) AS TABLE
+           SELECT constraints.* FROM quackgis_pg_catalog.pg_constraint constraints
+           JOIN quackgis_pg_visible_relations(effective_role, session_identity) visible
+             ON visible.relation_oid = constraints.conrelid;
+         CREATE OR REPLACE MACRO quackgis_pg_index_visible(effective_role, session_identity) AS TABLE
+           SELECT indexes.* FROM quackgis_pg_catalog.pg_index indexes
+           JOIN quackgis_pg_visible_relations(effective_role, session_identity) visible
+             ON visible.relation_oid = indexes.indrelid;
          CREATE OR REPLACE MACRO quackgis_pg_col_description_visible(
            relation_value, column_value, effective_role, session_identity
          ) AS (SELECT description
@@ -426,6 +436,32 @@ fn duckdb_role_structural_catalog_sql() -> &'static str {
                  FROM quackgis_pg_description_visible(effective_role, session_identity)
                  WHERE classoid = 1259::UINTEGER
                    AND objoid = try_cast(object_value AS UINTEGER) AND objsubid = 0
+                 LIMIT 1) END;
+         CREATE OR REPLACE MACRO quackgis_pg_get_constraintdef_visible(
+           constraint_value, pretty := false, effective_role := NULL, session_identity := NULL
+         ) AS CASE
+           WHEN constraint_value IS NULL THEN NULL
+           WHEN pretty IS NOT NULL AND try_cast(pretty AS BOOLEAN) IS NULL
+             THEN error('PostgreSQL pg_get_constraintdef pretty flag must be boolean')
+           ELSE (SELECT 'NOT NULL ' || quackgis_pg_quote_identifier(attributes.attname)
+                 FROM quackgis_pg_constraint_visible(effective_role, session_identity) constraints
+                 JOIN quackgis_pg_catalog.pg_attribute attributes
+                   ON attributes.attrelid = constraints.conrelid
+                  AND attributes.attnum = constraints.conkey[1]
+                 WHERE constraints.oid = try_cast(constraint_value AS UINTEGER)
+                   AND constraints.contype = 'n'
+                 LIMIT 1) END;
+         CREATE OR REPLACE MACRO quackgis_pg_get_indexdef_visible(
+           index_value, column_number := 0, pretty := false,
+           effective_role := NULL, session_identity := NULL
+         ) AS CASE
+           WHEN index_value IS NULL THEN NULL
+           WHEN try_cast(column_number AS INTEGER) IS NULL
+             OR (pretty IS NOT NULL AND try_cast(pretty AS BOOLEAN) IS NULL)
+             THEN error('PostgreSQL pg_get_indexdef arguments are invalid')
+           ELSE (SELECT NULL::VARCHAR
+                 FROM quackgis_pg_index_visible(effective_role, session_identity) indexes
+                 WHERE indexes.indexrelid = try_cast(index_value AS UINTEGER)
                  LIMIT 1) END;"#
 }
 
@@ -1082,6 +1118,30 @@ fn identity_catalog_macros_sql() -> &'static str {
            ELSE (SELECT description FROM quackgis_pg_catalog.pg_description
                  WHERE classoid = 1259::UINTEGER
                    AND objoid = try_cast(object_value AS UINTEGER) AND objsubid = 0
+                 LIMIT 1) END;
+         CREATE OR REPLACE MACRO quackgis_pg_get_constraintdef(
+           constraint_value, pretty := false
+         ) AS CASE
+           WHEN constraint_value IS NULL THEN NULL
+           WHEN pretty IS NOT NULL AND try_cast(pretty AS BOOLEAN) IS NULL
+             THEN error('PostgreSQL pg_get_constraintdef pretty flag must be boolean')
+           ELSE (SELECT 'NOT NULL ' || quackgis_pg_quote_identifier(attributes.attname)
+                 FROM quackgis_pg_catalog.pg_constraint constraints
+                 JOIN quackgis_pg_catalog.pg_attribute attributes
+                   ON attributes.attrelid = constraints.conrelid
+                  AND attributes.attnum = constraints.conkey[1]
+                 WHERE constraints.oid = try_cast(constraint_value AS UINTEGER)
+                   AND constraints.contype = 'n'
+                 LIMIT 1) END;
+         CREATE OR REPLACE MACRO quackgis_pg_get_indexdef(
+           index_value, column_number := 0, pretty := false
+         ) AS CASE
+           WHEN index_value IS NULL THEN NULL
+           WHEN try_cast(column_number AS INTEGER) IS NULL
+             OR (pretty IS NOT NULL AND try_cast(pretty AS BOOLEAN) IS NULL)
+             THEN error('PostgreSQL pg_get_indexdef arguments are invalid')
+           ELSE (SELECT NULL::VARCHAR FROM quackgis_pg_catalog.pg_index indexes
+                 WHERE indexes.indexrelid = try_cast(index_value AS UINTEGER)
                  LIMIT 1) END;"#
 }
 
@@ -1102,7 +1162,9 @@ pub fn duckdb_identity_catalog_bootstrap_sql(catalog: &str) -> String {
         "CREATE OR REPLACE VIEW quackgis_pg_catalog._current_columns AS\n\
          WITH identity AS (\n\
            SELECT identity.*, nullif(columns.column_default, 'NULL') AS column_default,\n\
-                  columns.comment AS column_comment, tables.comment AS table_comment\n\
+                  columns.comment AS column_comment, tables.comment AS table_comment,\n\
+                  NOT columns.is_nullable AS column_not_null,\n\
+                  constraints.constraint_name AS not_null_constraint_name\n\
            FROM ducklake_column_info({catalog_literal}) identity\n\
            JOIN duckdb_columns() columns\n\
              ON columns.database_name = {catalog_literal}\n\
@@ -1113,6 +1175,13 @@ pub fn duckdb_identity_catalog_bootstrap_sql(catalog: &str) -> String {
              ON tables.database_name = {catalog_literal}\n\
             AND tables.schema_name = identity.schema_name\n\
             AND tables.table_name = identity.table_name\n\
+           LEFT JOIN duckdb_constraints() constraints\n\
+             ON constraints.database_name = {catalog_literal}\n\
+            AND constraints.schema_name = identity.schema_name\n\
+            AND constraints.table_name = identity.table_name\n\
+            AND constraints.constraint_type = 'NOT NULL'\n\
+            AND len(constraints.constraint_column_names) = 1\n\
+            AND constraints.constraint_column_names[1] = identity.column_name\n\
            WHERE identity.schema_name <> {internal_schema_literal}\n\
          ), identity_fingerprint AS (\n\
            SELECT sha256(coalesce(CAST(to_json(list(struct_pack(\n\
@@ -1120,7 +1189,8 @@ pub fn duckdb_identity_catalog_bootstrap_sql(catalog: &str) -> String {
              table_uuid := table_uuid, table_name := table_name,\n\
              column_id := column_id, column_name := column_name,\n\
              column_default := column_default, column_comment := column_comment,\n\
-             table_comment := table_comment)\n\
+             table_comment := table_comment, column_not_null := column_not_null,\n\
+             not_null_constraint_name := not_null_constraint_name)\n\
              ORDER BY schema_uuid, table_uuid, column_id)) AS VARCHAR), '[]'))\n\
              AS fingerprint\n\
            FROM identity\n\
@@ -1132,6 +1202,9 @@ pub fn duckdb_identity_catalog_bootstrap_sql(catalog: &str) -> String {
                LEFT JOIN {catalog_identifier}.{schema}.relation_oid r USING (table_uuid)\n\
                LEFT JOIN {catalog_identifier}.{schema}.attribute_number a\n\
                  USING (table_uuid, column_id)\n\
+               LEFT JOIN {catalog_identifier}.{schema}.not_null_constraint_oid constraint_oid\n\
+                 ON constraint_oid.table_uuid = i.table_uuid\n\
+                AND constraint_oid.column_id = i.column_id AND constraint_oid.active\n\
                LEFT JOIN information_schema.columns c\n\
                  ON c.table_catalog = {catalog_literal}\n\
                 AND c.table_schema = i.schema_name\n\
@@ -1142,7 +1215,9 @@ pub fn duckdb_identity_catalog_bootstrap_sql(catalog: &str) -> String {
                   OR (i.schema_name = 'main' AND lower(i.table_name) IN\n\
                       ('geometry', 'geography', '_geometry', '_geography'))\n\
                   OR n.oid IS NULL OR r.oid IS NULL OR a.attnum IS NULL\n\
-                  OR c.column_name IS NULL OR r.namespace_oid <> n.oid)\n\
+                  OR c.column_name IS NULL OR r.namespace_oid <> n.oid\n\
+                  OR i.column_not_null <> (constraint_oid.oid IS NOT NULL)\n\
+                  OR (i.column_not_null AND i.not_null_constraint_name IS NULL))\n\
              THEN true ELSE error('PostgreSQL catalog identity snapshot is not reconciled') END AS ok\n\
            FROM identity_fingerprint f, {catalog_identifier}.{schema}.catalog_state s\n\
            WHERE s.singleton\n\
@@ -1152,11 +1227,15 @@ pub fn duckdb_identity_catalog_bootstrap_sql(catalog: &str) -> String {
                 r.oid AS relation_oid, r.row_type_oid, a.attnum,\n\
                 c.ordinal_position, c.data_type, c.is_nullable,\n\
                 c.numeric_precision, c.numeric_scale, i.column_default,\n\
-                i.column_comment, i.table_comment\n\
+                i.column_comment, i.table_comment, i.column_not_null,\n\
+                i.not_null_constraint_name, constraint_oid.oid AS not_null_constraint_oid\n\
          FROM identity i\n\
          JOIN {catalog_identifier}.{schema}.namespace_oid n USING (schema_uuid)\n\
          JOIN {catalog_identifier}.{schema}.relation_oid r USING (table_uuid)\n\
          JOIN {catalog_identifier}.{schema}.attribute_number a USING (table_uuid, column_id)\n\
+         LEFT JOIN {catalog_identifier}.{schema}.not_null_constraint_oid constraint_oid\n\
+           ON constraint_oid.table_uuid = i.table_uuid\n\
+          AND constraint_oid.column_id = i.column_id AND constraint_oid.active\n\
          JOIN information_schema.columns c\n\
            ON c.table_catalog = {catalog_literal}\n\
           AND c.table_schema = i.schema_name\n\
@@ -1223,6 +1302,24 @@ pub fn duckdb_identity_catalog_bootstrap_sql(catalog: &str) -> String {
          SELECT relation_oid, {PG_CLASS_RELATION_OID}::UINTEGER, CAST(attnum AS INTEGER),\n\
                 column_comment\n\
          FROM quackgis_pg_catalog._current_columns WHERE column_comment IS NOT NULL;\n\
+         CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_constraint AS\n\
+         SELECT not_null_constraint_oid AS oid, not_null_constraint_name AS conname,\n\
+                namespace_oid AS connamespace, 'n'::VARCHAR AS contype,\n\
+                false AS condeferrable, false AS condeferred, true AS convalidated,\n\
+                relation_oid AS conrelid, 0::UINTEGER AS conindid,\n\
+                0::UINTEGER AS conparentid, 0::UINTEGER AS confrelid,\n\
+                true AS conislocal, 0::SMALLINT AS coninhcount,\n\
+                true AS connoinherit, false AS conperiod,\n\
+                [attnum]::SMALLINT[] AS conkey\n\
+         FROM quackgis_pg_catalog._current_columns WHERE column_not_null;\n\
+         CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_index AS\n\
+         SELECT NULL::UINTEGER AS indexrelid, NULL::UINTEGER AS indrelid,\n\
+                0::SMALLINT AS indnatts, 0::SMALLINT AS indnkeyatts,\n\
+                false AS indisunique, false AS indisnullsnotdistinct,\n\
+                false AS indisprimary, false AS indisexclusion,\n\
+                false AS indimmediate, false AS indisclustered, false AS indisvalid,\n\
+                false AS indcheckxmin, false AS indisready, false AS indislive,\n\
+                false AS indisreplident, NULL::SMALLINT[] AS indkey WHERE false;\n\
          {macros}",
         internal_schema_literal = quote_literal(INTERNAL_SCHEMA),
     )
@@ -1259,7 +1356,10 @@ pub fn ducklake_identity_registry_bootstrap_sql(catalog: &str) -> String {
            namespace_oid UINTEGER NOT NULL, oid UINTEGER NOT NULL,\n\
            row_type_oid UINTEGER NOT NULL);\n\
          CREATE TABLE IF NOT EXISTS {catalog}.{schema}.attribute_number(\n\
-           table_uuid UUID NOT NULL, column_id BIGINT NOT NULL, attnum SMALLINT NOT NULL);"
+           table_uuid UUID NOT NULL, column_id BIGINT NOT NULL, attnum SMALLINT NOT NULL);\n\
+         CREATE TABLE IF NOT EXISTS {catalog}.{schema}.not_null_constraint_oid(\n\
+           table_uuid UUID NOT NULL, column_id BIGINT NOT NULL,\n\
+           oid UINTEGER NOT NULL, active BOOLEAN NOT NULL);"
     )
 }
 
@@ -1272,7 +1372,9 @@ pub fn ducklake_identity_registry_reconcile_sql(catalog: &str) -> String {
     format!(
         "CREATE OR REPLACE TEMP TABLE __quackgis_identity AS\n\
            SELECT identity.*, nullif(columns.column_default, 'NULL') AS column_default,\n\
-                  columns.comment AS column_comment, tables.comment AS table_comment\n\
+                  columns.comment AS column_comment, tables.comment AS table_comment,\n\
+                  NOT columns.is_nullable AS column_not_null,\n\
+                  constraints.constraint_name AS not_null_constraint_name\n\
            FROM ducklake_column_info({catalog_literal}) identity\n\
            JOIN duckdb_columns() columns\n\
              ON columns.database_name = {catalog_literal}\n\
@@ -1283,6 +1385,13 @@ pub fn ducklake_identity_registry_reconcile_sql(catalog: &str) -> String {
              ON tables.database_name = {catalog_literal}\n\
             AND tables.schema_name = identity.schema_name\n\
             AND tables.table_name = identity.table_name\n\
+           LEFT JOIN duckdb_constraints() constraints\n\
+             ON constraints.database_name = {catalog_literal}\n\
+            AND constraints.schema_name = identity.schema_name\n\
+            AND constraints.table_name = identity.table_name\n\
+            AND constraints.constraint_type = 'NOT NULL'\n\
+            AND len(constraints.constraint_column_names) = 1\n\
+            AND constraints.constraint_column_names[1] = identity.column_name\n\
            WHERE identity.schema_name <> {internal_schema_literal};\n\
          CREATE OR REPLACE TEMP TABLE __quackgis_identity_fingerprint AS\n\
            SELECT sha256(coalesce(CAST(to_json(list(struct_pack(\n\
@@ -1290,7 +1399,8 @@ pub fn ducklake_identity_registry_reconcile_sql(catalog: &str) -> String {
              table_uuid := table_uuid, table_name := table_name,\n\
              column_id := column_id, column_name := column_name,\n\
              column_default := column_default, column_comment := column_comment,\n\
-             table_comment := table_comment)\n\
+             table_comment := table_comment, column_not_null := column_not_null,\n\
+             not_null_constraint_name := not_null_constraint_name)\n\
              ORDER BY schema_uuid, table_uuid, column_id)) AS VARCHAR), '[]'))\n\
              AS fingerprint\n\
            FROM __quackgis_identity;\n\
@@ -1364,6 +1474,31 @@ pub fn ducklake_identity_registry_reconcile_sql(catalog: &str) -> String {
              WHERE a.table_uuid = i.table_uuid AND a.column_id = i.column_id);\n\
          INSERT INTO {catalog_identifier}.{schema}.attribute_number\n\
            SELECT * FROM __quackgis_new_attributes;\n\
+         UPDATE {catalog_identifier}.{schema}.not_null_constraint_oid constraints\n\
+           SET active = false\n\
+           WHERE constraints.active AND NOT EXISTS (\n\
+             SELECT 1 FROM __quackgis_identity identity\n\
+             WHERE identity.table_uuid = constraints.table_uuid\n\
+               AND identity.column_id = constraints.column_id\n\
+               AND identity.column_not_null);\n\
+         CREATE OR REPLACE TEMP TABLE __quackgis_new_not_null_constraints AS\n\
+           SELECT identity.table_uuid, identity.column_id,\n\
+                  row_number() OVER (ORDER BY identity.table_uuid, identity.column_id) AS ordinal\n\
+           FROM __quackgis_identity identity\n\
+           WHERE identity.column_not_null AND NOT EXISTS (\n\
+             SELECT 1 FROM {catalog_identifier}.{schema}.not_null_constraint_oid constraints\n\
+             WHERE constraints.table_uuid = identity.table_uuid\n\
+               AND constraints.column_id = identity.column_id AND constraints.active);\n\
+         INSERT INTO {catalog_identifier}.{schema}.not_null_constraint_oid\n\
+           SELECT constraints.table_uuid, constraints.column_id,\n\
+                  CAST(state.next_oid + constraints.ordinal - 1 AS UINTEGER), true\n\
+           FROM __quackgis_new_not_null_constraints constraints,\n\
+                {catalog_identifier}.{schema}.catalog_state state;\n\
+         UPDATE {catalog_identifier}.{schema}.catalog_state\n\
+           SET next_oid = next_oid +\n\
+               (SELECT count(*) FROM __quackgis_new_not_null_constraints)\n\
+           WHERE singleton\n\
+             AND (SELECT count(*) FROM __quackgis_new_not_null_constraints) > 0;\n\
          UPDATE {catalog_identifier}.{schema}.catalog_state s\n\
            SET schema_epoch = schema_epoch + CASE\n\
                  WHEN s.identity_fingerprint IS NULL\n\
@@ -1377,7 +1512,8 @@ pub fn ducklake_identity_registry_reconcile_sql(catalog: &str) -> String {
         change_count = "(SELECT count(*) FROM __quackgis_new_public_namespace) + \
                         (SELECT count(*) FROM __quackgis_new_namespaces) + \
                         (SELECT count(*) FROM __quackgis_new_relations) + \
-                        (SELECT count(*) FROM __quackgis_new_attributes)",
+                        (SELECT count(*) FROM __quackgis_new_attributes) + \
+                        (SELECT count(*) FROM __quackgis_new_not_null_constraints)",
     )
 }
 
@@ -1405,12 +1541,18 @@ pub fn ducklake_identity_registry_validation_sql(catalog: &str) -> String {
              SELECT table_uuid, attnum FROM {catalog}.{schema}.attribute_number\n\
              GROUP BY table_uuid, attnum HAVING count(*) <> 1)\n\
            AND NOT EXISTS (\n\
+             SELECT table_uuid, column_id\n\
+             FROM {catalog}.{schema}.not_null_constraint_oid WHERE active\n\
+             GROUP BY table_uuid, column_id HAVING count(*) <> 1)\n\
+           AND NOT EXISTS (\n\
              SELECT oid FROM (\n\
                SELECT oid FROM {catalog}.{schema}.namespace_oid\n\
                UNION ALL\n\
                SELECT oid FROM {catalog}.{schema}.relation_oid\n\
                UNION ALL\n\
                SELECT row_type_oid FROM {catalog}.{schema}.relation_oid\n\
+               UNION ALL\n\
+               SELECT oid FROM {catalog}.{schema}.not_null_constraint_oid\n\
              ) allocated GROUP BY oid HAVING count(*) <> 1)\n\
            AND NOT EXISTS (\n\
              SELECT 1 FROM {catalog}.{schema}.namespace_oid\n\
@@ -1419,6 +1561,9 @@ pub fn ducklake_identity_registry_validation_sql(catalog: &str) -> String {
              SELECT 1 FROM {catalog}.{schema}.relation_oid\n\
              WHERE oid < {DYNAMIC_OBJECT_OID_START}\n\
                 OR row_type_oid < {DYNAMIC_OBJECT_OID_START})\n\
+           AND NOT EXISTS (\n\
+             SELECT 1 FROM {catalog}.{schema}.not_null_constraint_oid\n\
+             WHERE oid < {DYNAMIC_OBJECT_OID_START})\n\
            AND NOT EXISTS (\n\
              SELECT 1 FROM {catalog}.{schema}.relation_oid r\n\
              WHERE NOT EXISTS (\n\
@@ -1429,6 +1574,15 @@ pub fn ducklake_identity_registry_validation_sql(catalog: &str) -> String {
              WHERE a.attnum <= 0 OR NOT EXISTS (\n\
                SELECT 1 FROM {catalog}.{schema}.relation_oid r\n\
                WHERE r.table_uuid = a.table_uuid))\n\
+           AND NOT EXISTS (\n\
+             SELECT 1 FROM {catalog}.{schema}.not_null_constraint_oid constraints\n\
+             WHERE NOT EXISTS (\n\
+               SELECT 1 FROM {catalog}.{schema}.relation_oid relations\n\
+               WHERE relations.table_uuid = constraints.table_uuid)\n\
+                OR NOT EXISTS (\n\
+               SELECT 1 FROM {catalog}.{schema}.attribute_number attributes\n\
+               WHERE attributes.table_uuid = constraints.table_uuid\n\
+                 AND attributes.column_id = constraints.column_id))\n\
            AND (SELECT next_oid FROM {catalog}.{schema}.catalog_state) > coalesce((\n\
              SELECT max(oid) FROM (\n\
                SELECT oid FROM {catalog}.{schema}.namespace_oid\n\
@@ -1437,6 +1591,8 @@ pub fn ducklake_identity_registry_validation_sql(catalog: &str) -> String {
                SELECT oid FROM {catalog}.{schema}.relation_oid\n\
                UNION ALL\n\
                SELECT row_type_oid FROM {catalog}.{schema}.relation_oid\n\
+               UNION ALL\n\
+               SELECT oid FROM {catalog}.{schema}.not_null_constraint_oid\n\
              ) allocated), {dynamic_predecessor})\n\
          THEN true ELSE error('QuackGIS catalog identity registry is inconsistent') END\n\
          AS registry_valid",
@@ -1585,6 +1741,8 @@ mod tests {
         assert!(sql.contains("quackgis_information_schema_column_privileges"));
         assert!(sql.contains("quackgis_pg_attrdef_visible"));
         assert!(sql.contains("quackgis_pg_description_visible"));
+        assert!(sql.contains("quackgis_pg_constraint_visible"));
+        assert!(sql.contains("quackgis_pg_index_visible"));
         assert!(sql.contains("NULL::VARCHAR"));
         assert!(!sql.contains("password-secret"));
     }
@@ -1625,6 +1783,8 @@ mod tests {
             "pg_attribute",
             "pg_attrdef",
             "pg_description",
+            "pg_constraint",
+            "pg_index",
         ] {
             assert!(
                 catalogs.contains(&format!("quackgis_pg_catalog.{relation}")),
@@ -1639,13 +1799,16 @@ mod tests {
         assert!(catalogs.contains("coalesce(max(owner.role_oid), 10::UINTEGER) AS relowner"));
         assert!(catalogs.contains("is_nullable = 'NO' AS attnotnull"));
         assert!(catalogs.contains("false AS attisdropped"));
-        assert_eq!(IDENTITY_TYPE_ROWS.len(), 29);
+        assert_eq!(IDENTITY_TYPE_ROWS.len(), 31);
         assert!(catalogs.contains("quackgis_pg_to_regclass"));
         assert!(catalogs.contains("quackgis_pg_to_regtype"));
         assert!(catalogs.contains("quackgis_pg_format_type"));
         assert!(catalogs.contains("quackgis_pg_get_expr"));
         assert!(catalogs.contains("quackgis_pg_col_description"));
         assert!(catalogs.contains("quackgis_pg_obj_description"));
+        assert!(catalogs.contains("quackgis_pg_get_constraintdef"));
+        assert!(catalogs.contains("quackgis_pg_get_indexdef"));
         assert!(catalogs.contains("column_default := column_default"));
+        assert!(catalogs.contains("not_null_constraint_oid"));
     }
 }

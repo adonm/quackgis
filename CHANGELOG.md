@@ -156,6 +156,11 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   fingerprint; actual pgwire preserves PostgreSQL `oid`, `int2`, `pg_node_tree`,
   and `text` identity and proves effective-role visibility cannot exceed the
   login identity's legacy allowlist ceiling.
+- Durable PostgreSQL 18 `pg_constraint` identity for DuckLake `NOT NULL`
+  constraints, including rename continuity, resolving OID/attribute links,
+  `int2[]` keys, and `pg_get_constraintdef`; a typed but empty `pg_index` plus
+  NULL `pg_get_indexdef` truthfully represent DuckLake's lack of primary, unique,
+  foreign-key, check, and index support.
 - DuckDB-computed bbox maintenance during COPY for the explicit reserved-column
   layout contract, including NULL, exact-recheck, and reopen evidence.
 - Fail-closed bbox layout validation rejects partial, wrong-type, caller-supplied,

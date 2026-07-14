@@ -141,6 +141,44 @@
       ]
     },
     {
+      "name": "pg_catalog.pg_constraint",
+      "stage": "C5",
+      "trace_status": "implemented_ducklake_not_null_only_pgwire",
+      "required_columns": [
+        { "name": "oid", "type_oid": 26, "nullable": false },
+        { "name": "conname", "type_oid": 19, "nullable": false },
+        { "name": "connamespace", "type_oid": 26, "nullable": false },
+        { "name": "contype", "type_oid": 18, "nullable": false },
+        { "name": "condeferrable", "type_oid": 16, "nullable": false },
+        { "name": "condeferred", "type_oid": 16, "nullable": false },
+        { "name": "convalidated", "type_oid": 16, "nullable": false },
+        { "name": "conrelid", "type_oid": 26, "nullable": false },
+        { "name": "conindid", "type_oid": 26, "nullable": false },
+        { "name": "conparentid", "type_oid": 26, "nullable": false },
+        { "name": "confrelid", "type_oid": 26, "nullable": false },
+        { "name": "conislocal", "type_oid": 16, "nullable": false },
+        { "name": "coninhcount", "type_oid": 21, "nullable": false },
+        { "name": "connoinherit", "type_oid": 16, "nullable": false },
+        { "name": "conperiod", "type_oid": 16, "nullable": false },
+        { "name": "conkey", "type_oid": 1005, "nullable": false }
+      ]
+    },
+    {
+      "name": "pg_catalog.pg_index",
+      "stage": "C5",
+      "trace_status": "implemented_empty_unsupported_ducklake_indexes",
+      "required_columns": [
+        { "name": "indexrelid", "type_oid": 26, "nullable": false },
+        { "name": "indrelid", "type_oid": 26, "nullable": false },
+        { "name": "indisunique", "type_oid": 16, "nullable": false },
+        { "name": "indisprimary", "type_oid": 16, "nullable": false },
+        { "name": "indisclustered", "type_oid": 16, "nullable": false },
+        { "name": "indisvalid", "type_oid": 16, "nullable": false },
+        { "name": "indisreplident", "type_oid": 16, "nullable": false },
+        { "name": "indkey", "type_oid": 22, "nullable": false }
+      ]
+    },
+    {
       "name": "pg_catalog.pg_database",
       "stage": "C3",
       "trace_status": "reference_pending",
@@ -378,6 +416,54 @@
         { "name": "default_expression", "type_oid": 25, "nullable": true },
         { "name": "column_description", "type_oid": 25, "nullable": true },
         { "name": "table_description", "type_oid": 25, "nullable": true }
+      ]
+    },
+    {
+      "id": "structural_not_null_constraint_discovery",
+      "stage": "C5",
+      "trace_status": "implemented_ducklake_not_null_only_pgwire",
+      "protocol": "extended",
+      "consumers": ["psql 18.3", "client-neutral catalog contract"],
+      "sql": "SELECT c.oid, c.conname, c.connamespace, c.contype, c.condeferrable, c.condeferred, c.convalidated, c.conrelid, c.conindid, c.conparentid, c.confrelid, c.conislocal, c.coninhcount, c.connoinherit, c.conperiod, c.conkey, pg_catalog.pg_get_constraintdef(c.oid, true) AS definition FROM pg_catalog.pg_constraint c WHERE c.conrelid = $1 ORDER BY c.conname",
+      "parameter_type_oids": [26],
+      "expected_columns": [
+        { "name": "oid", "type_oid": 26, "nullable": false },
+        { "name": "conname", "type_oid": 19, "nullable": false },
+        { "name": "connamespace", "type_oid": 26, "nullable": false },
+        { "name": "contype", "type_oid": 18, "nullable": false },
+        { "name": "condeferrable", "type_oid": 16, "nullable": false },
+        { "name": "condeferred", "type_oid": 16, "nullable": false },
+        { "name": "convalidated", "type_oid": 16, "nullable": false },
+        { "name": "conrelid", "type_oid": 26, "nullable": false },
+        { "name": "conindid", "type_oid": 26, "nullable": false },
+        { "name": "conparentid", "type_oid": 26, "nullable": false },
+        { "name": "confrelid", "type_oid": 26, "nullable": false },
+        { "name": "conislocal", "type_oid": 16, "nullable": false },
+        { "name": "coninhcount", "type_oid": 21, "nullable": false },
+        { "name": "connoinherit", "type_oid": 16, "nullable": false },
+        { "name": "conperiod", "type_oid": 16, "nullable": false },
+        { "name": "conkey", "type_oid": 1005, "nullable": false },
+        { "name": "definition", "type_oid": 25, "nullable": true }
+      ]
+    },
+    {
+      "id": "structural_index_identity_discovery",
+      "stage": "C5",
+      "trace_status": "implemented_empty_unsupported_ducklake_indexes",
+      "protocol": "extended",
+      "consumers": ["psql 18.3", "GDAL/OGR 3.11.5", "QGIS 3.44"],
+      "sql": "SELECT indexrelid, indrelid, indisunique, indisprimary, indisclustered, indisvalid, indisreplident, indkey, pg_catalog.pg_get_indexdef(indexrelid, 0, true) AS definition FROM pg_catalog.pg_index WHERE indrelid = $1",
+      "parameter_type_oids": [26],
+      "expected_columns": [
+        { "name": "indexrelid", "type_oid": 26, "nullable": false },
+        { "name": "indrelid", "type_oid": 26, "nullable": false },
+        { "name": "indisunique", "type_oid": 16, "nullable": false },
+        { "name": "indisprimary", "type_oid": 16, "nullable": false },
+        { "name": "indisclustered", "type_oid": 16, "nullable": false },
+        { "name": "indisvalid", "type_oid": 16, "nullable": false },
+        { "name": "indisreplident", "type_oid": 16, "nullable": false },
+        { "name": "indkey", "type_oid": 22, "nullable": false },
+        { "name": "definition", "type_oid": 25, "nullable": true }
       ]
     },
     {
