@@ -136,6 +136,7 @@ fn statement_allowed_for_readonly(statement: &Statement) -> bool {
         | Statement::Declare { .. }
         | Statement::Close { .. }
         | Statement::Discard { .. }
+        | Statement::Reset(_)
         | Statement::ExplainTable { .. }
         | Statement::Commit { .. }
         | Statement::Rollback { .. } => true,

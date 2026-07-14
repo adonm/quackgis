@@ -47,6 +47,12 @@ The required real-driver workflow proves:
   `SHOW search_path`, stable `pg_database` identity, PostgreSQL-shaped
   `current_database`/`current_schema`/`current_schemas`, `public` relation mapping,
   and quoted COPY targets;
+- optional immutable role provisioning with exact LOGIN/auth matching, stable
+  explicit OIDs, acyclic PostgreSQL 18 membership-edge options, and bounded owner/
+  grant declarations; actual pgwire proves `session_user`/`current_user`/
+  `current_role`/`user`, `SET [SESSION|LOCAL] ROLE`, `NONE`, reset, assumption
+  denial, connection isolation, prepared invalidation, and local cleanup after
+  commit/rollback/failed-transaction rollback;
 - portal paging, transaction isolation, failed-transaction `25P02` enforcement,
   `COMMIT`-as-rollback after failure, disconnect rollback, restart, and reopen;
 - the simple-protocol, server-owned
@@ -103,6 +109,11 @@ catalog surfaces remain open unless a focused test says otherwise.
 - Maintenance is disabled unless `QUACKGIS_MAINTENANCE_USER` names the caller;
   it remains constrained by the write table allowlist and cannot run inside an
   explicit transaction.
+- Configured owners and grants are validated input only; legacy read/write/
+  maintenance identities and table allowlists remain the statement-authorization
+  boundary until C5. Role switching therefore changes PostgreSQL session identity
+  but does not widen object access. `SET LOCAL ROLE` outside a transaction fails
+  with `25001`, a bounded divergence from PostgreSQL's warning/no-op behavior.
 - Global and reader/writer/maintenance admission are bounded. Native gates prove
   the default eight-reader ceiling under 32 clients and simultaneous all-class
   queueing/completion at reduced smoke scale; this is not mixed-workload soak

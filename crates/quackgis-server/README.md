@@ -29,7 +29,11 @@ mise exec -- just smoke
 Supported locally: bounded simple/extended pgwire, parameters, create/insert/
 update/delete, transactions, text COPY for maintained types, SCRAM/table policy,
 portals, `public` schema mapping, maintained SET/SHOW forms, quoted COPY targets,
-official DuckLake reopen, and the curated spatial subset.
+configuration-backed role switching/identity, official DuckLake reopen, and the
+curated spatial subset. Role configuration requires password authentication; see
+`docs/SECURITY_RBAC.md` for its bounded JSON schema. Configured owner/grant
+declarations are validated but not enforced until the common privilege engine
+lands.
 
 Query results stream from ADBC with native cancellation, deadlines, bounded
 admission, and autosized DuckDB resource controls. COPY incrementally decodes

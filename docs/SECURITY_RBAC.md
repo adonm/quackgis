@@ -24,10 +24,14 @@ floor from the ordered security work.
 | optional private metrics endpoint | metrics unit tests |
 | native driver digest/version validation | storage unit/native tests |
 | bounded immutable role configuration and graph validation | auth/role unit tests |
+| session/effective identity, role switching, and transaction-local cleanup | real pgwire workflow + role units |
 
-The role configuration parser now validates stable explicit OIDs, LOGIN/NOLOGIN,
+The role configuration parser validates stable explicit OIDs, LOGIN/NOLOGIN,
 INHERIT defaults, PostgreSQL 18 membership-edge options, cycles, owners, and the
-bounded schema/table privilege vocabulary. Runtime `SET ROLE`, privilege
+bounded schema/table privilege vocabulary. Sessions expose PostgreSQL `name`
+identity for `session_user`, `current_user`, `current_role`, and `user`; implement
+`SET ROLE`, `SET SESSION ROLE`, `SET LOCAL ROLE`, `SET ROLE NONE`, and
+`RESET ROLE`; and clear local role state on commit/rollback. Privilege
 enforcement/inquiry, request claims, role catalogs, RLS, administrative SQL,
 packaged secret rotation, revocation infrastructure, and production failure
 drills remain open.
@@ -291,6 +295,17 @@ Owner and grant declarations are validated now to freeze the C5 input boundary;
 they do not authorize statements or populate PostgreSQL catalogs until the common
 privilege engine lands. Existing allowlists remain the only current object-policy
 enforcement and cannot be widened by this file.
+
+With a valid role file, role assumption walks only `set_option=true` membership
+edges from the original authenticated `session_user`. A changed `current_user`
+does not become a new traversal root. Unknown roles return `42704`; unreachable
+roles return `42501`. `SET LOCAL ROLE` is deliberately rejected with `25001`
+outside an explicit transaction rather than emitting PostgreSQL's warning/no-op.
+Session role survives transaction end, while a local role (including local
+`NONE`) is removed after commit, rollback, and failed-transaction rollback.
+Identity changes invalidate already prepared statements instead of executing a
+statement authorized or rendered under a stale effective role. Disconnect drops
+all role state, and independent pgwire connections have independent state.
 
 ## Required Local 1.0 evidence
 

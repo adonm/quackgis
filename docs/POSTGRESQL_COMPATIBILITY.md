@@ -560,9 +560,16 @@ consumed by C5. Startup rejects trust mode, LOGIN/auth mismatches, duplicate or
 reserved identities, unknown principals, duplicate edges, cycles,
 `admin_option=true`, unsupported privileges/schemas, unknown fields, and input
 over 1 MiB. Set-option reachability is evaluated from the original login role and
-is independent of configuration order. The declarations do not yet alter
-statement authorization or catalog rows; session state, role switching, identity
-expressions, request context, and lifecycle cleanup remain C4 work.
+is independent of configuration order. Per-connection state now exposes
+PostgreSQL `name`-typed `session_user`, `current_user`, `current_role`, and `user`,
+and supports session/local role assumption, `NONE`, and reset with `42704`/`42501`
+errors. Local identity is removed after commit, rollback, and failed-transaction
+rollback; independent connections remain isolated. A role/context epoch rejects
+prepared execution after an identity change rather than reusing stale
+authorization. Existing allowlists are still the enforcement boundary, and the
+declarations do not yet alter statement authorization or catalog rows. Bounded
+request context plus cancellation/quarantine cleanup remain before the C4 gate;
+privilege integration and role catalogs are C5.
 
 ### C5 — implement privilege and discovery semantics
 

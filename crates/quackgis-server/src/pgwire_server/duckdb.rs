@@ -41,10 +41,10 @@ use pgwire::messages::data::DataRow;
 use pgwire::messages::extendedquery::Execute;
 use pgwire::messages::response::TransactionStatus;
 use sqlparser::ast::{
-    BinaryOperator, CopySource, CopyTarget as AstCopyTarget, Expr, Function, FunctionArg,
-    FunctionArgExpr, FunctionArgumentList, FunctionArguments, Ident, JoinConstraint, JoinOperator,
-    ObjectName, ObjectNamePart, SelectItem, SelectItemQualifiedWildcardKind, Set, SetExpr,
-    Statement, TableFactor, Value, WildcardAdditionalOptions, visit_expressions,
+    BinaryOperator, ContextModifier, CopySource, CopyTarget as AstCopyTarget, Expr, Function,
+    FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, Ident, JoinConstraint,
+    JoinOperator, ObjectName, ObjectNamePart, Reset, SelectItem, SelectItemQualifiedWildcardKind,
+    Set, SetExpr, Statement, TableFactor, Value, WildcardAdditionalOptions, visit_expressions,
     visit_expressions_mut, visit_relations_mut,
 };
 use sqlparser::dialect::PostgreSqlDialect;
@@ -65,6 +65,7 @@ use crate::execution_control::{
     ActiveQueryRegistry, AdmissionController, AdmissionError, BlockingWorkerError,
     BlockingWorkerPool, OperationClass, OperationDeadline,
 };
+use crate::role::{RoleSessionError, RoleSessionErrorKind, RoleSessionState, SessionIdentity};
 
 pub async fn serve_duckdb(
     storage: Arc<DuckDbAdbcStorage>,
@@ -222,6 +223,8 @@ struct DuckDbStatement {
     parameter_types: Vec<Type>,
     result_origins: Vec<Option<CatalogColumnOrigin>>,
     catalog_epoch: Option<u64>,
+    role_command: Option<RoleCommand>,
+    session_epoch: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -259,6 +262,8 @@ impl QueryParser for DuckDbParser {
         if client.transaction_status() == TransactionStatus::Error {
             return Err(failed_transaction_error());
         }
+        let role_session = client_role_session(client, &self.auth)?;
+        let identity = role_session.identity().map_err(role_session_error)?;
         if let Some(copy_target) = parse_copy_target(sql)? {
             authorize_copy(client, &self.auth, &copy_target)?;
             let empty = Arc::new(Schema::empty());
@@ -271,16 +276,22 @@ impl QueryParser for DuckDbParser {
                 parameter_types: Vec::new(),
                 result_origins: Vec::new(),
                 catalog_epoch: None,
+                role_command: None,
+                session_epoch: identity.epoch,
             });
         }
         let validated = validate_statement_with_catalog_identity(
             sql,
             ProtocolMode::Extended,
             self.storage.catalog_identity_enabled(),
+            Some(&identity),
         )?;
         let oid_parameters = catalog_oid_parameter_indexes(&validated.ast);
         authorize_statement(client, &self.auth, &validated.ast)?;
-        if validated.kind == StatementKind::SessionSet {
+        if matches!(
+            validated.kind,
+            StatementKind::SessionSet | StatementKind::Role
+        ) {
             let empty = Arc::new(Schema::empty());
             return Ok(DuckDbStatement {
                 sql: validated.sql,
@@ -291,6 +302,8 @@ impl QueryParser for DuckDbParser {
                 parameter_types: Vec::new(),
                 result_origins: Vec::new(),
                 catalog_epoch: None,
+                role_command: validated.role_command,
+                session_epoch: identity.epoch,
             });
         }
         let storage = client_session(
@@ -386,6 +399,8 @@ impl QueryParser for DuckDbParser {
             parameter_types,
             result_origins,
             catalog_epoch,
+            role_command: None,
+            session_epoch: identity.epoch,
         })
     }
 
@@ -467,9 +482,12 @@ impl SimpleQueryHandler for DuckDbService {
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
+        let role_session = client_role_session(client, &self.auth)?;
+        let identity = role_session.identity().map_err(role_session_error)?;
         let (sql, kind, ast) = validate_simple_sql_with_catalog_identity(
             query,
             self.storage.catalog_identity_enabled(),
+            Some(&identity),
         )?;
         let failed_transaction = client.transaction_status() == TransactionStatus::Error;
         if failed_transaction
@@ -625,6 +643,7 @@ impl SimpleQueryHandler for DuckDbService {
                         .await
                         .map_err(blocking_worker_error)?
                         .map_err(anyhow_error)?;
+                    role_session.end_transaction().map_err(role_session_error)?;
                     Ok(vec![Response::TransactionEnd(Tag::new("ROLLBACK"))])
                 } else {
                     self.control
@@ -633,6 +652,7 @@ impl SimpleQueryHandler for DuckDbService {
                         .await
                         .map_err(blocking_worker_error)?
                         .map_err(fatal_anyhow_error)?;
+                    role_session.end_transaction().map_err(role_session_error)?;
                     Ok(vec![Response::TransactionEnd(Tag::new("COMMIT"))])
                 }
             }
@@ -650,6 +670,7 @@ impl SimpleQueryHandler for DuckDbService {
                     .await
                     .map_err(blocking_worker_error)?
                     .map_err(anyhow_error)?;
+                role_session.end_transaction().map_err(role_session_error)?;
                 Ok(vec![Response::TransactionEnd(Tag::new("ROLLBACK"))])
             }
             SimpleStatementKind::Maintenance(command) => {
@@ -711,6 +732,14 @@ impl SimpleQueryHandler for DuckDbService {
             SimpleStatementKind::SessionSetBatch(count) => Ok((0..count)
                 .map(|_| Response::Execution(Tag::new("SET")))
                 .collect()),
+            SimpleStatementKind::Role(command) => {
+                apply_role_command(
+                    &role_session,
+                    &command,
+                    storage.transaction_state() == EngineTransactionState::Active,
+                )?;
+                Ok(vec![Response::Execution(Tag::new(command.tag()))])
+            }
             SimpleStatementKind::Copy(target) => begin_copy(client, storage, target, &self.control)
                 .await
                 .map(|response| vec![response]),
@@ -805,6 +834,13 @@ impl ExtendedQueryHandler for DuckDbService {
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
         let statement = &portal.statement.statement;
+        let role_session = client_role_session(client, &self.auth)?;
+        if role_session.identity().map_err(role_session_error)?.epoch != statement.session_epoch {
+            return Err(user_error(
+                "0A000",
+                "cached PostgreSQL statement was invalidated by a role or request-context change",
+            ));
+        }
         if let Some(target) = &statement.copy_target {
             let storage = client_session(
                 client,
@@ -908,6 +944,17 @@ impl ExtendedQueryHandler for DuckDbService {
                 Ok(Response::Execution(tag))
             }
             StatementKind::SessionSet => Ok(Response::Execution(Tag::new("SET"))),
+            StatementKind::Role => {
+                let command = statement.role_command.as_ref().ok_or_else(|| {
+                    user_error("XX000", "validated role statement has no session command")
+                })?;
+                apply_role_command(
+                    &role_session,
+                    command,
+                    storage.transaction_state() == EngineTransactionState::Active,
+                )?;
+                Ok(Response::Execution(Tag::new(command.tag())))
+            }
             StatementKind::Copy
             | StatementKind::Begin
             | StatementKind::Commit
@@ -928,6 +975,7 @@ enum StatementKind {
     Commit,
     Rollback,
     SessionSet,
+    Role,
     Maintenance,
     Copy,
 }
@@ -935,7 +983,7 @@ enum StatementKind {
 impl StatementKind {
     fn operation_class(self) -> OperationClass {
         match self {
-            Self::Read | Self::SessionSet => OperationClass::Reader,
+            Self::Read | Self::SessionSet | Self::Role => OperationClass::Reader,
             Self::Write(_) | Self::Begin | Self::Commit | Self::Rollback | Self::Copy => {
                 OperationClass::Writer
             }
@@ -956,22 +1004,39 @@ struct CopyTarget {
     columns: Vec<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RoleCommand {
+    Set { role: Option<String>, local: bool },
+    Reset,
+}
+
+impl RoleCommand {
+    const fn tag(&self) -> &'static str {
+        match self {
+            Self::Set { .. } => "SET",
+            Self::Reset => "RESET",
+        }
+    }
+}
+
 struct ValidatedStatement {
     sql: String,
     kind: StatementKind,
     ast: Statement,
+    role_command: Option<RoleCommand>,
 }
 
 #[cfg(test)]
 fn validate_simple_sql(
     sql: &str,
 ) -> PgWireResult<(String, SimpleStatementKind, Option<Statement>)> {
-    validate_simple_sql_with_catalog_identity(sql, false)
+    validate_simple_sql_with_catalog_identity(sql, false, None)
 }
 
 fn validate_simple_sql_with_catalog_identity(
     sql: &str,
     catalog_identity_enabled: bool,
+    identity: Option<&SessionIdentity>,
 ) -> PgWireResult<(String, SimpleStatementKind, Option<Statement>)> {
     if let Some(target) = parse_copy_target(sql)? {
         let sql = normalize_sql(sql)?;
@@ -988,6 +1053,7 @@ fn validate_simple_sql_with_catalog_identity(
         sql,
         ProtocolMode::Simple,
         catalog_identity_enabled,
+        identity,
     )?;
     let kind = match validated.kind {
         StatementKind::Read => SimpleStatementKind::Read,
@@ -996,6 +1062,12 @@ fn validate_simple_sql_with_catalog_identity(
         StatementKind::Commit => SimpleStatementKind::Commit,
         StatementKind::Rollback => SimpleStatementKind::Rollback,
         StatementKind::SessionSet => SimpleStatementKind::SessionSet,
+        StatementKind::Role => SimpleStatementKind::Role(
+            validated
+                .role_command
+                .clone()
+                .ok_or_else(|| user_error("XX000", "validated role statement has no command"))?,
+        ),
         StatementKind::Maintenance => SimpleStatementKind::Maintenance(
             parse_maintenance_call(&validated.ast)?
                 .ok_or_else(|| user_error("XX000", "validated maintenance call has no command"))?,
@@ -1013,19 +1085,21 @@ enum SimpleStatementKind {
     Rollback,
     SessionSet,
     SessionSetBatch(usize),
+    Role(RoleCommand),
     Maintenance(MaintenanceCommand),
     Copy(CopyTarget),
 }
 
 #[cfg(test)]
 fn validate_statement(sql: &str, mode: ProtocolMode) -> PgWireResult<ValidatedStatement> {
-    validate_statement_with_catalog_identity(sql, mode, false)
+    validate_statement_with_catalog_identity(sql, mode, false, None)
 }
 
 fn validate_statement_with_catalog_identity(
     sql: &str,
     mode: ProtocolMode,
     catalog_identity_enabled: bool,
+    identity: Option<&SessionIdentity>,
 ) -> PgWireResult<ValidatedStatement> {
     let sql = normalize_sql(sql)?;
     let sql = crate::spatial_compat::rewrite_postgis_sql(&sql);
@@ -1060,6 +1134,12 @@ fn validate_statement_with_catalog_identity(
         return Err(user_error(
             "0A000",
             &format!("DuckDB scalar function {function} is not exposed through pgwire"),
+        ));
+    }
+    if invalid_session_identity_function(&statement) {
+        return Err(user_error(
+            "0A000",
+            "unsupported PostgreSQL session identity expression shape",
         ));
     }
     if let Some(function) = invalid_maintained_function(&statement) {
@@ -1116,6 +1196,7 @@ fn validate_statement_with_catalog_identity(
             "PostgreSQL catalog query shape is outside the maintained projection contract",
         ));
     }
+    let role_command = parse_role_command(&statement);
     let kind = match &statement {
         Statement::Query(_) => StatementKind::Read,
         Statement::CreateTable(_) => StatementKind::Write("CREATE TABLE"),
@@ -1130,6 +1211,7 @@ fn validate_statement_with_catalog_identity(
             StatementKind::Rollback
         }
         Statement::Set(set) if supported_session_set(set) => StatementKind::SessionSet,
+        Statement::Set(_) | Statement::Reset(_) if role_command.is_some() => StatementKind::Role,
         Statement::ShowVariable { variable } if supported_show_variable(variable).is_some() => {
             StatementKind::Read
         }
@@ -1161,12 +1243,16 @@ fn validate_statement_with_catalog_identity(
         rewrite_pg_catalog_relations(&mut execution);
         rewrite_pg_catalog_functions(&mut execution);
         rewrite_pg_catalog_casts(&mut execution);
+        if let Some(identity) = identity {
+            rewrite_session_identity(&mut execution, identity);
+        }
         execution.to_string()
     };
     Ok(ValidatedStatement {
         sql: execution_sql,
         kind,
         ast: statement,
+        role_command,
     })
 }
 
@@ -1376,6 +1462,32 @@ fn supported_session_set(set: &Set) -> bool {
     }
 }
 
+fn parse_role_command(statement: &Statement) -> Option<RoleCommand> {
+    match statement {
+        Statement::Set(Set::SetRole {
+            context_modifier,
+            role_name,
+        }) if !matches!(context_modifier, Some(ContextModifier::Global)) => {
+            let local = matches!(context_modifier, Some(ContextModifier::Local));
+            let role = role_name.as_ref().map(|role| {
+                if role.quote_style.is_some() {
+                    role.value.clone()
+                } else {
+                    role.value.to_ascii_lowercase()
+                }
+            });
+            Some(RoleCommand::Set { role, local })
+        }
+        Statement::Reset(reset) => match &reset.reset {
+            Reset::ConfigurationParameter(name) if matches!(name.0.as_slice(), [ObjectNamePart::Identifier(role)] if pg_identifier_matches(role, "role")) => {
+                Some(RoleCommand::Reset)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn validate_session_set_batch(sql: &str) -> PgWireResult<Option<usize>> {
     let normalized = normalize_sql(sql)?;
     let statements = Parser::parse_sql(&PostgreSqlDialect {}, &normalized)
@@ -1454,6 +1566,49 @@ fn rewrite_public_relations(statement: &mut Statement) {
         }
         ControlFlow::Continue(())
     });
+}
+
+fn rewrite_session_identity(statement: &mut Statement, identity: &SessionIdentity) {
+    let _: ControlFlow<()> = visit_expressions_mut(statement, |expression| {
+        let value = match expression {
+            Expr::Function(function) => {
+                session_identity_function(function).map(|name| match name {
+                    "session_user" => identity.session_user.as_str(),
+                    _ => identity.current_user.as_str(),
+                })
+            }
+            Expr::Identifier(identifier)
+                if identifier.quote_style.is_none()
+                    && identifier.value.eq_ignore_ascii_case("current_role") =>
+            {
+                Some(identity.current_user.as_str())
+            }
+            _ => None,
+        };
+        if let Some(value) = value {
+            *expression = Expr::Value(Value::SingleQuotedString(value.to_owned()).into());
+        }
+        ControlFlow::Continue(())
+    });
+}
+
+fn session_identity_function(function: &Function) -> Option<&'static str> {
+    if function.uses_odbc_syntax
+        || !matches!(function.parameters, FunctionArguments::None)
+        || !matches!(function.args, FunctionArguments::None)
+        || function.filter.is_some()
+        || function.null_treatment.is_some()
+        || function.over.is_some()
+        || !function.within_group.is_empty()
+    {
+        return None;
+    }
+    let [ObjectNamePart::Identifier(name)] = function.name.0.as_slice() else {
+        return None;
+    };
+    ["current_user", "session_user", "current_role", "user"]
+        .into_iter()
+        .find(|candidate| pg_identifier_matches(name, candidate))
 }
 
 fn rewrite_pg_catalog_relations(statement: &mut Statement) {
@@ -2245,6 +2400,28 @@ fn forbidden_client_scalar_function(statement: &Statement) -> Option<String> {
     forbidden
 }
 
+fn invalid_session_identity_function(statement: &Statement) -> bool {
+    let mut invalid = false;
+    let _: ControlFlow<()> = visit_expressions(statement, |expression| {
+        let Expr::Function(function) = expression else {
+            return ControlFlow::Continue(());
+        };
+        let identity_name = function.name.0.last().is_some_and(|part| {
+            matches!(part, ObjectNamePart::Identifier(identifier)
+                if identifier.quote_style.is_none()
+                    && matches!(identifier.value.to_ascii_lowercase().as_str(),
+                        "current_user" | "session_user" | "current_role" | "user"))
+        });
+        if identity_name && session_identity_function(function).is_none() {
+            invalid = true;
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    invalid
+}
+
 fn internal_control_schema_reference(statement: &Statement) -> bool {
     let mut clone = statement.clone();
     let mut found = false;
@@ -3014,10 +3191,20 @@ fn result_schema_compatible(expected: &Schema, actual: &Schema) -> bool {
 }
 
 fn maintained_function_hint(expression: &Expr) -> Option<PgTypeHint> {
-    let Expr::Function(function) = expression else {
-        return None;
-    };
-    maintained_pg_function(&function.name).map(MaintainedPgFunction::result_hint)
+    match expression {
+        Expr::Function(function) => session_identity_function(function)
+            .map(|_| PgTypeHint::Name)
+            .or_else(|| {
+                maintained_pg_function(&function.name).map(MaintainedPgFunction::result_hint)
+            }),
+        Expr::Identifier(identifier)
+            if identifier.quote_style.is_none()
+                && identifier.value.eq_ignore_ascii_case("current_role") =>
+        {
+            Some(PgTypeHint::Name)
+        }
+        _ => None,
+    }
 }
 
 fn catalog_oid_parameter_indexes(statement: &Statement) -> HashSet<usize> {
@@ -3433,6 +3620,29 @@ fn failed_transaction_error() -> PgWireError {
     )
 }
 
+fn role_session_error(error: RoleSessionError) -> PgWireError {
+    let sqlstate = match error.kind {
+        RoleSessionErrorKind::UnknownRole => "42704",
+        RoleSessionErrorKind::PermissionDenied => "42501",
+        RoleSessionErrorKind::NoTransaction => "25001",
+        RoleSessionErrorKind::Internal => "XX000",
+    };
+    user_error(sqlstate, &error.to_string())
+}
+
+fn apply_role_command(
+    session: &RoleSessionState,
+    command: &RoleCommand,
+    in_transaction: bool,
+) -> PgWireResult<()> {
+    match command {
+        RoleCommand::Set { role, local } => session
+            .set_role(role.as_deref(), *local, in_transaction)
+            .map_err(role_session_error),
+        RoleCommand::Reset => session.reset_role().map_err(role_session_error),
+    }
+}
+
 fn anyhow_error(error: anyhow::Error) -> PgWireError {
     user_error("XX000", &error.to_string())
 }
@@ -3466,6 +3676,23 @@ where
         .session_extensions()
         .get::<DuckDbAdbcStorage>()
         .ok_or_else(|| user_error("XX000", "failed to initialize DuckDB client session"))
+}
+
+fn client_role_session<C>(client: &C, auth: &AuthConfig) -> PgWireResult<Arc<RoleSessionState>>
+where
+    C: ClientInfo + ?Sized,
+{
+    if let Some(session) = client.session_extensions().get::<RoleSessionState>() {
+        return Ok(session);
+    }
+    let session = auth
+        .start_role_session(client.metadata().get("user").map(String::as_str))
+        .map_err(anyhow_error)?;
+    client.session_extensions().insert(session);
+    client
+        .session_extensions()
+        .get::<RoleSessionState>()
+        .ok_or_else(|| user_error("XX000", "failed to initialize PostgreSQL role session"))
 }
 
 #[derive(Default)]
@@ -4105,6 +4332,7 @@ mod tests {
              WHERE n.nspname = 'public' ORDER BY c.oid, a.attnum",
             ProtocolMode::Extended,
             true,
+            None,
         )
         .expect("capability-gated user catalog query");
         assert!(
@@ -4234,6 +4462,7 @@ mod tests {
                     'public'::regnamespace::pg_catalog.text AS namespace_name",
             ProtocolMode::Extended,
             true,
+            None,
         )
         .expect("registered object lookup");
         for private in [
@@ -4288,8 +4517,13 @@ mod tests {
             "SELECT TRY_CAST('points' AS REGCLASS)",
         ] {
             assert!(
-                validate_statement_with_catalog_identity(private, ProtocolMode::Extended, true)
-                    .is_err(),
+                validate_statement_with_catalog_identity(
+                    private,
+                    ProtocolMode::Extended,
+                    true,
+                    None,
+                )
+                .is_err(),
                 "private catalog function must fail closed: {private}"
             );
         }
@@ -4479,6 +4713,89 @@ mod tests {
             assert_eq!(target.table.schema, "main");
             assert_eq!(target.table.table, "points");
             assert_eq!(target.columns, ["id", "name"]);
+        }
+    }
+
+    #[test]
+    fn role_commands_and_identity_expressions_are_structural_and_typed() {
+        let identity = SessionIdentity {
+            session_user: "authenticator".to_owned(),
+            current_user: "api_reader".to_owned(),
+            epoch: 7,
+        };
+        let validated = validate_statement_with_catalog_identity(
+            "SELECT session_user, current_user, current_role, user",
+            ProtocolMode::Extended,
+            false,
+            Some(&identity),
+        )
+        .expect("identity expressions");
+        assert!(validated.sql.contains("'authenticator'"));
+        assert_eq!(validated.sql.matches("'api_reader'").count(), 3);
+        let schema = annotate_catalog_result_schema(
+            &validated.ast,
+            &Schema::new(vec![
+                Field::new("session_user", DataType::Utf8, false),
+                Field::new("current_user", DataType::Utf8, false),
+                Field::new("current_role", DataType::Utf8, false),
+                Field::new("user", DataType::Utf8, false),
+            ]),
+        );
+        for field in schema.fields() {
+            assert_eq!(
+                field_into_pg_type(field).expect("identity type"),
+                Type::NAME
+            );
+        }
+
+        for (sql, expected) in [
+            (
+                "SET ROLE api_reader",
+                RoleCommand::Set {
+                    role: Some("api_reader".to_owned()),
+                    local: false,
+                },
+            ),
+            (
+                "SET SESSION ROLE API_READER",
+                RoleCommand::Set {
+                    role: Some("api_reader".to_owned()),
+                    local: false,
+                },
+            ),
+            (
+                "SET LOCAL ROLE api_reader",
+                RoleCommand::Set {
+                    role: Some("api_reader".to_owned()),
+                    local: true,
+                },
+            ),
+            (
+                "SET ROLE NONE",
+                RoleCommand::Set {
+                    role: None,
+                    local: false,
+                },
+            ),
+            ("RESET ROLE", RoleCommand::Reset),
+        ] {
+            let validated = validate_statement(sql, ProtocolMode::Simple)
+                .unwrap_or_else(|error| panic!("role command {sql}: {error}"));
+            assert_eq!(validated.kind, StatementKind::Role);
+            assert_eq!(validated.role_command, Some(expected));
+        }
+        for unsupported in [
+            "SET GLOBAL ROLE api_reader",
+            "RESET ALL",
+            "RESET SESSION AUTHORIZATION",
+            "SET SESSION AUTHORIZATION api_reader",
+            "SELECT current_user()",
+            "SELECT pg_catalog.current_user",
+        ] {
+            assert!(
+                validate_statement(unsupported, ProtocolMode::Simple).is_err(),
+                "unsupported session command: {unsupported}"
+            );
         }
     }
 }

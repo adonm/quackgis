@@ -58,8 +58,9 @@ Important limits:
   cancellable before the non-cancellable commit boundary with explicit
   rollback/quarantine outcomes;
 - broad PostgreSQL catalogs and named GIS-client parity are incomplete;
-- PostgreSQL roles, object privileges, role switching, and role-aware OpenAPI are
-  planned but not implemented; and
+- immutable roles, membership validation, session/effective identity, and role
+  switching are implemented when a role file is configured; object privileges,
+  role catalogs/inquiry, request context, and role-aware OpenAPI remain open; and
 - remote/shared catalog and object-storage profiles fail closed.
 
 TLS remains optional for local development. Set `QUACKGIS_TLS_MODE=required` with

@@ -2,6 +2,8 @@
 //! Immutable PostgreSQL role and future grant configuration.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow, bail};
 use serde::Deserialize;
@@ -130,6 +132,194 @@ impl RoleCatalog {
             }
         }
         false
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionIdentity {
+    pub session_user: String,
+    pub current_user: String,
+    pub epoch: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RoleSelection {
+    SessionUser,
+    Named(String),
+}
+
+#[derive(Debug)]
+struct RoleSession {
+    session_user: String,
+    session_role: RoleSelection,
+    local_role: Option<RoleSelection>,
+    epoch: u64,
+}
+
+#[derive(Debug)]
+pub struct RoleSessionState {
+    catalog: Option<Arc<RoleCatalog>>,
+    session: Mutex<RoleSession>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RoleSessionErrorKind {
+    UnknownRole,
+    PermissionDenied,
+    NoTransaction,
+    Internal,
+}
+
+#[derive(Debug)]
+pub struct RoleSessionError {
+    pub kind: RoleSessionErrorKind,
+    message: String,
+}
+
+impl RoleSessionError {
+    fn new(kind: RoleSessionErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for RoleSessionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for RoleSessionError {}
+
+impl RoleSessionState {
+    pub fn new(session_user: String, catalog: Option<Arc<RoleCatalog>>) -> Result<Self> {
+        if let Some(catalog) = &catalog {
+            let role = catalog
+                .role(&session_user)
+                .ok_or_else(|| anyhow!("authenticated user has no configured role"))?;
+            if !role.login {
+                bail!("authenticated user names a NOLOGIN role");
+            }
+        }
+        Ok(Self {
+            catalog,
+            session: Mutex::new(RoleSession {
+                session_user,
+                session_role: RoleSelection::SessionUser,
+                local_role: None,
+                epoch: 0,
+            }),
+        })
+    }
+
+    pub fn identity(&self) -> Result<SessionIdentity, RoleSessionError> {
+        let session = self.session.lock().map_err(|_| {
+            RoleSessionError::new(
+                RoleSessionErrorKind::Internal,
+                "PostgreSQL role session state is unavailable",
+            )
+        })?;
+        Ok(SessionIdentity {
+            session_user: session.session_user.clone(),
+            current_user: effective_role(&session).to_owned(),
+            epoch: session.epoch,
+        })
+    }
+
+    pub fn set_role(
+        &self,
+        target: Option<&str>,
+        local: bool,
+        in_transaction: bool,
+    ) -> Result<(), RoleSessionError> {
+        if local && !in_transaction {
+            return Err(RoleSessionError::new(
+                RoleSessionErrorKind::NoTransaction,
+                "SET LOCAL ROLE requires an explicit transaction",
+            ));
+        }
+        let mut session = self.session.lock().map_err(|_| {
+            RoleSessionError::new(
+                RoleSessionErrorKind::Internal,
+                "PostgreSQL role session state is unavailable",
+            )
+        })?;
+        let selection = match target {
+            None => RoleSelection::SessionUser,
+            Some(target) => {
+                let Some(catalog) = &self.catalog else {
+                    return Err(RoleSessionError::new(
+                        RoleSessionErrorKind::UnknownRole,
+                        format!("role {target:?} does not exist"),
+                    ));
+                };
+                if catalog.role(target).is_none() {
+                    return Err(RoleSessionError::new(
+                        RoleSessionErrorKind::UnknownRole,
+                        format!("role {target:?} does not exist"),
+                    ));
+                }
+                if !catalog.can_set_role(&session.session_user, target) {
+                    return Err(RoleSessionError::new(
+                        RoleSessionErrorKind::PermissionDenied,
+                        format!("permission denied to set role {target:?}"),
+                    ));
+                }
+                RoleSelection::Named(target.to_owned())
+            }
+        };
+        let changed = if local {
+            session.local_role.as_ref() != Some(&selection)
+        } else {
+            session.session_role != selection || session.local_role.is_some()
+        };
+        if local {
+            session.local_role = Some(selection);
+        } else {
+            session.session_role = selection;
+            session.local_role = None;
+        }
+        if changed {
+            session.epoch = session.epoch.wrapping_add(1);
+        }
+        Ok(())
+    }
+
+    pub fn reset_role(&self) -> Result<(), RoleSessionError> {
+        let mut session = self.session.lock().map_err(|_| {
+            RoleSessionError::new(
+                RoleSessionErrorKind::Internal,
+                "PostgreSQL role session state is unavailable",
+            )
+        })?;
+        if session.session_role != RoleSelection::SessionUser || session.local_role.is_some() {
+            session.session_role = RoleSelection::SessionUser;
+            session.local_role = None;
+            session.epoch = session.epoch.wrapping_add(1);
+        }
+        Ok(())
+    }
+
+    pub fn end_transaction(&self) -> Result<(), RoleSessionError> {
+        let mut session = self.session.lock().map_err(|_| {
+            RoleSessionError::new(
+                RoleSessionErrorKind::Internal,
+                "PostgreSQL role session state is unavailable",
+            )
+        })?;
+        if session.local_role.take().is_some() {
+            session.epoch = session.epoch.wrapping_add(1);
+        }
+        Ok(())
+    }
+}
+
+fn effective_role(session: &RoleSession) -> &str {
+    match session.local_role.as_ref().unwrap_or(&session.session_role) {
+        RoleSelection::SessionUser => &session.session_user,
+        RoleSelection::Named(role) => role,
     }
 }
 
@@ -566,5 +756,78 @@ mod tests {
         let oversized = " ".repeat(MAX_ROLE_CONFIG_BYTES + 1);
         let error = RoleCatalog::from_json(&oversized).expect_err("oversized config");
         assert!(error.to_string().contains("1048576-byte"));
+    }
+
+    #[test]
+    fn role_session_uses_original_login_reachability_and_cleans_local_state() {
+        let catalog = Arc::new(RoleCatalog::from_json(CONFIG).expect("role configuration"));
+        let state =
+            RoleSessionState::new("authenticator".to_owned(), Some(catalog)).expect("role session");
+        assert_eq!(
+            state.identity().expect("initial identity"),
+            SessionIdentity {
+                session_user: "authenticator".to_owned(),
+                current_user: "authenticator".to_owned(),
+                epoch: 0,
+            }
+        );
+
+        state
+            .set_role(Some("analyst"), false, false)
+            .expect("set reachable role");
+        assert_eq!(
+            state.identity().expect("assumed identity").current_user,
+            "analyst"
+        );
+        let denied = state
+            .set_role(Some("authenticator"), true, false)
+            .expect_err("SET LOCAL outside transaction");
+        assert_eq!(denied.kind, RoleSessionErrorKind::NoTransaction);
+        state
+            .set_role(Some("api_reader"), true, true)
+            .expect("set transitive local role from original login");
+        assert_eq!(
+            state.identity().expect("local identity").current_user,
+            "api_reader"
+        );
+        state.end_transaction().expect("transaction cleanup");
+        assert_eq!(
+            state.identity().expect("restored identity").current_user,
+            "analyst"
+        );
+        state.reset_role().expect("reset role");
+        assert_eq!(
+            state.identity().expect("reset identity").current_user,
+            "authenticator"
+        );
+    }
+
+    #[test]
+    fn assumed_role_does_not_expand_original_login_reachability() {
+        let catalog = Arc::new(
+            RoleCatalog::from_json(
+                r#"{
+                  "roles":[
+                    {"oid":11,"name":"login","login":true},
+                    {"oid":12,"name":"first"},
+                    {"oid":13,"name":"unreachable"},
+                    {"oid":14,"name":"target"}
+                  ],
+                  "memberships":[
+                    {"role":"first","member":"login"},
+                    {"role":"target","member":"unreachable"}
+                  ]
+                }"#,
+            )
+            .expect("role configuration"),
+        );
+        let state = RoleSessionState::new("login".to_owned(), Some(catalog)).expect("role session");
+        state
+            .set_role(Some("first"), false, false)
+            .expect("first assumption");
+        let denied = state
+            .set_role(Some("target"), false, false)
+            .expect_err("current role cannot expand assumption graph");
+        assert_eq!(denied.kind, RoleSessionErrorKind::PermissionDenied);
     }
 }

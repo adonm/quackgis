@@ -11,7 +11,7 @@ use anyhow::{Result, anyhow};
 use pgwire::api::ClientInfo;
 use pgwire::api::auth::sasl::scram::{SCRAM_ITERATIONS, gen_salted_password, random_nonce};
 
-use crate::role::RoleCatalog;
+use crate::role::{RoleCatalog, RoleSessionState};
 
 const METADATA_USER: &str = "user";
 
@@ -276,6 +276,18 @@ impl AuthConfig {
 
     pub fn role_catalog(&self) -> Option<&Arc<RoleCatalog>> {
         self.role_catalog.as_ref()
+    }
+
+    pub fn start_role_session(&self, name: Option<&str>) -> Result<RoleSessionState> {
+        let session_user = match self.mode {
+            AuthMode::Trust => name.unwrap_or("postgres"),
+            AuthMode::Password => name
+                .filter(|name| self.users.contains_key(*name))
+                .ok_or_else(|| {
+                    anyhow!("authenticated user is missing from password configuration")
+                })?,
+        };
+        RoleSessionState::new(session_user.to_owned(), self.role_catalog.clone())
     }
 
     pub fn read_targets(&self) -> Option<&[WriteTarget]> {

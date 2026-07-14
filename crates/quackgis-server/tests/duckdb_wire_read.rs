@@ -317,6 +317,22 @@ async fn cli_duckdb_backend_serves_an_official_local_catalog() {
         .expect("ephemeral listener");
     let port = listener.local_addr().expect("address").port();
     drop(listener);
+    let role_config = temp.path().join("roles.json");
+    std::fs::write(
+        &role_config,
+        r#"{
+          "roles": [
+            {"oid": 100001, "name": "writer", "login": true},
+            {"oid": 100002, "name": "reader", "login": true},
+            {"oid": 100003, "name": "analyst"},
+            {"oid": 100004, "name": "blocked"}
+          ],
+          "memberships": [
+            {"role": "analyst", "member": "writer", "set_option": true}
+          ]
+        }"#,
+    )
+    .expect("role config");
 
     let mut server = ChildGuard(
         std::process::Command::new(env!("CARGO_BIN_EXE_quackgis-server"))
@@ -335,6 +351,8 @@ async fn cli_duckdb_backend_serves_an_official_local_catalog() {
             .arg("--readonly-password=reader-secret")
             .arg("--write-allowlist=cli_points,private_points")
             .arg("--read-allowlist=cli_points")
+            .arg("--role-config")
+            .arg(&role_config)
             .arg("--shutdown-timeout-ms=500")
             .spawn()
             .expect("start DuckDB CLI backend"),
@@ -366,6 +384,152 @@ async fn cli_duckdb_backend_serves_an_official_local_catalog() {
         let _ = server.0.wait();
         panic!("DuckDB CLI backend did not accept connections before the timeout")
     });
+
+    let identity = client
+        .query_one("SELECT session_user, current_user, current_role, user", &[])
+        .await
+        .expect("initial PostgreSQL identity");
+    assert_eq!(identity.get::<_, String>(0), "writer");
+    assert_eq!(identity.get::<_, String>(1), "writer");
+    assert_eq!(identity.get::<_, String>(2), "writer");
+    assert_eq!(identity.get::<_, String>(3), "writer");
+    for column in identity.columns() {
+        assert_eq!(column.type_(), &tokio_postgres::types::Type::NAME);
+    }
+    let stale_identity = client
+        .prepare("SELECT current_user")
+        .await
+        .expect("prepare identity before role change");
+    client
+        .batch_execute("SET ROLE analyst")
+        .await
+        .expect("assume configured role");
+    assert_eq!(
+        client
+            .query_one("SELECT current_user", &[])
+            .await
+            .expect("assumed identity")
+            .get::<_, String>(0),
+        "analyst"
+    );
+    let stale_error = client
+        .query(&stale_identity, &[])
+        .await
+        .expect_err("role change invalidates a prepared identity");
+    assert_eq!(
+        stale_error.code(),
+        Some(&tokio_postgres::error::SqlState::FEATURE_NOT_SUPPORTED)
+    );
+    let unknown_role = client
+        .batch_execute("SET ROLE missing")
+        .await
+        .expect_err("unknown role");
+    assert_eq!(
+        unknown_role.code(),
+        Some(&tokio_postgres::error::SqlState::UNDEFINED_OBJECT)
+    );
+    let denied_role = client
+        .batch_execute("SET ROLE blocked")
+        .await
+        .expect_err("unreachable role");
+    assert_eq!(
+        denied_role.code(),
+        Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
+    );
+    client
+        .batch_execute("RESET ROLE")
+        .await
+        .expect("reset session role");
+    let local_outside_transaction = client
+        .batch_execute("SET LOCAL ROLE analyst")
+        .await
+        .expect_err("local role outside transaction");
+    assert_eq!(
+        local_outside_transaction.code(),
+        Some(&tokio_postgres::error::SqlState::ACTIVE_SQL_TRANSACTION)
+    );
+    client.batch_execute("BEGIN").await.expect("role begin");
+    client
+        .batch_execute("SET LOCAL ROLE analyst")
+        .await
+        .expect("transaction-local role");
+    assert_eq!(
+        client
+            .query_one("SELECT current_user", &[])
+            .await
+            .expect("local identity")
+            .get::<_, String>(0),
+        "analyst"
+    );
+    client
+        .batch_execute("ROLLBACK")
+        .await
+        .expect("role rollback");
+    assert_eq!(
+        client
+            .query_one("SELECT current_user", &[])
+            .await
+            .expect("identity after local cleanup")
+            .get::<_, String>(0),
+        "writer"
+    );
+    client
+        .batch_execute("SET ROLE analyst")
+        .await
+        .expect("session role before local NONE");
+    client
+        .batch_execute("BEGIN")
+        .await
+        .expect("local NONE begin");
+    client
+        .batch_execute("SET LOCAL ROLE NONE")
+        .await
+        .expect("transaction-local role NONE");
+    assert_eq!(
+        client
+            .query_one("SELECT current_user", &[])
+            .await
+            .expect("local NONE identity")
+            .get::<_, String>(0),
+        "writer"
+    );
+    client.batch_execute("COMMIT").await.expect("role commit");
+    assert_eq!(
+        client
+            .query_one("SELECT current_user", &[])
+            .await
+            .expect("session role after local commit cleanup")
+            .get::<_, String>(0),
+        "analyst"
+    );
+    client
+        .batch_execute("RESET ROLE")
+        .await
+        .expect("reset after commit cleanup");
+    client
+        .batch_execute("BEGIN")
+        .await
+        .expect("failed local role begin");
+    client
+        .batch_execute("SET LOCAL ROLE analyst")
+        .await
+        .expect("local role before failure");
+    client
+        .query("SELECT * FROM missing_role_cleanup_table", &[])
+        .await
+        .expect_err("native error fails role transaction");
+    client
+        .batch_execute("ROLLBACK")
+        .await
+        .expect("failed role transaction rollback");
+    assert_eq!(
+        client
+            .query_one("SELECT current_user", &[])
+            .await
+            .expect("identity after failed transaction cleanup")
+            .get::<_, String>(0),
+        "writer"
+    );
 
     client
         .batch_execute(
@@ -421,6 +585,22 @@ async fn cli_duckdb_backend_serves_an_official_local_catalog() {
         .await
         .expect("SCRAM reader connect");
     let reader_task = tokio::spawn(reader_connection);
+    assert_eq!(
+        reader
+            .query_one("SELECT current_user", &[])
+            .await
+            .expect("independent reader identity")
+            .get::<_, String>(0),
+        "reader"
+    );
+    let reader_role_denial = reader
+        .batch_execute("SET ROLE analyst")
+        .await
+        .expect_err("reader cannot inherit writer role membership");
+    assert_eq!(
+        reader_role_denial.code(),
+        Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
+    );
     assert_eq!(
         reader
             .query_one("SELECT count(*)::BIGINT FROM quackgis.main.cli_points", &[])
