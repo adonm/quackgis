@@ -125,6 +125,8 @@ pub struct Cli {
     pub read_allowlist: Option<String>,
     #[arg(long, env = "QUACKGIS_MAINTENANCE_USER")]
     pub maintenance_user: Option<String>,
+    #[arg(long, env = "QUACKGIS_ROLE_CONFIG")]
+    pub role_config: Option<std::path::PathBuf>,
     #[arg(long, env = "QUACKGIS_LOG", default_value = "info")]
     pub log: String,
     #[arg(long, env = "QUACKGIS_METRICS_HOST", default_value = "127.0.0.1")]

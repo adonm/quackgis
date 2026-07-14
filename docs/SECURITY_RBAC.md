@@ -23,10 +23,14 @@ floor from the ordered security work.
 | bounded/redacted auth and authorization audit events | audit/policy tests |
 | optional private metrics endpoint | metrics unit tests |
 | native driver digest/version validation | storage unit/native tests |
+| bounded immutable role configuration and graph validation | auth/role unit tests |
 
-PostgreSQL roles, memberships, owners, ACLs, `SET ROLE`, privilege inquiry,
-request claims, RLS, broad catalog behavior, administrative SQL, packaged secret
-rotation, revocation infrastructure, and production failure drills remain open.
+The role configuration parser now validates stable explicit OIDs, LOGIN/NOLOGIN,
+INHERIT defaults, PostgreSQL 18 membership-edge options, cycles, owners, and the
+bounded schema/table privilege vocabulary. Runtime `SET ROLE`, privilege
+enforcement/inquiry, request claims, role catalogs, RLS, administrative SQL,
+packaged secret rotation, revocation infrastructure, and production failure
+drills remain open.
 
 ## Trust boundaries
 
@@ -238,6 +242,55 @@ they require:
 
 Configuration-backed provisioning remains the supported path until those gates
 pass.
+
+## Immutable role configuration
+
+`QUACKGIS_ROLE_CONFIG` (or `--role-config`) names a UTF-8 JSON file of at most
+1 MiB. Role configuration is accepted only with password authentication, and its
+LOGIN roles must exactly equal the configured read/write and optional read-only
+authentication users. Role names are bounded lowercase unquoted PostgreSQL
+identifiers. OIDs are explicit so identity is independent of document ordering;
+OID zero and the bootstrap owner OID 10 are reserved.
+
+```json
+{
+  "roles": [
+    {"oid": 100001, "name": "authenticator", "login": true},
+    {"oid": 100002, "name": "reader", "login": true},
+    {"oid": 100003, "name": "api_reader", "inherit": true}
+  ],
+  "memberships": [
+    {
+      "role": "api_reader",
+      "member": "authenticator",
+      "inherit_option": true,
+      "set_option": true,
+      "admin_option": false
+    }
+  ],
+  "table_owners": [
+    {"table": "public.places", "role": "authenticator"}
+  ],
+  "schema_grants": [
+    {"schema": "public", "role": "PUBLIC", "privileges": ["USAGE"]}
+  ],
+  "table_grants": [
+    {"table": "public.places", "role": "api_reader", "privileges": ["SELECT"]}
+  ]
+}
+```
+
+`inherit_option` defaults from the member role's `inherit` setting and
+`set_option` defaults to true. `admin_option=true` is rejected because mutable
+role administration is outside this immutable slice. Membership self-edges,
+cycles, duplicate edges, unknown roles, duplicate owners/grants, unsupported
+schemas/privileges, and unknown JSON fields all fail startup. `PUBLIC` is valid
+only as a grant grantee, not as a configured role.
+
+Owner and grant declarations are validated now to freeze the C5 input boundary;
+they do not authorize statements or populate PostgreSQL catalogs until the common
+privilege engine lands. Existing allowlists remain the only current object-policy
+enforcement and cannot be widened by this file.
 
 ## Required Local 1.0 evidence
 

@@ -1,11 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 //! QuackGIS pgwire authentication and coarse role/table-policy configuration.
 
-use std::{collections::HashMap, fmt};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    sync::Arc,
+};
 
 use anyhow::{Result, anyhow};
 use pgwire::api::ClientInfo;
 use pgwire::api::auth::sasl::scram::{SCRAM_ITERATIONS, gen_salted_password, random_nonce};
+
+use crate::role::RoleCatalog;
 
 const METADATA_USER: &str = "user";
 
@@ -126,6 +132,7 @@ pub struct AuthConfig {
     trust_write_policy: TablePolicy,
     read_policy: TablePolicy,
     maintenance_user: Option<String>,
+    role_catalog: Option<Arc<RoleCatalog>>,
 }
 
 impl Default for AuthConfig {
@@ -142,6 +149,7 @@ impl AuthConfig {
             trust_write_policy: TablePolicy::All,
             read_policy: TablePolicy::All,
             maintenance_user: None,
+            role_catalog: None,
         }
     }
 
@@ -181,7 +189,34 @@ impl AuthConfig {
             trust_write_policy: TablePolicy::All,
             read_policy: TablePolicy::All,
             maintenance_user: None,
+            role_catalog: None,
         })
+    }
+
+    pub fn with_role_catalog(mut self, role_catalog: RoleCatalog) -> Result<Self> {
+        if self.mode != AuthMode::Password {
+            return Err(anyhow!(
+                "PostgreSQL role configuration requires password authentication"
+            ));
+        }
+        let auth_users = self
+            .users
+            .keys()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        let login_roles = role_catalog
+            .roles()
+            .iter()
+            .filter(|role| role.login)
+            .map(|role| role.name.as_str())
+            .collect::<HashSet<_>>();
+        if auth_users != login_roles {
+            return Err(anyhow!(
+                "configured LOGIN roles must exactly match password-authenticated users"
+            ));
+        }
+        self.role_catalog = Some(Arc::new(role_catalog));
+        Ok(self)
     }
 
     pub fn with_maintenance_user(mut self, user: impl Into<String>) -> Result<Self> {
@@ -237,6 +272,10 @@ impl AuthConfig {
 
     pub fn users(&self) -> impl Iterator<Item = (&str, &AuthUser)> {
         self.users.iter().map(|(name, user)| (name.as_str(), user))
+    }
+
+    pub fn role_catalog(&self) -> Option<&Arc<RoleCatalog>> {
+        self.role_catalog.as_ref()
     }
 
     pub fn read_targets(&self) -> Option<&[WriteTarget]> {
@@ -455,5 +494,33 @@ mod tests {
         assert!(auth.allows_maintenance(Some("writer"), ("main", "allowed")));
         assert!(!auth.allows_maintenance(Some("writer"), ("main", "denied")));
         assert!(!auth.allows_maintenance(Some("reader"), ("main", "allowed")));
+    }
+
+    #[test]
+    fn role_catalog_login_roles_must_exactly_match_password_users() {
+        let auth = AuthConfig::password(
+            "writer",
+            "readwrite-secret",
+            Some(("reader", "reader-secret")),
+        )
+        .expect("auth config");
+        let matching = RoleCatalog::from_json(
+            r#"{"roles":[{"oid":100001,"name":"reader","login":true},{"oid":100002,"name":"writer","login":true},{"oid":100003,"name":"group"}]}"#,
+        )
+        .expect("matching role catalog");
+        assert!(auth.clone().with_role_catalog(matching).is_ok());
+
+        for mismatched in [
+            r#"{"roles":[{"oid":100001,"name":"writer","login":true}]}"#,
+            r#"{"roles":[{"oid":100001,"name":"writer","login":true},{"oid":100002,"name":"reader"}]}"#,
+            r#"{"roles":[{"oid":100001,"name":"writer","login":true},{"oid":100002,"name":"reader","login":true},{"oid":100003,"name":"extra","login":true}]}"#,
+        ] {
+            let roles = RoleCatalog::from_json(mismatched).expect("valid role graph");
+            assert!(auth.clone().with_role_catalog(roles).is_err());
+        }
+        let roles =
+            RoleCatalog::from_json(r#"{"roles":[{"oid":100001,"name":"postgres","login":true}]}"#)
+                .expect("trust role graph");
+        assert!(AuthConfig::trust().with_role_catalog(roles).is_err());
     }
 }

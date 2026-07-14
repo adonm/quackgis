@@ -553,6 +553,17 @@ Gate: direct pgwire role/session tests prove role assumption follows PostgreSQL 
 membership-edge semantics and no effective identity or request context leaks
 across transactions, sessions, cancellation, or reused native connections.
 
+Current progress: the first C4 checkpoint adds a bounded immutable JSON schema
+with explicit stable role OIDs, LOGIN/NOLOGIN and INHERIT flags, PostgreSQL 18
+membership-edge options, table owners, and the schema/table grant vocabulary
+consumed by C5. Startup rejects trust mode, LOGIN/auth mismatches, duplicate or
+reserved identities, unknown principals, duplicate edges, cycles,
+`admin_option=true`, unsupported privileges/schemas, unknown fields, and input
+over 1 MiB. Set-option reachability is evaluated from the original login role and
+is independent of configuration order. The declarations do not yet alter
+statement authorization or catalog rows; session state, role switching, identity
+expressions, request context, and lifecycle cleanup remain C4 work.
+
 ### C5 — implement privilege and discovery semantics
 
 Deliver:

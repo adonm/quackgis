@@ -13,6 +13,7 @@ use quackgis_server::duckdb_adbc_storage::{
     DuckDbAdbcConfig, DuckDbAdbcStorage, DuckDbResourceConfig, ExtensionPolicy,
 };
 use quackgis_server::pgwire_server::{MAX_COPY_BATCHES_PER_CHUNK, ServerOptions};
+use quackgis_server::role::RoleCatalog;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
@@ -89,6 +90,16 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Some(user) = cli.maintenance_user.as_deref() {
         auth = auth.with_maintenance_user(user)?;
+    }
+    if let Some(path) = cli.role_config.as_deref() {
+        let metadata = std::fs::metadata(path)?;
+        if !metadata.is_file() || metadata.len() > 1_048_576 {
+            anyhow::bail!(
+                "--role-config must name a regular JSON file no larger than 1048576 bytes"
+            );
+        }
+        let raw = std::fs::read_to_string(path)?;
+        auth = auth.with_role_catalog(RoleCatalog::from_json(&raw)?)?;
     }
 
     let driver_path = cli.duckdb_driver.clone().ok_or_else(|| {
