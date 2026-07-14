@@ -59,8 +59,10 @@ Important limits:
   rollback/quarantine outcomes;
 - broad PostgreSQL catalogs and named GIS-client parity are incomplete;
 - immutable roles, membership validation, session/effective identity, and role
-  switching are implemented when a role file is configured; object privileges,
-  role catalogs/inquiry and role-aware OpenAPI remain open; bounded
+  switching are implemented when a role file is configured; configured schema
+  USAGE and table ownership/SELECT/INSERT/UPDATE/DELETE/MAINTAIN now enforce
+  statements behind the legacy allowlist ceiling, while role catalogs/inquiry and
+  role-aware OpenAPI remain open; bounded
   transaction-local `request.jwt.claims` context is implemented for the future
   authenticator flow; and
 - remote/shared catalog and object-storage profiles fail closed.

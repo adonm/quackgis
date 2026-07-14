@@ -12,6 +12,7 @@ use sqlparser::ast::{
 
 use crate::auth::{AccessRole, AuthConfig};
 use crate::engine_api::{EngineError, EngineErrorKind, EngineResult};
+use crate::role::TablePrivilege;
 
 static WRITE_DENIED_COUNTER: AtomicU64 = AtomicU64::new(0);
 static READ_DENIED_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -32,20 +33,22 @@ pub fn reads_denied_total() -> u64 {
 
 pub fn authorize_statement(
     auth: &AuthConfig,
-    user: Option<&str>,
+    session_user: Option<&str>,
+    effective_role: Option<&str>,
     statement: &Statement,
 ) -> EngineResult<()> {
+    let effective_role = effective_role.or(session_user);
     if !statement_allowed_for_readonly(statement) {
         let target = write_target(statement);
         let target_ref = target
             .as_ref()
             .map(|target| (target.schema.as_str(), target.table.as_str()));
-        if !auth.allows_write(user, target_ref) {
+        if !auth.allows_write(session_user, target_ref) {
             let target_label = target
                 .map(|target| format!("{}.{}", target.schema, target.table))
                 .unwrap_or_else(|| "<indeterminate>".to_string());
-            record_denial(user, statement_kind(statement), &target_label, true);
-            let message = match auth.role_for_user(user) {
+            record_denial(session_user, statement_kind(statement), &target_label, true);
+            let message = match auth.role_for_user(session_user) {
                 AccessRole::ReadOnly => {
                     "read-only QuackGIS role cannot execute write statements".to_string()
                 }
@@ -55,24 +58,81 @@ pub fn authorize_statement(
             };
             return Err(EngineError::new(EngineErrorKind::Unauthorized, message));
         }
+        if let Some(catalog) = auth.role_catalog() {
+            let allowed =
+                effective_role
+                    .zip(target.as_ref())
+                    .is_some_and(|(role, target)| match required_write_privilege(statement) {
+                        Some(TableWritePrivilege::Create) => {
+                            catalog.can_create_configured_table(role, &target.schema, &target.table)
+                        }
+                        Some(TableWritePrivilege::Table(privilege)) => catalog
+                            .allows_table_operation(role, &target.schema, &target.table, privilege),
+                        None => false,
+                    });
+            if !allowed {
+                let target_label = target
+                    .map(|target| format!("{}.{}", target.schema, target.table))
+                    .unwrap_or_else(|| "<indeterminate>".to_owned());
+                record_denial(
+                    effective_role,
+                    statement_kind(statement),
+                    &target_label,
+                    true,
+                );
+                return Err(EngineError::new(
+                    EngineErrorKind::Unauthorized,
+                    format!(
+                        "PostgreSQL role lacks {} privilege on {target_label}",
+                        required_write_privilege(statement)
+                            .map(TableWritePrivilege::label)
+                            .unwrap_or("required")
+                    ),
+                ));
+            }
+        }
     }
 
-    if auth.read_policy_restricted() {
+    if auth.read_policy_restricted() || auth.role_catalog().is_some() {
         let targets = read_targets(statement);
         if targets.sensitive_metadata {
-            record_denial(user, statement_kind(statement), "<metadata>", false);
+            record_denial(
+                effective_role,
+                statement_kind(statement),
+                "<metadata>",
+                false,
+            );
             return Err(EngineError::new(
                 EngineErrorKind::Unauthorized,
                 "restricted read allowlist denies unfiltered catalog metadata surfaces",
             ));
         }
         for target in targets.tables {
-            if !auth.allows_read(user, (&target.schema, &target.table)) {
+            if auth.read_policy_restricted()
+                && !auth.allows_read(session_user, (&target.schema, &target.table))
+            {
                 let label = format!("{}.{}", target.schema, target.table);
-                record_denial(user, statement_kind(statement), &label, false);
+                record_denial(effective_role, statement_kind(statement), &label, false);
                 return Err(EngineError::new(
                     EngineErrorKind::Unauthorized,
                     format!("QuackGIS read allowlist does not permit reads from {label}"),
+                ));
+            }
+            if let Some(catalog) = auth.role_catalog()
+                && !effective_role.is_some_and(|role| {
+                    catalog.allows_table_operation(
+                        role,
+                        &target.schema,
+                        &target.table,
+                        TablePrivilege::Select,
+                    )
+                })
+            {
+                let label = format!("{}.{}", target.schema, target.table);
+                record_denial(effective_role, statement_kind(statement), &label, false);
+                return Err(EngineError::new(
+                    EngineErrorKind::Unauthorized,
+                    format!("PostgreSQL role lacks SELECT privilege on {label}"),
                 ));
             }
         }
@@ -82,19 +142,30 @@ pub fn authorize_statement(
 
 pub fn authorize_copy_target(
     auth: &AuthConfig,
-    user: Option<&str>,
+    session_user: Option<&str>,
+    effective_role: Option<&str>,
     schema: &str,
     table: &str,
 ) -> EngineResult<()> {
-    if auth.allows_write(user, Some((schema, table))) {
+    let outer_allowed = auth.allows_write(session_user, Some((schema, table)));
+    let role_allowed = auth.role_catalog().is_none_or(|catalog| {
+        effective_role.or(session_user).is_some_and(|role| {
+            catalog.allows_table_operation(role, schema, table, TablePrivilege::Insert)
+        })
+    });
+    if outer_allowed && role_allowed {
         return Ok(());
     }
     let target = format!("{schema}.{table}");
-    record_denial(user, "copy", &target, true);
-    let message = match auth.role_for_user(user) {
-        AccessRole::ReadOnly => "read-only QuackGIS role cannot execute COPY FROM".to_string(),
-        AccessRole::ReadWrite => {
-            format!("QuackGIS write allowlist does not permit COPY to {target}")
+    record_denial(effective_role.or(session_user), "copy", &target, true);
+    let message = if outer_allowed {
+        format!("PostgreSQL role lacks INSERT privilege on {target}")
+    } else {
+        match auth.role_for_user(session_user) {
+            AccessRole::ReadOnly => "read-only QuackGIS role cannot execute COPY FROM".to_string(),
+            AccessRole::ReadWrite => {
+                format!("QuackGIS write allowlist does not permit COPY to {target}")
+            }
         }
     };
     Err(EngineError::new(EngineErrorKind::Unauthorized, message))
@@ -164,6 +235,35 @@ fn write_target(statement: &Statement) -> Option<TableKey> {
         schema: parts.0,
         table: parts.1,
     })
+}
+
+#[derive(Clone, Copy)]
+enum TableWritePrivilege {
+    Create,
+    Table(TablePrivilege),
+}
+
+impl TableWritePrivilege {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Create => "ownership",
+            Self::Table(TablePrivilege::Insert) => "INSERT",
+            Self::Table(TablePrivilege::Update) => "UPDATE",
+            Self::Table(TablePrivilege::Delete) => "DELETE",
+            Self::Table(TablePrivilege::Select) => "SELECT",
+            Self::Table(TablePrivilege::Maintain) => "MAINTAIN",
+        }
+    }
+}
+
+fn required_write_privilege(statement: &Statement) -> Option<TableWritePrivilege> {
+    match statement {
+        Statement::CreateTable(_) => Some(TableWritePrivilege::Create),
+        Statement::Insert(_) => Some(TableWritePrivilege::Table(TablePrivilege::Insert)),
+        Statement::Update { .. } => Some(TableWritePrivilege::Table(TablePrivilege::Update)),
+        Statement::Delete(_) => Some(TableWritePrivilege::Table(TablePrivilege::Delete)),
+        _ => None,
+    }
 }
 
 #[derive(Default)]
@@ -262,14 +362,12 @@ fn collect_name_target(name: &ObjectName, ctes: &HashSet<String>, targets: &mut 
         .unwrap_or_default()
         .trim_matches('"')
         .to_ascii_lowercase();
-    if matches!(
-        schema.as_str(),
-        "pg_catalog" | "information_schema" | "quackgis_pg_catalog"
-    ) || unqualified_pg_catalog_name(name)
-        || sensitive_metadata_name(name)
-    {
+    if schema == "information_schema" || sensitive_metadata_name(name) {
         targets.sensitive_metadata = true;
-    } else if let Some((schema, table)) = table_name_parts(name) {
+    } else if !matches!(schema.as_str(), "pg_catalog" | "quackgis_pg_catalog")
+        && !unqualified_pg_catalog_name(name)
+        && let Some((schema, table)) = table_name_parts(name)
+    {
         targets.tables.push(TableKey { schema, table });
     }
 }
@@ -366,7 +464,7 @@ mod tests {
     use sqlparser::parser::Parser;
 
     #[test]
-    fn restricted_metadata_policy_cannot_bypass_catalog_rewrite_schema() {
+    fn restricted_policy_allows_maintained_catalogs_but_not_user_or_raw_metadata() {
         let auth =
             AuthConfig::password("writer", "writer-secret", Some(("reader", "reader-secret")))
                 .unwrap()
@@ -375,10 +473,17 @@ mod tests {
         for sql in [
             "SELECT typname FROM pg_catalog.pg_type",
             "SELECT typname FROM pg_type",
-            "SELECT typname FROM quackgis_pg_catalog.pg_type",
-            "SELECT typname FROM memory.quackgis_pg_catalog.pg_type",
-            "SELECT table_name FROM memory.information_schema.tables",
             "SELECT EXISTS (SELECT 1 FROM pg_type)",
+        ] {
+            let statement = Parser::parse_sql(&PostgreSqlDialect {}, sql)
+                .unwrap()
+                .remove(0);
+            authorize_statement(&auth, Some("reader"), Some("reader"), &statement)
+                .unwrap_or_else(|error| panic!("maintained catalog denied for {sql}: {error}"));
+        }
+
+        for sql in [
+            "SELECT table_name FROM memory.information_schema.tables",
             "SELECT (SELECT name FROM denied LIMIT 1)",
             "SELECT 1 LIMIT (SELECT count(*) FROM denied)",
             "SELECT * FROM denied PIVOT (count(*) FOR id IN (1))",
@@ -386,7 +491,9 @@ mod tests {
             let statement = Parser::parse_sql(&PostgreSqlDialect {}, sql)
                 .unwrap()
                 .remove(0);
-            assert!(authorize_statement(&auth, Some("reader"), &statement).is_err());
+            assert!(
+                authorize_statement(&auth, Some("reader"), Some("reader"), &statement).is_err()
+            );
         }
     }
 }

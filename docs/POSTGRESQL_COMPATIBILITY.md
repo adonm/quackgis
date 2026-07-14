@@ -593,6 +593,16 @@ Gate: catalog inquiry, information-schema visibility, OpenAPI eligibility, and
 actual statement authorization agree for anonymous, reader, editor, and denied
 roles.
 
+Current progress: the common enforcement core is active. One pure role-catalog
+decision combines schema USAGE, table ownership, direct grants, inherited grants
+over `inherit_option=true` edges, and `PUBLIC`. It gates maintained SELECT,
+INSERT, UPDATE, DELETE, COPY FROM/INSERT, MAINTAIN, and predeclared-owner CREATE
+before DuckDB while preserving legacy allowlists as an outer ceiling. Actual
+SCRAM pgwire cases prove an assumed role without SELECT is denied, a SELECT-only
+role can read, and that role cannot inherit the login's legacy write access. Role
+and membership catalogs, privilege inquiry, information-schema visibility, and
+the traced structural catalogs remain open C5 work.
+
 ### C6 — qualify named clients
 
 Deliver:

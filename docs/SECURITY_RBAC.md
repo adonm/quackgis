@@ -26,6 +26,7 @@ floor from the ordered security work.
 | bounded immutable role configuration and graph validation | auth/role unit tests |
 | session/effective identity, role switching, and transaction-local cleanup | real pgwire workflow + role units |
 | bounded transaction-local `request.jwt.claims` context | real pgwire workflow + role/parser units |
+| common schema/table privilege enforcement | role/policy units + real pgwire role-denial/grant cases |
 
 The role configuration parser validates stable explicit OIDs, LOGIN/NOLOGIN,
 INHERIT defaults, PostgreSQL 18 membership-edge options, cycles, owners, and the
@@ -33,7 +34,7 @@ bounded schema/table privilege vocabulary. Sessions expose PostgreSQL `name`
 identity for `session_user`, `current_user`, `current_role`, and `user`; implement
 `SET ROLE`, `SET SESSION ROLE`, `SET LOCAL ROLE`, `SET ROLE NONE`, and
 `RESET ROLE`; and clear local role state on commit/rollback. Privilege
-enforcement/inquiry, role catalogs, RLS, administrative SQL,
+privilege inquiry/catalogs, RLS, administrative SQL,
 packaged secret rotation, revocation infrastructure, and production failure
 drills remain open.
 
@@ -292,10 +293,15 @@ cycles, duplicate edges, unknown roles, duplicate owners/grants, unsupported
 schemas/privileges, and unknown JSON fields all fail startup. `PUBLIC` is valid
 only as a grant grantee, not as a configured role.
 
-Owner and grant declarations are validated now to freeze the C5 input boundary;
-they do not authorize statements or populate PostgreSQL catalogs until the common
-privilege engine lands. Existing allowlists remain the only current object-policy
-enforcement and cannot be widened by this file.
+Owner and grant declarations now feed one pure authorization decision. Schema
+`USAGE` is required with table access; table ownership supplies every maintained
+table capability; direct, inherited (`inherit_option=true`), and `PUBLIC` grants
+supply their declared capabilities. The same decision gates SELECT, maintained
+INSERT/UPDATE/DELETE, COPY FROM as INSERT, and maintenance as MAINTAIN. Immutable
+CREATE is accepted only for a predeclared table owner with schema USAGE. Existing
+allowlists remain a non-widening outer ceiling, so the role file cannot broaden a
+login's legacy access. Role catalogs and `has_*_privilege` inquiry are the next
+C5 surface and are not claimed yet.
 
 With a valid role file, role assumption walks only `set_option=true` membership
 edges from the original authenticated `session_user`. A changed `current_user`

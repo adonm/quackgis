@@ -53,6 +53,10 @@ The required real-driver workflow proves:
   `current_role`/`user`, `SET [SESSION|LOCAL] ROLE`, `NONE`, reset, assumption
   denial, connection isolation, prepared invalidation, and local cleanup after
   commit/rollback/failed-transaction rollback;
+- common configured authorization for schema USAGE plus table ownership and
+  SELECT/INSERT/UPDATE/DELETE/MAINTAIN; ownership, direct grants, inherited
+  `inherit_option=true` grants, and `PUBLIC` feed one decision before DuckDB,
+  while legacy allowlists remain a non-widening outer ceiling;
 - exact transaction-local `request.jwt.claims` assignment through one text literal
   or `$1`, bounded at 16 KiB/setting and 32 KiB/session, plus PostgreSQL `text`
   retrieval with NULL-on-missing behavior; actual pgwire proves outside-
@@ -116,10 +120,11 @@ catalog surfaces remain open unless a focused test says otherwise.
 - Maintenance is disabled unless `QUACKGIS_MAINTENANCE_USER` names the caller;
   it remains constrained by the write table allowlist and cannot run inside an
   explicit transaction.
-- Configured owners and grants are validated input only; legacy read/write/
-  maintenance identities and table allowlists remain the statement-authorization
-  boundary until C5. Role switching therefore changes PostgreSQL session identity
-  but does not widen object access. `SET LOCAL ROLE` outside a transaction fails
+- Configured owners and grants now enforce maintained table operations, but
+  privilege inquiry, role catalogs, and privilege-aware information schema remain
+  open. Legacy read/write/maintenance identities and table allowlists remain an
+  outer ceiling. Role switching cannot inherit the login's coarse access unless
+  the effective role has the matching configured grant. `SET LOCAL ROLE` outside a transaction fails
   with `25001`, a bounded divergence from PostgreSQL's warning/no-op behavior.
 - Arbitrary `set_config`/`current_setting` names, non-local assignment, embedded
   setter query shapes, NUL, and DuckDB-qualified setting functions fail before

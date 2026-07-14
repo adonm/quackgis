@@ -729,11 +729,10 @@ impl SimpleQueryHandler for DuckDbService {
                     .acquire(OperationClass::Maintenance)
                     .await
                     .map_err(admission_error)?;
-                let user = client
-                    .metadata()
-                    .get("user")
-                    .cloned()
-                    .unwrap_or_else(|| "<unknown>".to_owned());
+                let user = role_session
+                    .identity()
+                    .map_err(role_session_error)?
+                    .current_user;
                 let target = command.target_label();
                 let result = self
                     .control
@@ -3628,9 +3627,13 @@ fn authorize_statement<C>(client: &C, auth: &AuthConfig, statement: &Statement) 
 where
     C: ClientInfo + ?Sized,
 {
+    let identity = client_role_session(client, auth)?
+        .identity()
+        .map_err(role_session_error)?;
     crate::statement_policy::authorize_statement(
         auth,
-        client.metadata().get("user").map(String::as_str),
+        Some(&identity.session_user),
+        Some(&identity.current_user),
         statement,
     )
     .map_err(engine_error)
@@ -3640,9 +3643,13 @@ fn authorize_copy<C>(client: &C, auth: &AuthConfig, target: &CopyTarget) -> PgWi
 where
     C: ClientInfo + ?Sized,
 {
+    let identity = client_role_session(client, auth)?
+        .identity()
+        .map_err(role_session_error)?;
     crate::statement_policy::authorize_copy_target(
         auth,
-        client.metadata().get("user").map(String::as_str),
+        Some(&identity.session_user),
+        Some(&identity.current_user),
         &target.table.schema,
         &target.table.table,
     )
@@ -3657,21 +3664,42 @@ fn authorize_maintenance<C>(
 where
     C: ClientInfo + ?Sized,
 {
-    let user = client.metadata().get("user").map(String::as_str);
-    if auth.allows_maintenance(user, (&command.schema, &command.table)) {
+    let identity = client_role_session(client, auth)?
+        .identity()
+        .map_err(role_session_error)?;
+    let outer_allowed = auth.allows_maintenance(
+        Some(&identity.session_user),
+        (&command.schema, &command.table),
+    );
+    let role_allowed = auth.role_catalog().is_none_or(|catalog| {
+        catalog.allows_table_operation(
+            &identity.current_user,
+            &command.schema,
+            &command.table,
+            crate::role::TablePrivilege::Maintain,
+        )
+    });
+    if outer_allowed && role_allowed {
         return Ok(());
     }
-    let user = user.unwrap_or("<unknown>");
     let target = command.target_label();
     crate::audit::log_authorization_denied(
-        user,
+        &identity.current_user,
         "maintenance",
         &target,
-        "maintenance_identity_or_table_policy",
+        if outer_allowed {
+            "postgresql_maintain_privilege"
+        } else {
+            "maintenance_identity_or_table_policy"
+        },
     );
     Err(user_error(
         "42501",
-        "maintenance requires the configured maintenance identity and table policy",
+        if outer_allowed {
+            "PostgreSQL role lacks MAINTAIN privilege on the maintenance target"
+        } else {
+            "maintenance requires the configured maintenance identity and table policy"
+        },
     ))
 }
 

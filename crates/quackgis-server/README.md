@@ -31,9 +31,10 @@ update/delete, transactions, text COPY for maintained types, SCRAM/table policy,
 portals, `public` schema mapping, maintained SET/SHOW forms, quoted COPY targets,
 configuration-backed role switching/identity, official DuckLake reopen, and the
 curated spatial subset. Role configuration requires password authentication; see
-`docs/SECURITY_RBAC.md` for its bounded JSON schema. Configured owner/grant
-declarations are validated but not enforced until the common privilege engine
-lands. The exact transaction-local
+`docs/SECURITY_RBAC.md` for its bounded JSON schema. Configured schema USAGE and
+table owners/grants are enforced for reads, maintained writes, COPY, and
+maintenance while legacy allowlists remain an outer ceiling. The exact
+transaction-local
 `set_config('request.jwt.claims', $1, true)`/`current_setting(..., true)` flow is
 bounded at the protocol edge; arbitrary DuckDB settings are not exposed.
 

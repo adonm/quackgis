@@ -136,6 +136,96 @@ impl RoleCatalog {
         }
         false
     }
+
+    pub fn has_schema_privilege(
+        &self,
+        role: &str,
+        schema: &str,
+        privilege: SchemaPrivilege,
+    ) -> bool {
+        if self.role(role).is_none() {
+            return false;
+        }
+        let inherited = self.inherited_roles(role);
+        self.schema_grants.iter().any(|grant| {
+            grant.schema.eq_ignore_ascii_case(schema)
+                && grant.privileges.contains(&privilege)
+                && grant
+                    .role
+                    .as_ref()
+                    .is_none_or(|grantee| inherited.contains(grantee.as_str()))
+        })
+    }
+
+    pub fn has_table_privilege(
+        &self,
+        role: &str,
+        schema: &str,
+        table: &str,
+        privilege: TablePrivilege,
+    ) -> bool {
+        if self.role(role).is_none() {
+            return false;
+        }
+        let inherited = self.inherited_roles(role);
+        if self.table_owners.iter().any(|owner| {
+            owner.schema.eq_ignore_ascii_case(schema)
+                && owner.table.eq_ignore_ascii_case(table)
+                && inherited.contains(owner.role.as_str())
+        }) {
+            return true;
+        }
+        self.table_grants.iter().any(|grant| {
+            grant.schema.eq_ignore_ascii_case(schema)
+                && grant.table.eq_ignore_ascii_case(table)
+                && grant.privileges.contains(&privilege)
+                && grant
+                    .role
+                    .as_ref()
+                    .is_none_or(|grantee| inherited.contains(grantee.as_str()))
+        })
+    }
+
+    pub fn can_create_configured_table(&self, role: &str, schema: &str, table: &str) -> bool {
+        let inherited = self.inherited_roles(role);
+        self.has_schema_privilege(role, schema, SchemaPrivilege::Usage)
+            && self.table_owners.iter().any(|owner| {
+                owner.schema.eq_ignore_ascii_case(schema)
+                    && owner.table.eq_ignore_ascii_case(table)
+                    && inherited.contains(owner.role.as_str())
+            })
+    }
+
+    pub fn allows_table_operation(
+        &self,
+        role: &str,
+        schema: &str,
+        table: &str,
+        privilege: TablePrivilege,
+    ) -> bool {
+        self.has_schema_privilege(role, schema, SchemaPrivilege::Usage)
+            && self.has_table_privilege(role, schema, table, privilege)
+    }
+
+    fn inherited_roles<'a>(&'a self, role: &'a str) -> HashSet<&'a str> {
+        if self.role(role).is_none() {
+            return HashSet::new();
+        }
+        let mut inherited = HashSet::from([role]);
+        let mut pending = VecDeque::from([role]);
+        while let Some(member) = pending.pop_front() {
+            for edge in self
+                .memberships
+                .iter()
+                .filter(|edge| edge.inherit_option && edge.member == member)
+            {
+                if inherited.insert(edge.role.as_str()) {
+                    pending.push_back(edge.role.as_str());
+                }
+            }
+        }
+        inherited
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -933,5 +1023,60 @@ mod tests {
                 .request_context
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn one_privilege_engine_combines_ownership_grants_public_and_inheritance() {
+        let catalog = RoleCatalog::from_json(
+            r#"{
+              "roles": [
+                {"oid": 11, "name": "owner"},
+                {"oid": 12, "name": "reader", "login": true},
+                {"oid": 13, "name": "editor", "login": true},
+                {"oid": 14, "name": "noinherit", "login": true, "inherit": false}
+              ],
+              "memberships": [
+                {"role": "owner", "member": "editor", "inherit_option": true},
+                {"role": "owner", "member": "noinherit"}
+              ],
+              "table_owners": [{"table": "places", "role": "owner"}],
+              "schema_grants": [
+                {"schema": "public", "role": "PUBLIC", "privileges": ["USAGE"]}
+              ],
+              "table_grants": [
+                {"table": "places", "role": "reader", "privileges": ["SELECT"]},
+                {"table": "places", "role": "PUBLIC", "privileges": ["MAINTAIN"]}
+              ]
+            }"#,
+        )
+        .expect("privilege catalog");
+
+        assert!(catalog.allows_table_operation("reader", "main", "places", TablePrivilege::Select));
+        assert!(!catalog.allows_table_operation(
+            "reader",
+            "main",
+            "places",
+            TablePrivilege::Update
+        ));
+        assert!(catalog.allows_table_operation("editor", "main", "places", TablePrivilege::Delete));
+        assert!(catalog.can_create_configured_table("editor", "main", "places"));
+        assert!(!catalog.allows_table_operation(
+            "noinherit",
+            "main",
+            "places",
+            TablePrivilege::Select
+        ));
+        assert!(catalog.allows_table_operation(
+            "noinherit",
+            "main",
+            "places",
+            TablePrivilege::Maintain
+        ));
+        assert!(!catalog.has_table_privilege(
+            "missing",
+            "main",
+            "places",
+            TablePrivilege::Maintain
+        ));
     }
 }

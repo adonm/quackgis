@@ -325,10 +325,23 @@ async fn cli_duckdb_backend_serves_an_official_local_catalog() {
             {"oid": 100001, "name": "writer", "login": true},
             {"oid": 100002, "name": "reader", "login": true},
             {"oid": 100003, "name": "analyst"},
-            {"oid": 100004, "name": "blocked"}
+            {"oid": 100004, "name": "blocked"},
+            {"oid": 100005, "name": "granted_reader"}
           ],
           "memberships": [
-            {"role": "analyst", "member": "writer", "set_option": true}
+            {"role": "analyst", "member": "writer", "set_option": true},
+            {"role": "granted_reader", "member": "writer", "set_option": true}
+          ],
+          "table_owners": [
+            {"table": "cli_points", "role": "writer"},
+            {"table": "private_points", "role": "writer"}
+          ],
+          "schema_grants": [
+            {"schema": "public", "role": "PUBLIC", "privileges": ["USAGE"]}
+          ],
+          "table_grants": [
+            {"table": "cli_points", "role": "reader", "privileges": ["SELECT"]},
+            {"table": "cli_points", "role": "granted_reader", "privileges": ["SELECT"]}
           ]
         }"#,
     )
@@ -676,6 +689,42 @@ async fn cli_duckdb_backend_serves_an_official_local_catalog() {
         .await
         .expect("CLI parameterized SELECT");
     assert_eq!(row.get::<_, String>(0), "one");
+    client
+        .batch_execute("SET ROLE analyst")
+        .await
+        .expect("assume role without grants");
+    let role_read_denial = client
+        .query_one("SELECT count(*)::BIGINT FROM quackgis.main.cli_points", &[])
+        .await
+        .expect_err("effective role without SELECT is denied before DuckDB");
+    assert_eq!(
+        role_read_denial.code(),
+        Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
+    );
+    client
+        .batch_execute("SET ROLE granted_reader")
+        .await
+        .expect("assume role with SELECT grant");
+    assert_eq!(
+        client
+            .query_one("SELECT count(*)::BIGINT FROM quackgis.main.cli_points", &[])
+            .await
+            .expect("effective role SELECT grant")
+            .get::<_, i64>(0),
+        1
+    );
+    let role_write_denial = client
+        .batch_execute("INSERT INTO quackgis.main.cli_points VALUES (2, 'role-denied')")
+        .await
+        .expect_err("effective SELECT-only role cannot inherit login write access");
+    assert_eq!(
+        role_write_denial.code(),
+        Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
+    );
+    client
+        .batch_execute("RESET ROLE")
+        .await
+        .expect("restore writer after privilege checks");
 
     let mut reader_config = tokio_postgres::Config::new();
     reader_config
