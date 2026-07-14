@@ -416,8 +416,11 @@ rest-check:
     cargo test -p quackgis-rest
 
 # Exercise the PostgREST read subset and QuackGIS WKB extension through actual pgwire.
-rest-postgrest-smoke:
-    HOME='{{duckdb_home}}' QUACKGIS_DUCKDB_ADBC_DRIVER='{{duckdb_adbc_driver}}' \
+rest-postgrest-smoke driver=duckdb_adbc_driver:
+    @set -eu; driver_arg='{{driver}}'; driver_arg="${driver_arg#driver=}"; \
+    if [ ! -f "$driver_arg" ]; then echo 'DuckDB ADBC driver is missing; run `mise run duckdb-bootstrap`' >&2; exit 2; fi; \
+    driver_arg="$(realpath "$driver_arg")"; duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; \
+    HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" \
       cargo test -p quackgis-rest tests::actual_postgrest_compat_and_quackgis_extensions -- --ignored --exact
 
 # Connect with psql to a running dev server.
