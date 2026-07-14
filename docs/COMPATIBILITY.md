@@ -57,7 +57,9 @@ The required real-driver workflow proves:
   or `$1`, bounded at 16 KiB/setting and 32 KiB/session, plus PostgreSQL `text`
   retrieval with NULL-on-missing behavior; actual pgwire proves outside-
   transaction and oversized denial, stale-prepare rejection, and commit/
-  failed-transaction rollback cleanup;
+  failed-transaction rollback cleanup; cancellation inside a role/context
+  transaction proves failed-state denial, native quarantine, and empty fresh-
+  session identity/context;
 - portal paging, transaction isolation, failed-transaction `25P02` enforcement,
   `COMMIT`-as-rollback after failure, disconnect rollback, restart, and reopen;
 - the simple-protocol, server-owned

@@ -326,9 +326,10 @@ embedded setters, and DuckDB-qualified setting functions fail before native
 execution. The getter requires `missing_ok=true`, returns PostgreSQL `text`, and
 returns NULL when unset. Commit, rollback, and failed-transaction rollback clear
 the value; a change invalidates prepared statements rendered under an older
-session epoch. Cancellation paths already quarantine uncertain native sessions,
-so context cannot cross into a reusable native connection; a focused context-set
-cancellation oracle remains part of the final C4 closure evidence.
+session epoch. The actual pgwire cancellation oracle sets local role and claims,
+cancels a streaming query inside that transaction, proves the failed session
+cannot read context or recover its quarantined native connection, then proves a
+fresh connection has session-user identity and no claims.
 
 ## Required Local 1.0 evidence
 

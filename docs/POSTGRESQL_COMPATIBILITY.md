@@ -553,7 +553,7 @@ Gate: direct pgwire role/session tests prove role assumption follows PostgreSQL 
 membership-edge semantics and no effective identity or request context leaks
 across transactions, sessions, cancellation, or reused native connections.
 
-Current progress: the first C4 checkpoint adds a bounded immutable JSON schema
+Current progress: C4 is complete. A bounded immutable JSON schema
 with explicit stable role OIDs, LOGIN/NOLOGIN and INHERIT flags, PostgreSQL 18
 membership-edge options, table owners, and the schema/table grant vocabulary
 consumed by C5. Startup rejects trust mode, LOGIN/auth mismatches, duplicate or
@@ -572,9 +572,11 @@ transaction-local `set_config('request.jwt.claims', $1, true)` and
 `current_setting(..., true)` path now stores bound text only at the pgwire session
 edge, allows one 16 KiB setting under a 32 KiB aggregate ceiling, rejects NUL and
 arbitrary/non-local settings, returns PostgreSQL `text`, invalidates stale
-prepared work, and clears on commit/rollback/failed-transaction rollback. A
-focused cancellation/quarantine context oracle remains before the C4 evidence
-gate; privilege integration and role catalogs are C5.
+prepared work, and clears on commit/rollback/failed-transaction rollback. The
+actual pgwire cancellation case sets local role/claims before cancelling a stream,
+proves failed-transaction and native quarantine prevent reuse or context reads,
+and proves a fresh connection has its session-user identity with no claims.
+Privilege integration and role catalogs are C5.
 
 ### C5 — implement privilege and discovery semantics
 

@@ -2199,6 +2199,103 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
         .expect("official snapshot inspection through pgwire");
     assert!(snapshots.get::<_, i64>(0) > 0);
 
+    let (context_cancelled, context_cancelled_connection) = tokio_postgres::connect(
+        &format!("host=127.0.0.1 port={port} user=postgres dbname=quackgis"),
+        tokio_postgres::NoTls,
+    )
+    .await
+    .expect("context cancellation client");
+    let context_cancelled_task = tokio::spawn(context_cancelled_connection);
+    context_cancelled
+        .batch_execute("BEGIN")
+        .await
+        .expect("context cancellation begin");
+    context_cancelled
+        .batch_execute("SET LOCAL ROLE NONE")
+        .await
+        .expect("context cancellation local role");
+    let cancellation_claims = r#"{"request":"cancelled"}"#;
+    context_cancelled
+        .query_one(
+            "SELECT set_config('request.jwt.claims', $1, true)",
+            &[&cancellation_claims],
+        )
+        .await
+        .expect("context before cancellation");
+    let context_cancel_token = context_cancelled.cancel_token();
+    let context_cancel_rows = context_cancelled
+        .query_raw(
+            "SELECT i::BIGINT FROM range(1000000000) AS context_cancel_rows(i)",
+            std::iter::empty::<&i32>(),
+        )
+        .await
+        .expect("open context cancellation query");
+    futures::pin_mut!(context_cancel_rows);
+    context_cancel_rows
+        .next()
+        .await
+        .expect("context cancellation first row")
+        .expect("context cancellation first result");
+    context_cancel_token
+        .cancel_query(tokio_postgres::NoTls)
+        .await
+        .expect("cancel context query");
+    let context_cancellation_error = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match context_cancel_rows.next().await {
+                Some(Ok(_)) => continue,
+                Some(Err(error)) => break error,
+                None => panic!("context cancellation query completed"),
+            }
+        }
+    })
+    .await
+    .expect("context cancellation deadline");
+    assert_eq!(
+        context_cancellation_error.code(),
+        Some(&tokio_postgres::error::SqlState::QUERY_CANCELED)
+    );
+    let context_after_cancel = context_cancelled
+        .query_one("SELECT current_setting('request.jwt.claims', true)", &[])
+        .await
+        .expect_err("cancelled transaction cannot expose retained context");
+    assert_eq!(
+        context_after_cancel.code(),
+        Some(&tokio_postgres::error::SqlState::IN_FAILED_SQL_TRANSACTION)
+    );
+    context_cancelled
+        .batch_execute("ROLLBACK")
+        .await
+        .expect_err("quarantined native session cannot be reused after rollback");
+    drop(context_cancelled);
+    context_cancelled_task.abort();
+
+    let (fresh_context, fresh_context_connection) = tokio_postgres::connect(
+        &format!("host=127.0.0.1 port={port} user=postgres dbname=quackgis"),
+        tokio_postgres::NoTls,
+    )
+    .await
+    .expect("fresh context client after cancellation");
+    let fresh_context_task = tokio::spawn(fresh_context_connection);
+    assert_eq!(
+        fresh_context
+            .query_one("SELECT current_setting('request.jwt.claims', true)", &[])
+            .await
+            .expect("fresh context is empty")
+            .get::<_, Option<String>>(0),
+        None
+    );
+    assert_eq!(
+        fresh_context
+            .query_one("SELECT current_user", &[])
+            .await
+            .expect("fresh role is the session user")
+            .get::<_, String>(0),
+        "postgres"
+    );
+    drop(fresh_context);
+    fresh_context_task.abort();
+
     let cancel_token = client.cancel_token();
     let cancel_rows = client
         .query_raw(
