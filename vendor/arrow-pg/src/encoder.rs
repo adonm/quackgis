@@ -2,6 +2,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use arrow::{array::*, datatypes::*};
+use bytes::{BufMut, BytesMut};
 use chrono::NaiveTime;
 use chrono::{NaiveDate, NaiveDateTime};
 use pg_interval::Interval as PgInterval;
@@ -10,7 +11,8 @@ use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::copy::CopyData;
 use pgwire::messages::data::DataRow;
 use pgwire::types::ToSqlText;
-use postgres_types::{Json, ToSql, Type};
+use pgwire::types::format::FormatOptions;
+use postgres_types::{IsNull, Json, ToSql, Type};
 use rust_decimal::Decimal;
 use timezone::Tz;
 
@@ -21,6 +23,45 @@ use crate::struct_encoder::encode_struct;
 
 fn is_geometry_wire_type(ty: &Type) -> bool {
     matches!(ty.oid(), GEOMETRY_OID | GEOGRAPHY_OID)
+}
+
+fn is_reg_oid_type(ty: &Type) -> bool {
+    matches!(
+        *ty,
+        Type::REGCLASS | Type::REGTYPE | Type::REGNAMESPACE | Type::REGROLE
+    )
+}
+
+#[derive(Debug)]
+struct PgRegOid(u32);
+
+impl ToSql for PgRegOid {
+    fn to_sql(
+        &self,
+        _ty: &Type,
+        out: &mut BytesMut,
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        out.put_u32(self.0);
+        Ok(IsNull::No)
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        is_reg_oid_type(ty)
+    }
+
+    postgres_types::to_sql_checked!();
+}
+
+impl ToSqlText for PgRegOid {
+    fn to_sql_text(
+        &self,
+        _ty: &Type,
+        out: &mut BytesMut,
+        _format_options: &FormatOptions,
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        out.extend_from_slice(self.0.to_string().as_bytes());
+        Ok(IsNull::No)
+    }
 }
 
 fn encode_binary_as_bytea(
@@ -344,6 +385,10 @@ pub fn encode_value<T: Encoder>(
         DataType::Boolean => encoder.encode_field(&get_bool_value(arr, idx), pg_field)?,
         DataType::Int8 => encoder.encode_field(&get_i8_value(arr, idx), pg_field)?,
         DataType::Int16 => encoder.encode_field(&get_i16_value(arr, idx), pg_field)?,
+        DataType::Int32 if is_reg_oid_type(pg_field.datatype()) => encoder.encode_field(
+            &get_i32_value(arr, idx).map(|value| PgRegOid(value as u32)),
+            pg_field,
+        )?,
         DataType::Int32 if *pg_field.datatype() == Type::OID => {
             encoder.encode_field(&get_i32_value(arr, idx).map(|value| value as u32), pg_field)?
         }
@@ -354,6 +399,9 @@ pub fn encode_value<T: Encoder>(
         }
         DataType::UInt16 => {
             encoder.encode_field(&(get_u16_value(arr, idx).map(|x| x as i32)), pg_field)?
+        }
+        DataType::UInt32 if is_reg_oid_type(pg_field.datatype()) => {
+            encoder.encode_field(&get_u32_value(arr, idx).map(PgRegOid), pg_field)?
         }
         DataType::UInt32 if *pg_field.datatype() == Type::OID => {
             encoder.encode_field(&get_u32_value(arr, idx), pg_field)?
@@ -811,6 +859,24 @@ mod tests {
             let mut encoder = TextCaptureEncoder::default();
             encode_value(&mut encoder, &oid_array, index, &oid_field, &oid_pg)
                 .expect("UInt32 OID alias must encode as OID");
+            assert_eq!(encoder.encoded.len(), 1);
+        }
+        for pg_type in [
+            Type::REGCLASS,
+            Type::REGTYPE,
+            Type::REGNAMESPACE,
+            Type::REGROLE,
+        ] {
+            let pg_field = FieldInfo::new(
+                "registered_oid".to_owned(),
+                None,
+                None,
+                pg_type,
+                FieldFormat::Text,
+            );
+            let mut encoder = TextCaptureEncoder::default();
+            encode_value(&mut encoder, &oid_array, 0, &oid_field, &pg_field)
+                .expect("registered OID type must encode");
             assert_eq!(encoder.encoded.len(), 1);
         }
     }

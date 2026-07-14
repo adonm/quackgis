@@ -519,6 +519,10 @@ async fn client_neutral_catalog_contract() {
     for sql in [
         "SELECT relname FROM pg_catalog.pg_class",
         "SELECT attname FROM pg_catalog.pg_attribute",
+        "SELECT to_regclass('catalog_fixture')",
+        "SELECT 'catalog_fixture'::regclass",
+        "SELECT to_regtype('integer')",
+        "SELECT format_type(23, -1)",
     ] {
         let error = client
             .query(sql, &[])

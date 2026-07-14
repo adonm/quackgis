@@ -21,6 +21,11 @@ pub enum PgTypeHint {
     Name,
     NameArray,
     Char,
+    Text,
+    Regclass,
+    Regtype,
+    Regnamespace,
+    Regrole,
 }
 
 impl PgTypeHint {
@@ -30,6 +35,11 @@ impl PgTypeHint {
             Self::Name => "name",
             Self::NameArray => "name_array",
             Self::Char => "char",
+            Self::Text => "text",
+            Self::Regclass => "regclass",
+            Self::Regtype => "regtype",
+            Self::Regnamespace => "regnamespace",
+            Self::Regrole => "regrole",
         }
     }
 }
@@ -328,6 +338,22 @@ pub fn field_into_pg_type(field: &Arc<Field>) -> PgWireResult<Type> {
             {
                 Type::CHAR
             }
+            "text"
+                if matches!(
+                    arrow_type,
+                    DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+                ) =>
+            {
+                Type::TEXT
+            }
+            "regclass" if matches!(arrow_type, DataType::Int32 | DataType::UInt32) => {
+                Type::REGCLASS
+            }
+            "regtype" if matches!(arrow_type, DataType::Int32 | DataType::UInt32) => Type::REGTYPE,
+            "regnamespace" if matches!(arrow_type, DataType::Int32 | DataType::UInt32) => {
+                Type::REGNAMESPACE
+            }
+            "regrole" if matches!(arrow_type, DataType::Int32 | DataType::UInt32) => Type::REGROLE,
             _ => {
                 return Err(PgWireError::UserError(Box::new(ErrorInfo::new(
                     "ERROR".to_owned(),
@@ -499,6 +525,21 @@ mod tests {
             ("oid", DataType::UInt32, PgTypeHint::Oid, Type::OID),
             ("typname", DataType::Utf8, PgTypeHint::Name, Type::NAME),
             ("typtype", DataType::Utf8, PgTypeHint::Char, Type::CHAR),
+            ("formatted", DataType::Utf8, PgTypeHint::Text, Type::TEXT),
+            (
+                "relation",
+                DataType::UInt32,
+                PgTypeHint::Regclass,
+                Type::REGCLASS,
+            ),
+            ("type", DataType::UInt32, PgTypeHint::Regtype, Type::REGTYPE),
+            (
+                "namespace",
+                DataType::UInt32,
+                PgTypeHint::Regnamespace,
+                Type::REGNAMESPACE,
+            ),
+            ("role", DataType::UInt32, PgTypeHint::Regrole, Type::REGROLE),
         ] {
             let field = Arc::new(with_pg_type_hint(Field::new(name, data_type, false), hint));
             assert_eq!(field_into_pg_type(&field).unwrap(), expected, "{name}");

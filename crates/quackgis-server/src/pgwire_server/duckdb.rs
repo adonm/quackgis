@@ -41,10 +41,11 @@ use pgwire::messages::data::DataRow;
 use pgwire::messages::extendedquery::Execute;
 use pgwire::messages::response::TransactionStatus;
 use sqlparser::ast::{
-    BinaryOperator, CopySource, CopyTarget as AstCopyTarget, Expr, FunctionArg, FunctionArgExpr,
-    FunctionArguments, Ident, JoinConstraint, JoinOperator, ObjectName, ObjectNamePart, SelectItem,
-    SelectItemQualifiedWildcardKind, Set, SetExpr, Statement, TableFactor, Value,
-    WildcardAdditionalOptions, visit_expressions, visit_expressions_mut, visit_relations_mut,
+    BinaryOperator, CopySource, CopyTarget as AstCopyTarget, Expr, Function, FunctionArg,
+    FunctionArgExpr, FunctionArgumentList, FunctionArguments, Ident, JoinConstraint, JoinOperator,
+    ObjectName, ObjectNamePart, SelectItem, SelectItemQualifiedWildcardKind, Set, SetExpr,
+    Statement, TableFactor, Value, WildcardAdditionalOptions, visit_expressions,
+    visit_expressions_mut, visit_relations_mut,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
@@ -1055,6 +1056,30 @@ fn validate_statement_with_catalog_identity(
             "direct references to the private QuackGIS catalog projection are not supported",
         ));
     }
+    if let Some(function) = forbidden_client_scalar_function(&statement) {
+        return Err(user_error(
+            "0A000",
+            &format!("DuckDB scalar function {function} is not exposed through pgwire"),
+        ));
+    }
+    if let Some(function) = invalid_maintained_function(&statement) {
+        return Err(user_error(
+            "0A000",
+            &format!("unsupported PostgreSQL function shape for {function}"),
+        ));
+    }
+    if invalid_maintained_cast(&statement) {
+        return Err(user_error(
+            "0A000",
+            "unsupported PostgreSQL registered-object cast shape",
+        ));
+    }
+    if !catalog_identity_enabled && let Some(feature) = identity_catalog_feature(&statement) {
+        return Err(user_error(
+            "0A000",
+            &format!("PostgreSQL catalog feature {feature} requires durable catalog identity"),
+        ));
+    }
     if internal_control_schema_reference(&statement) {
         return Err(user_error(
             "42501",
@@ -1135,6 +1160,7 @@ fn validate_statement_with_catalog_identity(
         rewrite_public_relations(&mut execution);
         rewrite_pg_catalog_relations(&mut execution);
         rewrite_pg_catalog_functions(&mut execution);
+        rewrite_pg_catalog_casts(&mut execution);
         execution.to_string()
     };
     Ok(ValidatedStatement {
@@ -1447,6 +1473,15 @@ enum MaintainedPgFunction {
     Database,
     Schema,
     Schemas,
+    FormatType,
+    ToRegclass,
+    Regclass,
+    ToRegtype,
+    Regtype,
+    ToRegnamespace,
+    Regnamespace,
+    ToRegrole,
+    Regrole,
 }
 
 impl MaintainedPgFunction {
@@ -1455,6 +1490,15 @@ impl MaintainedPgFunction {
             Self::Database => "quackgis_current_database",
             Self::Schema => "quackgis_current_schema",
             Self::Schemas => "quackgis_current_schemas",
+            Self::FormatType => "quackgis_pg_format_type",
+            Self::ToRegclass => "quackgis_pg_to_regclass",
+            Self::Regclass => "quackgis_pg_regclass",
+            Self::ToRegtype => "quackgis_pg_to_regtype",
+            Self::Regtype => "quackgis_pg_regtype",
+            Self::ToRegnamespace => "quackgis_pg_to_regnamespace",
+            Self::Regnamespace => "quackgis_pg_regnamespace",
+            Self::ToRegrole => "quackgis_pg_to_regrole",
+            Self::Regrole => "quackgis_pg_regrole",
         }
     }
 
@@ -1462,6 +1506,41 @@ impl MaintainedPgFunction {
         match self {
             Self::Database | Self::Schema => PgTypeHint::Name,
             Self::Schemas => PgTypeHint::NameArray,
+            Self::FormatType => PgTypeHint::Text,
+            Self::ToRegclass | Self::Regclass => PgTypeHint::Regclass,
+            Self::ToRegtype | Self::Regtype => PgTypeHint::Regtype,
+            Self::ToRegnamespace | Self::Regnamespace => PgTypeHint::Regnamespace,
+            Self::ToRegrole | Self::Regrole => PgTypeHint::Regrole,
+        }
+    }
+
+    const fn requires_identity(self) -> bool {
+        !matches!(self, Self::Database | Self::Schema | Self::Schemas)
+    }
+
+    const fn argument_count(self) -> usize {
+        match self {
+            Self::Database | Self::Schema => 0,
+            Self::Schemas
+            | Self::ToRegclass
+            | Self::Regclass
+            | Self::ToRegtype
+            | Self::Regtype
+            | Self::ToRegnamespace
+            | Self::Regnamespace
+            | Self::ToRegrole
+            | Self::Regrole => 1,
+            Self::FormatType => 2,
+        }
+    }
+
+    const fn registered_text_name(self) -> Option<&'static str> {
+        match self {
+            Self::ToRegclass | Self::Regclass => Some("quackgis_pg_regclass_text"),
+            Self::ToRegtype | Self::Regtype => Some("quackgis_pg_regtype_text"),
+            Self::ToRegnamespace | Self::Regnamespace => Some("quackgis_pg_regnamespace_text"),
+            Self::ToRegrole | Self::Regrole => Some("quackgis_pg_regrole_text"),
+            _ => None,
         }
     }
 }
@@ -1481,9 +1560,217 @@ fn maintained_pg_function(name: &ObjectName) -> Option<MaintainedPgFunction> {
         Some(MaintainedPgFunction::Schema)
     } else if pg_identifier_matches(function, "current_schemas") {
         Some(MaintainedPgFunction::Schemas)
+    } else if pg_identifier_matches(function, "format_type") {
+        Some(MaintainedPgFunction::FormatType)
+    } else if pg_identifier_matches(function, "to_regclass") {
+        Some(MaintainedPgFunction::ToRegclass)
+    } else if pg_identifier_matches(function, "regclass") {
+        Some(MaintainedPgFunction::Regclass)
+    } else if pg_identifier_matches(function, "to_regtype") {
+        Some(MaintainedPgFunction::ToRegtype)
+    } else if pg_identifier_matches(function, "regtype") {
+        Some(MaintainedPgFunction::Regtype)
+    } else if pg_identifier_matches(function, "to_regnamespace") {
+        Some(MaintainedPgFunction::ToRegnamespace)
+    } else if pg_identifier_matches(function, "regnamespace") {
+        Some(MaintainedPgFunction::Regnamespace)
+    } else if pg_identifier_matches(function, "to_regrole") {
+        Some(MaintainedPgFunction::ToRegrole)
+    } else if pg_identifier_matches(function, "regrole") {
+        Some(MaintainedPgFunction::Regrole)
     } else {
         None
     }
+}
+
+fn private_maintained_pg_function(name: &ObjectName) -> Option<MaintainedPgFunction> {
+    let [ObjectNamePart::Identifier(function)] = name.0.as_slice() else {
+        return None;
+    };
+    [
+        MaintainedPgFunction::FormatType,
+        MaintainedPgFunction::ToRegclass,
+        MaintainedPgFunction::Regclass,
+        MaintainedPgFunction::ToRegtype,
+        MaintainedPgFunction::Regtype,
+        MaintainedPgFunction::ToRegnamespace,
+        MaintainedPgFunction::Regnamespace,
+        MaintainedPgFunction::ToRegrole,
+        MaintainedPgFunction::Regrole,
+    ]
+    .into_iter()
+    .find(|candidate| function.value == candidate.private_name())
+}
+
+fn maintained_pg_cast(data_type: &sqlparser::ast::DataType) -> Option<MaintainedPgFunction> {
+    if matches!(data_type, sqlparser::ast::DataType::Regclass) {
+        return Some(MaintainedPgFunction::Regclass);
+    }
+    let (target, _) = custom_pg_cast_target(data_type)?;
+    if pg_identifier_matches(target, "regclass") {
+        Some(MaintainedPgFunction::Regclass)
+    } else if pg_identifier_matches(target, "regtype") {
+        Some(MaintainedPgFunction::Regtype)
+    } else if pg_identifier_matches(target, "regnamespace") {
+        Some(MaintainedPgFunction::Regnamespace)
+    } else if pg_identifier_matches(target, "regrole") {
+        Some(MaintainedPgFunction::Regrole)
+    } else {
+        None
+    }
+}
+
+fn custom_pg_cast_target(data_type: &sqlparser::ast::DataType) -> Option<(&Ident, bool)> {
+    let sqlparser::ast::DataType::Custom(name, modifiers) = data_type else {
+        return None;
+    };
+    if !modifiers.is_empty() {
+        return None;
+    }
+    let target = match name.0.as_slice() {
+        [ObjectNamePart::Identifier(target)] => (target, false),
+        [
+            ObjectNamePart::Identifier(schema),
+            ObjectNamePart::Identifier(target),
+        ] if pg_identifier_matches(schema, "pg_catalog") => (target, true),
+        _ => return None,
+    };
+    Some(target)
+}
+
+fn maintained_oid_cast(data_type: &sqlparser::ast::DataType) -> bool {
+    custom_pg_cast_target(data_type).is_some_and(|(target, _)| pg_identifier_matches(target, "oid"))
+}
+
+fn maintained_text_cast(data_type: &sqlparser::ast::DataType) -> bool {
+    matches!(data_type, sqlparser::ast::DataType::Text)
+        || custom_pg_cast_target(data_type)
+            .is_some_and(|(target, qualified)| qualified && pg_identifier_matches(target, "text"))
+}
+
+fn private_scalar_function(name: &str, argument: Expr) -> Expr {
+    Expr::Function(Function {
+        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(name))]),
+        uses_odbc_syntax: false,
+        parameters: FunctionArguments::None,
+        args: FunctionArguments::List(FunctionArgumentList {
+            duplicate_treatment: None,
+            args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(argument))],
+            clauses: Vec::new(),
+        }),
+        filter: None,
+        null_treatment: None,
+        over: None,
+        within_group: Vec::new(),
+    })
+}
+
+fn registered_expression_kind(expression: &Expr) -> Option<MaintainedPgFunction> {
+    match expression {
+        Expr::Cast { data_type, .. } => maintained_pg_cast(data_type),
+        Expr::Function(function) => maintained_pg_function(&function.name)
+            .or_else(|| private_maintained_pg_function(&function.name))
+            .filter(|function| function.registered_text_name().is_some()),
+        _ => None,
+    }
+}
+
+fn rewrite_registered_expression(expression: Expr) -> Expr {
+    match expression {
+        Expr::Cast {
+            kind,
+            expr,
+            data_type,
+            array,
+            format,
+        } => maintained_pg_cast(&data_type)
+            .map(|function| private_scalar_function(function.private_name(), *expr.clone()))
+            .unwrap_or(Expr::Cast {
+                kind,
+                expr,
+                data_type,
+                array,
+                format,
+            }),
+        Expr::Function(mut function) => {
+            if let Some(maintained) = maintained_pg_function(&function.name) {
+                function.name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(
+                    maintained.private_name(),
+                ))]);
+            }
+            Expr::Function(function)
+        }
+        expression => expression,
+    }
+}
+
+fn rewrite_pg_catalog_casts(statement: &mut Statement) {
+    let _: ControlFlow<()> = visit_expressions_mut(statement, |expression| {
+        let registered_text = match expression {
+            Expr::Cast {
+                expr, data_type, ..
+            } if maintained_text_cast(data_type) => {
+                registered_expression_kind(expr).and_then(|function| {
+                    function.registered_text_name().map(|text_function| {
+                        private_scalar_function(
+                            text_function,
+                            rewrite_registered_expression(*expr.clone()),
+                        )
+                    })
+                })
+            }
+            _ => None,
+        };
+        if let Some(replacement) = registered_text {
+            *expression = replacement;
+            return ControlFlow::Continue(());
+        }
+        let replacement = match expression {
+            Expr::Cast {
+                expr, data_type, ..
+            } => maintained_pg_cast(data_type)
+                .map(|function| private_scalar_function(function.private_name(), *expr.clone())),
+            _ => None,
+        };
+        if let Some(replacement) = replacement {
+            *expression = replacement;
+            return ControlFlow::Continue(());
+        }
+        let Expr::Cast { data_type, .. } = expression else {
+            return ControlFlow::Continue(());
+        };
+        if maintained_oid_cast(data_type) {
+            *data_type = sqlparser::ast::DataType::Custom(
+                ObjectName(vec![ObjectNamePart::Identifier(Ident::new("UINTEGER"))]),
+                Vec::new(),
+            );
+        } else if maintained_text_cast(data_type) {
+            *data_type = sqlparser::ast::DataType::Varchar(None);
+        }
+        ControlFlow::Continue(())
+    });
+}
+
+fn identity_catalog_feature(statement: &Statement) -> Option<String> {
+    let mut feature = None;
+    let _: ControlFlow<()> = visit_expressions(statement, |expression| {
+        let name = match expression {
+            Expr::Function(function) => maintained_pg_function(&function.name)
+                .filter(|function| function.requires_identity())
+                .map(|function| function.private_name().trim_start_matches("quackgis_pg_")),
+            Expr::Cast { data_type, .. } => maintained_pg_cast(data_type)
+                .map(MaintainedPgFunction::private_name)
+                .map(|name| name.trim_start_matches("quackgis_pg_")),
+            _ => None,
+        };
+        if let Some(name) = name {
+            feature = Some(name.to_owned());
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    feature
 }
 
 fn rewrite_pg_catalog_functions(statement: &mut Statement) {
@@ -1498,6 +1785,75 @@ fn rewrite_pg_catalog_functions(statement: &mut Statement) {
         }
         ControlFlow::Continue(())
     });
+}
+
+fn invalid_maintained_function(statement: &Statement) -> Option<String> {
+    let mut invalid = None;
+    let _: ControlFlow<()> = visit_expressions(statement, |expression| {
+        let Expr::Function(function) = expression else {
+            return ControlFlow::Continue(());
+        };
+        let Some(maintained) = maintained_pg_function(&function.name) else {
+            return ControlFlow::Continue(());
+        };
+        let valid_arguments = match &function.args {
+            FunctionArguments::List(arguments) => {
+                arguments.duplicate_treatment.is_none()
+                    && arguments.clauses.is_empty()
+                    && arguments.args.len() == maintained.argument_count()
+                    && arguments.args.iter().all(|argument| {
+                        matches!(argument, FunctionArg::Unnamed(FunctionArgExpr::Expr(_)))
+                    })
+            }
+            FunctionArguments::None => maintained.argument_count() == 0,
+            FunctionArguments::Subquery(_) => false,
+        };
+        if function.uses_odbc_syntax
+            || !matches!(function.parameters, FunctionArguments::None)
+            || !valid_arguments
+            || function.filter.is_some()
+            || function.null_treatment.is_some()
+            || function.over.is_some()
+            || !function.within_group.is_empty()
+        {
+            invalid = Some(maintained.private_name().to_owned());
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    invalid
+}
+
+fn invalid_maintained_cast(statement: &Statement) -> bool {
+    let mut invalid = false;
+    let _: ControlFlow<()> = visit_expressions(statement, |expression| {
+        let Expr::Cast {
+            kind,
+            data_type,
+            array,
+            format,
+            ..
+        } = expression
+        else {
+            return ControlFlow::Continue(());
+        };
+        if (maintained_pg_cast(data_type).is_some()
+            || maintained_oid_cast(data_type)
+            || maintained_text_cast(data_type))
+            && (!matches!(
+                kind,
+                sqlparser::ast::CastKind::Cast | sqlparser::ast::CastKind::DoubleColon
+            ) || *array
+                || format.is_some())
+        {
+            invalid = true;
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    invalid
 }
 
 fn maintained_pg_catalog_relation(name: &ObjectName) -> Option<&'static str> {
@@ -1844,7 +2200,9 @@ fn private_catalog_reference(statement: &Statement) -> bool {
     let _: ControlFlow<()> = visit_expressions(statement, |expression| {
         if let Expr::Function(function) = expression
             && function.name.0.iter().any(|part| {
-                matches!(part, ObjectNamePart::Identifier(identifier) if identifier.value.to_ascii_lowercase().starts_with("quackgis_current_"))
+                matches!(part, ObjectNamePart::Identifier(identifier)
+                    if identifier.value.to_ascii_lowercase().starts_with("quackgis_current_")
+                        || identifier.value.to_ascii_lowercase().starts_with("quackgis_pg_"))
             })
         {
             found = true;
@@ -1865,6 +2223,26 @@ fn private_catalog_reference(statement: &Statement) -> bool {
         }
     });
     found
+}
+
+fn forbidden_client_scalar_function(statement: &Statement) -> Option<String> {
+    let mut forbidden = None;
+    let _: ControlFlow<()> = visit_expressions(statement, |expression| {
+        let Expr::Function(function) = expression else {
+            return ControlFlow::Continue(());
+        };
+        let name = function.name.0.last().and_then(|part| match part {
+            ObjectNamePart::Identifier(identifier) => Some(identifier.value.to_ascii_lowercase()),
+            _ => None,
+        });
+        if name.as_deref() == Some("error") {
+            forbidden = name;
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    forbidden
 }
 
 fn internal_control_schema_reference(statement: &Statement) -> bool {
@@ -2285,8 +2663,20 @@ fn catalog_expression_hint(
         Expr::Identifier(column) if aliases.len() == 1 => {
             catalog_column_hint(aliases.values().next()?, column)
         }
+        Expr::Cast { data_type, .. } => maintained_cast_hint(data_type),
+        Expr::Function(_) => maintained_function_hint(expression),
         Expr::Nested(expression) => catalog_expression_hint(expression, aliases),
         _ => None,
+    }
+}
+
+fn maintained_cast_hint(data_type: &sqlparser::ast::DataType) -> Option<PgTypeHint> {
+    if maintained_oid_cast(data_type) {
+        Some(PgTypeHint::Oid)
+    } else if maintained_text_cast(data_type) {
+        Some(PgTypeHint::Text)
+    } else {
+        maintained_pg_cast(data_type).map(MaintainedPgFunction::result_hint)
     }
 }
 
@@ -3816,6 +4206,93 @@ mod tests {
             (Some(100_001), Some(3))
         );
         assert_eq!((fields[2].table_id(), fields[2].column_id()), (None, None));
+    }
+
+    #[test]
+    fn registered_object_resolution_is_capability_gated_and_typed() {
+        for sql in [
+            "SELECT to_regclass('points')",
+            "SELECT 'points'::regclass",
+            "SELECT to_regtype('integer')",
+            "SELECT 'public'::regnamespace",
+            "SELECT 'quackgis_owner'::regrole",
+            "SELECT format_type(23, -1)",
+        ] {
+            assert!(
+                validate_statement(sql, ProtocolMode::Extended).is_err(),
+                "identity-disabled registered object lookup: {sql}"
+            );
+        }
+
+        let validated = validate_statement_with_catalog_identity(
+            "SELECT to_regclass('points') AS relation, \
+                    'integer'::regtype AS data_type, \
+                    'public'::regnamespace AS namespace, \
+                    'quackgis_owner'::regrole AS role, \
+                    format_type(23, -1) AS formatted, \
+                    'points'::regclass::oid AS relation_oid, \
+                    'public'::regnamespace::pg_catalog.text AS namespace_name",
+            ProtocolMode::Extended,
+            true,
+        )
+        .expect("registered object lookup");
+        for private in [
+            "quackgis_pg_to_regclass",
+            "quackgis_pg_regtype",
+            "quackgis_pg_regnamespace",
+            "quackgis_pg_regrole",
+            "quackgis_pg_format_type",
+            "UINTEGER",
+        ] {
+            assert!(validated.sql.contains(private), "missing rewrite {private}");
+        }
+        assert!(!validated.sql.contains("::REGCLASS"));
+        assert!(!validated.sql.contains("::REGTYPE"));
+
+        let schema = annotate_catalog_result_schema(
+            &validated.ast,
+            &Schema::new(vec![
+                Field::new("relation", DataType::UInt32, true),
+                Field::new("data_type", DataType::UInt32, true),
+                Field::new("namespace", DataType::UInt32, true),
+                Field::new("role", DataType::UInt32, true),
+                Field::new("formatted", DataType::Utf8, true),
+                Field::new("relation_oid", DataType::UInt32, true),
+                Field::new("namespace_name", DataType::Utf8, true),
+            ]),
+        );
+        let actual = schema
+            .fields()
+            .iter()
+            .map(field_into_pg_type)
+            .collect::<PgWireResult<Vec<_>>>()
+            .expect("registered object wire types");
+        assert_eq!(
+            actual,
+            [
+                Type::REGCLASS,
+                Type::REGTYPE,
+                Type::REGNAMESPACE,
+                Type::REGROLE,
+                Type::TEXT,
+                Type::OID,
+                Type::TEXT,
+            ]
+        );
+
+        for private in [
+            "SELECT quackgis_pg_to_regclass('points')",
+            "SELECT quackgis_pg_format_type(23, -1)",
+            "SELECT error('PostgreSQL relation does not exist')",
+            "SELECT format_type(23)",
+            "SELECT TRY_CAST('points' AS REGCLASS)",
+        ] {
+            assert!(
+                validate_statement_with_catalog_identity(private, ProtocolMode::Extended, true)
+                    .is_err(),
+                "private catalog function must fail closed: {private}"
+            );
+        }
     }
 
     #[test]

@@ -471,9 +471,11 @@ resolves.
 Current progress: durable table/column identity and name-reuse behavior pass in
 independent DuckDB 1.5.4 processes. The registry and lower-maintenance extraction
 decisions are closed, and the upstream public-function proposal passes against
-DuckLake main. C2 remains open for upstream acceptance and a pinned-runtime
-contract test, transactional OID/attribute mapping, immutable snapshot, and
-commit/rollback epoch behavior.
+DuckLake main. The checksum-pinned 1.5.4 lane now closes the C2 implementation
+gate with transactional OID/attribute mapping, guarded committed snapshots,
+commit/rollback epoch behavior, rename/reopen stability, collision checks, and
+atomic prepared-read invalidation. Upstream acceptance and a signed matching
+bundle remain release gates rather than missing implementation.
 
 ### C3 — implement core catalogs and wire identity
 
@@ -492,7 +494,8 @@ Deliver:
 Gate: client-neutral differential fixtures and actual pgwire tests pass for
 scalar, geometry, and geography columns, including restart and rename.
 
-Current progress: exact whole-query interception is removed. Explicit and implicit
+Current progress: the C3 implementation gate is complete in the checksum-pinned
+development identity lane. Exact whole-query interception is removed. Explicit and implicit
 `pg_catalog` namespace/database/type/range/collation/owner-role references map
 structurally to protected process-local views. The stable single logical-database
 row and structurally rewritten `current_database`, `current_schema`, and
@@ -516,11 +519,18 @@ composite row-type rows. Pgwire joins prove PostgreSQL OID/`name`/internal-`char
 types, scalar/spatial type references, nullability, rename/reopen, retained
 attribute gaps, drop/recreate, and non-public schemas. Direct qualified or unambiguous base-table columns and plain wildcard
 projections carry matching relation OID/attribute-number origins, including
-joins; expressions carry zero origins. Unsupported column types and baseline
-startup without the identity capability fail closed. This remains development-
-only until upstream acceptance and a signed official bundle. Broader built-ins,
-`reg*`, constraints/indexes/defaults/comments, privilege-aware visibility, and
-complex expression provenance remain open.
+joins; expressions carry zero origins. The maintained search path resolves
+quoted/unquoted, qualified/unqualified `regclass`, `regtype`, `regnamespace`, and
+`regrole` values. Strict casts/functions return PostgreSQL `42P01`, `42704`, or
+`3F000`; `to_reg*` returns NULL; OID/text casts, bound text input, aliases, arrays,
+typmods, and `format_type` have explicit pgwire types and lifecycle tests. Actual
+descriptions for every foundation catalog are checked against the client-neutral
+`pg18-column-core-v1` fixture. Unsupported column types, malformed/private
+functions, complex provenance outside the maintained shape, and baseline startup
+without identity fail closed. This remains development-only until upstream
+acceptance and a signed official bundle. Constraints/indexes/defaults/comments,
+privilege-aware visibility, roles, and broader expression provenance are C4/C5 or
+later M3 work, not C3 blockers.
 
 The exact QGIS 3.44 four-statement session bootstrap now passes as the only
 multi-statement exception: simple-protocol batches are limited to eight structurally

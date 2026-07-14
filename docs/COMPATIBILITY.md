@@ -183,7 +183,11 @@ catalog surfaces remain open unless a focused test says otherwise.
   `pg_type` rows. Actual pgwire joins prove stable rename/reopen identity,
   attribute tombstones, drop/recreate, non-public schemas, scalar/spatial type
   references, direct-column/wildcard RowDescription origins, unsupported-type
-  rejection, and prepared-read epoch invalidation. Baseline startup still rejects
+  rejection, and prepared-read epoch invalidation. It also proves PostgreSQL-
+  typed strict/nullable `regclass`/`regtype`/`regnamespace`/`regrole`, maintained
+  search-path/quoted-name resolution, OID/text casts, aliases/arrays/typmods,
+  `format_type`, and exact foundation descriptions from the client-neutral
+  profile. This closes C3 implementation in the gated lane. Baseline startup still rejects
   those user-object catalogs explicitly. This lane is not loaded by default,
   packaged, or release-supported.
 - Binary columns named `geom_wkb` use the same geometry sentinel OID as the

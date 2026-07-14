@@ -23,6 +23,29 @@ struct IdentityRow {
     column_id: i64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RegisteredOid(u32);
+
+impl<'a> tokio_postgres::types::FromSql<'a> for RegisteredOid {
+    fn from_sql(
+        _ty: &tokio_postgres::types::Type,
+        raw: &'a [u8],
+    ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        let bytes: [u8; 4] = raw.try_into()?;
+        Ok(Self(u32::from_be_bytes(bytes)))
+    }
+
+    fn accepts(ty: &tokio_postgres::types::Type) -> bool {
+        matches!(
+            *ty,
+            tokio_postgres::types::Type::REGCLASS
+                | tokio_postgres::types::Type::REGTYPE
+                | tokio_postgres::types::Type::REGNAMESPACE
+                | tokio_postgres::types::Type::REGROLE
+        )
+    }
+}
+
 fn identity_rows(batches: &[RecordBatch]) -> Vec<IdentityRow> {
     let mut rows = Vec::new();
     for batch in batches {
@@ -159,6 +182,73 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
         .await
         .expect("create projected catalog table");
 
+    let profile: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/postgresql18_compatibility_profile.json"
+    ))
+    .expect("client-neutral PostgreSQL catalog profile");
+    for (relation, sql) in [
+        (
+            "pg_catalog.pg_namespace",
+            "SELECT oid, nspname, nspowner FROM pg_namespace WHERE nspname = 'public'",
+        ),
+        (
+            "pg_catalog.pg_class",
+            "SELECT oid, relname, relnamespace, reltype, relowner, relkind, relnatts, \
+                    relrowsecurity FROM pg_class WHERE relname = 'catalog_projection'",
+        ),
+        (
+            "pg_catalog.pg_attribute",
+            "SELECT a.attrelid, a.attname, a.atttypid, a.attlen, a.attnum, a.atttypmod, \
+                    a.attnotnull, a.attidentity, a.attgenerated, a.attisdropped \
+             FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid \
+             WHERE c.relname = 'catalog_projection' ORDER BY a.attnum",
+        ),
+        (
+            "pg_catalog.pg_type",
+            "SELECT t.oid, t.typname, t.typnamespace, t.typlen, t.typbyval, t.typtype, \
+                    t.typcategory, t.typispreferred, t.typisdefined, t.typdelim, \
+                    t.typrelid, t.typelem, t.typarray, t.typnotnull, t.typbasetype, \
+                    t.typtypmod, t.typndims, t.typcollation \
+             FROM pg_type t WHERE t.typname = 'catalog_projection'",
+        ),
+        (
+            "pg_catalog.pg_database",
+            "SELECT oid, datname, datdba FROM pg_database WHERE datname = current_database()",
+        ),
+        (
+            "pg_catalog.pg_roles",
+            "SELECT oid, rolname FROM pg_roles WHERE rolname = 'quackgis_owner'",
+        ),
+    ] {
+        let expected = profile["catalog_relations"]
+            .as_array()
+            .and_then(|relations| {
+                relations
+                    .iter()
+                    .find(|candidate| candidate["name"] == relation)
+            })
+            .and_then(|catalog| catalog["required_columns"].as_array())
+            .unwrap_or_else(|| panic!("profile relation {relation}"));
+        let statement = client
+            .prepare(sql)
+            .await
+            .unwrap_or_else(|error| panic!("prepare profile relation {relation}: {error}"));
+        assert_eq!(statement.columns().len(), expected.len(), "{relation}");
+        for (actual, expected) in statement.columns().iter().zip(expected) {
+            assert_eq!(
+                actual.name(),
+                expected["name"].as_str().unwrap(),
+                "{relation}"
+            );
+            assert_eq!(
+                actual.type_().oid(),
+                u32::try_from(expected["type_oid"].as_u64().unwrap()).unwrap(),
+                "{relation}.{}",
+                actual.name()
+            );
+        }
+    }
+
     let catalog_sql = "SELECT c.oid, c.relname, c.relnamespace, c.reltype, c.relowner, \
                 c.relkind, c.relnatts, c.relrowsecurity, a.attrelid, a.attname, \
                 a.atttypid, a.attlen, a.attnum, a.atttypmod, a.attnotnull, \
@@ -245,6 +335,12 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
         assert_eq!(row.get::<_, String>(20), "public");
     }
     for sql in [
+        "SELECT count(*)::BIGINT FROM pg_type t \
+         LEFT JOIN pg_type e ON e.oid = t.typelem \
+         LEFT JOIN pg_type a ON a.oid = t.typarray \
+         LEFT JOIN pg_namespace n ON n.oid = t.typnamespace \
+         WHERE n.oid IS NULL OR (t.typelem <> 0 AND e.oid IS NULL) \
+            OR (t.typarray <> 0 AND (a.oid IS NULL OR a.typelem <> t.oid))",
         "SELECT count(*)::BIGINT FROM pg_class c \
          LEFT JOIN pg_namespace n ON n.oid = c.relnamespace \
          LEFT JOIN pg_type t ON t.oid = c.reltype \
@@ -276,6 +372,180 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
     assert!(analytics_relation_oid >= 100_000);
     assert!(analytics.get::<_, u32>(2) >= 100_000);
     assert_eq!(analytics.get::<_, i16>(3), 1);
+
+    let registered = client
+        .prepare(
+            "SELECT to_regclass('catalog_projection') AS relation_by_path, \
+                    pg_catalog.to_regclass('\"public\".\"catalog_projection\"') AS relation_qualified, \
+                    to_regclass('missing_relation') AS missing_relation, \
+                    'catalog_projection'::regclass AS relation_cast, \
+                    c.oid::pg_catalog.regclass AS relation_oid_cast, \
+                    'integer'::regtype AS integer_type, \
+                    to_regtype('geometry') AS geometry_type, \
+                    to_regtype('integer[]') AS integer_array_type, \
+                    to_regtype('catalog_projection') AS row_type, \
+                    to_regtype('analytics.measurements') AS analytics_row_type, \
+                    'public'::regnamespace AS namespace, \
+                    'quackgis_owner'::regrole AS role, \
+                    format_type(20, -1) AS bigint_name, \
+                    pg_catalog.format_type(1700, 655366) AS numeric_name, \
+                    format_type(90001, -1) AS geometry_name, \
+                    format_type(c.reltype, -1) AS row_type_name, \
+                    format_type(99999, -1) AS unknown_type_name \
+             FROM pg_class c WHERE c.relname = 'catalog_projection'",
+        )
+        .await
+        .expect("prepare registered-object resolution");
+    let registered_types = [
+        tokio_postgres::types::Type::REGCLASS,
+        tokio_postgres::types::Type::REGCLASS,
+        tokio_postgres::types::Type::REGCLASS,
+        tokio_postgres::types::Type::REGCLASS,
+        tokio_postgres::types::Type::REGCLASS,
+        tokio_postgres::types::Type::REGTYPE,
+        tokio_postgres::types::Type::REGTYPE,
+        tokio_postgres::types::Type::REGTYPE,
+        tokio_postgres::types::Type::REGTYPE,
+        tokio_postgres::types::Type::REGTYPE,
+        tokio_postgres::types::Type::REGNAMESPACE,
+        tokio_postgres::types::Type::REGROLE,
+        tokio_postgres::types::Type::TEXT,
+        tokio_postgres::types::Type::TEXT,
+        tokio_postgres::types::Type::TEXT,
+        tokio_postgres::types::Type::TEXT,
+        tokio_postgres::types::Type::TEXT,
+    ];
+    for (column, expected) in registered.columns().iter().zip(registered_types) {
+        assert_eq!(
+            column.type_(),
+            &expected,
+            "registered field {}",
+            column.name()
+        );
+    }
+    let registered = client
+        .query_one(&registered, &[])
+        .await
+        .expect("registered-object resolution row");
+    for column in [0, 1, 3, 4] {
+        assert_eq!(
+            registered.get::<_, RegisteredOid>(column),
+            RegisteredOid(relation_oid),
+            "registered relation column {column}"
+        );
+    }
+    assert_eq!(registered.get::<_, Option<RegisteredOid>>(2), None);
+    assert_eq!(registered.get::<_, RegisteredOid>(5), RegisteredOid(23));
+    assert_eq!(registered.get::<_, RegisteredOid>(6), RegisteredOid(90_001));
+    assert_eq!(registered.get::<_, RegisteredOid>(7), RegisteredOid(1007));
+    assert_eq!(
+        registered.get::<_, RegisteredOid>(8),
+        RegisteredOid(row_type_oid)
+    );
+    assert_eq!(
+        registered.get::<_, RegisteredOid>(9),
+        RegisteredOid(analytics.get::<_, u32>(2))
+    );
+    assert_eq!(registered.get::<_, RegisteredOid>(10), RegisteredOid(2_200));
+    assert_eq!(registered.get::<_, RegisteredOid>(11), RegisteredOid(10));
+    assert_eq!(registered.get::<_, String>(12), "bigint");
+    assert_eq!(registered.get::<_, String>(13), "numeric(10,2)");
+    assert_eq!(registered.get::<_, String>(14), "geometry");
+    assert_eq!(registered.get::<_, String>(15), "catalog_projection");
+    assert_eq!(registered.get::<_, String>(16), "???");
+    let function_cast = client
+        .query_one(
+            "SELECT regclass('\"public\".\"catalog_projection\"')::oid",
+            &[],
+        )
+        .await
+        .expect("function-form regclass OID cast");
+    assert_eq!(function_cast.get::<_, u32>(0), relation_oid);
+    let registered_text = client
+        .query_one(
+            "SELECT 'catalog_projection'::regclass::text, \
+                    'integer'::regtype::text, \
+                    'public'::regnamespace::pg_catalog.text, \
+                    'quackgis_owner'::regrole::text",
+            &[],
+        )
+        .await
+        .expect("registered-object text output");
+    assert_eq!(registered_text.get::<_, String>(0), "catalog_projection");
+    assert_eq!(registered_text.get::<_, String>(1), "integer");
+    assert_eq!(registered_text.get::<_, String>(2), "public");
+    assert_eq!(registered_text.get::<_, String>(3), "quackgis_owner");
+    let simple_registered_text = client
+        .simple_query(
+            "SELECT to_regclass('catalog_projection')::text, \
+                    to_regtype('integer')::text",
+        )
+        .await
+        .expect("simple-protocol registered-object text output")
+        .into_iter()
+        .find_map(|message| match message {
+            tokio_postgres::SimpleQueryMessage::Row(row) => {
+                Some((row.get(0).map(str::to_owned), row.get(1).map(str::to_owned)))
+            }
+            _ => None,
+        })
+        .expect("simple-protocol registered-object row");
+    assert_eq!(
+        simple_registered_text,
+        (
+            Some("catalog_projection".to_owned()),
+            Some("integer".to_owned())
+        )
+    );
+    let bound_registered = client
+        .prepare_typed(
+            "SELECT to_regclass($1), to_regtype($2)",
+            &[
+                tokio_postgres::types::Type::TEXT,
+                tokio_postgres::types::Type::TEXT,
+            ],
+        )
+        .await
+        .expect("prepare bound registered-object lookup");
+    let bound_registered = client
+        .query_one(&bound_registered, &[&"catalog_projection", &"integer"])
+        .await
+        .expect("bound registered-object lookup");
+    assert_eq!(
+        bound_registered.get::<_, RegisteredOid>(0),
+        RegisteredOid(relation_oid)
+    );
+    assert_eq!(
+        bound_registered.get::<_, RegisteredOid>(1),
+        RegisteredOid(23)
+    );
+    for (sql, expected_sqlstate) in [
+        ("SELECT 'missing_relation'::regclass", "42P01"),
+        ("SELECT 'missing_type'::regtype", "42704"),
+        ("SELECT 'missing_schema'::regnamespace", "3F000"),
+        ("SELECT 'missing_role'::regrole", "42704"),
+    ] {
+        let error = match client.query(sql, &[]).await {
+            Ok(_) => panic!("strict registered-object lookup must fail: {sql}"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.code().map(tokio_postgres::error::SqlState::code),
+            Some(expected_sqlstate),
+            "{sql}"
+        );
+    }
+    let missing = client
+        .query_one(
+            "SELECT to_regclass('a.b.c'), to_regtype('missing_type'), \
+                    to_regnamespace('missing_schema'), to_regrole('missing_role')",
+            &[],
+        )
+        .await
+        .expect("nullable registered-object lookups");
+    for column in 0..4 {
+        assert_eq!(missing.get::<_, Option<RegisteredOid>>(column), None);
+    }
 
     let direct = client
         .prepare(
@@ -363,6 +633,33 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
     );
     assert_eq!(renamed_catalog[1].get::<_, String>(1), "title");
     assert_eq!(renamed_catalog[1].get::<_, i16>(2), 2);
+    let renamed_resolution = client
+        .query_one(
+            &format!(
+                "SELECT to_regclass('catalog_projection'), \
+                        to_regclass('catalog_projection_renamed'), \
+                        to_regtype('catalog_projection'), \
+                        to_regtype('catalog_projection_renamed'), \
+                        format_type({row_type_oid}, -1)"
+            ),
+            &[],
+        )
+        .await
+        .expect("registered-object resolution after rename");
+    assert_eq!(renamed_resolution.get::<_, Option<RegisteredOid>>(0), None);
+    assert_eq!(
+        renamed_resolution.get::<_, RegisteredOid>(1),
+        RegisteredOid(relation_oid)
+    );
+    assert_eq!(renamed_resolution.get::<_, Option<RegisteredOid>>(2), None);
+    assert_eq!(
+        renamed_resolution.get::<_, RegisteredOid>(3),
+        RegisteredOid(row_type_oid)
+    );
+    assert_eq!(
+        renamed_resolution.get::<_, String>(4),
+        "catalog_projection_renamed"
+    );
 
     execute_storage_update(
         &storage,
@@ -427,6 +724,22 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
     assert_ne!(recreated.get::<_, u32>(0), relation_oid);
     assert_ne!(recreated.get::<_, u32>(1), row_type_oid);
     assert_eq!(recreated.get::<_, i16>(2), 1);
+    let recreated_resolution = client
+        .query_one(
+            "SELECT to_regclass('catalog_projection_renamed'), \
+                    to_regtype('catalog_projection_renamed')",
+            &[],
+        )
+        .await
+        .expect("registered-object resolution after recreate");
+    assert_eq!(
+        recreated_resolution.get::<_, RegisteredOid>(0),
+        RegisteredOid(recreated.get::<_, u32>(0))
+    );
+    assert_eq!(
+        recreated_resolution.get::<_, RegisteredOid>(1),
+        RegisteredOid(recreated.get::<_, u32>(1))
+    );
 
     connection.abort();
     server.abort();

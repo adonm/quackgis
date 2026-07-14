@@ -125,9 +125,16 @@ schema epoch and fail `0A000` after a committed schema change. A guarded current
 column view also fails rather than returning partial rows if a read lands in the
 user-commit/registry-reconciliation gap.
 
-Broader expression provenance, durable empty-schema identity, `reg*` resolution,
-constraints/indexes/defaults/comments, and REST cache consumers remain later C3
-slices.
+The lane also resolves one-/two-part quoted or unquoted `regclass`, `regtype`,
+`regnamespace`, and `regrole` input against the maintained search path, including
+nullable `to_reg*`, strict PostgreSQL SQLSTATEs, bound text input, explicit text
+output, `format_type`, aliases/arrays/typmods, and OID casts. The exact
+`pg18-column-core-v1` catalog descriptions execute through the same pgwire test.
+
+C3 implementation is complete in this gated lane. Durable empty-schema identity
+still needs upstream API support. Constraints/indexes/defaults/comments,
+privilege-aware information schema, role semantics, REST cache consumers, and
+broader expression provenance belong to C4/C5 or later M3 slices.
 
 ## Runtime trust boundary
 

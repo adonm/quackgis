@@ -2693,28 +2693,61 @@ fn anyhow_engine_error(error: anyhow::Error) -> EngineError {
 }
 
 fn engine_error(error: AdbcError) -> EngineError {
-    let kind = match error.status {
-        AdbcStatus::NotImplemented => EngineErrorKind::Unsupported,
-        AdbcStatus::NotFound => EngineErrorKind::NotFound,
-        AdbcStatus::AlreadyExists => EngineErrorKind::AlreadyExists,
-        AdbcStatus::InvalidArguments | AdbcStatus::InvalidData => EngineErrorKind::InvalidQuery,
-        AdbcStatus::InvalidState => EngineErrorKind::Busy,
-        AdbcStatus::Integrity => EngineErrorKind::Constraint,
-        AdbcStatus::IO => EngineErrorKind::Io,
-        AdbcStatus::Cancelled => EngineErrorKind::Cancelled,
-        AdbcStatus::Timeout => EngineErrorKind::Timeout,
-        AdbcStatus::Unauthenticated | AdbcStatus::Unauthorized => EngineErrorKind::Unauthorized,
-        AdbcStatus::Ok | AdbcStatus::Unknown | AdbcStatus::Internal => EngineErrorKind::Internal,
-    };
+    let semantic_error = [
+        (
+            "PostgreSQL relation does not exist",
+            EngineErrorKind::NotFound,
+            "42P01",
+        ),
+        (
+            "PostgreSQL type does not exist",
+            EngineErrorKind::NotFound,
+            "42704",
+        ),
+        (
+            "PostgreSQL schema does not exist",
+            EngineErrorKind::NotFound,
+            "3F000",
+        ),
+        (
+            "PostgreSQL role does not exist",
+            EngineErrorKind::NotFound,
+            "42704",
+        ),
+    ]
+    .into_iter()
+    .find(|(message, _, _)| error.message.contains(message));
+    let kind = semantic_error.map_or_else(
+        || match error.status {
+            AdbcStatus::NotImplemented => EngineErrorKind::Unsupported,
+            AdbcStatus::NotFound => EngineErrorKind::NotFound,
+            AdbcStatus::AlreadyExists => EngineErrorKind::AlreadyExists,
+            AdbcStatus::InvalidArguments | AdbcStatus::InvalidData => EngineErrorKind::InvalidQuery,
+            AdbcStatus::InvalidState => EngineErrorKind::Busy,
+            AdbcStatus::Integrity => EngineErrorKind::Constraint,
+            AdbcStatus::IO => EngineErrorKind::Io,
+            AdbcStatus::Cancelled => EngineErrorKind::Cancelled,
+            AdbcStatus::Timeout => EngineErrorKind::Timeout,
+            AdbcStatus::Unauthenticated | AdbcStatus::Unauthorized => EngineErrorKind::Unauthorized,
+            AdbcStatus::Ok | AdbcStatus::Unknown | AdbcStatus::Internal => {
+                EngineErrorKind::Internal
+            }
+        },
+        |(_, kind, _)| kind,
+    );
     let sqlstate_bytes: Vec<u8> = error.sqlstate.iter().map(|value| *value as u8).collect();
-    let sqlstate = if sqlstate_bytes
-        .iter()
-        .all(|value| value.is_ascii_alphanumeric())
-    {
-        String::from_utf8(sqlstate_bytes).ok()
-    } else {
-        None
-    };
+    let sqlstate = semantic_error
+        .map(|(_, _, sqlstate)| sqlstate.to_owned())
+        .or_else(|| {
+            if sqlstate_bytes
+                .iter()
+                .all(|value| value.is_ascii_alphanumeric())
+            {
+                String::from_utf8(sqlstate_bytes).ok()
+            } else {
+                None
+            }
+        });
     let mut mapped = EngineError::new(kind, error.message);
     mapped.sqlstate = sqlstate;
     mapped.vendor_code = error.vendor_code;

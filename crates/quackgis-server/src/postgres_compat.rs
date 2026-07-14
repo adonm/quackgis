@@ -180,6 +180,14 @@ const IDENTITY_TYPE_ROWS: &[PgTypeRow] = &[
     builtin_scalar(1700, "numeric", -1, 'N', 1231),
     builtin_scalar(3802, "jsonb", -1, 'U', 3807),
     builtin_array(3807, "_jsonb", 3802, 0),
+    builtin_scalar(2205, "regclass", 4, 'N', 2210).by_value(),
+    builtin_array(2210, "_regclass", 2205, 0),
+    builtin_scalar(2206, "regtype", 4, 'N', 2211).by_value(),
+    builtin_array(2211, "_regtype", 2206, 0),
+    builtin_scalar(4089, "regnamespace", 4, 'N', 4090).by_value(),
+    builtin_array(4090, "_regnamespace", 4089, 0),
+    builtin_scalar(4096, "regrole", 4, 'N', 4097).by_value(),
+    builtin_array(4097, "_regrole", 4096, 0),
 ];
 
 fn render_type_rows<'a>(rows: impl IntoIterator<Item = &'a PgTypeRow>) -> String {
@@ -305,6 +313,183 @@ fn duckdb_column_type_oid_sql() -> &'static str {
      END"
 }
 
+fn identity_catalog_macros_sql() -> &'static str {
+    r#"CREATE OR REPLACE MACRO quackgis_pg_name_first(value) AS
+           regexp_extract(trim(CAST(value AS VARCHAR)),
+             '^("(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_$]*)(\s*\.\s*("(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_$]*))?$', 1);
+         CREATE OR REPLACE MACRO quackgis_pg_name_second(value) AS
+           regexp_extract(trim(CAST(value AS VARCHAR)),
+             '^("(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_$]*)(\s*\.\s*("(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_$]*))?$', 3);
+         CREATE OR REPLACE MACRO quackgis_pg_normalize_identifier(part) AS
+           CASE WHEN starts_with(part, '"')
+                THEN replace(substr(part, 2, length(part) - 2), '""', '"')
+                ELSE lower(part) END;
+         CREATE OR REPLACE MACRO quackgis_pg_name_schema(value) AS
+           CASE WHEN quackgis_pg_name_second(value) = '' THEN NULL
+                ELSE quackgis_pg_normalize_identifier(quackgis_pg_name_first(value)) END;
+         CREATE OR REPLACE MACRO quackgis_pg_name_object(value) AS
+           CASE WHEN quackgis_pg_name_second(value) = ''
+                THEN quackgis_pg_normalize_identifier(quackgis_pg_name_first(value))
+                ELSE quackgis_pg_normalize_identifier(quackgis_pg_name_second(value)) END;
+         CREATE OR REPLACE MACRO quackgis_pg_type_is_array(value) AS
+           regexp_full_match(trim(CAST(value AS VARCHAR)), '.*\[\]\s*$');
+         CREATE OR REPLACE MACRO quackgis_pg_type_clean(value) AS
+           trim(regexp_replace(regexp_replace(trim(CAST(value AS VARCHAR)),
+             '\[\]\s*$', ''), '\([^)]*\)\s*$', ''));
+         CREATE OR REPLACE MACRO quackgis_pg_type_object(value) AS
+           CASE lower(quackgis_pg_type_clean(value))
+             WHEN 'boolean' THEN 'bool'
+             WHEN 'smallint' THEN 'int2'
+             WHEN 'integer' THEN 'int4'
+             WHEN 'int' THEN 'int4'
+             WHEN 'bigint' THEN 'int8'
+             WHEN 'real' THEN 'float4'
+             WHEN 'double precision' THEN 'float8'
+             WHEN 'decimal' THEN 'numeric'
+             WHEN 'character varying' THEN 'varchar'
+             WHEN 'timestamp without time zone' THEN 'timestamp'
+             WHEN 'timestamp with time zone' THEN 'timestamptz'
+             WHEN 'time without time zone' THEN 'time'
+             ELSE quackgis_pg_name_object(quackgis_pg_type_clean(value)) END;
+         CREATE OR REPLACE MACRO quackgis_pg_to_regclass(value) AS
+           (SELECT __quackgis_class.oid FROM quackgis_pg_catalog.pg_class __quackgis_class
+            JOIN quackgis_pg_catalog.pg_namespace __quackgis_namespace
+              ON __quackgis_namespace.oid = __quackgis_class.relnamespace
+            WHERE (try_cast(value AS UINTEGER) IS NOT NULL
+                   AND __quackgis_class.oid = try_cast(value AS UINTEGER))
+               OR (try_cast(value AS UINTEGER) IS NULL
+                   AND __quackgis_class.relname = quackgis_pg_name_object(value)
+                   AND __quackgis_namespace.nspname =
+                       coalesce(quackgis_pg_name_schema(value), 'public'))
+            LIMIT 1);
+         CREATE OR REPLACE MACRO quackgis_pg_regclass(value) AS
+           CASE WHEN value IS NULL THEN NULL
+                ELSE coalesce(quackgis_pg_to_regclass(value),
+                     error('PostgreSQL relation does not exist')) END;
+         CREATE OR REPLACE MACRO quackgis_pg_to_regtype(value) AS
+           (SELECT CASE WHEN quackgis_pg_type_is_array(value)
+                        THEN nullif(__quackgis_type.typarray, 0)
+                        ELSE __quackgis_type.oid END
+            FROM quackgis_pg_catalog.pg_type __quackgis_type
+            JOIN quackgis_pg_catalog.pg_namespace __quackgis_namespace
+              ON __quackgis_namespace.oid = __quackgis_type.typnamespace
+            WHERE (try_cast(value AS UINTEGER) IS NOT NULL
+                   AND __quackgis_type.oid = try_cast(value AS UINTEGER))
+               OR (try_cast(value AS UINTEGER) IS NULL
+                   AND __quackgis_type.typname = quackgis_pg_type_object(value)
+                   AND (quackgis_pg_name_schema(quackgis_pg_type_clean(value)) IS NULL
+                        AND __quackgis_namespace.nspname IN ('pg_catalog', 'public')
+                     OR __quackgis_namespace.nspname =
+                        quackgis_pg_name_schema(quackgis_pg_type_clean(value))))
+            ORDER BY CASE __quackgis_namespace.nspname
+              WHEN 'pg_catalog' THEN 0 WHEN 'public' THEN 1 ELSE 2 END
+            LIMIT 1);
+         CREATE OR REPLACE MACRO quackgis_pg_regtype(value) AS
+           CASE WHEN value IS NULL THEN NULL
+                ELSE coalesce(quackgis_pg_to_regtype(value),
+                     error('PostgreSQL type does not exist')) END;
+         CREATE OR REPLACE MACRO quackgis_pg_to_regnamespace(value) AS
+           (SELECT __quackgis_namespace.oid
+            FROM quackgis_pg_catalog.pg_namespace __quackgis_namespace
+            WHERE (try_cast(value AS UINTEGER) IS NOT NULL
+                   AND __quackgis_namespace.oid = try_cast(value AS UINTEGER))
+               OR (try_cast(value AS UINTEGER) IS NULL
+                   AND quackgis_pg_name_schema(value) IS NULL
+                   AND __quackgis_namespace.nspname = quackgis_pg_name_object(value))
+            LIMIT 1);
+         CREATE OR REPLACE MACRO quackgis_pg_regnamespace(value) AS
+           CASE WHEN value IS NULL THEN NULL
+                ELSE coalesce(quackgis_pg_to_regnamespace(value),
+                     error('PostgreSQL schema does not exist')) END;
+         CREATE OR REPLACE MACRO quackgis_pg_to_regrole(value) AS
+           (SELECT __quackgis_role.oid FROM quackgis_pg_catalog.pg_roles __quackgis_role
+            WHERE (try_cast(value AS UINTEGER) IS NOT NULL
+                   AND __quackgis_role.oid = try_cast(value AS UINTEGER))
+               OR (try_cast(value AS UINTEGER) IS NULL
+                   AND quackgis_pg_name_schema(value) IS NULL
+                   AND __quackgis_role.rolname = quackgis_pg_name_object(value))
+            LIMIT 1);
+         CREATE OR REPLACE MACRO quackgis_pg_regrole(value) AS
+           CASE WHEN value IS NULL THEN NULL
+                ELSE coalesce(quackgis_pg_to_regrole(value),
+                     error('PostgreSQL role does not exist')) END;
+         CREATE OR REPLACE MACRO quackgis_pg_quote_identifier(value) AS
+           CASE WHEN regexp_full_match(value, '[a-z_][a-z0-9_$]*') THEN value
+                ELSE '"' || replace(value, '"', '""') || '"' END;
+         CREATE OR REPLACE MACRO quackgis_pg_regclass_text(value) AS
+           coalesce((SELECT CASE WHEN __quackgis_namespace.nspname = 'public'
+                    THEN quackgis_pg_quote_identifier(__quackgis_class.relname)
+                    ELSE quackgis_pg_quote_identifier(__quackgis_namespace.nspname) || '.' ||
+                         quackgis_pg_quote_identifier(__quackgis_class.relname) END
+             FROM quackgis_pg_catalog.pg_class __quackgis_class
+             JOIN quackgis_pg_catalog.pg_namespace __quackgis_namespace
+               ON __quackgis_namespace.oid = __quackgis_class.relnamespace
+             WHERE __quackgis_class.oid = try_cast(value AS UINTEGER)),
+             CAST(value AS VARCHAR));
+         CREATE OR REPLACE MACRO quackgis_pg_regnamespace_text(value) AS
+           coalesce((SELECT quackgis_pg_quote_identifier(__quackgis_namespace.nspname)
+             FROM quackgis_pg_catalog.pg_namespace __quackgis_namespace
+             WHERE __quackgis_namespace.oid = try_cast(value AS UINTEGER)),
+             CAST(value AS VARCHAR));
+         CREATE OR REPLACE MACRO quackgis_pg_regrole_text(value) AS
+           coalesce((SELECT quackgis_pg_quote_identifier(__quackgis_role.rolname)
+             FROM quackgis_pg_catalog.pg_roles __quackgis_role
+             WHERE __quackgis_role.oid = try_cast(value AS UINTEGER)),
+             CAST(value AS VARCHAR));
+         CREATE OR REPLACE MACRO quackgis_pg_base_type_display(
+           type_oid, type_name, namespace_name, type_modifier
+         ) AS CASE type_oid
+           WHEN 16 THEN 'boolean' WHEN 17 THEN 'bytea' WHEN 18 THEN '"char"'
+           WHEN 19 THEN 'name' WHEN 20 THEN 'bigint' WHEN 21 THEN 'smallint'
+           WHEN 23 THEN 'integer' WHEN 25 THEN 'text' WHEN 26 THEN 'oid'
+           WHEN 700 THEN 'real' WHEN 701 THEN 'double precision'
+           WHEN 1043 THEN 'character varying' ||
+             CASE WHEN type_modifier > 4 THEN '(' || CAST(type_modifier - 4 AS VARCHAR) || ')'
+                  ELSE '' END
+           WHEN 1082 THEN 'date'
+           WHEN 1083 THEN 'time' ||
+             CASE WHEN type_modifier >= 0 THEN '(' || CAST(type_modifier AS VARCHAR) || ')'
+                  ELSE '' END || ' without time zone'
+           WHEN 1114 THEN 'timestamp' ||
+             CASE WHEN type_modifier >= 0 THEN '(' || CAST(type_modifier AS VARCHAR) || ')'
+                  ELSE '' END || ' without time zone'
+           WHEN 1184 THEN 'timestamp' ||
+             CASE WHEN type_modifier >= 0 THEN '(' || CAST(type_modifier AS VARCHAR) || ')'
+                  ELSE '' END || ' with time zone'
+           WHEN 1186 THEN 'interval'
+           WHEN 1700 THEN 'numeric' || CASE WHEN type_modifier >= 4
+             THEN '(' || CAST(floor((type_modifier - 4) / 65536) AS BIGINT)::VARCHAR || ',' ||
+                  CAST((type_modifier - 4) % 65536 AS BIGINT)::VARCHAR || ')' ELSE '' END
+           WHEN 2205 THEN 'regclass' WHEN 2206 THEN 'regtype'
+           WHEN 3802 THEN 'jsonb' WHEN 4089 THEN 'regnamespace'
+           WHEN 4096 THEN 'regrole' WHEN 90001 THEN 'geometry'
+           WHEN 90002 THEN 'geography'
+           ELSE CASE WHEN namespace_name IN ('pg_catalog', 'public')
+                     THEN quackgis_pg_quote_identifier(type_name)
+                     ELSE quackgis_pg_quote_identifier(namespace_name) || '.' ||
+                          quackgis_pg_quote_identifier(type_name) END END;
+         CREATE OR REPLACE MACRO quackgis_pg_format_type(type_oid, type_modifier) AS
+           CASE WHEN type_oid IS NULL THEN NULL ELSE coalesce((
+             SELECT CASE WHEN __quackgis_type.typelem <> 0
+                    THEN quackgis_pg_base_type_display(
+                           __quackgis_element.oid, __quackgis_element.typname,
+                           __quackgis_element_namespace.nspname, type_modifier) || '[]'
+                    ELSE quackgis_pg_base_type_display(
+                           __quackgis_type.oid, __quackgis_type.typname,
+                           __quackgis_namespace.nspname, type_modifier) END
+             FROM quackgis_pg_catalog.pg_type __quackgis_type
+             JOIN quackgis_pg_catalog.pg_namespace __quackgis_namespace
+               ON __quackgis_namespace.oid = __quackgis_type.typnamespace
+             LEFT JOIN quackgis_pg_catalog.pg_type __quackgis_element
+               ON __quackgis_element.oid = __quackgis_type.typelem
+             LEFT JOIN quackgis_pg_catalog.pg_namespace __quackgis_element_namespace
+               ON __quackgis_element_namespace.oid = __quackgis_element.typnamespace
+             WHERE __quackgis_type.oid = CAST(type_oid AS UINTEGER)
+           ), '???') END;
+         CREATE OR REPLACE MACRO quackgis_pg_regtype_text(value) AS
+           quackgis_pg_format_type(value, -1);"#
+}
+
 /// Replace the baseline catalog views with registry-backed user-object views.
 ///
 /// This SQL is executed only after the checksum-pinned development DuckLake
@@ -317,6 +502,7 @@ pub fn duckdb_identity_catalog_bootstrap_sql(catalog: &str) -> String {
     let schema = quote_identifier(INTERNAL_SCHEMA);
     let type_rows = identity_type_rows_sql();
     let type_oid = duckdb_column_type_oid_sql();
+    let macros = identity_catalog_macros_sql();
     format!(
         "CREATE OR REPLACE VIEW quackgis_pg_catalog._current_columns AS\n\
          WITH identity AS (\n\
@@ -407,7 +593,8 @@ pub fn duckdb_identity_catalog_bootstrap_sql(catalog: &str) -> String {
                 t.typlen AS attlen, attnum, atttypmod, is_nullable = 'NO' AS attnotnull,\n\
                 ''::VARCHAR AS attidentity, ''::VARCHAR AS attgenerated,\n\
                 false AS attisdropped\n\
-         FROM typed JOIN quackgis_pg_catalog.pg_type t ON t.oid = typed.atttypid;",
+         FROM typed JOIN quackgis_pg_catalog.pg_type t ON t.oid = typed.atttypid;\n\
+         {macros}",
         internal_schema_literal = quote_literal(INTERNAL_SCHEMA),
     )
 }
@@ -766,6 +953,9 @@ mod tests {
         assert!(catalogs.contains("CAST(max(attnum) AS SMALLINT) AS relnatts"));
         assert!(catalogs.contains("is_nullable = 'NO' AS attnotnull"));
         assert!(catalogs.contains("false AS attisdropped"));
-        assert_eq!(IDENTITY_TYPE_ROWS.len(), 20);
+        assert_eq!(IDENTITY_TYPE_ROWS.len(), 28);
+        assert!(catalogs.contains("quackgis_pg_to_regclass"));
+        assert!(catalogs.contains("quackgis_pg_to_regtype"));
+        assert!(catalogs.contains("quackgis_pg_format_type"));
     }
 }
