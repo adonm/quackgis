@@ -61,6 +61,13 @@ The required real-driver workflow proves:
   graph, including stable explicit role/edge OIDs, resolving role/member/
   bootstrap-grantor references, LOGIN/INHERIT and membership options, fixed
   non-superuser fields, and NULL credential material;
+- bounded PostgreSQL 18 `pg_has_role`, `has_schema_privilege`,
+  `has_table_privilege`, `has_any_column_privilege`, and
+  `has_column_privilege` inquiry from the same role decisions as execution,
+  including comma-separated privilege literals, ownership/direct/inherited/
+  PUBLIC grants, and false grant/admin options; name-literal objects work in the
+  official lane, while OID/catalog-expression and exact column lookup require
+  durable catalog identity;
 - exact transaction-local `request.jwt.claims` assignment through one text literal
   or `$1`, bounded at 16 KiB/setting and 32 KiB/session, plus PostgreSQL `text`
   retrieval with NULL-on-missing behavior; actual pgwire proves outside-
@@ -124,8 +131,8 @@ catalog surfaces remain open unless a focused test says otherwise.
 - Maintenance is disabled unless `QUACKGIS_MAINTENANCE_USER` names the caller;
   it remains constrained by the write table allowlist and cannot run inside an
   explicit transaction.
-- Configured owners and grants now enforce maintained table operations, but
-  privilege inquiry and privilege-aware information schema remain
+- Configured owners and grants now enforce maintained table operations and feed
+  bounded privilege inquiry, but privilege-aware information schema remains
   open. Legacy read/write/maintenance identities and table allowlists remain an
   outer ceiling. Role switching cannot inherit the login's coarse access unless
   the effective role has the matching configured grant. `SET LOCAL ROLE` outside a transaction fails

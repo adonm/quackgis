@@ -66,7 +66,8 @@ use crate::execution_control::{
     BlockingWorkerPool, OperationClass, OperationDeadline,
 };
 use crate::role::{
-    REQUEST_JWT_CLAIMS, RoleSessionError, RoleSessionErrorKind, RoleSessionState, SessionIdentity,
+    REQUEST_JWT_CLAIMS, RoleCatalog, RolePrivilege, RoleSessionError, RoleSessionErrorKind,
+    RoleSessionState, SchemaPrivilege, SessionIdentity, TablePrivilege,
 };
 
 pub async fn serve_duckdb(
@@ -301,6 +302,7 @@ impl QueryParser for DuckDbParser {
             ProtocolMode::Extended,
             self.storage.catalog_identity_enabled(),
             Some(&identity),
+            self.auth.role_catalog().map(Arc::as_ref),
         )?;
         let oid_parameters = catalog_oid_parameter_indexes(&validated.ast);
         authorize_statement(client, &self.auth, &validated.ast)?;
@@ -543,6 +545,7 @@ impl SimpleQueryHandler for DuckDbService {
             query,
             self.storage.catalog_identity_enabled(),
             Some(&identity),
+            self.auth.role_catalog().map(Arc::as_ref),
         )?;
         let failed_transaction = client.transaction_status() == TransactionStatus::Error;
         if failed_transaction
@@ -1142,13 +1145,14 @@ struct ValidatedStatement {
 fn validate_simple_sql(
     sql: &str,
 ) -> PgWireResult<(String, SimpleStatementKind, Option<Statement>)> {
-    validate_simple_sql_with_catalog_identity(sql, false, None)
+    validate_simple_sql_with_catalog_identity(sql, false, None, None)
 }
 
 fn validate_simple_sql_with_catalog_identity(
     sql: &str,
     catalog_identity_enabled: bool,
     identity: Option<&SessionIdentity>,
+    role_catalog: Option<&RoleCatalog>,
 ) -> PgWireResult<(String, SimpleStatementKind, Option<Statement>)> {
     if let Some(target) = parse_copy_target(sql)? {
         let sql = normalize_sql(sql)?;
@@ -1166,6 +1170,7 @@ fn validate_simple_sql_with_catalog_identity(
         ProtocolMode::Simple,
         catalog_identity_enabled,
         identity,
+        role_catalog,
     )?;
     let kind = match validated.kind {
         StatementKind::Read => SimpleStatementKind::Read,
@@ -1213,7 +1218,7 @@ enum SimpleStatementKind {
 
 #[cfg(test)]
 fn validate_statement(sql: &str, mode: ProtocolMode) -> PgWireResult<ValidatedStatement> {
-    validate_statement_with_catalog_identity(sql, mode, false, None)
+    validate_statement_with_catalog_identity(sql, mode, false, None, None)
 }
 
 fn validate_statement_with_catalog_identity(
@@ -1221,6 +1226,7 @@ fn validate_statement_with_catalog_identity(
     mode: ProtocolMode,
     catalog_identity_enabled: bool,
     identity: Option<&SessionIdentity>,
+    role_catalog: Option<&RoleCatalog>,
 ) -> PgWireResult<ValidatedStatement> {
     let sql = normalize_sql(sql)?;
     let sql = crate::spatial_compat::rewrite_postgis_sql(&sql);
@@ -1270,6 +1276,7 @@ fn validate_statement_with_catalog_identity(
             "unsupported or non-transaction-local PostgreSQL request-context expression",
         ));
     }
+    validate_privilege_inquiry(&statement, catalog_identity_enabled, identity, role_catalog)?;
     if let Some(function) = invalid_maintained_function(&statement) {
         return Err(user_error(
             "0A000",
@@ -1370,6 +1377,14 @@ fn validate_statement_with_catalog_identity(
         let mut execution = statement.clone();
         rewrite_public_relations(&mut execution);
         rewrite_pg_catalog_relations(&mut execution);
+        if let (Some(identity), Some(role_catalog)) = (identity, role_catalog) {
+            rewrite_privilege_inquiry(
+                &mut execution,
+                identity,
+                role_catalog,
+                catalog_identity_enabled,
+            )?;
+        }
         rewrite_pg_catalog_functions(&mut execution);
         rewrite_pg_catalog_casts(&mut execution);
         if let Some(identity) = identity {
@@ -2130,13 +2145,20 @@ fn maintained_text_cast(data_type: &sqlparser::ast::DataType) -> bool {
 }
 
 fn private_scalar_function(name: &str, argument: Expr) -> Expr {
+    private_function(name, vec![argument])
+}
+
+fn private_function(name: &str, arguments: Vec<Expr>) -> Expr {
     Expr::Function(Function {
         name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(name))]),
         uses_odbc_syntax: false,
         parameters: FunctionArguments::None,
         args: FunctionArguments::List(FunctionArgumentList {
             duplicate_treatment: None,
-            args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(argument))],
+            args: arguments
+                .into_iter()
+                .map(|argument| FunctionArg::Unnamed(FunctionArgExpr::Expr(argument)))
+                .collect(),
             clauses: Vec::new(),
         }),
         filter: None,
@@ -2266,6 +2288,679 @@ fn rewrite_pg_catalog_functions(statement: &mut Statement) {
         }
         ControlFlow::Continue(())
     });
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrivilegeInquiryFunction {
+    Schema,
+    Table,
+    AnyColumn,
+    Column,
+    Role,
+}
+
+fn privilege_inquiry_function(name: &ObjectName) -> Option<PrivilegeInquiryFunction> {
+    let function = match name.0.as_slice() {
+        [ObjectNamePart::Identifier(function)] => function,
+        [
+            ObjectNamePart::Identifier(schema),
+            ObjectNamePart::Identifier(function),
+        ] if pg_identifier_matches(schema, "pg_catalog") => function,
+        _ => return None,
+    };
+    if pg_identifier_matches(function, "has_schema_privilege") {
+        Some(PrivilegeInquiryFunction::Schema)
+    } else if pg_identifier_matches(function, "has_table_privilege") {
+        Some(PrivilegeInquiryFunction::Table)
+    } else if pg_identifier_matches(function, "has_any_column_privilege") {
+        Some(PrivilegeInquiryFunction::AnyColumn)
+    } else if pg_identifier_matches(function, "has_column_privilege") {
+        Some(PrivilegeInquiryFunction::Column)
+    } else if pg_identifier_matches(function, "pg_has_role") {
+        Some(PrivilegeInquiryFunction::Role)
+    } else {
+        None
+    }
+}
+
+fn privilege_inquiry_name_ends_with(name: &ObjectName) -> bool {
+    [
+        "has_schema_privilege",
+        "has_table_privilege",
+        "has_any_column_privilege",
+        "has_column_privilege",
+        "pg_has_role",
+    ]
+    .into_iter()
+    .any(|candidate| function_name_ends_with(name, candidate))
+}
+
+fn validate_privilege_inquiry(
+    statement: &Statement,
+    catalog_identity_enabled: bool,
+    identity: Option<&SessionIdentity>,
+    role_catalog: Option<&RoleCatalog>,
+) -> PgWireResult<()> {
+    let mut error = None;
+    let _: ControlFlow<()> = visit_expressions(statement, |expression| {
+        let Expr::Function(function) = expression else {
+            return ControlFlow::Continue(());
+        };
+        if !privilege_inquiry_name_ends_with(&function.name) {
+            return ControlFlow::Continue(());
+        }
+        let next = if let (Some(identity), Some(role_catalog)) = (identity, role_catalog) {
+            privilege_inquiry_replacement(
+                function,
+                identity,
+                role_catalog,
+                catalog_identity_enabled,
+            )
+            .map(|_| ())
+        } else {
+            Err(user_error(
+                "0A000",
+                "PostgreSQL privilege inquiry requires immutable role configuration",
+            ))
+        };
+        if let Err(next) = next {
+            error = Some(next);
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    error.map_or(Ok(()), Err)
+}
+
+fn rewrite_privilege_inquiry(
+    statement: &mut Statement,
+    identity: &SessionIdentity,
+    role_catalog: &RoleCatalog,
+    catalog_identity_enabled: bool,
+) -> PgWireResult<()> {
+    let mut error = None;
+    let _: ControlFlow<()> = visit_expressions_mut(statement, |expression| {
+        let Expr::Function(function) = expression else {
+            return ControlFlow::Continue(());
+        };
+        if !privilege_inquiry_name_ends_with(&function.name) {
+            return ControlFlow::Continue(());
+        }
+        match privilege_inquiry_replacement(
+            function,
+            identity,
+            role_catalog,
+            catalog_identity_enabled,
+        ) {
+            Ok(replacement) => {
+                *expression = replacement;
+                ControlFlow::Continue(())
+            }
+            Err(next) => {
+                error = Some(next);
+                ControlFlow::Break(())
+            }
+        }
+    });
+    error.map_or(Ok(()), Err)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RequestedPrivilege {
+    name: String,
+    grant_option: bool,
+}
+
+fn privilege_inquiry_replacement(
+    function: &Function,
+    identity: &SessionIdentity,
+    catalog: &RoleCatalog,
+    catalog_identity_enabled: bool,
+) -> PgWireResult<Expr> {
+    let kind = privilege_inquiry_function(&function.name).ok_or_else(|| {
+        user_error(
+            "0A000",
+            "unsupported PostgreSQL privilege inquiry qualification",
+        )
+    })?;
+    let arguments = owned_plain_function_arguments(function).ok_or_else(|| {
+        user_error(
+            "0A000",
+            "unsupported PostgreSQL privilege inquiry function shape",
+        )
+    })?;
+    let current_argument_count = match kind {
+        PrivilegeInquiryFunction::Column => 3,
+        _ => 2,
+    };
+    if arguments.len() != current_argument_count && arguments.len() != current_argument_count + 1 {
+        return Err(user_error(
+            "42883",
+            "unsupported PostgreSQL privilege inquiry argument count",
+        ));
+    }
+    let explicit_role = arguments.len() == current_argument_count + 1;
+    let role = if explicit_role {
+        resolve_inquiry_role(
+            &arguments[0],
+            identity,
+            catalog,
+            kind != PrivilegeInquiryFunction::Role,
+        )?
+    } else {
+        identity.current_user.clone()
+    };
+    let object_index = usize::from(explicit_role);
+    let privileges = parse_requested_privileges(
+        arguments
+            .last()
+            .expect("validated privilege inquiry has a privilege argument"),
+        kind,
+    )?;
+
+    if !catalog_identity_enabled {
+        return literal_privilege_inquiry_replacement(
+            kind,
+            &role,
+            &arguments,
+            object_index,
+            &privileges,
+            identity,
+            catalog,
+        );
+    }
+
+    match kind {
+        PrivilegeInquiryFunction::Schema => Ok(privilege_object_match(
+            registered_object_text(
+                "quackgis_pg_regnamespace",
+                "quackgis_pg_regnamespace_text",
+                arguments[object_index].clone(),
+            ),
+            configured_schema_privileges(catalog, &role, &privileges),
+        )),
+        PrivilegeInquiryFunction::Table | PrivilegeInquiryFunction::AnyColumn => {
+            Ok(privilege_object_match(
+                registered_object_text(
+                    "quackgis_pg_regclass",
+                    "quackgis_pg_regclass_text",
+                    arguments[object_index].clone(),
+                ),
+                configured_table_privileges(catalog, &role, &privileges),
+            ))
+        }
+        PrivilegeInquiryFunction::Column => {
+            let table = arguments[object_index].clone();
+            let table_privilege = privilege_object_match(
+                registered_object_text(
+                    "quackgis_pg_regclass",
+                    "quackgis_pg_regclass_text",
+                    table.clone(),
+                ),
+                configured_table_privileges(catalog, &role, &privileges),
+            );
+            Ok(Expr::BinaryOp {
+                left: Box::new(table_privilege),
+                op: BinaryOperator::And,
+                right: Box::new(private_function(
+                    "quackgis_pg_attribute_exists",
+                    vec![table, arguments[object_index + 1].clone()],
+                )),
+            })
+        }
+        PrivilegeInquiryFunction::Role => Ok(privilege_object_match(
+            registered_object_text(
+                "quackgis_pg_regrole",
+                "quackgis_pg_regrole_text",
+                arguments[object_index].clone(),
+            ),
+            configured_role_privileges(catalog, &role, &privileges),
+        )),
+    }
+}
+
+fn literal_privilege_inquiry_replacement(
+    kind: PrivilegeInquiryFunction,
+    role: &str,
+    arguments: &[Expr],
+    object_index: usize,
+    privileges: &[RequestedPrivilege],
+    identity: &SessionIdentity,
+    catalog: &RoleCatalog,
+) -> PgWireResult<Expr> {
+    let allowed = match kind {
+        PrivilegeInquiryFunction::Schema => {
+            let schema = string_literal(&arguments[object_index])
+                .and_then(parse_pg_qualified_name)
+                .filter(|parts| parts.len() == 1)
+                .ok_or_else(identity_required_for_dynamic_privilege)?;
+            let schema = if schema[0].eq_ignore_ascii_case("public") {
+                "main"
+            } else {
+                schema[0].as_str()
+            };
+            privileges.iter().any(|privilege| {
+                !privilege.grant_option
+                    && privilege.name == "USAGE"
+                    && catalog.has_schema_privilege(role, schema, SchemaPrivilege::Usage)
+            })
+        }
+        PrivilegeInquiryFunction::Table
+        | PrivilegeInquiryFunction::AnyColumn
+        | PrivilegeInquiryFunction::Column => {
+            let (schema, table) = string_literal(&arguments[object_index])
+                .and_then(parse_pg_table_name)
+                .ok_or_else(identity_required_for_dynamic_privilege)?;
+            if kind == PrivilegeInquiryFunction::Column {
+                string_literal(&arguments[object_index + 1])
+                    .and_then(parse_pg_qualified_name)
+                    .filter(|parts| parts.len() == 1)
+                    .ok_or_else(identity_required_for_dynamic_privilege)?;
+            }
+            privileges.iter().any(|privilege| {
+                !privilege.grant_option
+                    && table_privilege(&privilege.name).is_some_and(|privilege| {
+                        catalog.has_table_privilege(role, &schema, &table, privilege)
+                    })
+            })
+        }
+        PrivilegeInquiryFunction::Role => {
+            let target = resolve_inquiry_role(&arguments[object_index], identity, catalog, false)?;
+            privileges.iter().any(|privilege| {
+                !privilege.grant_option
+                    && role_privilege(&privilege.name).is_some_and(|privilege| {
+                        catalog.has_role_privilege(role, &target, privilege)
+                    })
+            })
+        }
+    };
+    Ok(Expr::Value(Value::Boolean(allowed).into()))
+}
+
+fn identity_required_for_dynamic_privilege() -> PgWireError {
+    user_error(
+        "0A000",
+        "OID or expression privilege inquiry requires durable catalog identity",
+    )
+}
+
+fn owned_plain_function_arguments(function: &Function) -> Option<Vec<Expr>> {
+    if function.uses_odbc_syntax
+        || !matches!(function.parameters, FunctionArguments::None)
+        || function.filter.is_some()
+        || function.null_treatment.is_some()
+        || function.over.is_some()
+        || !function.within_group.is_empty()
+    {
+        return None;
+    }
+    let FunctionArguments::List(arguments) = &function.args else {
+        return None;
+    };
+    if arguments.duplicate_treatment.is_some() || !arguments.clauses.is_empty() {
+        return None;
+    }
+    arguments
+        .args
+        .iter()
+        .map(|argument| match argument {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(expression)) => Some(expression.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn resolve_inquiry_role(
+    expression: &Expr,
+    identity: &SessionIdentity,
+    catalog: &RoleCatalog,
+    allow_public: bool,
+) -> PgWireResult<String> {
+    let name = match expression {
+        Expr::Value(value) => match &value.value {
+            Value::SingleQuotedString(name) => Some(name.clone()),
+            Value::Number(oid, _) => oid
+                .parse::<u32>()
+                .ok()
+                .and_then(|oid| catalog.role_by_oid(oid))
+                .map(|role| role.name.clone()),
+            _ => None,
+        },
+        Expr::Identifier(identifier) if identifier.quote_style.is_none() => {
+            match identifier.value.to_ascii_lowercase().as_str() {
+                "current_user" | "current_role" | "user" => Some(identity.current_user.clone()),
+                "session_user" => Some(identity.session_user.clone()),
+                _ => None,
+            }
+        }
+        Expr::Cast { expr, .. } | Expr::Nested(expr) => {
+            return resolve_inquiry_role(expr, identity, catalog, allow_public);
+        }
+        _ => None,
+    }
+    .ok_or_else(|| {
+        user_error(
+            "0A000",
+            "explicit privilege inquiry role must be a configured role name or OID literal",
+        )
+    })?;
+    if allow_public && name.eq_ignore_ascii_case("PUBLIC") {
+        return Ok("PUBLIC".to_owned());
+    }
+    catalog
+        .role(&name)
+        .map(|role| role.name.clone())
+        .ok_or_else(|| user_error("42704", &format!("PostgreSQL role {name:?} does not exist")))
+}
+
+fn parse_requested_privileges(
+    expression: &Expr,
+    kind: PrivilegeInquiryFunction,
+) -> PgWireResult<Vec<RequestedPrivilege>> {
+    let raw = string_literal(expression).ok_or_else(|| {
+        user_error(
+            "0A000",
+            "privilege inquiry requires a bounded text-literal privilege list",
+        )
+    })?;
+    let mut requested = Vec::new();
+    for part in raw.split(',') {
+        let normalized = part
+            .split_whitespace()
+            .map(str::to_ascii_uppercase)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let (name, grant_option) = if let Some(name) = normalized.strip_suffix(" WITH GRANT OPTION")
+        {
+            (name, true)
+        } else if kind == PrivilegeInquiryFunction::Role
+            && let Some(name) = normalized.strip_suffix(" WITH ADMIN OPTION")
+        {
+            (name, true)
+        } else {
+            (normalized.as_str(), false)
+        };
+        if name.is_empty() || !valid_privilege_name(kind, name) {
+            return Err(user_error(
+                "22023",
+                &format!("unrecognized PostgreSQL privilege type {part:?}"),
+            ));
+        }
+        requested.push(RequestedPrivilege {
+            name: name.to_owned(),
+            grant_option,
+        });
+    }
+    Ok(requested)
+}
+
+fn string_literal(expression: &Expr) -> Option<&str> {
+    match expression {
+        Expr::Value(value) => match &value.value {
+            Value::SingleQuotedString(value) => Some(value),
+            _ => None,
+        },
+        Expr::Cast {
+            expr, data_type, ..
+        } if maintained_text_cast(data_type) => string_literal(expr),
+        Expr::Nested(expression) => string_literal(expression),
+        _ => None,
+    }
+}
+
+fn valid_privilege_name(kind: PrivilegeInquiryFunction, name: &str) -> bool {
+    match kind {
+        PrivilegeInquiryFunction::Schema => matches!(name, "CREATE" | "USAGE"),
+        PrivilegeInquiryFunction::Table => matches!(
+            name,
+            "SELECT"
+                | "INSERT"
+                | "UPDATE"
+                | "DELETE"
+                | "TRUNCATE"
+                | "REFERENCES"
+                | "TRIGGER"
+                | "MAINTAIN"
+        ),
+        PrivilegeInquiryFunction::AnyColumn | PrivilegeInquiryFunction::Column => {
+            matches!(name, "SELECT" | "INSERT" | "UPDATE" | "REFERENCES")
+        }
+        PrivilegeInquiryFunction::Role => matches!(name, "MEMBER" | "USAGE" | "SET"),
+    }
+}
+
+fn table_privilege(name: &str) -> Option<TablePrivilege> {
+    match name {
+        "SELECT" => Some(TablePrivilege::Select),
+        "INSERT" => Some(TablePrivilege::Insert),
+        "UPDATE" => Some(TablePrivilege::Update),
+        "DELETE" => Some(TablePrivilege::Delete),
+        "MAINTAIN" => Some(TablePrivilege::Maintain),
+        _ => None,
+    }
+}
+
+fn role_privilege(name: &str) -> Option<RolePrivilege> {
+    match name {
+        "MEMBER" => Some(RolePrivilege::Member),
+        "USAGE" => Some(RolePrivilege::Usage),
+        "SET" => Some(RolePrivilege::Set),
+        _ => None,
+    }
+}
+
+fn parse_pg_table_name(raw: &str) -> Option<(String, String)> {
+    let parts = parse_pg_qualified_name(raw)?;
+    match parts.as_slice() {
+        [table] => Some(("main".to_owned(), table.clone())),
+        [schema, table] => Some((
+            if schema.eq_ignore_ascii_case("public") {
+                "main".to_owned()
+            } else {
+                schema.clone()
+            },
+            table.clone(),
+        )),
+        _ => None,
+    }
+}
+
+fn parse_pg_qualified_name(raw: &str) -> Option<Vec<String>> {
+    let mut characters = raw.trim().chars().peekable();
+    let mut parts = vec![parse_pg_identifier(&mut characters)?];
+    skip_pg_name_whitespace(&mut characters);
+    if characters.peek() == Some(&'.') {
+        characters.next();
+        skip_pg_name_whitespace(&mut characters);
+        parts.push(parse_pg_identifier(&mut characters)?);
+        skip_pg_name_whitespace(&mut characters);
+    }
+    characters.next().is_none().then_some(parts)
+}
+
+fn parse_pg_identifier(
+    characters: &mut std::iter::Peekable<std::str::Chars<'_>>,
+) -> Option<String> {
+    if characters.peek() == Some(&'"') {
+        characters.next();
+        let mut identifier = String::new();
+        let mut closed = false;
+        while let Some(character) = characters.next() {
+            if character == '"' {
+                if characters.peek() == Some(&'"') {
+                    characters.next();
+                    identifier.push('"');
+                } else {
+                    closed = true;
+                    break;
+                }
+            } else {
+                identifier.push(character);
+            }
+        }
+        return (closed && !identifier.is_empty()).then_some(identifier);
+    }
+    let first = characters.next()?;
+    if first != '_' && !first.is_ascii_alphabetic() {
+        return None;
+    }
+    let mut identifier = String::from(first.to_ascii_lowercase());
+    while let Some(character) = characters.peek()
+        && (*character == '_' || *character == '$' || character.is_ascii_alphanumeric())
+    {
+        identifier.push(character.to_ascii_lowercase());
+        characters.next();
+    }
+    Some(identifier)
+}
+
+fn skip_pg_name_whitespace(characters: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    while characters
+        .peek()
+        .is_some_and(|character| character.is_whitespace())
+    {
+        characters.next();
+    }
+}
+
+fn configured_schema_privileges(
+    catalog: &RoleCatalog,
+    role: &str,
+    requested: &[RequestedPrivilege],
+) -> Vec<String> {
+    let usage = requested
+        .iter()
+        .any(|privilege| privilege.name == "USAGE" && !privilege.grant_option);
+    catalog
+        .schema_grants()
+        .iter()
+        .map(|grant| grant.schema.as_str())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .filter(|schema| {
+            usage && catalog.has_schema_privilege(role, schema, SchemaPrivilege::Usage)
+        })
+        .map(|schema| {
+            if schema.eq_ignore_ascii_case("main") {
+                "public".to_owned()
+            } else {
+                canonical_pg_identifier(schema)
+            }
+        })
+        .collect()
+}
+
+fn configured_table_privileges(
+    catalog: &RoleCatalog,
+    role: &str,
+    requested: &[RequestedPrivilege],
+) -> Vec<String> {
+    let requested = requested
+        .iter()
+        .filter(|privilege| !privilege.grant_option)
+        .filter_map(|privilege| table_privilege(&privilege.name))
+        .collect::<HashSet<_>>();
+    catalog
+        .table_owners()
+        .iter()
+        .map(|owner| (owner.schema.as_str(), owner.table.as_str()))
+        .chain(
+            catalog
+                .table_grants()
+                .iter()
+                .map(|grant| (grant.schema.as_str(), grant.table.as_str())),
+        )
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .filter(|(schema, table)| {
+            requested
+                .iter()
+                .any(|privilege| catalog.has_table_privilege(role, schema, table, *privilege))
+        })
+        .map(|(schema, table)| {
+            if schema.eq_ignore_ascii_case("main") {
+                canonical_pg_identifier(table)
+            } else {
+                format!(
+                    "{}.{}",
+                    canonical_pg_identifier(schema),
+                    canonical_pg_identifier(table)
+                )
+            }
+        })
+        .collect()
+}
+
+fn configured_role_privileges(
+    catalog: &RoleCatalog,
+    member: &str,
+    requested: &[RequestedPrivilege],
+) -> Vec<String> {
+    let requested = requested
+        .iter()
+        .filter(|privilege| !privilege.grant_option)
+        .filter_map(|privilege| role_privilege(&privilege.name))
+        .collect::<HashSet<_>>();
+    catalog
+        .roles()
+        .iter()
+        .filter(|role| {
+            requested
+                .iter()
+                .any(|privilege| catalog.has_role_privilege(member, &role.name, *privilege))
+        })
+        .map(|role| role.name.clone())
+        .collect()
+}
+
+fn registered_object_text(resolver: &str, renderer: &str, argument: Expr) -> Expr {
+    private_scalar_function(renderer, private_scalar_function(resolver, argument))
+}
+
+fn privilege_object_match(resolved: Expr, mut allowed: Vec<String>) -> Expr {
+    allowed.sort_unstable();
+    allowed.dedup();
+    let normalized = private_scalar_function("lower", resolved.clone());
+    let mut comparisons = allowed.into_iter().map(|value| Expr::BinaryOp {
+        left: Box::new(normalized.clone()),
+        op: BinaryOperator::Eq,
+        right: Box::new(Expr::Value(
+            Value::SingleQuotedString(value.to_ascii_lowercase()).into(),
+        )),
+    });
+    comparisons.next().map_or_else(
+        || Expr::BinaryOp {
+            left: Box::new(resolved.clone()),
+            op: BinaryOperator::NotEq,
+            right: Box::new(resolved),
+        },
+        |first| {
+            comparisons.fold(first, |left, right| Expr::BinaryOp {
+                left: Box::new(left),
+                op: BinaryOperator::Or,
+                right: Box::new(right),
+            })
+        },
+    )
+}
+
+fn canonical_pg_identifier(value: &str) -> String {
+    let mut characters = value.chars();
+    if characters
+        .next()
+        .is_some_and(|character| character == '_' || character.is_ascii_lowercase())
+        && characters.all(|character| {
+            character == '_'
+                || character == '$'
+                || character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+        })
+    {
+        value.to_owned()
+    } else {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    }
 }
 
 fn invalid_maintained_function(statement: &Statement) -> Option<String> {
@@ -4799,6 +5494,7 @@ mod tests {
             ProtocolMode::Extended,
             true,
             None,
+            None,
         )
         .expect("capability-gated user catalog query");
         assert!(
@@ -4929,6 +5625,7 @@ mod tests {
             ProtocolMode::Extended,
             true,
             None,
+            None,
         )
         .expect("registered object lookup");
         for private in [
@@ -4987,6 +5684,7 @@ mod tests {
                     private,
                     ProtocolMode::Extended,
                     true,
+                    None,
                     None,
                 )
                 .is_err(),
@@ -5195,6 +5893,7 @@ mod tests {
             ProtocolMode::Extended,
             false,
             Some(&identity),
+            None,
         )
         .expect("identity expressions");
         assert!(validated.sql.contains("'authenticator'"));
@@ -5267,6 +5966,84 @@ mod tests {
     }
 
     #[test]
+    fn privilege_inquiry_reuses_role_decisions_and_rejects_unbounded_shapes() {
+        let catalog = RoleCatalog::from_json(
+            r#"{
+              "roles":[
+                {"oid":100001,"name":"writer","login":true},
+                {"oid":100002,"name":"reader"}
+              ],
+              "memberships":[
+                {"oid":200001,"role":"reader","member":"writer",
+                 "inherit_option":false,"set_option":true}
+              ],
+              "table_owners":[{"table":"places","role":"writer"}],
+              "schema_grants":[
+                {"schema":"public","role":"PUBLIC","privileges":["USAGE"]}
+              ],
+              "table_grants":[
+                {"table":"places","role":"reader","privileges":["SELECT"]}
+              ]
+            }"#,
+        )
+        .expect("role catalog");
+        let identity = SessionIdentity {
+            session_user: "writer".to_owned(),
+            current_user: "writer".to_owned(),
+            epoch: 1,
+            request_context: HashMap::new(),
+        };
+        let validated = validate_statement_with_catalog_identity(
+            "SELECT has_schema_privilege('public', 'usage'), \
+                    has_table_privilege('public.places', 'select, maintain'), \
+                    has_any_column_privilege('public.places', 'insert'), \
+                    has_column_privilege('public.places', 'geom', 'update'), \
+                    pg_has_role('reader', 'set')",
+            ProtocolMode::Extended,
+            true,
+            Some(&identity),
+            Some(&catalog),
+        )
+        .expect("bounded privilege inquiry");
+        for private in [
+            "quackgis_pg_regnamespace",
+            "quackgis_pg_regclass",
+            "quackgis_pg_attribute_exists",
+            "quackgis_pg_regrole",
+        ] {
+            assert!(validated.sql.contains(private), "missing rewrite {private}");
+        }
+        for invalid in [
+            "SELECT has_table_privilege('public.places', $1)",
+            "SELECT has_table_privilege('public.places', 'bogus')",
+            "SELECT main.has_table_privilege('public.places', 'select')",
+            "SELECT pg_has_role('PUBLIC', 'reader', 'member')",
+        ] {
+            assert!(
+                validate_statement_with_catalog_identity(
+                    invalid,
+                    ProtocolMode::Extended,
+                    true,
+                    Some(&identity),
+                    Some(&catalog),
+                )
+                .is_err(),
+                "unbounded privilege inquiry must fail: {invalid}"
+            );
+        }
+        assert!(
+            validate_statement_with_catalog_identity(
+                "SELECT has_table_privilege($1, 'select')",
+                ProtocolMode::Extended,
+                false,
+                Some(&identity),
+                Some(&catalog),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn request_context_is_structural_transaction_local_and_typed() {
         let mut request_context = HashMap::new();
         request_context.insert(
@@ -5284,6 +6061,7 @@ mod tests {
             ProtocolMode::Extended,
             false,
             Some(&identity),
+            None,
         )
         .expect("bounded current_setting");
         assert!(current.sql.contains(r#"{"sub":"reader"}"#));

@@ -305,7 +305,17 @@ login's legacy access. `pg_roles` and `pg_auth_members` project the immutable
 graph as ordinary protected relational views. They include the bootstrap owner,
 all configured roles, stable edge OIDs, resolving role/member/grantor references,
 and PostgreSQL 18 membership options. Password/verifier fields are always NULL.
-`pg_has_role` and `has_*_privilege` inquiry remain open.
+Configured table ownership also supplies `pg_class.relowner` in the durable
+identity lane. `pg_has_role`, `has_schema_privilege`, `has_table_privilege`,
+`has_any_column_privilege`, and `has_column_privilege` now consume the same role
+decisions. They accept PostgreSQL-valid comma-separated text-literal privilege
+lists, report immutable grants as non-grantable/non-admin, and preserve MEMBER,
+INHERIT/USAGE, and SET edge semantics. Name-literal object inquiry works in the
+official lane; OID or catalog-expression object inquiry and exact column
+existence require the durable identity lane and otherwise fail with `0A000`.
+Column grants are not provisioned, so maintained column inquiry succeeds only
+through a matching table privilege. Privilege-aware information schema and
+OpenAPI remain open.
 
 With a valid role file, role assumption walks only `set_option=true` membership
 edges from the original authenticated `session_user`. A changed `current_user`

@@ -566,8 +566,8 @@ and supports session/local role assumption, `NONE`, and reset with `42704`/`4250
 errors. Local identity is removed after commit, rollback, and failed-transaction
 rollback; independent connections remain isolated. A role/context epoch rejects
 prepared execution after an identity change rather than reusing stale
-authorization. Existing allowlists are still the enforcement boundary, and the
-declarations do not yet alter statement authorization or catalog rows. The exact
+authorization. C5 now consumes those declarations for non-widening statement
+authorization, catalog ownership, and privilege inquiry. The exact
 transaction-local `set_config('request.jwt.claims', $1, true)` and
 `current_setting(..., true)` path now stores bound text only at the pgwire session
 edge, allows one 16 KiB setting under a 32 KiB aggregate ceiling, rejects NUL and
@@ -576,7 +576,7 @@ prepared work, and clears on commit/rollback/failed-transaction rollback. The
 actual pgwire cancellation case sets local role/claims before cancelling a stream,
 proves failed-transaction and native quarantine prevent reuse or context reads,
 and proves a fresh connection has its session-user identity with no claims.
-Privilege integration and role catalogs are C5.
+Privilege integration, inquiry, and role catalogs are implemented in C5.
 
 ### C5 — implement privilege and discovery semantics
 
@@ -605,8 +605,19 @@ and membership catalogs are now ordinary protected relational views:
 password/expiry/config values, while `pg_auth_members` publishes explicit stable
 edge OIDs, role/member/grantor references, and admin/inherit/set options. Actual
 pgwire joins prove all references resolve to role rows and no credentials appear.
-Privilege inquiry, information-schema visibility, and the traced structural
-catalogs remain open C5 work.
+Configured owners project into durable-identity `pg_class.relowner`.
+`pg_has_role`, `has_schema_privilege`, `has_table_privilege`,
+`has_any_column_privilege`, and `has_column_privilege` call the same Rust role
+decisions used by execution. Bounded comma-separated privilege literals cover the
+PostgreSQL 18 keywords, `WITH GRANT OPTION`/`WITH ADMIN OPTION` correctly report
+false for immutable grants, and role inquiry distinguishes MEMBER, immediately
+inherited USAGE, and SET reachability. Name-literal object inquiry passes the
+official DuckLake SCRAM workflow; OID/catalog-expression inquiry and exact column
+existence resolve through durable catalog identity and fail closed without it.
+Actual pgwire cases prove writer ownership, PUBLIC schema usage, ungranted denial,
+and SELECT-only inquiry agree with allowed SELECT and denied INSERT. Privilege-
+aware information-schema visibility and the traced constraint/index/default/
+comment/spatial catalogs remain open C5 work.
 
 ### C6 — qualify named clients
 

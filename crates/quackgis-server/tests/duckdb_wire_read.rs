@@ -449,6 +449,25 @@ async fn cli_duckdb_backend_serves_an_official_local_catalog() {
     assert!(!memberships[0].get::<_, bool>(4));
     assert!(memberships[0].get::<_, bool>(5));
     assert!(memberships[0].get::<_, bool>(6));
+    let role_inquiry = client
+        .query_one(
+            "SELECT has_schema_privilege('public', 'usage'), \
+                    pg_has_role('analyst', 'member'), \
+                    pg_has_role('analyst', 'usage'), \
+                    pg_has_role('analyst', 'set'), \
+                    pg_has_role('analyst', 'member with admin option')",
+            &[],
+        )
+        .await
+        .expect("schema and role privilege inquiry");
+    assert!(role_inquiry.get::<_, bool>(0));
+    assert!(role_inquiry.get::<_, bool>(1));
+    assert!(role_inquiry.get::<_, bool>(2));
+    assert!(role_inquiry.get::<_, bool>(3));
+    assert!(!role_inquiry.get::<_, bool>(4));
+    for column in role_inquiry.columns() {
+        assert_eq!(column.type_(), &tokio_postgres::types::Type::BOOL);
+    }
     let stale_identity = client
         .prepare("SELECT current_user")
         .await
@@ -707,6 +726,22 @@ async fn cli_duckdb_backend_serves_an_official_local_catalog() {
         .batch_execute("CREATE TABLE quackgis.main.private_points(id INTEGER)")
         .await
         .expect("writer can create second allowlisted table");
+    let writer_privileges = client
+        .query_one(
+            "SELECT has_table_privilege('\"public\".\"cli_points\"', 'SELECT'), \
+                    has_table_privilege('\"public\".\"cli_points\"', 'INSERT, MAINTAIN'), \
+                    has_any_column_privilege('\"public\".\"cli_points\"', 'INSERT'), \
+                    has_column_privilege('\"public\".\"cli_points\"', 'name', 'UPDATE'), \
+                    has_table_privilege('PUBLIC', '\"public\".\"cli_points\"', 'SELECT')",
+            &[],
+        )
+        .await
+        .expect("owner and PUBLIC table privilege inquiry");
+    assert!(writer_privileges.get::<_, bool>(0));
+    assert!(writer_privileges.get::<_, bool>(1));
+    assert!(writer_privileges.get::<_, bool>(2));
+    assert!(writer_privileges.get::<_, bool>(3));
+    assert!(!writer_privileges.get::<_, bool>(4));
     let denied_maintenance = client
         .batch_execute(
             "CALL quackgis_merge_adjacent_files('main', 'cli_points', 8, 16777216, NULL)",
@@ -733,6 +768,16 @@ async fn cli_duckdb_backend_serves_an_official_local_catalog() {
         .batch_execute("SET ROLE analyst")
         .await
         .expect("assume role without grants");
+    assert!(
+        !client
+            .query_one(
+                "SELECT has_table_privilege('public.cli_points', 'select')",
+                &[],
+            )
+            .await
+            .expect("ungranted role inquiry")
+            .get::<_, bool>(0)
+    );
     let role_read_denial = client
         .query_one("SELECT count(*)::BIGINT FROM quackgis.main.cli_points", &[])
         .await
@@ -745,6 +790,20 @@ async fn cli_duckdb_backend_serves_an_official_local_catalog() {
         .batch_execute("SET ROLE granted_reader")
         .await
         .expect("assume role with SELECT grant");
+    let granted_privileges = client
+        .query_one(
+            "SELECT has_table_privilege('public.cli_points', 'select'), \
+                    has_table_privilege('public.cli_points', 'insert'), \
+                    has_any_column_privilege('public.cli_points', 'select'), \
+                    has_column_privilege('public.cli_points', 'name', 'update')",
+            &[],
+        )
+        .await
+        .expect("SELECT-only role inquiry");
+    assert!(granted_privileges.get::<_, bool>(0));
+    assert!(!granted_privileges.get::<_, bool>(1));
+    assert!(granted_privileges.get::<_, bool>(2));
+    assert!(!granted_privileges.get::<_, bool>(3));
     assert_eq!(
         client
             .query_one("SELECT count(*)::BIGINT FROM quackgis.main.cli_points", &[])

@@ -54,6 +54,13 @@ pub enum TablePrivilege {
     Maintain,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RolePrivilege {
+    Member,
+    Usage,
+    Set,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SchemaGrant {
     pub schema: String,
@@ -115,18 +122,32 @@ impl RoleCatalog {
             .and_then(|index| self.roles.get(*index))
     }
 
+    pub fn role_by_oid(&self, oid: u32) -> Option<&Role> {
+        self.roles.iter().find(|role| role.oid == oid)
+    }
+
     pub fn can_set_role(&self, session_user: &str, target: &str) -> bool {
-        if session_user == target {
-            return self.role(session_user).is_some();
+        self.has_role_privilege(session_user, target, RolePrivilege::Set)
+    }
+
+    pub fn has_role_privilege(&self, member: &str, target: &str, privilege: RolePrivilege) -> bool {
+        if self.role(member).is_none() || self.role(target).is_none() {
+            return false;
         }
-        let mut visited = HashSet::from([session_user]);
-        let mut pending = VecDeque::from([session_user]);
-        while let Some(member) = pending.pop_front() {
-            for edge in self
-                .memberships
-                .iter()
-                .filter(|edge| edge.set_option && edge.member == member)
-            {
+        if member == target {
+            return true;
+        }
+        let mut visited = HashSet::from([member]);
+        let mut pending = VecDeque::from([member]);
+        while let Some(current) = pending.pop_front() {
+            for edge in self.memberships.iter().filter(|edge| {
+                edge.member == current
+                    && match privilege {
+                        RolePrivilege::Member => true,
+                        RolePrivilege::Usage => edge.inherit_option,
+                        RolePrivilege::Set => edge.set_option,
+                    }
+            }) {
                 if edge.role == target {
                     return true;
                 }
@@ -144,7 +165,8 @@ impl RoleCatalog {
         schema: &str,
         privilege: SchemaPrivilege,
     ) -> bool {
-        if self.role(role).is_none() {
+        let public = role.eq_ignore_ascii_case("PUBLIC");
+        if !public && self.role(role).is_none() {
             return false;
         }
         let inherited = self.inherited_roles(role);
@@ -154,7 +176,7 @@ impl RoleCatalog {
                 && grant
                     .role
                     .as_ref()
-                    .is_none_or(|grantee| inherited.contains(grantee.as_str()))
+                    .is_none_or(|grantee| !public && inherited.contains(grantee.as_str()))
         })
     }
 
@@ -165,15 +187,18 @@ impl RoleCatalog {
         table: &str,
         privilege: TablePrivilege,
     ) -> bool {
-        if self.role(role).is_none() {
+        let public = role.eq_ignore_ascii_case("PUBLIC");
+        if !public && self.role(role).is_none() {
             return false;
         }
         let inherited = self.inherited_roles(role);
-        if self.table_owners.iter().any(|owner| {
-            owner.schema.eq_ignore_ascii_case(schema)
-                && owner.table.eq_ignore_ascii_case(table)
-                && inherited.contains(owner.role.as_str())
-        }) {
+        if !public
+            && self.table_owners.iter().any(|owner| {
+                owner.schema.eq_ignore_ascii_case(schema)
+                    && owner.table.eq_ignore_ascii_case(table)
+                    && inherited.contains(owner.role.as_str())
+            })
+        {
             return true;
         }
         self.table_grants.iter().any(|grant| {
@@ -183,7 +208,7 @@ impl RoleCatalog {
                 && grant
                     .role
                     .as_ref()
-                    .is_none_or(|grantee| inherited.contains(grantee.as_str()))
+                    .is_none_or(|grantee| !public && inherited.contains(grantee.as_str()))
         })
     }
 
@@ -1073,6 +1098,12 @@ mod tests {
         ));
         assert!(catalog.allows_table_operation("editor", "main", "places", TablePrivilege::Delete));
         assert!(catalog.can_create_configured_table("editor", "main", "places"));
+        assert!(catalog.has_role_privilege("editor", "owner", RolePrivilege::Member));
+        assert!(catalog.has_role_privilege("editor", "owner", RolePrivilege::Usage));
+        assert!(catalog.has_role_privilege("editor", "owner", RolePrivilege::Set));
+        assert!(catalog.has_role_privilege("noinherit", "owner", RolePrivilege::Member));
+        assert!(!catalog.has_role_privilege("noinherit", "owner", RolePrivilege::Usage));
+        assert!(catalog.has_role_privilege("noinherit", "owner", RolePrivilege::Set));
         assert!(!catalog.allows_table_operation(
             "noinherit",
             "main",
@@ -1085,6 +1116,9 @@ mod tests {
             "places",
             TablePrivilege::Maintain
         ));
+        assert!(catalog.has_schema_privilege("PUBLIC", "main", SchemaPrivilege::Usage));
+        assert!(catalog.has_table_privilege("PUBLIC", "main", "places", TablePrivilege::Maintain));
+        assert!(!catalog.has_table_privilege("PUBLIC", "main", "places", TablePrivilege::Select));
         assert!(!catalog.has_table_privilege(
             "missing",
             "main",

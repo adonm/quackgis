@@ -35,7 +35,10 @@ curated spatial subset. Role configuration requires password authentication; see
 table owners/grants are enforced for reads, maintained writes, COPY, and
 maintenance while legacy allowlists remain an outer ceiling. Relational
 `pg_roles`/`pg_auth_members` project stable role and membership identities without
-credential material. The exact
+credential material. Bounded `pg_has_role`, `has_schema_privilege`,
+`has_table_privilege`, `has_any_column_privilege`, and `has_column_privilege`
+inquiry consumes the same immutable decisions; OID/expression object lookup is
+available only with durable catalog identity. The exact
 transaction-local
 `set_config('request.jwt.claims', $1, true)`/`current_setting(..., true)` flow is
 bounded at the protocol edge; arbitrary DuckDB settings are not exposed.

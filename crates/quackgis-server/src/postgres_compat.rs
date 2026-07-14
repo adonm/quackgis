@@ -272,6 +272,9 @@ pub fn duckdb_catalog_bootstrap_sql() -> String {
          SELECT NULL::UINTEGER AS oid, NULL::UINTEGER AS roleid, NULL::UINTEGER AS member,\n\
                 NULL::UINTEGER AS grantor, false AS admin_option, false AS inherit_option,\n\
                 false AS set_option WHERE false;\n\
+         CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_table_owners AS\n\
+         SELECT NULL::VARCHAR AS schema_name, NULL::VARCHAR AS table_name,\n\
+                NULL::UINTEGER AS role_oid WHERE false;\n\
          CREATE OR REPLACE MACRO quackgis_current_database() AS 'quackgis';\n\
          CREATE OR REPLACE MACRO quackgis_current_schema() AS 'public';\n\
          CREATE OR REPLACE MACRO quackgis_current_schemas(include_implicit) AS\n\
@@ -331,6 +334,29 @@ pub fn duckdb_role_catalog_sql(catalog: &crate::role::RoleCatalog) -> String {
              admin_option, inherit_option, set_option)"
         )
     };
+    let owner_sql = if catalog.table_owners().is_empty() {
+        "SELECT NULL::VARCHAR AS schema_name, NULL::VARCHAR AS table_name, \
+         NULL::UINTEGER AS role_oid WHERE false"
+            .to_owned()
+    } else {
+        let rows = catalog
+            .table_owners()
+            .iter()
+            .map(|owner| {
+                let role = catalog
+                    .role(&owner.role)
+                    .expect("validated table owner role");
+                format!(
+                    "({}::VARCHAR, {}::VARCHAR, {}::UINTEGER)",
+                    quote_literal(&owner.schema),
+                    quote_literal(&owner.table),
+                    role.oid,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",\n");
+        format!("SELECT * FROM (VALUES\n{rows}\n) AS o(schema_name, table_name, role_oid)")
+    };
     format!(
         "CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_roles AS\n\
          SELECT * FROM (VALUES\n{}\n\
@@ -338,7 +364,9 @@ pub fn duckdb_role_catalog_sql(catalog: &crate::role::RoleCatalog) -> String {
                 rolcanlogin, rolreplication, rolconnlimit, rolpassword, rolvaliduntil,\n\
                 rolbypassrls, rolconfig);\n\
          CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_auth_members AS\n\
-         {membership_sql};",
+         {membership_sql};\n\
+         CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_table_owners AS\n\
+         {owner_sql};",
         role_rows.join(",\n"),
     )
 }
@@ -486,6 +514,20 @@ fn identity_catalog_macros_sql() -> &'static str {
            CASE WHEN value IS NULL THEN NULL
                 ELSE coalesce(quackgis_pg_to_regrole(value),
                      error('PostgreSQL role does not exist')) END;
+         CREATE OR REPLACE MACRO quackgis_pg_attribute_exists(relation_value, column_value) AS
+           CASE WHEN relation_value IS NULL OR column_value IS NULL THEN NULL
+                ELSE EXISTS (
+                  SELECT 1 FROM quackgis_pg_catalog.pg_attribute __quackgis_attribute
+                  WHERE __quackgis_attribute.attrelid = quackgis_pg_regclass(relation_value)
+                    AND __quackgis_attribute.attnum > 0
+                    AND NOT __quackgis_attribute.attisdropped
+                    AND ((try_cast(column_value AS SMALLINT) IS NOT NULL
+                          AND __quackgis_attribute.attnum = try_cast(column_value AS SMALLINT))
+                      OR (try_cast(column_value AS SMALLINT) IS NULL
+                          AND quackgis_pg_name_schema(column_value) IS NULL
+                          AND __quackgis_attribute.attname =
+                              quackgis_pg_name_object(column_value)))
+                ) END;
          CREATE OR REPLACE MACRO quackgis_pg_quote_identifier(value) AS
            CASE WHEN regexp_full_match(value, '[a-z_][a-z0-9_$]*') THEN value
                 ELSE '"' || replace(value, '"', '""') || '"' END;
@@ -648,12 +690,17 @@ pub fn duckdb_identity_catalog_bootstrap_sql(catalog: &str) -> String {
                 0::INTEGER, 0::UINTEGER\n\
          FROM quackgis_pg_catalog._current_columns;\n\
          CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_class AS\n\
-         SELECT relation_oid AS oid, table_name AS relname, namespace_oid AS relnamespace,\n\
-                row_type_oid AS reltype, {BOOTSTRAP_OWNER_OID}::UINTEGER AS relowner,\n\
-                'r'::VARCHAR AS relkind, CAST(max(attnum) AS SMALLINT) AS relnatts,\n\
+         SELECT columns.relation_oid AS oid, columns.table_name AS relname,\n\
+                columns.namespace_oid AS relnamespace, columns.row_type_oid AS reltype,\n\
+                coalesce(max(owner.role_oid), {BOOTSTRAP_OWNER_OID}::UINTEGER) AS relowner,\n\
+                'r'::VARCHAR AS relkind, CAST(max(columns.attnum) AS SMALLINT) AS relnatts,\n\
                 false AS relrowsecurity\n\
-         FROM quackgis_pg_catalog._current_columns\n\
-         GROUP BY relation_oid, table_name, namespace_oid, row_type_oid;\n\
+         FROM quackgis_pg_catalog._current_columns columns\n\
+         LEFT JOIN quackgis_pg_catalog.pg_table_owners owner\n\
+           ON owner.schema_name = columns.schema_name\n\
+          AND lower(owner.table_name) = lower(columns.table_name)\n\
+         GROUP BY columns.relation_oid, columns.table_name, columns.namespace_oid,\n\
+                  columns.row_type_oid;\n\
          CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_attribute AS\n\
          WITH typed AS (\n\
            SELECT *, CAST(({type_oid}) AS UINTEGER) AS atttypid,\n\
@@ -992,7 +1039,8 @@ mod tests {
               "memberships":[
                 {"oid":200001,"role":"api_reader","member":"authenticator",
                  "inherit_option":false,"set_option":true}
-              ]
+              ],
+              "table_owners":[{"table":"places","role":"authenticator"}]
             }"#,
         )
         .expect("role catalog");
@@ -1000,6 +1048,8 @@ mod tests {
         assert!(sql.contains("100001::UINTEGER"));
         assert!(sql.contains("200001::UINTEGER"));
         assert!(sql.contains("pg_auth_members"));
+        assert!(sql.contains("pg_table_owners"));
+        assert!(sql.contains("'places'::VARCHAR, 100001::UINTEGER"));
         assert!(sql.contains("NULL::VARCHAR"));
         assert!(!sql.contains("password-secret"));
     }
@@ -1047,7 +1097,9 @@ mod tests {
         assert!(catalogs.contains("PostgreSQL catalog identity snapshot is not reconciled"));
         assert!(catalogs.contains("unsupported DuckLake column type"));
         assert!(catalogs.contains("row_type_oid"));
-        assert!(catalogs.contains("CAST(max(attnum) AS SMALLINT) AS relnatts"));
+        assert!(catalogs.contains("CAST(max(columns.attnum) AS SMALLINT) AS relnatts"));
+        assert!(catalogs.contains("LEFT JOIN quackgis_pg_catalog.pg_table_owners owner"));
+        assert!(catalogs.contains("coalesce(max(owner.role_oid), 10::UINTEGER) AS relowner"));
         assert!(catalogs.contains("is_nullable = 'NO' AS attnotnull"));
         assert!(catalogs.contains("false AS attisdropped"));
         assert_eq!(IDENTITY_TYPE_ROWS.len(), 28);
