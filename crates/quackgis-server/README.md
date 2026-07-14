@@ -33,7 +33,9 @@ configuration-backed role switching/identity, official DuckLake reopen, and the
 curated spatial subset. Role configuration requires password authentication; see
 `docs/SECURITY_RBAC.md` for its bounded JSON schema. Configured schema USAGE and
 table owners/grants are enforced for reads, maintained writes, COPY, and
-maintenance while legacy allowlists remain an outer ceiling. The exact
+maintenance while legacy allowlists remain an outer ceiling. Relational
+`pg_roles`/`pg_auth_members` project stable role and membership identities without
+credential material. The exact
 transaction-local
 `set_config('request.jwt.claims', $1, true)`/`current_setting(..., true)` flow is
 bounded at the protocol edge; arbitrary DuckDB settings are not exposed.

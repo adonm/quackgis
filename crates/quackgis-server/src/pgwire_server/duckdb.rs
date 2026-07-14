@@ -74,7 +74,7 @@ pub async fn serve_duckdb(
     options: &ServerOptions,
     auth: AuthConfig,
 ) -> Result<(), std::io::Error> {
-    let factory = Arc::new(DuckDbHandlerFactory::new(storage, auth, options));
+    let factory = Arc::new(DuckDbHandlerFactory::new(storage, auth, options)?);
     serve_with_handlers(factory, options).await
 }
 
@@ -84,7 +84,7 @@ pub async fn serve_duckdb_on_listener(
     options: &ServerOptions,
     auth: AuthConfig,
 ) -> Result<(), std::io::Error> {
-    let factory = Arc::new(DuckDbHandlerFactory::new(storage, auth, options));
+    let factory = Arc::new(DuckDbHandlerFactory::new(storage, auth, options)?);
     serve_with_handlers_on_listener(factory, listener, options).await
 }
 
@@ -94,7 +94,7 @@ pub async fn serve_duckdb_until(
     auth: AuthConfig,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), std::io::Error> {
-    let factory = Arc::new(DuckDbHandlerFactory::new(storage, auth, options));
+    let factory = Arc::new(DuckDbHandlerFactory::new(storage, auth, options)?);
     let address = format!("{}:{}", options.host, options.port);
     let listener = tokio::net::TcpListener::bind(address).await?;
     serve_with_handlers_on_listener_until(factory, listener, options, shutdown).await
@@ -107,7 +107,7 @@ pub async fn serve_duckdb_on_listener_until(
     auth: AuthConfig,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), std::io::Error> {
-    let factory = Arc::new(DuckDbHandlerFactory::new(storage, auth, options));
+    let factory = Arc::new(DuckDbHandlerFactory::new(storage, auth, options)?);
     serve_with_handlers_on_listener_until(factory, listener, options, shutdown).await
 }
 
@@ -119,7 +119,19 @@ struct DuckDbHandlerFactory {
 }
 
 impl DuckDbHandlerFactory {
-    fn new(storage: Arc<DuckDbAdbcStorage>, auth: AuthConfig, options: &ServerOptions) -> Self {
+    fn new(
+        storage: Arc<DuckDbAdbcStorage>,
+        auth: AuthConfig,
+        options: &ServerOptions,
+    ) -> Result<Self, std::io::Error> {
+        if let Some(catalog) = auth.role_catalog() {
+            storage.install_role_catalog(catalog).map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid PostgreSQL role catalog: {error}"),
+                )
+            })?;
+        }
         let manager = Arc::new(ConnectionManager::new());
         let admission = Arc::new(AdmissionController::new(
             options.max_active_queries(),
@@ -155,7 +167,7 @@ impl DuckDbHandlerFactory {
             auth: startup_auth,
             tls_required: options.tls_required(),
         };
-        Self {
+        Ok(Self {
             service: Arc::new(DuckDbService::new(storage, auth, Arc::clone(&control))),
             startup: Arc::new(startup),
             cancel: Arc::new(DuckDbCancelHandler {
@@ -163,7 +175,7 @@ impl DuckDbHandlerFactory {
                 blocking_workers: Arc::clone(&control.blocking_workers),
             }),
             copy: Arc::new(DuckDbCopyHandler),
-        }
+        })
     }
 }
 
@@ -2339,6 +2351,7 @@ fn maintained_pg_catalog_relation(name: &ObjectName) -> Option<&'static str> {
         "pg_range",
         "pg_collation",
         "pg_roles",
+        "pg_auth_members",
     ]
     .into_iter()
     .find(|candidate| pg_identifier_matches(table, candidate))
@@ -3093,6 +3106,12 @@ fn catalog_columns(relation: &str) -> &'static [(&'static str, PgTypeHint)] {
             ("collprovider", PgTypeHint::Char),
         ],
         "pg_roles" => &[("rolname", PgTypeHint::Name), ("oid", PgTypeHint::Oid)],
+        "pg_auth_members" => &[
+            ("oid", PgTypeHint::Oid),
+            ("roleid", PgTypeHint::Oid),
+            ("member", PgTypeHint::Oid),
+            ("grantor", PgTypeHint::Oid),
+        ],
         _ => &[],
     }
 }
@@ -3158,7 +3177,30 @@ fn catalog_column_names(relation: &str) -> &'static [&'static str] {
             "collicurules",
             "collversion",
         ],
-        "pg_roles" => &["oid", "rolname"],
+        "pg_roles" => &[
+            "oid",
+            "rolname",
+            "rolsuper",
+            "rolinherit",
+            "rolcreaterole",
+            "rolcreatedb",
+            "rolcanlogin",
+            "rolreplication",
+            "rolconnlimit",
+            "rolpassword",
+            "rolvaliduntil",
+            "rolbypassrls",
+            "rolconfig",
+        ],
+        "pg_auth_members" => &[
+            "oid",
+            "roleid",
+            "member",
+            "grantor",
+            "admin_option",
+            "inherit_option",
+            "set_option",
+        ],
         _ => &[],
     }
 }

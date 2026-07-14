@@ -255,8 +255,8 @@ pass.
 1 MiB. Role configuration is accepted only with password authentication, and its
 LOGIN roles must exactly equal the configured read/write and optional read-only
 authentication users. Role names are bounded lowercase unquoted PostgreSQL
-identifiers. OIDs are explicit so identity is independent of document ordering;
-OID zero and the bootstrap owner OID 10 are reserved.
+identifiers. Role and membership-edge OIDs are explicit so identity is independent
+of document ordering; OID zero and the bootstrap owner OID 10 are reserved.
 
 ```json
 {
@@ -267,6 +267,7 @@ OID zero and the bootstrap owner OID 10 are reserved.
   ],
   "memberships": [
     {
+      "oid": 200001,
       "role": "api_reader",
       "member": "authenticator",
       "inherit_option": true,
@@ -300,8 +301,11 @@ supply their declared capabilities. The same decision gates SELECT, maintained
 INSERT/UPDATE/DELETE, COPY FROM as INSERT, and maintenance as MAINTAIN. Immutable
 CREATE is accepted only for a predeclared table owner with schema USAGE. Existing
 allowlists remain a non-widening outer ceiling, so the role file cannot broaden a
-login's legacy access. Role catalogs and `has_*_privilege` inquiry are the next
-C5 surface and are not claimed yet.
+login's legacy access. `pg_roles` and `pg_auth_members` project the immutable
+graph as ordinary protected relational views. They include the bootstrap owner,
+all configured roles, stable edge OIDs, resolving role/member/grantor references,
+and PostgreSQL 18 membership options. Password/verifier fields are always NULL.
+`pg_has_role` and `has_*_privilege` inquiry remain open.
 
 With a valid role file, role assumption walks only `set_option=true` membership
 edges from the original authenticated `session_user`. A changed `current_user`

@@ -61,8 +61,9 @@ Important limits:
 - immutable roles, membership validation, session/effective identity, and role
   switching are implemented when a role file is configured; configured schema
   USAGE and table ownership/SELECT/INSERT/UPDATE/DELETE/MAINTAIN now enforce
-  statements behind the legacy allowlist ceiling, while role catalogs/inquiry and
-  role-aware OpenAPI remain open; bounded
+  statements behind the legacy allowlist ceiling; relational `pg_roles` and
+  `pg_auth_members` project stable identities/options without credentials, while
+  privilege inquiry and role-aware OpenAPI remain open; bounded
   transaction-local `request.jwt.claims` context is implemented for the future
   authenticator flow; and
 - remote/shared catalog and object-storage profiles fail closed.

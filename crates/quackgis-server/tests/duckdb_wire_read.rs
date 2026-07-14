@@ -329,8 +329,8 @@ async fn cli_duckdb_backend_serves_an_official_local_catalog() {
             {"oid": 100005, "name": "granted_reader"}
           ],
           "memberships": [
-            {"role": "analyst", "member": "writer", "set_option": true},
-            {"role": "granted_reader", "member": "writer", "set_option": true}
+            {"oid": 200001, "role": "analyst", "member": "writer", "set_option": true},
+            {"oid": 200002, "role": "granted_reader", "member": "writer", "set_option": true}
           ],
           "table_owners": [
             {"table": "cli_points", "role": "writer"},
@@ -409,6 +409,46 @@ async fn cli_duckdb_backend_serves_an_official_local_catalog() {
     for column in identity.columns() {
         assert_eq!(column.type_(), &tokio_postgres::types::Type::NAME);
     }
+    let roles = client
+        .query(
+            "SELECT oid, rolname, rolsuper, rolinherit, rolcanlogin, rolpassword \
+             FROM pg_catalog.pg_roles ORDER BY oid",
+            &[],
+        )
+        .await
+        .expect("configured pg_roles");
+    assert_eq!(roles.len(), 6);
+    assert_eq!(roles[0].get::<_, u32>(0), 10);
+    assert_eq!(roles[0].get::<_, String>(1), "quackgis_owner");
+    assert!(roles.iter().all(|row| !row.get::<_, bool>(2)));
+    assert!(
+        roles
+            .iter()
+            .all(|row| row.get::<_, Option<String>>(5).is_none())
+    );
+    assert!(roles.iter().any(|row| {
+        row.get::<_, String>(1) == "writer" && row.get::<_, bool>(3) && row.get::<_, bool>(4)
+    }));
+    let memberships = client
+        .query(
+            "SELECT m.oid, granted.rolname, member.rolname, grantor.rolname, \
+                    m.admin_option, m.inherit_option, m.set_option \
+             FROM pg_auth_members m \
+             JOIN pg_roles granted ON granted.oid = m.roleid \
+             JOIN pg_roles member ON member.oid = m.member \
+             JOIN pg_roles grantor ON grantor.oid = m.grantor ORDER BY m.oid",
+            &[],
+        )
+        .await
+        .expect("configured pg_auth_members");
+    assert_eq!(memberships.len(), 2);
+    assert_eq!(memberships[0].get::<_, u32>(0), 200001);
+    assert_eq!(memberships[0].get::<_, String>(1), "analyst");
+    assert_eq!(memberships[0].get::<_, String>(2), "writer");
+    assert_eq!(memberships[0].get::<_, String>(3), "quackgis_owner");
+    assert!(!memberships[0].get::<_, bool>(4));
+    assert!(memberships[0].get::<_, bool>(5));
+    assert!(memberships[0].get::<_, bool>(6));
     let stale_identity = client
         .prepare("SELECT current_user")
         .await

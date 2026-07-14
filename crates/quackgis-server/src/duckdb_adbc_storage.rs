@@ -567,6 +567,12 @@ impl DuckDbAdbcStorage {
         self.catalog_identity_enabled
     }
 
+    pub fn install_role_catalog(&self, catalog: &crate::role::RoleCatalog) -> Result<()> {
+        self.execute_update(&crate::postgres_compat::duckdb_role_catalog_sql(catalog))
+            .context("installing immutable PostgreSQL role catalogs")?;
+        Ok(())
+    }
+
     pub fn catalog_schema_epoch(&self) -> EngineResult<Option<u64>> {
         if !self.catalog_identity_enabled {
             return Ok(None);

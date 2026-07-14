@@ -57,6 +57,10 @@ The required real-driver workflow proves:
   SELECT/INSERT/UPDATE/DELETE/MAINTAIN; ownership, direct grants, inherited
   `inherit_option=true` grants, and `PUBLIC` feed one decision before DuckDB,
   while legacy allowlists remain a non-widening outer ceiling;
+- relational `pg_roles` and `pg_auth_members` projections for the immutable
+  graph, including stable explicit role/edge OIDs, resolving role/member/
+  bootstrap-grantor references, LOGIN/INHERIT and membership options, fixed
+  non-superuser fields, and NULL credential material;
 - exact transaction-local `request.jwt.claims` assignment through one text literal
   or `$1`, bounded at 16 KiB/setting and 32 KiB/session, plus PostgreSQL `text`
   retrieval with NULL-on-missing behavior; actual pgwire proves outside-
@@ -121,7 +125,7 @@ catalog surfaces remain open unless a focused test says otherwise.
   it remains constrained by the write table allowlist and cannot run inside an
   explicit transaction.
 - Configured owners and grants now enforce maintained table operations, but
-  privilege inquiry, role catalogs, and privilege-aware information schema remain
+  privilege inquiry and privilege-aware information schema remain
   open. Legacy read/write/maintenance identities and table allowlists remain an
   outer ceiling. Role switching cannot inherit the login's coarse access unless
   the effective role has the matching configured grant. `SET LOCAL ROLE` outside a transaction fails

@@ -25,6 +25,7 @@ pub struct Role {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RoleMembership {
+    pub oid: u32,
     pub role: String,
     pub member: String,
     pub inherit_option: bool,
@@ -517,6 +518,7 @@ impl TryFrom<RoleConfigDocument> for RoleCatalog {
             .collect::<HashMap<_, _>>();
 
         let mut membership_keys = HashSet::new();
+        let mut membership_oids = HashSet::new();
         let mut memberships = Vec::with_capacity(document.memberships.len());
         for configured in document.memberships {
             let role = known_role(&role_indexes, &configured.role, "membership role")?;
@@ -527,6 +529,14 @@ impl TryFrom<RoleConfigDocument> for RoleCatalog {
             if configured.admin_option {
                 bail!("membership admin_option is not supported by immutable role provisioning");
             }
+            if configured.oid == 0 || !membership_oids.insert(configured.oid) {
+                bail!(
+                    "membership from {:?} to {:?} has a zero or duplicate OID {}",
+                    member,
+                    role,
+                    configured.oid
+                );
+            }
             if !membership_keys.insert((member.to_owned(), role.to_owned())) {
                 bail!("duplicate membership from {:?} to {:?}", member, role);
             }
@@ -534,6 +544,7 @@ impl TryFrom<RoleConfigDocument> for RoleCatalog {
                 .inherit_option
                 .unwrap_or_else(|| roles[role_indexes[member]].inherit);
             memberships.push(RoleMembership {
+                oid: configured.oid,
                 role: role.to_owned(),
                 member: member.to_owned(),
                 inherit_option,
@@ -785,6 +796,7 @@ struct RoleConfig {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MembershipConfig {
+    oid: u32,
     role: String,
     member: String,
     inherit_option: Option<bool>,
@@ -848,8 +860,8 @@ mod tests {
         {"oid": 100002, "name": "analyst", "inherit": false}
       ],
       "memberships": [
-        {"role": "analyst", "member": "authenticator", "set_option": true},
-        {"role": "api_reader", "member": "analyst", "inherit_option": false}
+        {"oid": 200001, "role": "analyst", "member": "authenticator", "set_option": true},
+        {"oid": 200002, "role": "api_reader", "member": "analyst", "inherit_option": false}
       ],
       "table_owners": [{"table": "public.points", "role": "analyst"}],
       "schema_grants": [
@@ -887,13 +899,14 @@ mod tests {
     #[test]
     fn role_configuration_rejects_cycles_and_privilege_or_identity_ambiguity() {
         for invalid in [
-            r#"{"roles":[{"oid":11,"name":"a"},{"oid":12,"name":"b"}],"memberships":[{"role":"b","member":"a"},{"role":"a","member":"b"}]}"#,
+            r#"{"roles":[{"oid":11,"name":"a"},{"oid":12,"name":"b"}],"memberships":[{"oid":21,"role":"b","member":"a"},{"oid":22,"role":"a","member":"b"}]}"#,
             r#"{"roles":[{"oid":10,"name":"reserved"}]}"#,
             r#"{"roles":[{"oid":11,"name":"UPPER"}]}"#,
             r#"{"roles":[{"oid":11,"name":"a"},{"oid":11,"name":"b"}]}"#,
-            r#"{"roles":[{"oid":11,"name":"a"}],"memberships":[{"role":"missing","member":"a"}]}"#,
-            r#"{"roles":[{"oid":11,"name":"a"}],"memberships":[{"role":"a","member":"a"}]}"#,
-            r#"{"roles":[{"oid":11,"name":"a"}],"memberships":[{"role":"a","member":"missing"}]}"#,
+            r#"{"roles":[{"oid":11,"name":"a"}],"memberships":[{"oid":21,"role":"missing","member":"a"}]}"#,
+            r#"{"roles":[{"oid":11,"name":"a"}],"memberships":[{"oid":21,"role":"a","member":"a"}]}"#,
+            r#"{"roles":[{"oid":11,"name":"a"}],"memberships":[{"oid":21,"role":"a","member":"missing"}]}"#,
+            r#"{"roles":[{"oid":11,"name":"a"},{"oid":12,"name":"b"},{"oid":13,"name":"c"}],"memberships":[{"oid":21,"role":"a","member":"b"},{"oid":21,"role":"a","member":"c"}]}"#,
             r#"{"roles":[{"oid":11,"name":"a"}],"table_grants":[{"table":"points","role":"a","privileges":[]}]}"#,
             r#"{"roles":[{"oid":11,"name":"a"}],"table_grants":[{"table":"points","role":"a","privileges":["SELECT","SELECT"]}]}"#,
             r#"{"roles":[{"oid":11,"name":"a"}],"unknown":true}"#,
@@ -969,8 +982,8 @@ mod tests {
                     {"oid":14,"name":"target"}
                   ],
                   "memberships":[
-                    {"role":"first","member":"login"},
-                    {"role":"target","member":"unreachable"}
+                    {"oid":21,"role":"first","member":"login"},
+                    {"oid":22,"role":"target","member":"unreachable"}
                   ]
                 }"#,
             )
@@ -1036,8 +1049,8 @@ mod tests {
                 {"oid": 14, "name": "noinherit", "login": true, "inherit": false}
               ],
               "memberships": [
-                {"role": "owner", "member": "editor", "inherit_option": true},
-                {"role": "owner", "member": "noinherit"}
+                {"oid": 21, "role": "owner", "member": "editor", "inherit_option": true},
+                {"oid": 22, "role": "owner", "member": "noinherit"}
               ],
               "table_owners": [{"table": "places", "role": "owner"}],
               "schema_grants": [

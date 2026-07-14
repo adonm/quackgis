@@ -261,12 +261,85 @@ pub fn duckdb_catalog_bootstrap_sql() -> String {
                 collisdeterministic, collencoding, collcollate, collctype,\n\
                 colllocale, collicurules, collversion);\n\
          CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_roles AS\n\
-         SELECT {BOOTSTRAP_OWNER_OID}::UINTEGER AS oid, 'quackgis_owner'::VARCHAR AS rolname;\n\
+         SELECT * FROM (VALUES\n\
+           ({BOOTSTRAP_OWNER_OID}::UINTEGER, 'quackgis_owner'::VARCHAR, false, true, false, false,\n\
+            false, false, -1::INTEGER, NULL::VARCHAR, NULL::TIMESTAMP WITH TIME ZONE,\n\
+            false, NULL::VARCHAR[])\n\
+         ) AS r(oid, rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb,\n\
+                rolcanlogin, rolreplication, rolconnlimit, rolpassword, rolvaliduntil,\n\
+                rolbypassrls, rolconfig);\n\
+         CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_auth_members AS\n\
+         SELECT NULL::UINTEGER AS oid, NULL::UINTEGER AS roleid, NULL::UINTEGER AS member,\n\
+                NULL::UINTEGER AS grantor, false AS admin_option, false AS inherit_option,\n\
+                false AS set_option WHERE false;\n\
          CREATE OR REPLACE MACRO quackgis_current_database() AS 'quackgis';\n\
          CREATE OR REPLACE MACRO quackgis_current_schema() AS 'public';\n\
          CREATE OR REPLACE MACRO quackgis_current_schemas(include_implicit) AS\n\
            CASE WHEN CAST(include_implicit AS BOOLEAN)\n\
                 THEN ['pg_catalog', 'public'] ELSE ['public'] END;"
+    )
+}
+
+/// Replace bootstrap role catalogs with one immutable configured role graph.
+pub fn duckdb_role_catalog_sql(catalog: &crate::role::RoleCatalog) -> String {
+    let mut role_rows = vec![format!(
+        "({BOOTSTRAP_OWNER_OID}::UINTEGER, 'quackgis_owner'::VARCHAR, false, true, false, false, \
+         false, false, -1::INTEGER, NULL::VARCHAR, NULL::TIMESTAMP WITH TIME ZONE, \
+         false, NULL::VARCHAR[])"
+    )];
+    role_rows.extend(catalog.roles().iter().map(|role| {
+        format!(
+            "({}::UINTEGER, {}::VARCHAR, false, {}, false, false, {}, false, -1::INTEGER, \
+             NULL::VARCHAR, NULL::TIMESTAMP WITH TIME ZONE, false, NULL::VARCHAR[])",
+            role.oid,
+            quote_literal(&role.name),
+            role.inherit,
+            role.login,
+        )
+    }));
+    let membership_sql = if catalog.memberships().is_empty() {
+        "SELECT NULL::UINTEGER AS oid, NULL::UINTEGER AS roleid, NULL::UINTEGER AS member, \
+         NULL::UINTEGER AS grantor, false AS admin_option, false AS inherit_option, \
+         false AS set_option WHERE false"
+            .to_owned()
+    } else {
+        let rows = catalog
+            .memberships()
+            .iter()
+            .map(|membership| {
+                let role = catalog
+                    .role(&membership.role)
+                    .expect("validated membership role");
+                let member = catalog
+                    .role(&membership.member)
+                    .expect("validated membership member");
+                format!(
+                    "({}::UINTEGER, {}::UINTEGER, {}::UINTEGER, \
+                     {BOOTSTRAP_OWNER_OID}::UINTEGER, {}, {}, {})",
+                    membership.oid,
+                    role.oid,
+                    member.oid,
+                    membership.admin_option,
+                    membership.inherit_option,
+                    membership.set_option,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",\n");
+        format!(
+            "SELECT * FROM (VALUES\n{rows}\n) AS m(oid, roleid, member, grantor, \
+             admin_option, inherit_option, set_option)"
+        )
+    };
+    format!(
+        "CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_roles AS\n\
+         SELECT * FROM (VALUES\n{}\n\
+         ) AS r(oid, rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb,\n\
+                rolcanlogin, rolreplication, rolconnlimit, rolpassword, rolvaliduntil,\n\
+                rolbypassrls, rolconfig);\n\
+         CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_auth_members AS\n\
+         {membership_sql};",
+        role_rows.join(",\n"),
     )
 }
 
@@ -836,6 +909,7 @@ pub fn ducklake_identity_registry_coverage_sql(catalog: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::role::RoleCatalog;
     use std::collections::HashSet;
 
     #[test]
@@ -905,6 +979,29 @@ mod tests {
         assert!(sql.contains("quackgis_current_schema"));
         assert!(sql.contains("quackgis_current_schemas"));
         assert!(!sql.contains("CREATE TABLE"));
+    }
+
+    #[test]
+    fn configured_role_catalog_contains_no_credentials_and_stable_edge_identity() {
+        let catalog = RoleCatalog::from_json(
+            r#"{
+              "roles":[
+                {"oid":100001,"name":"authenticator","login":true},
+                {"oid":100002,"name":"api_reader"}
+              ],
+              "memberships":[
+                {"oid":200001,"role":"api_reader","member":"authenticator",
+                 "inherit_option":false,"set_option":true}
+              ]
+            }"#,
+        )
+        .expect("role catalog");
+        let sql = duckdb_role_catalog_sql(&catalog);
+        assert!(sql.contains("100001::UINTEGER"));
+        assert!(sql.contains("200001::UINTEGER"));
+        assert!(sql.contains("pg_auth_members"));
+        assert!(sql.contains("NULL::VARCHAR"));
+        assert!(!sql.contains("password-secret"));
     }
 
     #[test]

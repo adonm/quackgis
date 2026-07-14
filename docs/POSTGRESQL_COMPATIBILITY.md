@@ -600,8 +600,13 @@ INSERT, UPDATE, DELETE, COPY FROM/INSERT, MAINTAIN, and predeclared-owner CREATE
 before DuckDB while preserving legacy allowlists as an outer ceiling. Actual
 SCRAM pgwire cases prove an assumed role without SELECT is denied, a SELECT-only
 role can read, and that role cannot inherit the login's legacy write access. Role
-and membership catalogs, privilege inquiry, information-schema visibility, and
-the traced structural catalogs remain open C5 work.
+and membership catalogs are now ordinary protected relational views:
+`pg_roles` publishes PostgreSQL-shaped non-superuser capability fields with NULL
+password/expiry/config values, while `pg_auth_members` publishes explicit stable
+edge OIDs, role/member/grantor references, and admin/inherit/set options. Actual
+pgwire joins prove all references resolve to role rows and no credentials appear.
+Privilege inquiry, information-schema visibility, and the traced structural
+catalogs remain open C5 work.
 
 ### C6 — qualify named clients
 
