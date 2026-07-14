@@ -4,12 +4,13 @@ use std::sync::Arc;
 use adbc_core::options::IngestMode;
 use arrow_array::{Array, Int32Array, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
-use quackgis_server::auth::AuthConfig;
+use quackgis_server::auth::{AuthConfig, parse_read_allowlist};
 use quackgis_server::duckdb_adbc_storage::{DuckDbAdbcConfig, DuckDbAdbcStorage, ExtensionPolicy};
 use quackgis_server::engine_api::{
     EngineStorageKernel, EngineTableRef, EngineTransactionState, IngestDisposition,
 };
 use quackgis_server::pgwire_server::ServerOptions;
+use quackgis_server::role::RoleCatalog;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct IdentityRow {
@@ -25,6 +26,22 @@ struct IdentityRow {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RegisteredOid(u32);
+
+#[derive(Debug, Eq, PartialEq)]
+struct PgNodeTree(String);
+
+impl<'a> tokio_postgres::types::FromSql<'a> for PgNodeTree {
+    fn from_sql(
+        _ty: &tokio_postgres::types::Type,
+        raw: &'a [u8],
+    ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        Ok(Self(std::str::from_utf8(raw)?.to_owned()))
+    }
+
+    fn accepts(ty: &tokio_postgres::types::Type) -> bool {
+        ty.oid() == 194
+    }
+}
 
 impl<'a> tokio_postgres::types::FromSql<'a> for RegisteredOid {
     fn from_sql(
@@ -155,32 +172,111 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
         .local_addr()
         .expect("development catalog address")
         .port();
+    let role_catalog = RoleCatalog::from_json(
+        r#"{
+          "roles": [
+            {"oid": 110001, "name": "writer", "login": true},
+            {"oid": 110002, "name": "reader", "login": true}
+          ],
+          "table_owners": [
+            {"table": "catalog_projection", "role": "writer"},
+            {"table": "catalog_projection_renamed", "role": "writer"},
+            {"table": "private_metadata", "role": "writer"}
+          ],
+          "schema_grants": [
+            {"schema": "public", "role": "PUBLIC", "privileges": ["USAGE"]}
+          ],
+          "table_grants": [
+            {"table": "catalog_projection", "role": "reader", "privileges": ["SELECT"]},
+            {"table": "private_metadata", "role": "reader", "privileges": ["SELECT"]}
+          ]
+        }"#,
+    )
+    .expect("development metadata role catalog");
+    let auth = AuthConfig::password("writer", "writer-secret", Some(("reader", "reader-secret")))
+        .expect("development metadata password auth")
+        .with_read_allowlist(
+            parse_read_allowlist("catalog_projection,catalog_projection_renamed")
+                .expect("read allowlist"),
+        )
+        .with_role_catalog(role_catalog)
+        .expect("development metadata role auth");
     let server_storage = Arc::clone(&storage);
     let server = tokio::spawn(async move {
         quackgis_server::pgwire_server::serve_duckdb_on_listener(
             server_storage,
             listener,
             &ServerOptions::new().with_max_connections(4),
-            AuthConfig::trust(),
+            auth,
         )
         .await
     });
-    let (client, connection) = tokio_postgres::connect(
-        &format!("host=127.0.0.1 port={port} user=postgres dbname=quackgis"),
-        tokio_postgres::NoTls,
-    )
-    .await
-    .expect("development catalog pgwire connection");
+    let mut writer_config = tokio_postgres::Config::new();
+    writer_config
+        .host("127.0.0.1")
+        .port(port)
+        .user("writer")
+        .password("writer-secret")
+        .dbname("quackgis");
+    let (client, connection) = writer_config
+        .connect(tokio_postgres::NoTls)
+        .await
+        .expect("development catalog pgwire connection");
     let connection = tokio::spawn(connection);
 
     client
         .batch_execute(
             "CREATE TABLE quackgis.main.catalog_projection(\
-             id BIGINT NOT NULL, label VARCHAR, geom_wkb BLOB, \
+             id BIGINT NOT NULL DEFAULT 7, label VARCHAR, geom_wkb BLOB, \
              score DOUBLE, active BOOLEAN)",
         )
         .await
         .expect("create projected catalog table");
+    let epoch_before_comments = storage
+        .catalog_schema_epoch()
+        .expect("catalog epoch before comments")
+        .expect("development catalog epoch");
+    execute_storage_update(
+        &storage,
+        "COMMENT ON TABLE quackgis.main.catalog_projection IS 'projected table'",
+    )
+    .await;
+    execute_storage_update(
+        &storage,
+        "COMMENT ON COLUMN quackgis.main.catalog_projection.id IS 'stable identifier'",
+    )
+    .await;
+    assert_eq!(
+        storage
+            .catalog_schema_epoch()
+            .expect("catalog epoch after comments")
+            .expect("development catalog epoch"),
+        epoch_before_comments + 2
+    );
+    execute_storage_update(
+        &storage,
+        "CREATE TABLE quackgis.main.private_metadata(id BIGINT DEFAULT 9)",
+    )
+    .await;
+    execute_storage_update(
+        &storage,
+        "COMMENT ON TABLE quackgis.main.private_metadata IS 'legacy-hidden table'",
+    )
+    .await;
+    let projected_metadata_counts = storage
+        .query(
+            "SELECT (SELECT count(*)::BIGINT FROM quackgis_pg_catalog.pg_attrdef \
+                     WHERE adrelid = quackgis_pg_regclass('catalog_projection')), \
+                    (SELECT count(*)::BIGINT \
+                     FROM quackgis_pg_attrdef_visible('writer', 'writer') \
+                     WHERE adrelid = quackgis_pg_regclass('catalog_projection')), \
+                    (SELECT count(*)::BIGINT FROM quackgis_pg_catalog.pg_description \
+                     WHERE objoid = quackgis_pg_regclass('catalog_projection'))",
+        )
+        .expect("projected metadata counts");
+    assert_eq!(first_i64(&projected_metadata_counts, 0), 1);
+    assert_eq!(first_i64(&projected_metadata_counts, 1), 1);
+    assert_eq!(first_i64(&projected_metadata_counts, 2), 2);
 
     let profile: serde_json::Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/postgresql18_compatibility_profile.json"
@@ -202,6 +298,17 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
                     a.attnotnull, a.attidentity, a.attgenerated, a.attisdropped \
              FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid \
              WHERE c.relname = 'catalog_projection' ORDER BY a.attnum",
+        ),
+        (
+            "pg_catalog.pg_attrdef",
+            "SELECT d.adrelid, d.adnum, d.adbin FROM pg_attrdef d \
+             JOIN pg_class c ON c.oid = d.adrelid \
+             WHERE c.relname = 'catalog_projection' ORDER BY d.adnum",
+        ),
+        (
+            "pg_catalog.pg_description",
+            "SELECT objoid, classoid, objsubid, description FROM pg_description \
+             WHERE objoid = 'catalog_projection'::regclass ORDER BY objsubid",
         ),
         (
             "pg_catalog.pg_type",
@@ -319,7 +426,7 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
         assert_eq!(row.get::<_, String>(1), "catalog_projection");
         assert_eq!(row.get::<_, u32>(2), 2_200);
         assert_eq!(row.get::<_, u32>(3), row_type_oid);
-        assert_eq!(row.get::<_, u32>(4), 10);
+        assert_eq!(row.get::<_, u32>(4), 110_001);
         assert_eq!(row.get::<_, i8>(5), b'r' as i8);
         assert_eq!(row.get::<_, i16>(6), 5);
         assert!(!row.get::<_, bool>(7));
@@ -334,6 +441,103 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
         assert_eq!(row.get::<_, u32>(19), relation_oid);
         assert_eq!(row.get::<_, String>(20), "public");
     }
+    let structural_metadata = client
+        .prepare(
+            "SELECT d.adrelid, d.adnum, d.adbin, \
+                    pg_get_expr(d.adbin, d.adrelid) AS default_expression, \
+                    col_description(d.adrelid, d.adnum) AS column_description, \
+                    obj_description(d.adrelid, 'pg_class') AS table_description \
+             FROM pg_attrdef d WHERE d.adrelid = $1 ORDER BY d.adnum",
+        )
+        .await
+        .expect("prepare default/comment projection");
+    let structural_types = [
+        tokio_postgres::types::Type::OID,
+        tokio_postgres::types::Type::INT2,
+        tokio_postgres::types::Type::PG_NODE_TREE,
+        tokio_postgres::types::Type::TEXT,
+        tokio_postgres::types::Type::TEXT,
+        tokio_postgres::types::Type::TEXT,
+    ];
+    for (column, expected) in structural_metadata.columns().iter().zip(structural_types) {
+        assert_eq!(
+            column.type_(),
+            &expected,
+            "structural metadata field {}",
+            column.name()
+        );
+    }
+    let structural_metadata = client
+        .query_one(&structural_metadata, &[&relation_oid])
+        .await
+        .expect("default/comment projection");
+    assert_eq!(structural_metadata.get::<_, u32>(0), relation_oid);
+    assert_eq!(structural_metadata.get::<_, i16>(1), 1);
+    assert_eq!(structural_metadata.get::<_, PgNodeTree>(2).0, "'7'");
+    assert_eq!(structural_metadata.get::<_, String>(3), "'7'");
+    assert_eq!(structural_metadata.get::<_, String>(4), "stable identifier");
+    assert_eq!(structural_metadata.get::<_, String>(5), "projected table");
+    let descriptions = client
+        .query(
+            "SELECT objsubid, description FROM pg_description \
+             WHERE objoid = 'catalog_projection'::regclass \
+               AND classoid = 'pg_class'::regclass ORDER BY objsubid",
+            &[],
+        )
+        .await
+        .expect("direct description catalog");
+    assert_eq!(descriptions.len(), 2);
+    assert_eq!(descriptions[0].get::<_, i32>(0), 0);
+    assert_eq!(descriptions[0].get::<_, String>(1), "projected table");
+    assert_eq!(descriptions[1].get::<_, i32>(0), 1);
+    assert_eq!(descriptions[1].get::<_, String>(1), "stable identifier");
+
+    let mut reader_config = tokio_postgres::Config::new();
+    reader_config
+        .host("127.0.0.1")
+        .port(port)
+        .user("reader")
+        .password("reader-secret")
+        .dbname("quackgis");
+    let (reader, reader_connection) = reader_config
+        .connect(tokio_postgres::NoTls)
+        .await
+        .expect("development metadata reader connection");
+    let reader_connection = tokio::spawn(reader_connection);
+    let reader_descriptions = reader
+        .query_one(
+            "SELECT obj_description(to_regclass('catalog_projection'), 'pg_class'), \
+                    obj_description(to_regclass('private_metadata'), 'pg_class')",
+            &[],
+        )
+        .await
+        .expect("role and legacy-filtered structural metadata");
+    assert_eq!(reader_descriptions.get::<_, String>(0), "projected table");
+    assert_eq!(reader_descriptions.get::<_, Option<String>>(1), None);
+    assert_eq!(
+        reader
+            .query_one(
+                "SELECT count(*)::BIGINT FROM pg_attrdef \
+                 WHERE adrelid = to_regclass('catalog_projection')",
+                &[],
+            )
+            .await
+            .expect("reader-visible defaults")
+            .get::<_, i64>(0),
+        1
+    );
+    assert_eq!(
+        reader
+            .query_one(
+                "SELECT count(*)::BIGINT FROM pg_attrdef \
+                 WHERE adrelid = to_regclass('private_metadata')",
+                &[],
+            )
+            .await
+            .expect("legacy-hidden defaults")
+            .get::<_, i64>(0),
+        0
+    );
     for sql in [
         "SELECT count(*)::BIGINT FROM pg_type t \
          LEFT JOIN pg_type e ON e.oid = t.typelem \
@@ -741,6 +945,7 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
         RegisteredOid(recreated.get::<_, u32>(1))
     );
 
+    reader_connection.abort();
     connection.abort();
     server.abort();
 }

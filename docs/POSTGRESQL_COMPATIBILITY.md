@@ -72,8 +72,9 @@ The current runtime has a bounded compatibility contract:
 The checksum-pinned development identity lane additionally provides stable
 user-object relation/attribute identity and RowDescription origins. That lane is
 not release-supported until the upstream identity API ships in a signed bundle.
-Constraints/indexes/defaults/comments/spatial metadata and role-aware OpenAPI
-remain incomplete; this is not a broad PostgreSQL catalog claim.
+Constraints/indexes/spatial metadata and role-aware OpenAPI remain incomplete;
+the development lane now covers the first traced defaults/comments slice, but
+this is not a broad PostgreSQL catalog claim.
 
 The first target contract is frozen in
 `tests/fixtures/postgresql18_compatibility_profile.json`. Its normalized result
@@ -263,6 +264,18 @@ semantics, including safe handling of unqualified catalog functions and relation
 | key/constraint information-schema views | client and REST relationship discovery |
 | table/column privilege views | portable role-aware API discovery |
 | `pg_table_is_visible`, `pg_relation_is_updatable` | search-path and mutation capability queries |
+
+The development identity lane implements the table/column subset of
+`pg_attrdef` and `pg_description` plus `pg_get_expr`, `col_description`, and
+`obj_description`. DuckDB/DuckLake remains authoritative for values; durable
+relation/attribute mappings supply PostgreSQL identity; `adbin` advertises OID
+194 (`pg_node_tree`) and helper results advertise OID 25 (`text`). Content-bearing
+rows/helpers bind effective and session roles at the structural rewrite and
+intersect common table visibility with the legacy allowlist ceiling. DuckDB's
+implicit string `NULL` default marker is normalized to SQL NULL, so explicit
+`DEFAULT NULL` is not separately represented. Generated expressions, routine
+comments, mutable comment/default DDL over pgwire, and exact PostgreSQL deparser
+normalization remain outside this slice.
 
 PostgreSQL 18 `has_table_privilege` can report `MAINTAIN`, while
 `information_schema.table_privileges` does not list it. The compatibility view
@@ -533,9 +546,9 @@ descriptions for every foundation catalog are checked against the client-neutral
 `pg18-column-core-v1` fixture. Unsupported column types, malformed/private
 functions, complex provenance outside the maintained shape, and baseline startup
 without identity fail closed. This remains development-only until upstream
-acceptance and a signed official bundle. Constraints/indexes/defaults/comments,
-privilege-aware visibility, roles, and broader expression provenance are C4/C5 or
-later M3 work, not C3 blockers.
+acceptance and a signed official bundle. The later C5 defaults/comments slice is
+described below; constraints/indexes, broader privilege-aware structure, and
+expression provenance remain later M3 work, not C3 blockers.
 
 The exact QGIS 3.44 four-statement session bootstrap now passes as the only
 multi-statement exception: simple-protocol batches are limited to eight structurally
@@ -631,8 +644,15 @@ actual pgwire alongside ungranted denial. Standard privilege views omit
 QuackGIS-only `MAINTAIN`, expand eligible table grants across columns, exclude
 PUBLIC from the `role_*` variants, and report immutable grants as non-grantable.
 Role changes invalidate prepared discovery statements rather than retaining a
-stale role literal. The traced constraint/index/default/comment/spatial catalogs
-remain open C5 work.
+stale role literal. The first shared traced structural slice now projects
+DuckLake defaults and table/column comments through `pg_attrdef`,
+`pg_description`, `pg_get_expr`, `col_description`, and `obj_description`.
+Default/comment values participate in the guarded catalog fingerprint epoch;
+actual pgwire checks durable relation/attribute references, exact PostgreSQL
+`oid`/`int2`/`pg_node_tree`/`text` result identity, owner and SELECT-granted
+visibility, and legacy-allowlist denial despite a table grant. The traced
+constraint/index/spatial catalogs and generated-column semantics remain open C5
+work.
 
 ### C6 — qualify named clients
 
@@ -667,7 +687,7 @@ Deliver only surfaces justified by the next HTTP/client behavior:
 
 - foreign-key relationship discovery and embedding;
 - supported routine metadata and execution privileges if RPC is selected;
-- enums/ranges/defaults/generated-column behavior; and
+- enums/ranges and generated-column behavior; and
 - richer count, representation, CSV, singular, and GeoJSON paths.
 
 Gate: each feature has a reference PostgreSQL/PostgREST case and an actual

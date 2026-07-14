@@ -150,6 +150,12 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   derive object existence from DuckDB, preserve `public` naming and exact
   `name`/`varchar` wire types, hide ungranted objects, expand table grants to
   eligible columns, and omit QuackGIS-only `MAINTAIN` from the standard views.
+- Registry-backed DuckLake defaults and table/column comments through
+  `pg_attrdef`, `pg_description`, `pg_get_expr`, `col_description`, and
+  `obj_description`. Default/comment values advance the guarded catalog
+  fingerprint; actual pgwire preserves PostgreSQL `oid`, `int2`, `pg_node_tree`,
+  and `text` identity and proves effective-role visibility cannot exceed the
+  login identity's legacy allowlist ceiling.
 - DuckDB-computed bbox maintenance during COPY for the explicit reserved-column
   layout contract, including NULL, exact-recheck, and reopen evidence.
 - Fail-closed bbox layout validation rejects partial, wrong-type, caller-supplied,

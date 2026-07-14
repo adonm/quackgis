@@ -28,7 +28,7 @@ floor from the ordered security work.
 | session/effective identity, role switching, and transaction-local cleanup | real pgwire workflow + role units |
 | bounded transaction-local `request.jwt.claims` context | real pgwire workflow + role/parser units |
 | common schema/table privilege enforcement | role/policy units + real pgwire role-denial/grant cases |
-| role-aware schema/table/column/grant discovery | real pgwire workflow + catalog/parser units |
+| role-aware schema/table/column/grant/default/comment discovery | real pgwire workflow + development catalog/parser units |
 
 The role configuration parser validates stable explicit OIDs, LOGIN/NOLOGIN,
 INHERIT defaults, PostgreSQL 18 membership-edge options, cycles, owners, and the
@@ -36,7 +36,7 @@ bounded schema/table privilege vocabulary. Sessions expose PostgreSQL `name`
 identity for `session_user`, `current_user`, `current_role`, and `user`; implement
 `SET ROLE`, `SET SESSION ROLE`, `SET LOCAL ROLE`, `SET ROLE NONE`, and
 `RESET ROLE`; and clear local role state on commit/rollback. Privilege inquiry
-and role-aware schema/table/column/grant discovery are also implemented. RLS,
+and role-aware schema/table/column/grant/default/comment discovery are also implemented. RLS,
 role-aware OpenAPI, administrative SQL, packaged secret rotation, revocation
 infrastructure, and production failure drills remain open.
 
@@ -168,6 +168,10 @@ access. QuackGIS will therefore implement relation-specific PostgreSQL behavior:
 
 - maintained `pg_catalog` relations expose the PostgreSQL-compatible structural
   rows defined by the selected profile;
+- content-bearing `pg_attrdef`/`pg_description` rows and comment lookup helpers
+  additionally intersect effective-role visibility with the login identity's
+  legacy allowlist ceiling so defaults/comments cannot bypass configured metadata
+  confidentiality;
 - maintained `information_schema` views apply role/ownership filters;
 - `pg_roles` never returns a password verifier;
 - `pg_authid`, internal role configuration, JWT material, SCRAM verifier storage,

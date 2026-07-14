@@ -1391,6 +1391,13 @@ fn validate_statement_with_catalog_identity(
                 &identity.current_user,
                 &identity.session_user,
             );
+            if catalog_identity_enabled {
+                rewrite_role_structural_catalog_relations(
+                    &mut execution,
+                    &identity.current_user,
+                    &identity.session_user,
+                );
+            }
         }
         rewrite_pg_catalog_relations(&mut execution);
         if let (Some(identity), Some(role_catalog)) = (identity, role_catalog) {
@@ -1401,7 +1408,18 @@ fn validate_statement_with_catalog_identity(
                 catalog_identity_enabled,
             )?;
         }
-        rewrite_pg_catalog_functions(&mut execution);
+        rewrite_pg_catalog_functions(
+            &mut execution,
+            catalog_identity_enabled
+                .then(|| identity.zip(role_catalog))
+                .flatten()
+                .map(|(identity, _)| {
+                    (
+                        identity.current_user.as_str(),
+                        identity.session_user.as_str(),
+                    )
+                }),
+        );
         rewrite_pg_catalog_casts(&mut execution);
         if let Some(identity) = identity {
             rewrite_session_identity(&mut execution, identity);
@@ -2027,6 +2045,56 @@ fn rewrite_information_schema_relations(
     });
 }
 
+struct RoleStructuralCatalogRewriter<'a> {
+    effective_role: &'a str,
+    session_user: &'a str,
+}
+
+impl VisitorMut for RoleStructuralCatalogRewriter<'_> {
+    type Break = ();
+
+    fn pre_visit_table_factor(
+        &mut self,
+        table_factor: &mut TableFactor,
+    ) -> ControlFlow<Self::Break> {
+        let TableFactor::Table { name, args, .. } = table_factor else {
+            return ControlFlow::Continue(());
+        };
+        let Some(relation) = maintained_pg_catalog_relation(name) else {
+            return ControlFlow::Continue(());
+        };
+        let macro_name = match relation {
+            "pg_attrdef" => "quackgis_pg_attrdef_visible",
+            "pg_description" => "quackgis_pg_description_visible",
+            _ => return ControlFlow::Continue(()),
+        };
+        *name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(macro_name))]);
+        *args = Some(sqlparser::ast::TableFunctionArgs {
+            args: [self.effective_role, self.session_user]
+                .into_iter()
+                .map(|value| {
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
+                        Value::SingleQuotedString(value.to_owned()).into(),
+                    )))
+                })
+                .collect(),
+            settings: None,
+        });
+        ControlFlow::Continue(())
+    }
+}
+
+fn rewrite_role_structural_catalog_relations(
+    statement: &mut Statement,
+    effective_role: &str,
+    session_user: &str,
+) {
+    let _ = statement.visit(&mut RoleStructuralCatalogRewriter {
+        effective_role,
+        session_user,
+    });
+}
+
 fn information_schema_macro(relation: &str) -> &'static str {
     match relation {
         "schemata" => "quackgis_information_schema_schemata",
@@ -2046,6 +2114,9 @@ enum MaintainedPgFunction {
     Schema,
     Schemas,
     FormatType,
+    GetExpr,
+    ColDescription,
+    ObjDescription,
     ToRegclass,
     Regclass,
     ToRegtype,
@@ -2063,6 +2134,9 @@ impl MaintainedPgFunction {
             Self::Schema => "quackgis_current_schema",
             Self::Schemas => "quackgis_current_schemas",
             Self::FormatType => "quackgis_pg_format_type",
+            Self::GetExpr => "quackgis_pg_get_expr",
+            Self::ColDescription => "quackgis_pg_col_description",
+            Self::ObjDescription => "quackgis_pg_obj_description",
             Self::ToRegclass => "quackgis_pg_to_regclass",
             Self::Regclass => "quackgis_pg_regclass",
             Self::ToRegtype => "quackgis_pg_to_regtype",
@@ -2078,7 +2152,9 @@ impl MaintainedPgFunction {
         match self {
             Self::Database | Self::Schema => PgTypeHint::Name,
             Self::Schemas => PgTypeHint::NameArray,
-            Self::FormatType => PgTypeHint::Text,
+            Self::FormatType | Self::GetExpr | Self::ColDescription | Self::ObjDescription => {
+                PgTypeHint::Text
+            }
             Self::ToRegclass | Self::Regclass => PgTypeHint::Regclass,
             Self::ToRegtype | Self::Regtype => PgTypeHint::Regtype,
             Self::ToRegnamespace | Self::Regnamespace => PgTypeHint::Regnamespace,
@@ -2102,7 +2178,24 @@ impl MaintainedPgFunction {
             | Self::Regnamespace
             | Self::ToRegrole
             | Self::Regrole => 1,
-            Self::FormatType => 2,
+            Self::FormatType | Self::GetExpr | Self::ColDescription => 2,
+            Self::ObjDescription => 1,
+        }
+    }
+
+    const fn accepts_argument_count(self, count: usize) -> bool {
+        match self {
+            Self::GetExpr => matches!(count, 2 | 3),
+            Self::ObjDescription => matches!(count, 1 | 2),
+            _ => count == self.argument_count(),
+        }
+    }
+
+    const fn role_filtered_private_name(self) -> Option<&'static str> {
+        match self {
+            Self::ColDescription => Some("quackgis_pg_col_description_visible"),
+            Self::ObjDescription => Some("quackgis_pg_obj_description_visible"),
+            _ => None,
         }
     }
 
@@ -2134,6 +2227,12 @@ fn maintained_pg_function(name: &ObjectName) -> Option<MaintainedPgFunction> {
         Some(MaintainedPgFunction::Schemas)
     } else if pg_identifier_matches(function, "format_type") {
         Some(MaintainedPgFunction::FormatType)
+    } else if pg_identifier_matches(function, "pg_get_expr") {
+        Some(MaintainedPgFunction::GetExpr)
+    } else if pg_identifier_matches(function, "col_description") {
+        Some(MaintainedPgFunction::ColDescription)
+    } else if pg_identifier_matches(function, "obj_description") {
+        Some(MaintainedPgFunction::ObjDescription)
     } else if pg_identifier_matches(function, "to_regclass") {
         Some(MaintainedPgFunction::ToRegclass)
     } else if pg_identifier_matches(function, "regclass") {
@@ -2352,15 +2451,35 @@ fn identity_catalog_feature(statement: &Statement) -> Option<String> {
     feature
 }
 
-fn rewrite_pg_catalog_functions(statement: &mut Statement) {
+fn rewrite_pg_catalog_functions(statement: &mut Statement, role_context: Option<(&str, &str)>) {
     let _: ControlFlow<()> = visit_expressions_mut(statement, |expression| {
         let Expr::Function(function) = expression else {
             return ControlFlow::Continue(());
         };
         if let Some(maintained) = maintained_pg_function(&function.name) {
-            function.name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(
-                maintained.private_name(),
-            ))]);
+            let private_name = role_context
+                .and_then(|_| maintained.role_filtered_private_name())
+                .unwrap_or_else(|| maintained.private_name());
+            function.name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(private_name))]);
+            if let Some((effective_role, session_user)) =
+                role_context.filter(|_| maintained.role_filtered_private_name().is_some())
+                && let FunctionArguments::List(arguments) = &mut function.args
+            {
+                if maintained == MaintainedPgFunction::ObjDescription && arguments.args.len() == 1 {
+                    arguments
+                        .args
+                        .push(FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
+                            Value::Null.into(),
+                        ))));
+                }
+                arguments
+                    .args
+                    .extend([effective_role, session_user].into_iter().map(|value| {
+                        FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
+                            Value::SingleQuotedString(value.to_owned()).into(),
+                        )))
+                    }));
+            }
         }
         ControlFlow::Continue(())
     });
@@ -3052,7 +3171,7 @@ fn invalid_maintained_function(statement: &Statement) -> Option<String> {
             FunctionArguments::List(arguments) => {
                 arguments.duplicate_treatment.is_none()
                     && arguments.clauses.is_empty()
-                    && arguments.args.len() == maintained.argument_count()
+                    && maintained.accepts_argument_count(arguments.args.len())
                     && arguments.args.iter().all(|argument| {
                         matches!(argument, FunctionArg::Unnamed(FunctionArgExpr::Expr(_)))
                     })
@@ -3119,6 +3238,8 @@ fn maintained_pg_catalog_relation(name: &ObjectName) -> Option<&'static str> {
         "pg_type",
         "pg_class",
         "pg_attribute",
+        "pg_attrdef",
+        "pg_description",
         "pg_range",
         "pg_collation",
         "pg_roles",
@@ -3157,7 +3278,10 @@ fn maintained_catalog_relation(name: &ObjectName) -> Option<&'static str> {
 }
 
 fn identity_catalog_relation(relation: &str) -> bool {
-    matches!(relation, "pg_class" | "pg_attribute")
+    matches!(
+        relation,
+        "pg_class" | "pg_attribute" | "pg_attrdef" | "pg_description"
+    )
 }
 
 fn catalog_relation_identifier(name: &ObjectName) -> Option<(&Ident, bool)> {
@@ -3560,6 +3684,8 @@ fn stale_catalog_column_qualifier(expression: &Expr) -> bool {
             "pg_type",
             "pg_class",
             "pg_attribute",
+            "pg_attrdef",
+            "pg_description",
             "pg_range",
             "pg_collation",
             "pg_roles",
@@ -3750,7 +3876,8 @@ fn forbidden_catalog_function_name(name: &ObjectName) -> Option<String> {
     };
     let lower = function.value.to_ascii_lowercase();
     (["query", "query_table", "ducklake_column_info"].contains(&lower.as_str())
-        || lower.starts_with("quackgis_information_schema_"))
+        || lower.starts_with("quackgis_information_schema_")
+        || lower.starts_with("quackgis_pg_"))
     .then_some(lower)
 }
 
@@ -4015,8 +4142,20 @@ fn catalog_columns(relation: &str) -> &'static [(&'static str, PgTypeHint)] {
             ("attrelid", PgTypeHint::Oid),
             ("attname", PgTypeHint::Name),
             ("atttypid", PgTypeHint::Oid),
+            ("attcollation", PgTypeHint::Oid),
             ("attidentity", PgTypeHint::Char),
             ("attgenerated", PgTypeHint::Char),
+            ("attstorage", PgTypeHint::Char),
+            ("attcompression", PgTypeHint::Char),
+        ],
+        "pg_attrdef" => &[
+            ("adrelid", PgTypeHint::Oid),
+            ("adbin", PgTypeHint::PgNodeTree),
+        ],
+        "pg_description" => &[
+            ("objoid", PgTypeHint::Oid),
+            ("classoid", PgTypeHint::Oid),
+            ("description", PgTypeHint::Text),
         ],
         "pg_range" => &[
             ("rngtypid", PgTypeHint::Oid),
@@ -4138,10 +4277,17 @@ fn catalog_column_names(relation: &str) -> &'static [&'static str] {
             "attnum",
             "atttypmod",
             "attnotnull",
+            "atthasdef",
+            "attcollation",
             "attidentity",
             "attgenerated",
+            "attstorage",
+            "attcompression",
+            "attstattarget",
             "attisdropped",
         ],
+        "pg_attrdef" => &["adrelid", "adnum", "adbin"],
+        "pg_description" => &["objoid", "classoid", "objsubid", "description"],
         "pg_range" => &["rngtypid", "rngsubtype"],
         "pg_collation" => &[
             "oid",
@@ -6057,6 +6203,109 @@ mod tests {
                 )
                 .is_err(),
                 "private catalog function must fail closed: {private}"
+            );
+        }
+    }
+
+    #[test]
+    fn defaults_and_comments_are_identity_gated_role_bound_and_typed() {
+        let catalog = RoleCatalog::from_json(
+            r#"{
+              "roles":[
+                {"oid":100001,"name":"writer","login":true},
+                {"oid":100002,"name":"reader"}
+              ],
+              "table_owners":[{"table":"places","role":"writer"}],
+              "table_grants":[
+                {"table":"places","role":"reader","privileges":["SELECT"]}
+              ]
+            }"#,
+        )
+        .expect("role catalog");
+        let identity = SessionIdentity {
+            session_user: "writer".to_owned(),
+            current_user: "reader".to_owned(),
+            epoch: 3,
+            request_context: HashMap::new(),
+        };
+        let sql = "SELECT d.adrelid, d.adnum, d.adbin, \
+                          pg_catalog.pg_get_expr(d.adbin, d.adrelid, true) AS default_expression, \
+                          pg_catalog.col_description(d.adrelid, d.adnum) AS column_description, \
+                          pg_catalog.obj_description(d.adrelid, 'pg_class') AS table_description \
+                   FROM pg_catalog.pg_attrdef d WHERE d.adrelid = $1 ORDER BY d.adnum";
+        assert!(validate_statement(sql, ProtocolMode::Extended).is_err());
+        let validated = validate_statement_with_catalog_identity(
+            sql,
+            ProtocolMode::Extended,
+            true,
+            Some(&identity),
+            Some(&catalog),
+        )
+        .expect("role-bound structural metadata");
+        assert!(
+            validated
+                .sql
+                .contains("quackgis_pg_attrdef_visible('reader', 'writer')")
+        );
+        assert!(validated.sql.contains("quackgis_pg_get_expr"));
+        assert!(
+            validated
+                .sql
+                .contains("quackgis_pg_col_description_visible")
+        );
+        assert!(
+            validated
+                .sql
+                .contains("quackgis_pg_obj_description_visible")
+        );
+        assert!(validated.sql.matches("'reader'").count() >= 3);
+        assert!(validated.sql.matches("'writer'").count() >= 3);
+
+        let schema = annotate_catalog_result_schema(
+            &validated.ast,
+            &Schema::new(vec![
+                Field::new("adrelid", DataType::UInt32, false),
+                Field::new("adnum", DataType::Int16, false),
+                Field::new("adbin", DataType::Utf8, false),
+                Field::new("default_expression", DataType::Utf8, true),
+                Field::new("column_description", DataType::Utf8, true),
+                Field::new("table_description", DataType::Utf8, true),
+            ]),
+        );
+        let actual = schema
+            .fields()
+            .iter()
+            .map(field_into_pg_type)
+            .collect::<PgWireResult<Vec<_>>>()
+            .expect("default/comment wire types");
+        assert_eq!(
+            actual,
+            [
+                Type::OID,
+                Type::INT2,
+                Type::PG_NODE_TREE,
+                Type::TEXT,
+                Type::TEXT,
+                Type::TEXT,
+            ]
+        );
+
+        for invalid in [
+            "SELECT pg_get_expr('x')",
+            "SELECT col_description(1)",
+            "SELECT obj_description(1, 'pg_class', true)",
+            "SELECT * FROM quackgis_pg_attrdef_visible('reader', 'writer')",
+        ] {
+            assert!(
+                validate_statement_with_catalog_identity(
+                    invalid,
+                    ProtocolMode::Extended,
+                    true,
+                    Some(&identity),
+                    Some(&catalog),
+                )
+                .is_err(),
+                "unsupported structural metadata shape: {invalid}"
             );
         }
     }

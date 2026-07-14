@@ -7,6 +7,7 @@ pub const PG_CATALOG_NAMESPACE_OID: u32 = 11;
 pub const PUBLIC_NAMESPACE_OID: u32 = 2_200;
 pub const BOOTSTRAP_OWNER_OID: u32 = 10;
 pub const QUACKGIS_DATABASE_OID: u32 = 16_384;
+pub const PG_CLASS_RELATION_OID: u32 = 1_259;
 pub const GEOMETRY_ARRAY_OID: u32 = 90_003;
 pub const GEOGRAPHY_ARRAY_OID: u32 = 90_004;
 pub const DYNAMIC_OBJECT_OID_START: u32 = 100_000;
@@ -157,6 +158,7 @@ const TYPE_ROWS: &[PgTypeRow] = &[
 // an official bundle.
 const IDENTITY_TYPE_ROWS: &[PgTypeRow] = &[
     builtin_scalar(17, "bytea", -1, 'U', 1001),
+    builtin_scalar(194, "pg_node_tree", -1, 'S', 0).collation(100),
     builtin_array(1001, "_bytea", 17, 0),
     builtin_scalar(700, "float4", 4, 'N', 1021).by_value(),
     builtin_scalar(701, "float8", 8, 'N', 1022)
@@ -287,6 +289,7 @@ pub fn duckdb_catalog_bootstrap_sql() -> String {
 pub fn duckdb_role_catalog_sql(
     catalog: &crate::role::RoleCatalog,
     auth: &crate::auth::AuthConfig,
+    catalog_identity_enabled: bool,
 ) -> String {
     let mut role_rows = vec![format!(
         "({BOOTSTRAP_OWNER_OID}::UINTEGER, 'quackgis_owner'::VARCHAR, false, true, false, false, \
@@ -361,6 +364,11 @@ pub fn duckdb_role_catalog_sql(
         format!("SELECT * FROM (VALUES\n{rows}\n) AS o(schema_name, table_name, role_oid)")
     };
     let information_schema_sql = duckdb_role_information_schema_sql(catalog, auth);
+    let structural_catalog_sql = if catalog_identity_enabled {
+        duckdb_role_structural_catalog_sql()
+    } else {
+        ""
+    };
     format!(
         "CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_roles AS\n\
          SELECT * FROM (VALUES\n{}\n\
@@ -371,9 +379,54 @@ pub fn duckdb_role_catalog_sql(
          {membership_sql};\n\
          CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_table_owners AS\n\
          {owner_sql};\n\
-         {information_schema_sql}",
+         {information_schema_sql}\n\
+         {structural_catalog_sql}",
         role_rows.join(",\n"),
     )
+}
+
+fn duckdb_role_structural_catalog_sql() -> &'static str {
+    r#"CREATE OR REPLACE MACRO quackgis_pg_visible_relations(effective_role, session_identity) AS TABLE
+           SELECT DISTINCT columns.relation_oid
+           FROM quackgis_pg_catalog._current_columns columns
+           JOIN quackgis_pg_catalog.information_schema_table_visibility visibility
+             ON visibility.schema_name = columns.schema_name
+            AND lower(visibility.table_name) = lower(columns.table_name)
+           JOIN quackgis_pg_catalog.information_schema_legacy_visibility legacy
+             ON legacy.schema_name = visibility.schema_name
+            AND lower(legacy.table_name) = lower(visibility.table_name)
+           WHERE visibility.role_name = CAST(effective_role AS VARCHAR)
+             AND legacy.session_user = CAST(session_identity AS VARCHAR)
+             AND (visibility.can_select AND legacy.can_read
+                  OR (visibility.can_insert OR visibility.can_update OR visibility.can_delete)
+                     AND legacy.can_write);
+         CREATE OR REPLACE MACRO quackgis_pg_attrdef_visible(effective_role, session_identity) AS TABLE
+           SELECT defaults.* FROM quackgis_pg_catalog.pg_attrdef defaults
+           JOIN quackgis_pg_visible_relations(effective_role, session_identity) visible
+             ON visible.relation_oid = defaults.adrelid;
+         CREATE OR REPLACE MACRO quackgis_pg_description_visible(effective_role, session_identity) AS TABLE
+           SELECT descriptions.* FROM quackgis_pg_catalog.pg_description descriptions
+           JOIN quackgis_pg_visible_relations(effective_role, session_identity) visible
+             ON visible.relation_oid = descriptions.objoid;
+         CREATE OR REPLACE MACRO quackgis_pg_col_description_visible(
+           relation_value, column_value, effective_role, session_identity
+         ) AS (SELECT description
+               FROM quackgis_pg_description_visible(effective_role, session_identity)
+               WHERE classoid = 1259::UINTEGER
+                 AND objoid = try_cast(relation_value AS UINTEGER)
+                 AND objsubid = try_cast(column_value AS INTEGER)
+               LIMIT 1);
+         CREATE OR REPLACE MACRO quackgis_pg_obj_description_visible(
+           object_value, catalog_name := NULL, effective_role := NULL, session_identity := NULL
+         ) AS CASE
+           WHEN object_value IS NULL THEN NULL
+           WHEN catalog_name IS NOT NULL AND lower(CAST(catalog_name AS VARCHAR)) <> 'pg_class'
+             THEN error('PostgreSQL object description catalog is not maintained')
+           ELSE (SELECT description
+                 FROM quackgis_pg_description_visible(effective_role, session_identity)
+                 WHERE classoid = 1259::UINTEGER
+                   AND objoid = try_cast(object_value AS UINTEGER) AND objsubid = 0
+                 LIMIT 1) END;"#
 }
 
 fn duckdb_role_information_schema_sql(
@@ -620,7 +673,7 @@ fn duckdb_role_information_schema_sql(
                     AS table_schema,\n\
                   c.table_name::VARCHAR AS table_name, c.column_name::VARCHAR AS column_name,\n\
                   c.ordinal_position::INTEGER AS ordinal_position,\n\
-                  c.column_default::VARCHAR AS column_default,\n\
+                  nullif(c.column_default, 'NULL')::VARCHAR AS column_default,\n\
                   c.is_nullable::VARCHAR AS is_nullable, ({data_type})::VARCHAR AS data_type,\n\
                   ({udt_schema})::VARCHAR AS udt_schema, ({udt_name})::VARCHAR AS udt_name,\n\
                   CASE WHEN c.is_identity THEN 'YES' ELSE 'NO' END::VARCHAR AS is_identity,\n\
@@ -847,16 +900,23 @@ fn identity_catalog_macros_sql() -> &'static str {
              WHEN 'time without time zone' THEN 'time'
              ELSE quackgis_pg_name_object(quackgis_pg_type_clean(value)) END;
          CREATE OR REPLACE MACRO quackgis_pg_to_regclass(value) AS
-           (SELECT __quackgis_class.oid FROM quackgis_pg_catalog.pg_class __quackgis_class
-            JOIN quackgis_pg_catalog.pg_namespace __quackgis_namespace
-              ON __quackgis_namespace.oid = __quackgis_class.relnamespace
-            WHERE (try_cast(value AS UINTEGER) IS NOT NULL
-                   AND __quackgis_class.oid = try_cast(value AS UINTEGER))
-               OR (try_cast(value AS UINTEGER) IS NULL
-                   AND __quackgis_class.relname = quackgis_pg_name_object(value)
-                   AND __quackgis_namespace.nspname =
-                       coalesce(quackgis_pg_name_schema(value), 'public'))
-            LIMIT 1);
+           CASE
+             WHEN try_cast(value AS UINTEGER) = 1259 THEN 1259::UINTEGER
+             WHEN try_cast(value AS UINTEGER) IS NULL
+              AND quackgis_pg_name_object(value) = 'pg_class'
+              AND coalesce(quackgis_pg_name_schema(value), 'pg_catalog') = 'pg_catalog'
+               THEN 1259::UINTEGER
+             ELSE (SELECT __quackgis_class.oid
+                   FROM quackgis_pg_catalog.pg_class __quackgis_class
+                   JOIN quackgis_pg_catalog.pg_namespace __quackgis_namespace
+                     ON __quackgis_namespace.oid = __quackgis_class.relnamespace
+                   WHERE (try_cast(value AS UINTEGER) IS NOT NULL
+                          AND __quackgis_class.oid = try_cast(value AS UINTEGER))
+                      OR (try_cast(value AS UINTEGER) IS NULL
+                          AND __quackgis_class.relname = quackgis_pg_name_object(value)
+                          AND __quackgis_namespace.nspname =
+                              coalesce(quackgis_pg_name_schema(value), 'public'))
+                   LIMIT 1) END;
          CREATE OR REPLACE MACRO quackgis_pg_regclass(value) AS
            CASE WHEN value IS NULL THEN NULL
                 ELSE coalesce(quackgis_pg_to_regclass(value),
@@ -926,7 +986,8 @@ fn identity_catalog_macros_sql() -> &'static str {
            CASE WHEN regexp_full_match(value, '[a-z_][a-z0-9_$]*') THEN value
                 ELSE '"' || replace(value, '"', '""') || '"' END;
          CREATE OR REPLACE MACRO quackgis_pg_regclass_text(value) AS
-           coalesce((SELECT CASE WHEN __quackgis_namespace.nspname = 'public'
+           CASE WHEN try_cast(value AS UINTEGER) = 1259 THEN 'pg_class'
+           ELSE coalesce((SELECT CASE WHEN __quackgis_namespace.nspname = 'public'
                     THEN quackgis_pg_quote_identifier(__quackgis_class.relname)
                     ELSE quackgis_pg_quote_identifier(__quackgis_namespace.nspname) || '.' ||
                          quackgis_pg_quote_identifier(__quackgis_class.relname) END
@@ -934,7 +995,7 @@ fn identity_catalog_macros_sql() -> &'static str {
              JOIN quackgis_pg_catalog.pg_namespace __quackgis_namespace
                ON __quackgis_namespace.oid = __quackgis_class.relnamespace
              WHERE __quackgis_class.oid = try_cast(value AS UINTEGER)),
-             CAST(value AS VARCHAR));
+             CAST(value AS VARCHAR)) END;
          CREATE OR REPLACE MACRO quackgis_pg_regnamespace_text(value) AS
            coalesce((SELECT quackgis_pg_quote_identifier(__quackgis_namespace.nspname)
              FROM quackgis_pg_catalog.pg_namespace __quackgis_namespace
@@ -996,7 +1057,32 @@ fn identity_catalog_macros_sql() -> &'static str {
              WHERE __quackgis_type.oid = CAST(type_oid AS UINTEGER)
            ), '???') END;
          CREATE OR REPLACE MACRO quackgis_pg_regtype_text(value) AS
-           quackgis_pg_format_type(value, -1);"#
+           quackgis_pg_format_type(value, -1);
+         CREATE OR REPLACE MACRO quackgis_pg_get_expr(
+           expression_value, relation_value, pretty := false
+         ) AS CASE
+           WHEN expression_value IS NULL OR relation_value IS NULL THEN NULL
+           WHEN pretty IS NOT NULL AND try_cast(pretty AS BOOLEAN) IS NULL
+             THEN error('PostgreSQL pg_get_expr pretty flag must be boolean')
+           WHEN quackgis_pg_regclass(relation_value) IS NOT NULL
+             THEN CAST(expression_value AS VARCHAR)
+           ELSE NULL END;
+         CREATE OR REPLACE MACRO quackgis_pg_col_description(relation_value, column_value) AS
+           (SELECT description FROM quackgis_pg_catalog.pg_description
+            WHERE classoid = 1259::UINTEGER
+              AND objoid = try_cast(relation_value AS UINTEGER)
+              AND objsubid = try_cast(column_value AS INTEGER)
+            LIMIT 1);
+         CREATE OR REPLACE MACRO quackgis_pg_obj_description(
+           object_value, catalog_name := NULL
+         ) AS CASE
+           WHEN object_value IS NULL THEN NULL
+           WHEN catalog_name IS NOT NULL AND lower(CAST(catalog_name AS VARCHAR)) <> 'pg_class'
+             THEN error('PostgreSQL object description catalog is not maintained')
+           ELSE (SELECT description FROM quackgis_pg_catalog.pg_description
+                 WHERE classoid = 1259::UINTEGER
+                   AND objoid = try_cast(object_value AS UINTEGER) AND objsubid = 0
+                 LIMIT 1) END;"#
 }
 
 /// Replace the baseline catalog views with registry-backed user-object views.
@@ -1015,13 +1101,26 @@ pub fn duckdb_identity_catalog_bootstrap_sql(catalog: &str) -> String {
     format!(
         "CREATE OR REPLACE VIEW quackgis_pg_catalog._current_columns AS\n\
          WITH identity AS (\n\
-           SELECT * FROM ducklake_column_info({catalog_literal})\n\
-           WHERE schema_name <> {internal_schema_literal}\n\
+           SELECT identity.*, nullif(columns.column_default, 'NULL') AS column_default,\n\
+                  columns.comment AS column_comment, tables.comment AS table_comment\n\
+           FROM ducklake_column_info({catalog_literal}) identity\n\
+           JOIN duckdb_columns() columns\n\
+             ON columns.database_name = {catalog_literal}\n\
+            AND columns.schema_name = identity.schema_name\n\
+            AND columns.table_name = identity.table_name\n\
+            AND columns.column_name = identity.column_name\n\
+           JOIN duckdb_tables() tables\n\
+             ON tables.database_name = {catalog_literal}\n\
+            AND tables.schema_name = identity.schema_name\n\
+            AND tables.table_name = identity.table_name\n\
+           WHERE identity.schema_name <> {internal_schema_literal}\n\
          ), identity_fingerprint AS (\n\
            SELECT sha256(coalesce(CAST(to_json(list(struct_pack(\n\
              schema_uuid := schema_uuid, schema_name := schema_name,\n\
              table_uuid := table_uuid, table_name := table_name,\n\
-             column_id := column_id, column_name := column_name)\n\
+             column_id := column_id, column_name := column_name,\n\
+             column_default := column_default, column_comment := column_comment,\n\
+             table_comment := table_comment)\n\
              ORDER BY schema_uuid, table_uuid, column_id)) AS VARCHAR), '[]'))\n\
              AS fingerprint\n\
            FROM identity\n\
@@ -1052,7 +1151,8 @@ pub fn duckdb_identity_catalog_bootstrap_sql(catalog: &str) -> String {
                 i.column_name, i.column_id, n.oid AS namespace_oid,\n\
                 r.oid AS relation_oid, r.row_type_oid, a.attnum,\n\
                 c.ordinal_position, c.data_type, c.is_nullable,\n\
-                c.numeric_precision, c.numeric_scale\n\
+                c.numeric_precision, c.numeric_scale, i.column_default,\n\
+                i.column_comment, i.table_comment\n\
          FROM identity i\n\
          JOIN {catalog_identifier}.{schema}.namespace_oid n USING (schema_uuid)\n\
          JOIN {catalog_identifier}.{schema}.relation_oid r USING (table_uuid)\n\
@@ -1105,9 +1205,24 @@ pub fn duckdb_identity_catalog_bootstrap_sql(catalog: &str) -> String {
          )\n\
          SELECT relation_oid AS attrelid, column_name AS attname, typed.atttypid,\n\
                 t.typlen AS attlen, attnum, atttypmod, is_nullable = 'NO' AS attnotnull,\n\
+                column_default IS NOT NULL AS atthasdef,\n\
+                t.typcollation AS attcollation,\n\
                 ''::VARCHAR AS attidentity, ''::VARCHAR AS attgenerated,\n\
+                CASE WHEN t.typlen = -1 THEN 'x' ELSE 'p' END::VARCHAR AS attstorage,\n\
+                ''::VARCHAR AS attcompression, -1::SMALLINT AS attstattarget,\n\
                 false AS attisdropped\n\
          FROM typed JOIN quackgis_pg_catalog.pg_type t ON t.oid = typed.atttypid;\n\
+         CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_attrdef AS\n\
+         SELECT relation_oid AS adrelid, attnum AS adnum, column_default AS adbin\n\
+         FROM quackgis_pg_catalog._current_columns WHERE column_default IS NOT NULL;\n\
+         CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_description AS\n\
+         SELECT DISTINCT relation_oid AS objoid, {PG_CLASS_RELATION_OID}::UINTEGER AS classoid,\n\
+                0::INTEGER AS objsubid, table_comment AS description\n\
+         FROM quackgis_pg_catalog._current_columns WHERE table_comment IS NOT NULL\n\
+         UNION ALL\n\
+         SELECT relation_oid, {PG_CLASS_RELATION_OID}::UINTEGER, CAST(attnum AS INTEGER),\n\
+                column_comment\n\
+         FROM quackgis_pg_catalog._current_columns WHERE column_comment IS NOT NULL;\n\
          {macros}",
         internal_schema_literal = quote_literal(INTERNAL_SCHEMA),
     )
@@ -1156,13 +1271,26 @@ pub fn ducklake_identity_registry_reconcile_sql(catalog: &str) -> String {
     let schema = quote_identifier(INTERNAL_SCHEMA);
     format!(
         "CREATE OR REPLACE TEMP TABLE __quackgis_identity AS\n\
-           SELECT * FROM ducklake_column_info({catalog_literal})\n\
-           WHERE schema_name <> {internal_schema_literal};\n\
+           SELECT identity.*, nullif(columns.column_default, 'NULL') AS column_default,\n\
+                  columns.comment AS column_comment, tables.comment AS table_comment\n\
+           FROM ducklake_column_info({catalog_literal}) identity\n\
+           JOIN duckdb_columns() columns\n\
+             ON columns.database_name = {catalog_literal}\n\
+            AND columns.schema_name = identity.schema_name\n\
+            AND columns.table_name = identity.table_name\n\
+            AND columns.column_name = identity.column_name\n\
+           JOIN duckdb_tables() tables\n\
+             ON tables.database_name = {catalog_literal}\n\
+            AND tables.schema_name = identity.schema_name\n\
+            AND tables.table_name = identity.table_name\n\
+           WHERE identity.schema_name <> {internal_schema_literal};\n\
          CREATE OR REPLACE TEMP TABLE __quackgis_identity_fingerprint AS\n\
            SELECT sha256(coalesce(CAST(to_json(list(struct_pack(\n\
              schema_uuid := schema_uuid, schema_name := schema_name,\n\
              table_uuid := table_uuid, table_name := table_name,\n\
-             column_id := column_id, column_name := column_name)\n\
+             column_id := column_id, column_name := column_name,\n\
+             column_default := column_default, column_comment := column_comment,\n\
+             table_comment := table_comment)\n\
              ORDER BY schema_uuid, table_uuid, column_id)) AS VARCHAR), '[]'))\n\
              AS fingerprint\n\
            FROM __quackgis_identity;\n\
@@ -1443,7 +1571,7 @@ mod tests {
                 .expect("password auth")
                 .with_role_catalog(catalog.clone())
                 .expect("role auth");
-        let sql = duckdb_role_catalog_sql(&catalog, &auth);
+        let sql = duckdb_role_catalog_sql(&catalog, &auth, true);
         assert!(sql.contains("100001::UINTEGER"));
         assert!(sql.contains("200001::UINTEGER"));
         assert!(sql.contains("pg_auth_members"));
@@ -1455,6 +1583,8 @@ mod tests {
         assert!(sql.contains("quackgis_information_schema_columns"));
         assert!(sql.contains("quackgis_information_schema_table_privileges"));
         assert!(sql.contains("quackgis_information_schema_column_privileges"));
+        assert!(sql.contains("quackgis_pg_attrdef_visible"));
+        assert!(sql.contains("quackgis_pg_description_visible"));
         assert!(sql.contains("NULL::VARCHAR"));
         assert!(!sql.contains("password-secret"));
     }
@@ -1493,6 +1623,8 @@ mod tests {
             "pg_type",
             "pg_class",
             "pg_attribute",
+            "pg_attrdef",
+            "pg_description",
         ] {
             assert!(
                 catalogs.contains(&format!("quackgis_pg_catalog.{relation}")),
@@ -1507,9 +1639,13 @@ mod tests {
         assert!(catalogs.contains("coalesce(max(owner.role_oid), 10::UINTEGER) AS relowner"));
         assert!(catalogs.contains("is_nullable = 'NO' AS attnotnull"));
         assert!(catalogs.contains("false AS attisdropped"));
-        assert_eq!(IDENTITY_TYPE_ROWS.len(), 28);
+        assert_eq!(IDENTITY_TYPE_ROWS.len(), 29);
         assert!(catalogs.contains("quackgis_pg_to_regclass"));
         assert!(catalogs.contains("quackgis_pg_to_regtype"));
         assert!(catalogs.contains("quackgis_pg_format_type"));
+        assert!(catalogs.contains("quackgis_pg_get_expr"));
+        assert!(catalogs.contains("quackgis_pg_col_description"));
+        assert!(catalogs.contains("quackgis_pg_obj_description"));
+        assert!(catalogs.contains("column_default := column_default"));
     }
 }

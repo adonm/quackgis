@@ -75,6 +75,12 @@ The required real-driver workflow proves:
   identity/allowlist ceiling, identifier/character fields advertise
   `name`/`varchar`, PUBLIC is excluded from `role_*`, and `MAINTAIN` is excluded
   from the standard privilege views;
+- in the checksum-pinned identity lane, DuckLake-derived defaults and table/column
+  comments through `pg_attrdef`, `pg_description`, `pg_get_expr`,
+  `col_description`, and `obj_description`; result descriptions preserve
+  PostgreSQL `oid`/`int2`/`pg_node_tree`/`text` identity, metadata participates in
+  the schema fingerprint epoch, and effective-role visibility is intersected
+  with the login identity's legacy allowlist ceiling;
 - exact transaction-local `request.jwt.claims` assignment through one text literal
   or `$1`, bounded at 16 KiB/setting and 32 KiB/session, plus PostgreSQL `text`
   retrieval with NULL-on-missing behavior; actual pgwire proves outside-
@@ -232,9 +238,13 @@ catalog surfaces remain open unless a focused test says otherwise.
   typed strict/nullable `regclass`/`regtype`/`regnamespace`/`regrole`, maintained
   search-path/quoted-name resolution, OID/text casts, aliases/arrays/typmods,
   `format_type`, and exact foundation descriptions from the client-neutral
-  profile. This closes C3 implementation in the gated lane. Baseline startup still rejects
-  those user-object catalogs explicitly. This lane is not loaded by default,
-  packaged, or release-supported.
+  profile. The same actual-pgwire lane now proves role/legacy-filtered default and
+  comment rows/functions. DuckDB's implicit string `NULL` default marker is
+  normalized to no catalog row; explicit `DEFAULT NULL` is not separately
+  distinguished, and pgwire comment/default DDL remains unsupported. This closes
+  the first shared traced structural slice. Baseline startup still rejects those
+  user-object catalogs explicitly. This lane is not loaded by default, packaged,
+  or release-supported.
 - Binary columns named `geom_wkb` use the same geometry sentinel OID as the
   maintained COPY bbox layout. RowDescription plus text hex-WKB, binary WKB, and
   NULL transport are tested through pgwire for geometry and the maintained

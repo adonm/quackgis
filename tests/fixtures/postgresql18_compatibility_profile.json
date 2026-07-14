@@ -120,6 +120,27 @@
       ]
     },
     {
+      "name": "pg_catalog.pg_attrdef",
+      "stage": "C5",
+      "trace_status": "implemented_ducklake_defaults_pgwire",
+      "required_columns": [
+        { "name": "adrelid", "type_oid": 26, "nullable": false },
+        { "name": "adnum", "type_oid": 21, "nullable": false },
+        { "name": "adbin", "type_oid": 194, "nullable": false }
+      ]
+    },
+    {
+      "name": "pg_catalog.pg_description",
+      "stage": "C5",
+      "trace_status": "implemented_ducklake_comments_pgwire",
+      "required_columns": [
+        { "name": "objoid", "type_oid": 26, "nullable": false },
+        { "name": "classoid", "type_oid": 26, "nullable": false },
+        { "name": "objsubid", "type_oid": 23, "nullable": false },
+        { "name": "description", "type_oid": 25, "nullable": false }
+      ]
+    },
+    {
       "name": "pg_catalog.pg_database",
       "stage": "C3",
       "trace_status": "reference_pending",
@@ -340,6 +361,23 @@
         { "name": "is_nullable", "type_oid": 1043, "nullable": true },
         { "name": "column_default", "type_oid": 1043, "nullable": true },
         { "name": "ordinal_position", "type_oid": 23, "nullable": true }
+      ]
+    },
+    {
+      "id": "structural_default_comment_discovery",
+      "stage": "C5",
+      "trace_status": "implemented_ducklake_metadata_pgwire",
+      "protocol": "extended",
+      "consumers": ["psql 18.3", "GDAL/OGR 3.11.5", "QGIS 3.44"],
+      "sql": "SELECT d.adrelid, d.adnum, d.adbin, pg_catalog.pg_get_expr(d.adbin, d.adrelid) AS default_expression, pg_catalog.col_description(d.adrelid, d.adnum) AS column_description, pg_catalog.obj_description(d.adrelid, 'pg_class') AS table_description FROM pg_catalog.pg_attrdef d WHERE d.adrelid = $1 ORDER BY d.adnum",
+      "parameter_type_oids": [26],
+      "expected_columns": [
+        { "name": "adrelid", "type_oid": 26, "nullable": false },
+        { "name": "adnum", "type_oid": 21, "nullable": false },
+        { "name": "adbin", "type_oid": 194, "nullable": false },
+        { "name": "default_expression", "type_oid": 25, "nullable": true },
+        { "name": "column_description", "type_oid": 25, "nullable": true },
+        { "name": "table_description", "type_oid": 25, "nullable": true }
       ]
     },
     {

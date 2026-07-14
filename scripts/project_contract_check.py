@@ -154,6 +154,8 @@ def check_postgresql_profile(errors: list[str]) -> None:
         "pg_catalog.pg_collation",
         "pg_catalog.pg_class",
         "pg_catalog.pg_attribute",
+        "pg_catalog.pg_attrdef",
+        "pg_catalog.pg_description",
         "pg_catalog.pg_database",
         "pg_catalog.pg_roles",
         "information_schema.tables",

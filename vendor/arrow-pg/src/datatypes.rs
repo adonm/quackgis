@@ -21,6 +21,7 @@ pub enum PgTypeHint {
     Name,
     NameArray,
     Char,
+    PgNodeTree,
     Text,
     Varchar,
     Regclass,
@@ -36,6 +37,7 @@ impl PgTypeHint {
             Self::Name => "name",
             Self::NameArray => "name_array",
             Self::Char => "char",
+            Self::PgNodeTree => "pg_node_tree",
             Self::Text => "text",
             Self::Varchar => "varchar",
             Self::Regclass => "regclass",
@@ -340,6 +342,14 @@ pub fn field_into_pg_type(field: &Arc<Field>) -> PgWireResult<Type> {
             {
                 Type::CHAR
             }
+            "pg_node_tree"
+                if matches!(
+                    arrow_type,
+                    DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+                ) =>
+            {
+                Type::PG_NODE_TREE
+            }
             "text"
                 if matches!(
                     arrow_type,
@@ -535,6 +545,12 @@ mod tests {
             ("oid", DataType::UInt32, PgTypeHint::Oid, Type::OID),
             ("typname", DataType::Utf8, PgTypeHint::Name, Type::NAME),
             ("typtype", DataType::Utf8, PgTypeHint::Char, Type::CHAR),
+            (
+                "adbin",
+                DataType::Utf8,
+                PgTypeHint::PgNodeTree,
+                Type::PG_NODE_TREE,
+            ),
             ("formatted", DataType::Utf8, PgTypeHint::Text, Type::TEXT),
             (
                 "character_data",

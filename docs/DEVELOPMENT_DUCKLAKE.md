@@ -103,7 +103,8 @@ global-OID, attribute-number, range, reference, and committed-snapshot coverage
 invariants before/after reconciliation and fails closed on inconsistency. The gate
 injects a duplicate mapping, requires the post-commit session to quarantine, and
 requires restart rejection. A SHA-256 fingerprint of current identity names/IDs
-advances the schema epoch for create, rename, add, drop, and recreate; direct
+plus DuckDB-reported column defaults and table/column comments advances the schema
+epoch for create, rename, add, drop, recreate, and metadata changes; direct
 pgwire relation references to the control schema are rejected, as are dynamic
 `query`/`query_table` indirection and direct `ducklake_column_info` calls.
 
@@ -131,10 +132,21 @@ nullable `to_reg*`, strict PostgreSQL SQLSTATEs, bound text input, explicit text
 output, `format_type`, aliases/arrays/typmods, and OID casts. The exact
 `pg18-column-core-v1` catalog descriptions execute through the same pgwire test.
 
+The first traced structural slice projects normalized DuckLake column defaults
+through `pg_attrdef` and table/column comments through `pg_description`.
+`pg_get_expr`, `col_description`, and `obj_description` return PostgreSQL `text`,
+while `adbin` retains PostgreSQL `pg_node_tree` wire identity. Effective-role
+visibility is structurally intersected with the session login's legacy read/write
+ceiling. DuckDB reports the implicit no-default marker as the string `NULL`; the
+projection normalizes it to SQL NULL. An explicit `DEFAULT NULL` is therefore
+semantically preserved as no default rather than distinguished as a separate
+catalog row. Comment/default DDL is not added to the bounded pgwire statement
+surface by this discovery slice.
+
 C3 implementation is complete in this gated lane. Durable empty-schema identity
 still needs upstream API support. Role semantics and role-aware information
 schema now execute independently of the development override; constraints,
-indexes, richer defaults/comments, REST cache consumers, and broader expression
+indexes, generated-column semantics, REST cache consumers, and broader expression
 provenance remain C5 or later M3 slices.
 
 ## Runtime trust boundary
