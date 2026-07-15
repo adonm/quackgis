@@ -6,6 +6,12 @@ run through `just ci` or the pinned native recipes.
 `duckdb_wire_read::current_duckdb_transport_profile` owns the required 100k-row
 direct DuckDB/ADBC/pgwire benchmark smoke and writes its manifest under `.tmp`.
 
+`iroh_direct::duckdb_pgwire_oracles_pass_through_local_iroh` owns the first native
+I0 direct-path smoke. It uses real bootstrap, worker, and tiny-client endpoints
+and proves typed/spatial query, COPY, rollback, cancellation/quarantine, and fresh
+reconnect behavior against a fresh local DuckLake worker. Run it with
+`just iroh-duckdb-smoke`; it is functional evidence, not relay or resource proof.
+
 - `duckdb_spatial_compat.json` is the maintained 57-case disposition ledger; 43
   cases currently execute through pgwire.
 - `fixtures/duckdb_catalog_contract.json` is the client-neutral executable

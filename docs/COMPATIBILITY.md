@@ -22,8 +22,10 @@ challenges, typed streams, mandatory uncompressed negotiation, fail-closed relay
 selection, a loopback tiny client, and a worker bridge that binds pgwire startup
 to the leased role without carrying SCRAM. `just iroh-protocol-test` proves the
 pure contract; `just iroh-direct-smoke` uses real local iroh endpoints and a fake
-trust-mode pgwire backend. Actual DuckDB protocol/COPY/cancellation semantics and
-direct/relayed resource claims remain open.
+trust-mode pgwire backend. `just iroh-duckdb-smoke` additionally proves typed and
+spatial queries, exact COPY publication, rollback, cancellation/quarantine, and
+fresh reconnect against the current DuckDB/DuckLake worker. Broad protocol parity
+and direct/relayed resource claims remain open.
 
 The exact OGR 3.11.5 client image also has a credential-free normalized
 copied-point trace against digest-pinned PostgreSQL 18.4/PostGIS. Its 21 query
@@ -139,7 +141,7 @@ mise exec -- just ci
 | psycopg | 3.2.13 TLS/SCRAM scalar smoke passes in Kind; copied-data workflow remains open |
 | SQLAlchemy, GeoPandas, pg_featureserv | target; named dependency workflows remain open |
 | `pg_dump`, logical replication, PL/pgSQL, triggers, LISTEN/NOTIFY | unsupported/non-goals |
-| Tiny iroh client bridge | executable local-direct pgwire/cancellation seam passes against a deterministic fake trust-mode backend; actual QuackGIS, public/custom relay, packaging, and resource qualification remain open |
+| Tiny iroh client bridge | executable local-direct seam passes simple/extended and spatial QuackGIS queries, exact COPY, rollback, cancellation/quarantine, and fresh reconnect; broad oracle parity, public/custom relay, packaging, and resource qualification remain open |
 
 ## Spatial contract
 
@@ -169,8 +171,9 @@ unless a focused test says otherwise.
 - The I0 tiny client and worker bridge are not release ingress yet. They require
   loopback listeners, a trust-mode backend that immediately returns
   `AuthenticationOk`, and the exact leased startup role; nested TLS/GSS and
-  password/SASL challenges are rejected. The registered direct test uses a fake
-  backend and makes no DuckDB semantics, relay, or performance claim.
+  password/SASL challenges are rejected. The native direct gate proves a bounded
+  DuckDB/DuckLake query/COPY/rollback/cancellation slice, but makes no broad
+  protocol, relay, packaging, or performance claim.
 - Maintenance is disabled unless `QUACKGIS_MAINTENANCE_USER` names the caller;
   it remains constrained by the write table allowlist and cannot run inside an
   explicit transaction.

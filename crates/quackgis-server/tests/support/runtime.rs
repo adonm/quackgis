@@ -78,6 +78,11 @@ impl TestRuntime {
     pub fn storage(&self) -> &Arc<DuckDbAdbcStorage> {
         &self.storage
     }
+
+    #[allow(dead_code)]
+    pub fn port(&self) -> u16 {
+        self.port
+    }
 }
 
 impl Drop for TestRuntime {

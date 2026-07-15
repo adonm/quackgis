@@ -74,11 +74,12 @@ Important limits:
 The first I0 transport slice is executable: a config-backed bootstrap issues a
 short-lived signed one-worker lease after registered-key proof, a challenged
 worker accepts typed pgwire/cancellation streams, and a bounded loopback tiny
-client multiplexes local sessions over iroh. The local-direct gate proves this
-seam against a deterministic fake trust-mode pgwire backend, including leased
+client multiplexes local sessions over iroh. The local-direct gates prove leased
 startup-role enforcement and rejection of nested TLS or backend password/SASL
-requests. Actual DuckDB semantics, public/custom relays, packaging, compression,
-and transport resource budgets remain open.
+requests, then run typed and spatial queries, exact COPY publication, rollback,
+cancellation/quarantine, and fresh reconnect against DuckDB/DuckLake. Broad
+protocol parity, public/custom relays, packaging, compression, and transport
+resource budgets remain open.
 
 TLS remains optional for local development. Set `QUACKGIS_TLS_MODE=required` with
 `QUACKGIS_TLS_CERT` and `QUACKGIS_TLS_KEY` to fail closed on plaintext startup.
@@ -140,6 +141,7 @@ mise exec -- just duckdb-current-benchmark
 mise exec -- just duckdb-runtime-static-check
 mise exec -- just iroh-protocol-test
 mise exec -- just iroh-direct-smoke
+mise exec -- just iroh-duckdb-smoke
 ```
 
 Use `just --list` for the complete current command set. Commands are maintained

@@ -76,8 +76,9 @@ bounded loopback tiny client, and typed pgwire/cancellation worker streams. The
 worker validates pgwire startup `user` against the lease, answers SSL/GSS requests
 without nested encryption, and accepts only `AuthenticationOk` from the loopback
 backend before forwarding any client authentication traffic. The tiny client
-recognizes initial cancellation framing but never parses SQL. Current evidence
-uses a fake trust-mode backend; actual DuckDB oracle parity and an owner-protected
+recognizes initial cancellation framing but never parses SQL. Current direct-path
+evidence reaches the DuckDB/DuckLake server for a bounded query/COPY/rollback/
+cancellation slice; broad parity, relays, resource budgets, and an owner-protected
 packaged local boundary remain open.
 
 The release application path always enters through the tiny client. Bootstrap

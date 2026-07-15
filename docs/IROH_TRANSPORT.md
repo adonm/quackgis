@@ -45,10 +45,13 @@ worker, and client iroh endpoints and proves concurrent sessions, local bridge
 forwarding, nested-TLS denial, and cancellation against a deterministic fake
 trust-mode pgwire backend.
 
-This is not yet DuckDB application or performance evidence. The actual QuackGIS
-result/type/error/transaction/COPY/cancellation oracles, public-default and custom
-relay paths, reconnect/restart, and CPU/RSS/throughput/compression profiles remain
-open and are tracked in [ROADMAP_STATUS.md](./ROADMAP_STATUS.md).
+Run `just iroh-duckdb-smoke` for the native direct path. It compares a direct
+scalar result, then proves typed parameters, DuckDB Spatial, exact two-row COPY
+publication, transaction rollback, cancellation with `57014`, quarantine, and a
+fresh tunneled reconnect against official local DuckLake. Broader result/type/
+error/transaction/COPY parity, public-default and custom relay paths, worker
+restart, and CPU/RSS/throughput/compression profiles remain open and are tracked
+in [ROADMAP_STATUS.md](./ROADMAP_STATUS.md).
 
 ## Operator configuration
 

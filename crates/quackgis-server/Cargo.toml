@@ -43,6 +43,10 @@ path = "tests/roadmap_profiles.rs"
 name = "catalog_contract"
 path = "tests/catalog_contract.rs"
 
+[[test]]
+name = "iroh_direct"
+path = "tests/iroh_direct.rs"
+
 [dependencies]
 arrow-pg = { workspace = true }
 pgwire = { workspace = true }
@@ -81,3 +85,5 @@ libc = "0.2"
 sha2 = { workspace = true }
 bytes = "1"
 regex = { workspace = true }
+iroh = { workspace = true }
+quackgis-edge = { path = "../quackgis-edge" }

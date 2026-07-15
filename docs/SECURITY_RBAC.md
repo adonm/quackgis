@@ -54,8 +54,9 @@ infrastructure, and production failure drills remain open.
    are implemented. The worker answers SSL/GSS requests without nesting
    encryption and refuses a backend unless its first frame is
    `AuthenticationOk`, before a client can send password/SASL material. The
-   registered direct smoke uses a fake backend; owner-protected packaged local
-   boundaries and the actual DuckDB oracle remain open.
+   registered native smoke reaches the DuckDB/DuckLake server for a bounded
+   query/COPY/cancellation slice; owner-protected packaged local boundaries,
+   role-catalog preauthentication, and broad oracle parity remain open.
 2. **HTTP client → REST:** the current bearer token is a preview control. The
    Local 1.0 target validates JWT signature, issuer, audience, time bounds, and a
    bounded role claim before opening a database transaction. Shared 1.x uses the
