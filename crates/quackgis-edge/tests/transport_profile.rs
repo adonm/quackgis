@@ -40,12 +40,34 @@ enum ProfilePath {
 #[derive(Serialize)]
 struct ProfileEvidence {
     schema: &'static str,
+    status: &'static str,
     source_sha: String,
     source_dirty: bool,
+    runtime: RuntimeEvidence,
+    host: HostEvidence,
     profile: &'static str,
     payload_bytes: usize,
     modes: Vec<ModeEvidence>,
     budgets: Budgets,
+}
+
+#[derive(Serialize)]
+struct RuntimeEvidence {
+    quackgis_version: &'static str,
+    iroh_version: &'static str,
+    lz4_flex_version: &'static str,
+    build_profile: &'static str,
+}
+
+#[derive(Serialize)]
+struct HostEvidence {
+    os: String,
+    architecture: &'static str,
+    cpu_model: String,
+    logical_cpus: usize,
+    memory_bytes: Option<u64>,
+    cgroup_memory_max_bytes: Option<u64>,
+    cgroup_cpu_max: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -381,8 +403,16 @@ async fn direct_and_relay_transport_profile() -> Result<()> {
     let (source_sha, source_dirty) = source_state()?;
     let evidence = ProfileEvidence {
         schema: "quackgis-iroh-transport-evidence-v1",
+        status: "pass",
         source_sha,
         source_dirty,
+        runtime: RuntimeEvidence {
+            quackgis_version: env!("CARGO_PKG_VERSION"),
+            iroh_version: "1.0.2",
+            lz4_flex_version: "0.13.1",
+            build_profile: "release",
+        },
+        host: host_evidence(),
         profile: "smoke",
         payload_bytes: PROFILE_PAYLOAD_BYTES,
         modes,
@@ -405,8 +435,8 @@ async fn direct_and_relay_transport_profile() -> Result<()> {
                 .join("../..")
                 .join(".tmp/iroh-transport-profile/smoke.json")
         });
-    write_evidence(&output, &evidence)?;
     enforce_budgets(&evidence.modes)?;
+    write_evidence(&output, &evidence)?;
     println!("iroh_transport_profile_ok out={}", output.display());
     Ok(())
 }
@@ -882,6 +912,51 @@ fn source_state() -> Result<(String, bool)> {
     let sha = command_output(&["rev-parse", "HEAD"])?;
     let status = command_output(&["status", "--porcelain=v1", "--untracked-files=all"])?;
     Ok((sha.trim().to_owned(), !status.is_empty()))
+}
+
+fn host_evidence() -> HostEvidence {
+    HostEvidence {
+        os: os_description(),
+        architecture: std::env::consts::ARCH,
+        cpu_model: proc_value("/proc/cpuinfo", "model name").unwrap_or_else(|| "unknown".into()),
+        logical_cpus: std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1),
+        memory_bytes: proc_value("/proc/meminfo", "MemTotal")
+            .and_then(|value| value.split_whitespace().next()?.parse::<u64>().ok())
+            .and_then(|kib| kib.checked_mul(1024)),
+        cgroup_memory_max_bytes: read_trimmed("/sys/fs/cgroup/memory.max")
+            .and_then(|value| (value != "max").then(|| value.parse().ok()).flatten()),
+        cgroup_cpu_max: read_trimmed("/sys/fs/cgroup/cpu.max"),
+    }
+}
+
+fn os_description() -> String {
+    std::fs::read_to_string("/etc/os-release")
+        .ok()
+        .and_then(|contents| {
+            contents
+                .lines()
+                .find_map(|line| line.strip_prefix("PRETTY_NAME="))
+                .map(|value| value.trim_matches('"').to_owned())
+        })
+        .unwrap_or_else(|| std::env::consts::OS.to_owned())
+}
+
+fn proc_value(path: &str, key: &str) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()?
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            (name.trim() == key).then(|| value.trim().to_owned())
+        })
+}
+
+fn read_trimmed(path: &str) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|value| value.trim().to_owned())
 }
 
 fn command_output(arguments: &[&str]) -> Result<String> {
