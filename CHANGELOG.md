@@ -23,6 +23,11 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   text COPY, rollback, cancellation/quarantine, and a fresh reconnect through the
   bootstrap/tiny-client/worker path to the current DuckDB/official-DuckLake
   server, with exact row/count/sum and SQLSTATE oracles.
+- The native iroh gate now runs one differential oracle unchanged over direct TCP
+  and the tiny-client path, requiring equal result values/types, errors,
+  parameters, portals, transaction/disconnect behavior, successful and malformed
+  COPY atomicity, cancellation/quarantine, concurrent sessions, and reconnect
+  state.
 - Local-first smoke/local/reference/external roadmap levels with explicit host
   performance, minimal-Kind topology, and managed-service claim boundaries.
 - A common profile evidence envelope with source dirty hashes, checksum-only native

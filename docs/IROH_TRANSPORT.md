@@ -45,11 +45,12 @@ worker, and client iroh endpoints and proves concurrent sessions, local bridge
 forwarding, nested-TLS denial, and cancellation against a deterministic fake
 trust-mode pgwire backend.
 
-Run `just iroh-duckdb-smoke` for the native direct path. It compares a direct
-scalar result, then proves typed parameters, DuckDB Spatial, exact two-row COPY
-publication, transaction rollback, cancellation with `57014`, quarantine, and a
-fresh tunneled reconnect against official local DuckLake. Broader result/type/
-error/transaction/COPY parity, public-default and custom relay paths, worker
+Run `just iroh-duckdb-smoke` for native direct-path parity. One reusable oracle
+runs unchanged against direct TCP and the tiny-client bridge and requires equal
+result values/types, stable errors, typed parameters, one-row portals, DuckDB
+Spatial, commit/rollback/disconnect behavior, successful and malformed COPY
+atomicity, cancellation/quarantine, and fresh reconnect state. It also opens two
+concurrent tunneled sessions. Public-default and custom relay paths, worker
 restart, and CPU/RSS/throughput/compression profiles remain open and are tracked
 in [ROADMAP_STATUS.md](./ROADMAP_STATUS.md).
 

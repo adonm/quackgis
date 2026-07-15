@@ -156,7 +156,7 @@ iroh-protocol-test:
 iroh-direct-smoke:
     cargo test -p quackgis-edge --test direct_path
 
-# Run core DuckDB pgwire/COPY/cancellation oracles through the local direct iroh bridge.
+# Differentially run result/type/error/portal/transaction/COPY/cancellation oracles over direct TCP and local iroh.
 iroh-duckdb-smoke driver=duckdb_adbc_driver:
     @set -eu; driver_arg='{{driver}}'; driver_arg="${driver_arg#driver=}"; \
     if [ ! -f "$driver_arg" ]; then echo 'DuckDB ADBC driver is missing; run `mise run duckdb-bootstrap`' >&2; exit 2; fi; \
