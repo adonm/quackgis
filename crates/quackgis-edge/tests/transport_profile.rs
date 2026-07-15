@@ -21,7 +21,10 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-const PROFILE_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
+const SMOKE_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
+const LOCAL_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
+const REFERENCE_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+const MAX_PROFILE_PAYLOAD_BYTES: usize = 256 * 1024 * 1024;
 const MAX_CONNECTION_MILLIS: f64 = 5_000.0;
 const MAX_FIRST_BYTE_MILLIS: f64 = 2_000.0;
 const MAX_CANCELLATION_MILLIS: f64 = 1_000.0;
@@ -45,7 +48,7 @@ struct ProfileEvidence {
     source_dirty: bool,
     runtime: RuntimeEvidence,
     host: HostEvidence,
-    profile: &'static str,
+    profile: String,
     payload_bytes: usize,
     modes: Vec<ModeEvidence>,
     budgets: Budgets,
@@ -327,7 +330,11 @@ impl CodecSnapshot {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "registered release-mode transport resource profile"]
 async fn direct_and_relay_transport_profile() -> Result<()> {
-    let payloads = profile_payloads();
+    let (profile, payload_bytes) = profile_configuration()?;
+    if profile == "reference" && source_state()?.1 {
+        bail!("reference iroh evidence requires a clean source tree");
+    }
+    let payloads = profile_payloads(payload_bytes);
     let backend = TcpListener::bind("127.0.0.1:0").await?;
     let backend_address = backend.local_addr()?;
     let backend_task = tokio::spawn(async move {
@@ -401,6 +408,9 @@ async fn direct_and_relay_transport_profile() -> Result<()> {
     backend_task.abort();
 
     let (source_sha, source_dirty) = source_state()?;
+    if profile == "reference" && source_dirty {
+        bail!("source tree changed during reference iroh evidence collection");
+    }
     let evidence = ProfileEvidence {
         schema: "quackgis-iroh-transport-evidence-v1",
         status: "pass",
@@ -413,8 +423,8 @@ async fn direct_and_relay_transport_profile() -> Result<()> {
             build_profile: "release",
         },
         host: host_evidence(),
-        profile: "smoke",
-        payload_bytes: PROFILE_PAYLOAD_BYTES,
+        profile,
+        payload_bytes,
         modes,
         budgets: Budgets {
             max_connection_millis: MAX_CONNECTION_MILLIS,
@@ -640,11 +650,11 @@ async fn profile_endpoint(
     Ok(endpoint)
 }
 
-fn profile_payloads() -> Vec<Payload> {
+fn profile_payloads(payload_bytes: usize) -> Vec<Payload> {
     let small = vec![b's'; 128];
-    let compressible = vec![b'x'; PROFILE_PAYLOAD_BYTES];
+    let compressible = vec![b'x'; payload_bytes];
     let mut state = 0x243f_6a88_u32;
-    let incompressible = (0..PROFILE_PAYLOAD_BYTES)
+    let incompressible = (0..payload_bytes)
         .map(|_| {
             state ^= state << 13;
             state ^= state >> 17;
@@ -655,24 +665,20 @@ fn profile_payloads() -> Vec<Payload> {
     let point_wkb = [
         1_u8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xf0, 0x3f, 0, 0, 0, 0, 0, 0, 0x40,
     ];
-    let wkb = point_wkb
-        .into_iter()
-        .cycle()
-        .take(PROFILE_PAYLOAD_BYTES)
-        .collect();
+    let wkb = point_wkb.into_iter().cycle().take(payload_bytes).collect();
     let copy_row = b"123456\tcompressible-copy-value-compressible-copy-value\n";
     let copy = copy_row
         .iter()
         .copied()
         .cycle()
-        .take(PROFILE_PAYLOAD_BYTES)
+        .take(payload_bytes)
         .collect();
     let result_row = b"D\0\0\0\x20\0\x02\0\0\0\x08\0\0\0\0\0\0\0\x01\0\0\0\x08resultxx";
     let result = result_row
         .iter()
         .copied()
         .cycle()
-        .take(PROFILE_PAYLOAD_BYTES)
+        .take(payload_bytes)
         .collect();
     vec![
         Payload {
@@ -700,6 +706,29 @@ fn profile_payloads() -> Vec<Payload> {
             bytes: Arc::new(result),
         },
     ]
+}
+
+fn profile_configuration() -> Result<(String, usize)> {
+    let profile =
+        std::env::var("QUACKGIS_IROH_PROFILE_LEVEL").unwrap_or_else(|_| "smoke".to_owned());
+    let default_bytes = match profile.as_str() {
+        "smoke" => SMOKE_PAYLOAD_BYTES,
+        "local" => LOCAL_PAYLOAD_BYTES,
+        "reference" => REFERENCE_PAYLOAD_BYTES,
+        _ => bail!("unknown iroh evidence level {profile:?}"),
+    };
+    let payload_bytes = std::env::var("QUACKGIS_IROH_PROFILE_BYTES")
+        .ok()
+        .map(|value| value.parse::<usize>())
+        .transpose()?
+        .unwrap_or(default_bytes);
+    if !(1024 * 1024..=MAX_PROFILE_PAYLOAD_BYTES).contains(&payload_bytes) {
+        bail!(
+            "iroh profile payload must be between 1 MiB and {} MiB",
+            MAX_PROFILE_PAYLOAD_BYTES / (1024 * 1024)
+        );
+    }
+    Ok((profile, payload_bytes))
 }
 
 fn enforce_budgets(modes: &[ModeEvidence]) -> Result<()> {

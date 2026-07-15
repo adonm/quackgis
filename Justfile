@@ -181,9 +181,11 @@ iroh-duckdb-relay-smoke driver=duckdb_adbc_driver:
       cargo test -p quackgis-server --test iroh_direct duckdb_pgwire_oracles_pass_through_forced_custom_relay -- --ignored --exact --nocapture --test-threads=1
 
 # Measure TCP, direct iroh, and forced-relay off/auto transport behavior and enforce I0 budgets.
-iroh-transport-profile out=".tmp/iroh-transport-profile/smoke.json":
-    @set -eu; out_arg='{{out}}'; out_arg="${out_arg#out=}"; out_arg="$(realpath -m "$out_arg")"; \
-    QUACKGIS_IROH_PROFILE_OUT="$out_arg" cargo test --release -p quackgis-edge --test transport_profile direct_and_relay_transport_profile -- --ignored --exact --nocapture --test-threads=1
+iroh-transport-profile level="smoke" bytes="8388608" out=".tmp/iroh-transport-profile/smoke.json":
+    @set -eu; level_arg='{{level}}'; bytes_arg='{{bytes}}'; out_arg='{{out}}'; \
+    level_arg="${level_arg#level=}"; bytes_arg="${bytes_arg#bytes=}"; out_arg="${out_arg#out=}"; out_arg="$(realpath -m "$out_arg")"; \
+    QUACKGIS_IROH_PROFILE_LEVEL="$level_arg" QUACKGIS_IROH_PROFILE_BYTES="$bytes_arg" QUACKGIS_IROH_PROFILE_OUT="$out_arg" \
+      cargo test --release -p quackgis-edge --test transport_profile direct_and_relay_transport_profile -- --ignored --exact --nocapture --test-threads=1
 
 # Install checksum-pinned libduckdb and signed extensions into ignored .tmp.
 duckdb-bootstrap duckdb_bin=duckdb_bin:
