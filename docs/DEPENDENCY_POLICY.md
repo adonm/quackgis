@@ -17,9 +17,10 @@
   new architecture decision and are not acceptable transitive conveniences.
 - Upstream roadmap adoption follows `DUCKDB_ROADMAP_ALIGNMENT.md`: evaluate
   DuckDB 1.5.5 after release and DuckDB 2.0 as a full bundle; do not publish Local
-  1.0 on an unsupported engine line. Stable Quack, async client I/O, and C/Rust
-  extension APIs may replace current code only after equivalence and upgrade
-  gates pass.
+  1.0 on an unsupported engine line. Async client I/O and C/Rust extension APIs
+  may replace current code only after equivalence and upgrade gates pass. Quack or
+  another remote engine protocol is watch-only and requires an explicit direction
+  change plus complete attached-DuckLake data-plane evidence.
 
 ## Rust dependencies
 

@@ -14,7 +14,8 @@ This document defines the durable product direction.
 ## Product thesis
 
 QuackGIS is a thin, high-performance PostgreSQL/PostGIS compatibility and control
-edge for DuckDB Spatial and official DuckLake.
+edge for DuckDB Spatial and official DuckLake. One complete worker owns the Rust
+policy edge, ADBC, and its in-process DuckDB execution engine.
 
 It lets PostgreSQL-oriented spatial tools use DuckDB's analytical and spatial
 execution without introducing another query engine, storage writer, distributed
@@ -30,8 +31,16 @@ The intended product advantage is the combination of:
 3. official DuckLake storage and snapshot semantics;
 4. bounded, trace-driven compatibility rather than broad emulation;
 5. one role, privilege, and metadata contract shared by pgwire, GIS clients, and
-   a load-balanceable PostgREST-style HTTP edge; and
-6. predictable streaming, cancellation, admission, and bulk-ingest behavior.
+   a load-balanceable PostgREST-style HTTP edge;
+6. predictable streaming, cancellation, admission, and bulk-ingest behavior;
+7. a tiny iroh client that is the sole application ingress, pairs once, supports
+   desktop and serverless runtimes, and forwards pgwire or HTTP without owning SQL
+   policy, worker selection, or storage credentials;
+8. adaptive, low-overhead transport compression that reduces relayed bytes when
+   measured savings justify its CPU and latency cost without compressing
+   authentication/control traffic; and
+9. horizontally replaceable complete workers over one managed control/catalog
+   database and object store, without a central SQL router.
 
 ## Current reality
 
@@ -70,9 +79,13 @@ Direction starts from these constraints, not from capabilities of retired engine
 
 ## First release
 
-The first release has one state-owning, read-mostly spatial analytical server with
-controlled bulk ingestion over local official DuckLake, plus optional stateless
-HTTP read replicas that reach it only through pgwire.
+The first release has one state-owning, read-mostly spatial analytical worker with
+controlled bulk ingestion over local official DuckLake. Maintained PostgreSQL/GIS
+clients and optional stateless HTTP read replicas enter through the packaged tiny
+client. Direct TCP remains a current/development correctness and performance
+baseline rather than a supported application ingress. The early
+one-client/one-worker iroh profile reaches the same complete Rust/ADBC/DuckDB
+worker and does not claim shared storage or clustered authorization.
 
 Release-required outcomes:
 
@@ -85,6 +98,12 @@ Release-required outcomes:
 - a packaged stateless HTTP read edge whose JWT role mapping, schema discovery,
   authorization, and role-aware OpenAPI run through the same pgwire contract;
 - selective spatial reads and ordinary DuckDB OLAP with measured plans;
+- a packaged tiny client that obtains a signed one-worker access lease from a
+  minimal config-backed bootstrap and carries pgwire to that worker over iroh,
+  with direct, public-relay-default, and explicitly configured relay performance,
+  cancellation, COPY, reconnect, and resource evidence;
+- no application-facing worker TCP/HTTP listener in the release profile; standard
+  clients use the tiny client's owner-protected local or embedded adapter;
 - restart, backup, restore, compaction, and upgrade procedures; and
 - reproducible packages with no runtime extension downloads.
 
@@ -93,17 +112,125 @@ later storage capability. It is distinct from QuackGIS's PostgreSQL-compatible
 `pg_catalog` surface and must not block a useful local release or be claimed
 before official DuckLake concurrency, visibility, and recovery evidence exists.
 
+Iroh transport work is deliberately earlier than the shared-cluster milestone.
+The one-client/one-complete-worker path must expose connection setup, direct-path
+establishment, relay fallback, throughput, time-to-first-row, COPY, cancellation,
+CPU, memory, stream-multiplexing, and adaptive-compression costs while the local
+execution baseline is still small. I0 includes the control/edge protocol split,
+registered-key proof, and one bootstrap-issued worker lease so later work cannot
+move passwords or assignment into the client or worker. Durable PostgreSQL pairing
+state, multi-bootstrap gossip reconciliation, and remote DuckLake remain later
+layers built on that measured path.
+
+## Shared iroh cluster target
+
+After Local 1.0, the scale-out target is an iroh-native cluster of complete
+QuackGIS workers over one managed PostgreSQL and object-storage stack:
+
+```text
+desktop / server / serverless application
+             │ local socket or embedded adapter
+             ▼
+      tiny paired QuackGIS client
+             │ iroh through configured relays
+             ▼
+       one assigned full worker
+             │
+             ├── protected QuackGIS control/user database
+             ├── PostgreSQL-backed official DuckLake catalog
+             └── shared object storage
+```
+
+The durable cluster contract is:
+
+- SCRAM is used by bootstrap to pair or recover a client, not by workers and not
+  stored as a runtime client password;
+- pairing registers a generated credential public key in the control database;
+  the credential private key and handle are stored in the desktop keystore or
+  serverless secret store and remain usable while the role and credential row are
+  enabled;
+- bootstrap issues one short-lived signed access lease binding the credential
+  public key, LOGIN role, permitted protocols, assigned worker, assignment
+  generation, and security/configuration epochs. The lease is the runtime
+  certificate and assignment proof; there is no second long-lived signed client
+  certificate to renew or reconcile;
+- the credential identity is distinct from the iroh transport `EndpointId`, so a
+  service deployment may share one credential while each ephemeral instance uses
+  its own iroh endpoint key;
+- bootstrap, not the client, assigns one credential to one worker at a time and
+  issues the lease. All pgwire and HTTP sessions use that worker until bootstrap
+  fences the generation during an explicit drain or failure transition;
+- workers enforce signed assignment generations; clients do not route individual
+  statements or simultaneously fan one credential out across workers;
+- bootstrap nodes and workers form one bounded gossip pool for liveness,
+  readiness, drain, and coarse capacity; clients never join that gossip topic;
+- PostgreSQL control metadata is authoritative for users, SCRAM verifiers, client
+  credentials, roles, grants, policy, worker registration, pool configuration,
+  assignments, revocation, and schema/security/configuration epochs; gossip is
+  never an authorization or configuration authority;
+- one authenticated `quackgis/edge/1` connection carries typed pgwire, HTTP, and
+  cancellation streams under the same access lease, relay setup, compression
+  negotiation, and connection lifecycle;
+- the client contains no DuckDB, ADBC, SQL authorization, object-store
+  credentials, gossip, worker list, scoring algorithm, or failover decision; it
+  only obtains, caches, and follows a bootstrap-issued access lease;
+- bootstrap, worker, and client relay lists are independently configurable. An
+  omitted relay configuration selects iroh's public relay preset. A configured
+  non-empty list selects exactly those relays; an explicitly configured empty list
+  is invalid;
+  and
+- transport compression is negotiated per protocol connection with `none` as a
+  mandatory fallback and an `auto` policy that emits independent bounded raw or
+  compressed blocks according to measured gain, path cost, and available CPU.
+
+Public relays make development and first use work without infrastructure setup.
+Production deployments may select hosted relays without changing pairing,
+identity, assignment, pgwire, HTTP, or storage semantics. Relay API secrets and
+client/worker private keys remain in their respective secret stores and never
+enter gossip or DuckLake metadata.
+
+The native client is delivered as a small binary and reusable library. Desktop
+mode exposes an owner-protected local socket, using a generated installation-local
+credential only where the local transport cannot authenticate the OS user.
+Serverless mode loads the registered service credential key and handle from the
+platform secret store and uses an embedded adapter or process-local listener.
+Multiple instances may share that credential while each uses an independent iroh
+transport key and the same bootstrap assignment. Direct browser/WASM access is a
+separate security and transport capability.
+
+Client, bootstrap, and worker consume one shared transport implementation for
+relay policy, ALPN and stream preludes, access-lease/proof types, framing,
+compression, limits, errors, and metrics. Bootstrap/control uses
+`quackgis/control/1` for SCRAM pairing and lease refresh. Workers accept
+application data only through `quackgis/edge/1`; they do not handle pairing,
+passwords, worker selection, credential registration/access-lease issuance, or
+local-client secrets.
+
 ## Ownership rules
 
 - DuckDB is the only query planner and spatial execution engine.
-- Official DuckLake is the only writer of new durable catalogs and data.
+- Official DuckLake is the only writer of new durable user-schema catalogs and
+  table data. The separate Shared 1.x PostgreSQL control database writes only
+  QuackGIS identity, policy, configuration, and operational state.
 - Rust does not implement row-wise spatial kernels or pull arbitrary table rows
   out of DuckDB for fallback execution.
 - Rust does not maintain an independent table catalog, optimizer, or data cache.
-- QuackGIS may persist protected control metadata for roles, memberships, grants,
-  policy, catalog epochs, and compatibility OID identity through the supported
-  DuckDB/DuckLake transaction path. This metadata may project authoritative user
-  schema but may not become a second user-table authority.
+- Local compatibility identity and catalog epochs may use protected metadata
+  written through the supported DuckDB/DuckLake path. Shared users, SCRAM
+  verifiers, client credentials, roles, memberships, grants, policy, worker
+  pools, assignments, revocation, and security/configuration epochs live in a
+  transactional PostgreSQL control database. Both remain separate from official
+  DuckLake metadata and may project authoritative user schema but may not become
+  a second user-table authority.
+- Iroh authenticates transport endpoints. A bootstrap-signed access lease,
+  credential-key proof, and the control database determine database identity and
+  worker assignment; relay admission, client assertions, and gossip membership
+  never grant a LOGIN role.
+- Every worker owns a distinct iroh private key. A service client credential may
+  intentionally be shared by serverless instances, but worker endpoint keys are
+  never shared across replicas.
+- Worker affinity reduces cross-worker visibility transitions but never replaces
+  DuckLake conflict, visibility, backup, restore, or independent-reader evidence.
 - PostgreSQL compatibility exists only at observable protocol, SQL, type, and
   catalog boundaries in the declared versioned compatibility profile.
 - PostgreSQL catalog visibility, information-schema filtering, privilege inquiry,
@@ -153,6 +280,57 @@ Register active native statements against pgwire cancel keys. Add statement and
 queue deadlines, separate reader/writer/maintenance limits, and a fixed blocking
 worker budget. Quarantine uncertain connections. Reserve capacity for cancel,
 health, and transaction cleanup.
+
+### Connected sessions and native leases
+
+The clustered worker separates cheap authenticated client sessions from native
+DuckDB connection leases and active-query permits. Thousands of mostly idle
+pgwire sessions may share one worker without allocating one native connection or
+blocking thread per session. Autocommit statements lease a clean engine
+connection; explicit transactions, COPY, and active or suspended result streams
+pin one within separate limits. Idle transactions, portals, COPY input, queues,
+and per-credential fan-out have bounded time and count limits. A reused native
+connection is reset or quarantined before another pgwire session can acquire it.
+
+### Iroh edge and worker pools
+
+The tiny client obtains one signed access lease from a small bootstrap pool, then
+maps each local pgwire, HTTP, or cancellation session to a typed stream on that
+lease's worker. It never receives a pool to score. Worker addition does not
+rebalance established clients. Graceful drain completes old sessions before
+bootstrap advances the assignment; abrupt failure drops sessions, bootstrap
+fences the old generation, and a refreshed lease permits reconnect to one
+caught-up replacement. No transaction or statement is replayed transparently.
+
+Bootstrap and worker gossip is soft state with bounded members, message size,
+frequency, and expiry. PostgreSQL remains the source of truth for desired pool
+state and assignment generations. Pool scale improves aggregate execution and
+availability; one worker must still support the declared mostly-idle client
+population with bounded memory and native leases.
+
+### Adaptive transport compression
+
+Compression runs in QuackGIS's framed tunnel before QUIC encryption and after the
+remote client or worker connection is authenticated. Enrollment, SCRAM,
+grant/access proofs, assignment/control messages, cancellation, and other small
+latency-sensitive frames remain uncompressed. Compression state is isolated per
+direction and pgwire/HTTP stream; dictionaries are never shared across clients,
+credentials, requests, or sessions.
+
+The negotiated protocol always supports `none`. The default `auto` policy samples
+bounded application blocks, skips small or already incompressible data, and uses a
+selected low-latency codec only when expected byte savings exceed its measured
+CPU and latency cost. Relay use, direct-path bandwidth, worker CPU pressure, and
+configured operator preference may influence the decision but never correctness.
+Every block declares bounded compressed and decompressed lengths; invalid,
+oversized, truncated, or expansion-ratio-violating input fails before allocation
+or pgwire/HTTP delivery. Idle sessions retain no compression buffer.
+
+Metrics expose aggregate input/output bytes, ratio, codec, CPU time, and
+compressed/skipped/error counts without payloads, SQL, parameters, credentials,
+or object paths. I0 selects the codec and thresholds from direct and relayed
+compressible/incompressible profiles; the design does not commit to a codec before
+that evidence.
 
 ### Streaming ingestion
 
@@ -210,18 +388,24 @@ Passing an earlier ring does not imply a later claim.
 
 - **Local 1.0:** resource-bounded single-process vector analytics over local
   official DuckLake with bulk ingest, a PostgreSQL 18 catalog/RBAC profile,
-  maintained read clients, and packaged role-aware HTTP read/OpenAPI replicas.
+  maintained read clients, packaged role-aware HTTP read/OpenAPI replicas, and a
+  measured tiny-client/minimal-bootstrap/one-complete-worker iroh transport
+  profile using registered-key proof and a signed one-worker access lease.
 - **Shared 1.x:** official shared DuckLake using managed catalog/object storage,
-  enabled only after concurrency, visibility, backup, and restore gates.
+  protected PostgreSQL control state, a tiny paired iroh client, a bounded
+  bootstrap/worker gossip pool, credential-to-worker affinity, and common pgwire
+  and HTTP delivery. It is enabled only after concurrency, visibility, identity,
+  revocation, relay, backup, and restore gates.
 - **Dataset lifecycle 1.x:** protected versions, promotion, rollback, retention,
   and maintained summaries using official primitives.
 - **Later research:** multi-modal inventories and national-scale stress after the
   10M and 100M vector gates are routine.
 
-Stable Quack is a candidate engine transport for Local/Shared 1.x, not another
-client API. Official DuckLake protected snapshots, RBAC, UDTs, and materialized
-views are preferred future primitives where they can delete QuackGIS control or
-summary machinery without weakening PostgreSQL-facing semantics.
+Iroh is the client and cluster-control transport; it does not split DuckDB from a
+complete QuackGIS worker or bypass the Rust policy edge. Official DuckLake
+protected snapshots, RBAC, UDTs, and materialized views are preferred future
+primitives where they can delete QuackGIS control or summary machinery without
+weakening PostgreSQL-facing semantics.
 
 ## Explicit non-goals
 
@@ -231,6 +415,19 @@ summary machinery without weakening PostgreSQL-facing semantics.
 - DataFusion, SedonaDB, PostgreSQL, or another auxiliary query engine.
 - Row-wise spatial computation in Rust.
 - Client-name-specific SQL branches.
+- A central SQL router or manager in the query data path.
+- Direct application connections to a worker that bypass the tiny client and its
+  bootstrap-issued access lease.
+- Per-statement worker routing or simultaneous multi-worker use by one client
+  credential.
+- Client-side worker discovery, scoring, assignment, or failover decisions.
+- Client participation in the worker/bootstrap gossip pool.
+- Transparent replay of failed statements or transactions on another worker.
+- Reusing one iroh worker private key across autoscaled replicas.
+- Treating relay access, a gossip topic, or a client-supplied role header as
+  database authorization.
+- Compressing enrollment/authentication/control traffic or sharing compression
+  dictionaries across clients, credentials, requests, or sessions.
 - PL/pgSQL, triggers, LISTEN/NOTIFY, logical replication, or `pg_dump` fidelity.
 - PostGIS topology, Tiger geocoder, SFCGAL, or raster pixel algebra.
 - Multi-writer/horizontal-scale claims based only on emulators.

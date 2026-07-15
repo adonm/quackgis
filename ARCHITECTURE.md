@@ -25,8 +25,7 @@ PostgreSQL / GIS / application clients
 │ portals · Arrow↔PostgreSQL encoding · PostGIS compatibility  │
 │ bounded request context · audit/metrics                      │
 └──────────────────────────────────────────────────────────────┘
-                  │ current: Arrow / ADBC
-                  │ candidate: stable Quack-backed transport
+                  │ Arrow / ADBC inside one complete worker
                   ▼
 ┌──────────────────────────────────────────────────────────────┐
 │ DuckDB + official extensions                                 │
@@ -49,7 +48,7 @@ capability is implemented in the current preview.
 | Rust pgwire edge | protocol state, TLS/SCRAM, target PostgreSQL-facing roles/session/catalog projection, parsed policy, COPY framing, PostgreSQL types/errors, connection lifecycle | SQL planning, spatial kernels, table data, an independent user-schema authority |
 | DuckDB | SQL planning, vectorized execution, exact spatial operations, transactions, resource/spill behavior | PostgreSQL protocol or identity policy |
 | official DuckLake | catalog, snapshots, Parquet publication, maintenance primitives | client compatibility or authorization |
-| planned QuackGIS control metadata | role membership/grants, compatibility OID mapping, policy and schema/security epochs, written through supported DuckDB/DuckLake transactions | user table definitions/data, SQL planning, independent snapshot publication |
+| planned QuackGIS control metadata | local compatibility identity through supported DuckDB/DuckLake transactions; shared users, credentials, roles, policy, pools, assignments, and security/configuration epochs in a protected PostgreSQL control database | user table definitions/data, SQL planning, independent snapshot publication |
 | `vendor/arrow-pg` | Arrow field/row encoding and maintained WKB wire identity | planning, catalogs, DataFusion support |
 | optional future QuackGIS DuckDB extension | measured vectorized functions unavailable through native SQL/macros | pgwire, auth, policy, COPY, catalogs, snapshots, DuckLake writes |
 
@@ -67,6 +66,27 @@ uses preinstalled signed `spatial` and `ducklake` extensions with `LOAD` only.
 Pgwire startup terminates at the Rust edge. Trust mode is development-only;
 password mode uses SCRAM-SHA-256. TLS certificate and key must be configured
 together. Parsed read/write policy runs before ADBC prepare or schema lookup.
+
+The planned I0 ingress treats an authenticated, end-to-end encrypted iroh
+connection as an already secure pgwire channel; direct TCP continues to require
+configured TLS outside development, but the iroh cluster leg does not nest pgwire
+TLS inside QUIC. The local client boundary is protected separately by an
+owner-only socket, process isolation, or generated local credential. A minimal
+config-backed bootstrap registers the client public key and assigns one worker in
+a signed access lease. The worker validates that lease and key proof before
+attaching the preauthenticated LOGIN role; it never receives pairing passwords or
+SCRAM verifiers. Tunnel compression is enabled only after that authentication and
+pgwire startup. The tiny client may recognize startup framing such as cancellation
+but never parses SQL.
+
+The release application path always enters through the tiny client. Bootstrap
+registers the client-generated credential public key, selects one worker, and
+signs a short-lived access lease; the client follows that lease and never receives
+a pool to score. One
+`quackgis/edge/1` connection carries typed pgwire, HTTP, and cancellation streams.
+Workers verify the lease and credential-key proof before attaching `session_user`;
+they do not handle pairing passwords, assignment, or local-client authentication.
+Direct TCP remains a current/development test oracle rather than release ingress.
 
 The target identity model distinguishes authenticated `session_user` from the
 effective `current_user`. Configuration-backed LOGIN/NOLOGIN roles, memberships,
@@ -108,13 +128,14 @@ SQL → normalize/rewrite → PostgreSQL AST → authorization/admission
     → owned ADBC reader → one Arrow batch → pgwire rows → client
 ```
 
-The engine transport is replaceable only at this boundary. A stable Quack-backed
-out-of-process profile may replace ADBC if it preserves Arrow streaming,
-parameters, transaction outcomes, cancellation, extension pins, and resource
-budgets while reducing native crash/concurrency burden. It does not replace the
-Rust pgwire/catalog/authorization edge. Async I/O is adopted only when exposed by
-a supported cancellable client API, at which point it replaces the matching
-blocking path rather than creating a second execution path.
+ADBC remains inside each complete worker. The planned iroh transport terminates at
+the same Rust pgwire/HTTP/catalog/authorization edge and does not replace this
+engine boundary or expose DuckDB directly. An out-of-process engine would require
+an explicit direction change and evidence that it can serve the attached official
+DuckLake data plane while preserving streaming, parameters, transaction outcomes,
+cancellation, extension pins, and resource budgets. Async I/O is adopted only
+when exposed by a supported cancellable client API, at which point it replaces the
+matching blocking path rather than creating a second execution path.
 
 The live stream owns its ADBC reader, statement, connection lease, admission
 permit, cancellation registration, and deadline. Pgwire requests another native
@@ -274,10 +295,11 @@ reuses an immutable revision of `pg-rest-server`'s URL parser/query engine but r
 only through the maintained QuackGIS pgwire boundary. It does not link ADBC,
 publish DuckLake state, or become a second catalog/security authority. The
 current bearer identity and independently reloadable `information_schema` cache
-are bootstrap behavior. The target uses JWT validation, one authenticator pgwire
+are bootstrap behavior. Local 1.0 uses JWT validation, one authenticator pgwire
 identity, transaction-local role/context, role-aware catalog/OpenAPI discovery,
-and caches keyed by role plus schema/security epoch. Unsupported PostgREST
-behavior fails closed until an actual-pgwire compatibility case exists.
+and caches keyed by role plus schema/security epoch. Shared 1.x moves HTTP to the
+same assigned complete worker as pgwire over the measured iroh edge. Unsupported
+PostgREST behavior fails closed until a maintained compatibility case exists.
 
 ## Deployment model
 

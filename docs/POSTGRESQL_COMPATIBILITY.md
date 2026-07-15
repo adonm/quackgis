@@ -24,10 +24,13 @@ same answers for:
 - transaction-local request context; and
 - actual query and mutation authorization.
 
-`quackgis-rest` remains a stateless pgwire client. It must not own an independent
+For Local 1.0, `quackgis-rest` remains a stateless pgwire client of the packaged
+tiny client rather than a direct worker client. It must not own an independent
 schema cache authority, role model, or row-policy implementation. Its exposure
 configuration is an additional HTTP ceiling, never a replacement for database
-privileges.
+privileges. Shared 1.x carries HTTP through the same tiny iroh edge connection to
+the assigned complete worker, while retaining this one catalog, identity, and
+authorization contract.
 
 ## Scope boundary
 
@@ -101,10 +104,12 @@ pending on C4/C5; no behavior is inferred from another version.
   columns, constraints, and data.
 - QuackGIS may cache and project that metadata, but must not independently decide
   that a user table or column exists.
-- QuackGIS-owned control metadata may store roles, memberships, grants, policy,
-  catalog epochs, and compatibility identity mappings. It must be protected,
-  versioned, backed up with the logical catalog, and written only through the
-  supported DuckDB/DuckLake transaction path.
+- Local compatibility identity and catalog epochs may use protected metadata
+  written through the supported DuckDB/DuckLake transaction path. Shared users,
+  SCRAM verifiers, client credentials, roles, memberships, grants, policy, worker
+  pools and assignments, revocation, and security/configuration epochs live in a
+  protected transactional PostgreSQL control database. Both stores are versioned,
+  backed up with their profile, and separate from official DuckLake metadata.
 - A compatibility OID mapping records identity, not a duplicate table definition.
 
 ### One authorization decision

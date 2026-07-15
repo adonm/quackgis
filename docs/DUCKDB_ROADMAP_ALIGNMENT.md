@@ -28,7 +28,7 @@ pinned artifact passes an executable gate.
 |---|---|---|---|
 | DuckDB 2.0 and 1.5.5 | Carrying a short-lived engine baseline and patch-specific shims | Keep 1.5.4 as the current verified development bundle; evaluate 1.5.5 after release; make a supported post-1.5 bundle decision before Local 1.0 rather than publishing on a near-EOL line | Exact DuckDB/Spatial/DuckLake versions and digests; old-catalog reopen; write/reopen/backup/rollback; pgwire/catalog/client suites; 10M profiles; mixed-version refusal |
 | PEG parser by default | Eventually, duplicate parser compatibility work and some error normalization | Keep the Rust PostgreSQL AST as the authorization boundary today. Add classic-versus-PEG acceptance/rejection equivalence to the engine upgrade matrix. Do not let runtime parser extensions widen pgwire SQL | Every maintained accepted query has equal result/type/plan behavior; every denied multi-statement, dynamic SQL, private catalog, authorization, and rewrite-bypass shape remains denied; error changes are classified |
-| Stable Quack protocol | In-process native crash exposure, some session/concurrency plumbing, and possibly a separate shared deployment design | Preserve the storage-kernel/Arrow boundary so an out-of-process Quack-backed engine can compete with ADBC. Treat Quack as a candidate engine transport, not as a replacement for QuackGIS pgwire, PostgreSQL catalogs, roles, or policy | Stable release; Rust-usable client path; TLS/token/credential model; Arrow streaming and backpressure; prepared parameters; explicit transactions; cancel/deadline; commit outcome; extension pinning; DuckLake attach; latency/RSS; crash/restart and upgrade evidence |
+| Stable Quack protocol | Potential future engine isolation if it can serve a complete attached-DuckLake data plane | Watch upstream only. The selected Local/Shared topology keeps ADBC and DuckDB in each complete worker and uses iroh at the client/control edge; Quack is not a competing deployment path | Explicit product-direction change plus a stable Rust client, complete DuckLake attach/data-plane support, streaming/backpressure, prepared parameters, transactions, cancellation, commit outcome, extension pinning, latency/RSS, crash/restart, and upgrade evidence |
 | Async I/O | Blocking workers used only to hide synchronous native I/O, especially for object storage | Do not redesign around an internal core feature alone. If a supported client API exposes cancellable async operations, allow it to replace—not supplement—the corresponding blocking path | Same cancellation, memory, spill, first-row, throughput, and quarantine oracles; no unbounded task or native queue |
 | C client/C extension API and Rust extensions | C++ internal-API/ABI maintenance for future custom extensions and possibly direct client FFI | Continue Arrow ADBC while it is the smaller proven boundary. Any new QuackGIS extension should prefer the supported C or Rust extension API once stable; do not port the temporary DuckLake fork merely to preserve it | Stable API and packaging, signed/versioned artifacts, vectorized workload benchmark, fuzz/property tests, upgrade matrix, and a smaller total support surface than SQL/Rust-edge alternatives |
 | Continuous DuckLake improvement | Private metadata adapters, custom snapshot/version machinery, custom RBAC/storage policy, and bespoke summaries | Keep upstreaming `ducklake_column_info`; make official protected snapshots the intended M7 primitive; evaluate DuckLake RBAC as a storage-enforcement backend; wait for official UDT/materialized-view primitives before inventing equivalents | Public versioned API; transactional and independent-reader evidence; PostgreSQL-facing semantic mapping; backup/restore/upgrade; no second writer or schema authority |
@@ -54,8 +54,8 @@ remove code:
   reconciliation into one native transaction;
 - stable Rust/C extensions may make the five measured extension candidates
   cheaper than C++ forks; and
-- stable Quack may isolate DuckDB from the protocol process and provide the lower-
-  operations local/shared topology.
+- a future remote engine protocol is relevant only if it can replace the complete
+  worker's engine boundary without creating a second Local/Shared topology.
 
 None of those speculative capabilities changes a current claim. In particular,
 “improved concurrent transactions” does not remove QuackGIS catalog serialization
@@ -87,8 +87,8 @@ The DuckLake roadmap is more directly relevant than generic v2 speculation:
 - Do not expose Quack directly to PostgreSQL/GIS clients; QuackGIS remains the
   PostgreSQL compatibility and authorization edge.
 - Do not enable runtime-extensible grammar from client input.
-- Do not add a second engine transport in production before it beats and replaces
-  ADBC on the maintained gates.
+- Do not add a second engine transport or Quack deployment profile without an
+  explicit product-direction change and complete attached-DuckLake evidence.
 - Do not wait for future DuckLake RBAC to implement the PostgreSQL-facing role
   contract needed by Local 1.0.
 - Do not treat `MATCH_RECOGNIZE`, parallel Python UDFs, installers, or C++17 as

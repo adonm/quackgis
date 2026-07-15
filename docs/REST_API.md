@@ -12,8 +12,11 @@ PostgREST compatibility or of upstream's 1,013-case PostgreSQL result.
 
 The durable target is not a REST-specific security/catalog implementation.
 QuackGIS will own PostgreSQL 18 roles, privileges, session identity, catalog
-projection, and bounded request context; REST will exercise those capabilities as
-an ordinary pgwire client. See
+projection, and bounded request context. Local 1.0 exercises those capabilities
+through this ordinary pgwire sidecar connected to the packaged tiny client, not a
+direct worker listener. Shared 1.x carries HTTP as a typed stream on the same tiny
+client edge connection to the assigned complete worker, reusing the same access
+lease, policy, admission, epochs, and audit identity. See
 [POSTGRESQL_COMPATIBILITY.md](./POSTGRESQL_COMPATIBILITY.md) for the ordered plan.
 
 ## Trust boundaries

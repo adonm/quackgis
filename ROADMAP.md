@@ -39,7 +39,8 @@ Environment ownership is deliberate:
   jobs, TLS/rotation, drain/restart, backup/restore, upgrade, and mixed-workload
   topology evidence;
 - Kind PostgreSQL/MinIO services may rehearse M6 behavior after Local 1.0, but do
-  not replace the two required managed-service runs; and
+  not replace the required managed catalog, object-storage, iroh-relay, and
+  serverless runs; and
 - the old DataFusion/Sedona/Linkerd/shared-profile deployment tree remains retired.
 
 Every profile emits one common evidence envelope containing source/dirty state,
@@ -50,26 +51,40 @@ run must use the same implementation and oracle as its reference counterpart.
 ## Closure workstreams
 
 The identifiers below preserve the established work-package names. Completed
-foundations remain listed; remaining dependencies are C0, then H0, while P0 can
-proceed after its evidence/layout prerequisites.
+foundations remain listed. I0 may proceed immediately and must establish the iroh
+transport/resource baseline before Local 1.0 closes; C0 then H0 remain the
+compatibility dependency chain, while P0 can proceed after its evidence/layout
+prerequisites.
 
 1. **E0 — evidence harness:** split reusable runtime/client/fixture/oracle/evidence
    support from monolithic native scenarios; add smoke/local/reference entrypoints.
 2. **E1 — M1/M2 local profiles:** result RSS/first-row, 100 cancellations,
    mixed-class admission, ADBC/pgwire overhead, and COPY RSS/throughput/atomicity.
-3. **K0 — minimal Local 1.0 Kind topology:** one QuackGIS workload, local durable
-   volume, TLS secret, and pinned psql/psycopg/GDAL client jobs; no service mesh or
-   deferred clients.
-4. **C0 — PostgreSQL compatibility program:** freeze a PostgreSQL 18 profile,
+3. **I0 — early iroh transport foundation:** one tiny client obtains a signed
+   one-worker lease from a minimal config-backed bootstrap and reaches one complete
+   local-DuckLake worker, carrying opaque pgwire sessions through direct and
+   relayed iroh paths with measured connection, stream, result, COPY, adaptive
+   compression, cancellation, CPU, RSS, and throughput behavior. The shared
+   control/edge framing precedes gossip or shared storage.
+4. **K0 — minimal Local 1.0 Kind topology:** one bootstrap, one QuackGIS worker,
+   one tiny client bridge, local durable volume, required credential configuration,
+   optional relay configuration, and pinned psql/psycopg/GDAL jobs entering
+   through the bridge; no service mesh or deferred clients.
+5. **C0 — PostgreSQL compatibility program:** freeze a PostgreSQL 18 profile,
    implement stable catalog identity and role/privilege/session semantics, then
    qualify psql, psycopg, OGR, and headless QGIS against copied data.
-5. **H0 — role-aware HTTP:** migrate schema discovery and OpenAPI to the common
-   catalog/authorization boundary, then package multiple stateless replicas.
-6. **P0 — M4 host profiles:** conservative predicate/layout work followed by two
+6. **H0 — role-aware HTTP:** migrate schema discovery and OpenAPI to the common
+   catalog/authorization boundary, route the sidecar through the tiny client, then
+   package multiple stateless replicas.
+7. **P0 — M4 host profiles:** conservative predicate/layout work followed by two
    10M runs; introduce 100M only after those runs pass.
-7. **K1 — operations and shared rehearsal:** termination, rotation, upgrade,
+8. **K1 — operations and shared rehearsal:** termination, rotation, upgrade,
    recovery, mixed workload and soak locally; PostgreSQL/MinIO shared-profile
    rehearsal begins only after Local 1.0 closes.
+9. **I1 — shared iroh cluster:** durable user/control metadata, one-time client
+   pairing, a tiny desktop/serverless client, one-credential/one-worker affinity,
+   bounded bootstrap/worker gossip, complete shared-DuckLake workers, and common
+   pgwire/HTTP delivery. It builds on I0 and begins after Local 1.0 closes.
 
 ## Baseline
 
@@ -87,6 +102,8 @@ proceed after its evidence/layout prerequisites.
 | Operations | restart/reopen, snapshot inspection, adjacent-file merge, checksummed offline exact-path backup/restore | no online/relocated production recovery or shared profile |
 | Performance | fixture-level bbox/exact-recheck oracle | no current scale or layout-maintenance claim |
 | Metrics/status | policy, classed admission, lifecycle, cancellation, timeout, quarantine, COPY rows/bytes/batches/latency, sampled DuckDB memory/temporary storage, liveness, and DuckLake-probed readiness/drain state | probe is local/read-only; no write-capacity SLO |
+| Iroh cluster edge | none; direct TCP pgwire is the only server ingress | no pairing, registered client key, access lease, relay configuration, bootstrap/gossip pool, worker assignment, native-lease pool, or serverless client |
+| Transport compression | none | no negotiated tunnel framing, adaptive policy, codec evidence, decompression bounds, or direct/relay budgets |
 
 ## M0 — truthful, focused repository
 
@@ -168,6 +185,108 @@ Exit gates:
 - WKB bytes, NULLs, decimals, dates, and timestamps survive commit/reopen; and
 - parse failure, cancellation, disconnect, and rollback add zero visible rows.
 
+## I0 — early iroh transport foundation
+
+**Outcome:** transport cost and behavior are known before compatibility, storage,
+and durable cluster-control designs depend on iroh. One tiny client is the only
+application ingress, obtains one signed worker lease from a minimal bootstrap, and
+carries many pgwire sessions to one complete QuackGIS worker over the same Rust
+policy, ADBC, DuckDB, and local official-DuckLake path used by the direct TCP test
+baseline.
+
+This work may proceed as soon as the M1/M2 streaming and cancellation primitives
+it carries have stable smoke profiles. It does not wait for Local 1.0 or M6.
+
+Deliver:
+
+- a minimal native client/library and worker ingress using one versioned
+  `quackgis/edge/1` ALPN, one connection-level access lease/key proof and
+  compression negotiation, and a typed prelude that maps each local pgwire or
+  cancellation connection to one bidirectional stream on the leased worker;
+- a minimal `quackgis/control/1` bootstrap using explicit operator configuration
+  for the registered client public key and one eligible worker, issuing a bounded
+  signed lease after key proof without proxying SQL, handling the user's SCRAM
+  password, or returning a pool to the client;
+- one shared transport crate/module used by client, bootstrap, and worker for
+  relay policy, ALPN/prelude types, leases/proofs, framing, compression, limits,
+  errors, and metrics rather than parallel implementations;
+- versioned tunnel capability negotiation with mandatory `none` support and an
+  `auto` compression policy using independent bounded blocks per stream direction;
+  compression starts only after access-lease/key-proof authentication and never
+  covers control, grant/access proof, assignment, cancellation, or other
+  designated latency-sensitive frames;
+- an ingress security contract where direct TCP still requires configured TLS,
+  while an authenticated, encrypted iroh connection is marked as an already
+  secure pgwire channel and does not carry nested TLS on the cluster leg. The
+  local socket/process boundary is protected independently; the worker validates
+  the lease, attaches the preauthenticated LOGIN role, and signals compression
+  after pgwire startup without receiving SCRAM material or requiring the tiny
+  client to parse SQL;
+- bounded sampling and candidate low-latency codec profiles that choose compressed
+  blocks only when expected transfer savings exceed measured CPU/latency cost,
+  skip small or incompressible input, retain no buffer for idle sessions, and use
+  no dictionary shared across clients, credentials, requests, or sessions;
+- declared compressed/decompressed block ceilings, expansion-ratio limits, and
+  deterministic rejection of corrupt, truncated, oversized, or allocation-abusive
+  input before pgwire delivery;
+- bootstrap, worker, and client configuration accepting an ordered non-empty
+  relay list, using iroh's public relay preset when relay configuration is omitted,
+  and rejecting an explicitly configured empty list;
+- direct TCP pgwire retained only as a current/development correctness and
+  performance baseline, with the release application path going through the tiny
+  client;
+- deterministic tests for access-lease/key-proof authentication, startup under the
+  leased LOGIN role, simple and extended queries, parameters, portals,
+  transactions, COPY, cancellation, reconnect, disconnect, frame limits,
+  backpressure, and graceful worker shutdown through the iroh path; direct TCP
+  SCRAM remains a baseline-only oracle;
+- smoke/local/reference profiles comparing direct TCP, an iroh direct path, and a
+  forced relay path for cold/warm connection latency, time to first row, sustained
+  result and COPY throughput, CPU, RSS, bytes transferred, cancellation latency,
+  and concurrent stream behavior, each with compression disabled and automatic
+  compression over representative compressible, incompressible, small, WKB, and
+  COPY/result shapes;
+- payload-free compression metrics for input/output bytes, achieved ratio, selected
+  codec, CPU time, compressed/skipped reasons, and decode failures, without SQL,
+  parameters, payload samples, credentials, or object paths;
+- public-relay-default smoke plus an explicit configured hosted/custom relay
+  profile, with relay credentials kept out of logs, metrics, tickets, and public
+  configuration; and
+- a written release budget and keep/change decision for every measured transport
+  dimension before M5 packaging, rather than selecting thresholds after the
+  clustered implementation exists.
+
+Exit gates:
+
+- direct TCP and iroh execute the same registered pgwire result, type, error,
+  transaction, COPY atomicity, cancellation, and reconnect oracles;
+- one client keeps multiple independent pgwire sessions on one worker without SQL
+  parsing, a worker list, or per-session worker selection in the client;
+- the client cannot connect to a worker absent a valid bootstrap-issued lease, the
+  worker receives no pairing password/SCRAM verifier, and bootstrap cannot proxy
+  application data;
+- result and COPY memory remain bounded by the existing M1/M2 limits plus a
+  measured, documented transport allowance independent of result/request
+  cardinality;
+- authentication/control bytes are never compressed, compression contexts are
+  isolated per stream and direction, and adversarial length/ratio/corruption tests
+  cannot cause cross-session disclosure, unbounded allocation, or delayed
+  cancellation;
+- direct-path and forced-relay evidence publish connection, first-row, throughput,
+  CPU, RSS, stream-count, cancellation, bytes-saved, compression-CPU, and
+  compression-ratio distributions on named endpoints;
+- automatic mode meets committed byte-saving and CPU/latency budgets for
+  maintained compressible relay profiles, while small and incompressible profiles
+  stay within a committed raw-path overhead and predominantly select raw blocks;
+- unset relay configuration demonstrably uses the public iroh preset, while a
+  configured relay list uses only that list and an empty configured list fails on
+  bootstrap, worker, and client;
+- public and configured relay profiles survive path establishment, fallback,
+  reconnect, worker restart, and credential rotation without changing SQL
+  semantics; and
+- the measured budgets and any required client/worker protocol changes are
+  committed before M3 and M5 close and make them expensive to alter.
+
 ## M3 — focused compatibility product
 
 **Outcome:** the first named client set and HTTP read edge share one coherent
@@ -207,7 +326,7 @@ Deliver:
 - replace text signatures with reusable AST/catalog/protocol rules;
 - add fuzz/property coverage for the Arrow-to-pgwire encoder;
 - run version-pinned psql, psycopg, OGR, and headless QGIS jobs in the minimal Kind
-  topology while keeping catalog fixtures client-neutral; and
+  topology through the tiny client while keeping catalog fixtures client-neutral;
 - migrate `quackgis-rest` to catalog-backed discovery, JWT-to-role mapping, one
   authenticator identity, transaction-local role/context, and role-aware OpenAPI;
 - package at least two stateless REST replicas behind the local test Service; and
@@ -232,7 +351,8 @@ Exit gates:
 - all supported cases pass through pgwire with exact expected results;
 - QGIS and OGR observe maintained geometry fields rather than generic `bytea`;
 - two REST replicas expose the same role-specific OpenAPI, stay within both the
-  HTTP exposure ceiling and database grants, and access data only through pgwire;
+  HTTP exposure ceiling and database grants, and access data only through the
+  tiny client and assigned complete worker;
 - unsupported functions/shapes return stable errors; and
 - no release query uses row-wise Rust spatial fallback.
 
@@ -290,12 +410,18 @@ Deliver:
   not release dependencies;
 - classic/PEG parser equivalence for every maintained allow/deny/rewrite family
   while both parser modes exist;
-- a measured keep-ADBC-or-adopt-Quack decision covering transport, cancellation,
-  transaction, security, crash, and resource gates;
+- retain complete in-process ADBC workers unless a released transport can serve
+  the attached DuckLake data plane, an explicit product-direction change approves
+  the engine split, and cancellation, transaction, security, crash, and resource
+  gates pass;
 - TLS and secret-rotation evidence;
 - catalog/control-metadata backup, restore, upgrade, and cache-invalidation
   evidence;
 - authenticator/JWT/database credential rotation and multi-replica REST readiness;
+- package the I0 one-client/one-worker iroh path and rerun its committed direct,
+  public-relay-default, and configured-relay budgets against the release artifact;
+- disable application-facing worker TCP/HTTP listeners in the release profile;
+  direct TCP remains an explicit test/development baseline only;
 - mixed read/COPY/mutation/cancel/compaction/restart/restore workloads; and
 - maintain a minimal Kind topology for packaged functional evidence while keeping
   performance budgets on the host/reference profile.
@@ -309,16 +435,82 @@ Exit gates:
 - a 24-hour mixed workload has no correctness failure, leaked transaction, or
   unbounded memory growth;
 - required client and 10M performance gates remain green after packaging;
+- the packaged iroh client/worker path meets the I0 connection, throughput,
+  adaptive-compression, cancellation, COPY, CPU, RSS, and relay-selection budgets;
+- all named pgwire and HTTP client gates enter through the packaged tiny client,
+  while a direct worker connection is refused by the release profile;
 - role-aware REST and catalog/RBAC gates remain green after restart, restore, and
   upgrade; and
 - statement/type/transaction/concurrency limits are published.
 
-## M6 — Shared DuckLake 1.x
+## M6 — Shared iroh cluster 1.x
 
-**Outcome:** an official managed catalog/object-storage profile preserves the
-local query and compatibility contract.
+**Outcome:** paired desktop, server, and serverless clients reach a bounded pool
+of complete QuackGIS workers over iroh while one managed PostgreSQL and
+object-storage stack preserves the local query, policy, and compatibility
+contract.
 
-This begins only after Local 1.0.
+This begins only after Local 1.0 and builds on the measured I0 transport. M6 must
+not introduce an unrelated iroh data path when it adds pairing, gossip, worker
+assignment, shared control state, and shared storage.
+
+### M6.1 — durable control and client identity
+
+Deliver:
+
+- a protected transactional PostgreSQL control database, separate from official
+  DuckLake metadata, for users, SCRAM verifiers, client credentials, roles,
+  memberships, grants, policy, worker registration, pool configuration,
+  credential-to-worker assignments, revocation, and schema/security/configuration
+  epochs;
+- one-time bootstrap SCRAM pairing that registers a generated credential public
+  key against a LOGIN role, stores only verifier/public credential material
+  server-side, and never retains the human password in the client or exposes it to
+  workers;
+- long-lived credential private keys and handles in an OS keystore, owner-only
+  file, KMS, or serverless secret store, with routine password rotation
+  independent from credential revocation and compromise rotation able to advance
+  a security epoch;
+- short-lived bootstrap-signed access leases binding credential public key, role,
+  permitted protocols, assigned worker, assignment generation, and
+  security/configuration epochs; lease refresh proves the registered key and does
+  not require interactive re-pairing while the credential row remains enabled;
+- migration from I0's explicit local registration and one-worker bootstrap config
+  to this transactional authority without changing `control/1`, `edge/1`, key
+  proof, lease, relay, framing, compression, or pgwire/HTTP semantics;
+- one common role, privilege, catalog visibility, statement authorization, and
+  OpenAPI decision across pgwire and HTTP; and
+- backup, restore, migration, audit, revocation, and fail-closed cache-invalidation
+  procedures for control metadata.
+
+### M6.2 — tiny client and relay contract
+
+Deliver:
+
+- one small native binary and reusable library containing local access, iroh,
+  pairing, credential proof, access-lease refresh/cache, and typed pgwire/HTTP/
+  cancellation stream forwarding plus the bounded I0 compression codec, but no
+  DuckDB, ADBC, SQL policy, gossip, worker list/scoring, or storage credentials;
+- an owner-protected local desktop transport plus a generated independent local
+  credential where OS peer authentication is unavailable;
+- an embedded/process-local serverless mode that loads a service credential from
+  platform secret storage, supports many ephemeral transport endpoints sharing
+  that registered key/handle and bootstrap assignment, and never stores the
+  pairing password;
+- bootstrap, worker, and client configuration accepting an ordered non-empty iroh
+  relay list; when relay configuration is omitted, select iroh's public relay
+  preset; reject an explicitly configured empty list rather than silently changing
+  network behavior;
+- hosted-relay configuration and credential rotation without changing cluster
+  identity, pairing, assignment, pgwire, HTTP, or storage semantics;
+- compression configuration supporting `off` and evidence-selected `auto`
+  behavior without changing SQL/HTTP semantics, worker affinity, or relay choice;
+  and
+- no relay API secret, client private key, worker private key, SCRAM material, or
+  storage credential in gossip, logs, metrics, DuckLake metadata, or generated
+  public configuration.
+
+### M6.3 — shared complete workers
 
 Deliver:
 
@@ -330,6 +522,52 @@ Deliver:
 - throttling, interruption, rotation, backup, restore, cleanup, and independent
   reader tests.
 
+Each worker retains the Rust policy edge, ADBC, and in-process DuckDB. Iroh does
+not introduce a Quack/engine split or grant direct DuckDB access.
+
+### M6.4 — bounded sessions and worker pools
+
+Deliver:
+
+- separate limits for authenticated client sessions, native engine leases, pinned
+  transactions/COPY/portals, active queries, queued operations, and per-credential
+  fairness so mostly idle clients do not allocate one DuckDB connection or
+  blocking thread each;
+- a small, explicitly bounded gossip topic containing bootstrap nodes and workers
+  only, with signed incarnations, readiness, drain, compatibility, coarse
+  capacity, heartbeat expiry, and lag recovery;
+- two or more stable bootstrap endpoints that reconcile gossip liveness with
+  authoritative PostgreSQL desired state, select the worker, and issue one signed
+  access lease rather than returning a pool for client-side scoring;
+- one authoritative assignment generation per client credential, enforced by
+  access leases and workers across pgwire and HTTP so a credential cannot fan out
+  to several workers;
+- graceful drain without overlapping new sessions on old and replacement workers,
+  and abrupt failure that fences the old generation without replaying SQL; and
+- worker autoscaling/replacement that leaves established clients pinned and uses
+  new capacity for new assignments until an explicit drain/rebalance.
+
+### M6.5 — common edge and HTTP delivery
+
+Deliver:
+
+- one authenticated `quackgis/edge/1` connection with typed pgwire, HTTP, and
+  cancellation stream preludes, using the same access lease, role, assigned
+  worker, policy, engine-lease pool, admission, catalog/security epochs, audit
+  identity, relay setup, and bounded adaptive-compression framing;
+- `quackgis/control/1` for bootstrap SCRAM pairing, registered-key proof, and
+  access-lease refresh, with no SQL/HTTP data proxying through bootstrap;
+- local HTTP through an owner-protected socket or generated local bearer token,
+  plus an embedded serverless adapter;
+- role-aware schema discovery and OpenAPI from the common authorization boundary;
+- direct registered-service-credential requests using the access lease's LOGIN
+  role, plus optional per-request end-user delegation only when the worker itself
+  validates a signed JWT's issuer, audience, time bounds, security epoch, and
+  bounded role or request context through the same authorization engine; and
+- an explicit distinction between a serverless application's service role and
+  any end users it serves; unsigned or merely forwarded role, identity, or claims
+  headers never grant database authority.
+
 Exit gates:
 
 - two readers and one writer run for 24 hours with no loss, duplicates, or partial
@@ -338,8 +576,26 @@ Exit gates:
 - conflict/response-loss tests have deterministic reconciliation outcomes;
 - independent version-matched DuckDB reproduces schemas, counts, samples, and
   snapshots;
-- restored catalog/object storage reproduces the recovery point; and
-- two managed-service runs pass on the same release candidate.
+- restored catalog/object storage reproduces the recovery point;
+- restored control metadata reproduces users, registered credential public keys,
+  revocation, assignments, policy, and security/configuration epochs without
+  private keys or stale access leases;
+- at least 2,000 authenticated, mostly idle pgwire sessions share one reference
+  worker within a published RSS budget while native engine leases, active queries,
+  pinned work, and queues remain at their configured ceilings;
+- many local pgwire sessions under one desktop credential and concurrent cold
+  serverless instances sharing one registered service key obtain leases for one
+  enforced worker assignment and retain independent
+  session/transaction/cancellation identity;
+- graceful drain and abrupt failure each produce one assignment generation and no
+  old/new-worker overlap for newly accepted sessions;
+- clients never join gossip, and the bootstrap/worker topic remains within its
+  configured member, message-size, frequency, and expiry bounds under churn;
+- public-relay defaults and explicit hosted-relay configuration both pass pairing,
+  pgwire, HTTP, adaptive compression, reconnect, cancellation, and rotation tests;
+  and
+- two managed catalog/object-storage/hosted-relay runs, including one serverless
+  client profile, pass on the same release candidate.
 
 ## M7 — dataset lifecycle 1.x
 
@@ -367,8 +623,8 @@ Exit gates:
 - Billion-row scheduled, 10 TB, or trillion-class claims.
 - Branch/merge and CDC row functions.
 - A QuackGIS DuckDB extension without an accepted, benchmarked proposal.
-- Production Quack transport before the stable protocol and QuackGIS equivalence
-  gates pass.
+- An out-of-process engine split that cannot serve the attached official DuckLake
+  data plane through the existing Rust policy and transaction boundary.
 
 ## Risk controls
 
@@ -383,6 +639,13 @@ Exit gates:
 | incorrect spatial pruning | conservative candidate oracle plus visible exact recheck for every optimized shape |
 | DuckLake API/semantics drift | use official primitives, independent reopen, backup/restore, versioned upgrade gates |
 | shared claims outrun local product | Local 1.0 is a hard prerequisite for M6 |
+| relay defaults become hidden authority | omitted config selects the public iroh preset; explicit relay lists are validated; relay access never grants a database role |
+| compression wastes CPU or leaks across trust boundaries | negotiate `none`; compress only authenticated bounded application blocks after measured gain; isolate contexts per stream/direction; never compress auth/control traffic or share dictionaries |
+| gossip becomes an unbounded control plane | only bounded bootstrap/worker membership; PostgreSQL owns desired state, policy, credentials, and assignments |
+| client affinity masks storage bugs | require cross-worker visibility/failover evidence even though one credential normally uses one worker |
+| shared service credential broadens impact | bind it to one role/pool/worker assignment, enforce per-credential limits, audit every session, and support immediate revocation |
+| client grows into a second control plane | bootstrap alone chooses/fences workers and signs leases; client has no gossip, pool list, scoring, policy, or replay logic |
+| client and worker transport implementations drift | one shared relay/framing/lease/proof/compression/limits module and cross-endpoint conformance tests |
 | scale language outruns evidence | publish exact rows/bytes/files/hardware/cost and distinguish routine from stress runs |
 
 ## Scope boundaries

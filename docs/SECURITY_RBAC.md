@@ -42,27 +42,44 @@ infrastructure, and production failure drills remain open.
 
 ## Trust boundaries
 
-1. **Client → pgwire:** use SCRAM and `QUACKGIS_TLS_MODE=required` outside local
-   development. `preferred` mode permits plaintext for development; required mode
-   needs paired certificate/key material and rejects insecure startup before auth.
+1. **Client → pgwire:** current direct TCP uses SCRAM and
+   `QUACKGIS_TLS_MODE=required` outside local development. `preferred` mode permits
+   plaintext for development; required mode needs paired certificate/key material
+   and rejects insecure startup before auth. The planned iroh ingress is already
+   authenticated and end-to-end encrypted, so it satisfies the secure-channel
+   boundary without nesting pgwire TLS; its local socket/process boundary is
+   protected independently.
 2. **HTTP client → REST:** the current bearer token is a preview control. The
-   target validates JWT signature, issuer, audience, time bounds, and a bounded
-   role claim before opening a database transaction. HTTP authentication does not
-   itself authorize a database object.
-3. **REST → pgwire:** the target authenticator credential is a privileged service
-   secret because its holder can assume configured API roles and set request
-   context. REST never receives ADBC or storage access.
+   Local 1.0 target validates JWT signature, issuer, audience, time bounds, and a
+   bounded role claim before opening a database transaction. Shared 1.x uses the
+   paired client credential and assigned iroh worker for both HTTP and pgwire.
+   HTTP authentication does not itself authorize a database object.
+3. **REST → tiny client → worker:** the Local 1.0 sidecar reaches pgwire only
+   through its local tiny client. The registered service credential is privileged
+   because its holder can obtain an access lease, assume configured API roles, and
+   set request context. Shared 1.x carries HTTP as a typed stream on the same edge
+   connection. REST never receives ADBC or storage access.
 4. **SQL → policy → ADBC:** exactly one general structurally parsed statement is
    authorized before prepare/schema access. The bounded all-allowlisted session
    `SET` batch is handled without ADBC; unknown write/read/catalog/policy shapes
    fail closed.
-5. **Catalog/control metadata:** user schema comes from DuckDB/DuckLake. Protected
-   QuackGIS metadata may hold roles, memberships, grants, policy, compatibility
-   OIDs, and epochs, but must not become an independent user-schema authority.
+5. **Catalog/control metadata:** user schema comes from DuckDB/DuckLake. Local
+   compatibility identity may use protected DuckLake metadata; Shared 1.x users,
+   credentials, roles, grants, policy, pools, assignments, and security/config
+   epochs use a protected PostgreSQL control database. Neither becomes an
+   independent user-schema authority.
 6. **Storage:** local data roots carry one authority marker. Remote credentials and
    shared profiles are disabled.
 7. **Metrics/audit:** never include SQL text, parameters, request claims, WKB,
    credentials, signed URIs, or sensitive paths.
+
+The target iroh tunnel negotiates compression only after client/worker
+authentication. Enrollment, SCRAM, grant/access proofs, assignments, cancellation,
+errors, and control messages remain raw. Application compression uses bounded
+independent blocks and separate contexts per stream direction, with no dictionary
+shared across clients, credentials, requests, or sessions. Declared decompressed
+length and expansion-ratio limits are checked before allocation; compression
+metrics contain sizes and decisions, never payload samples.
 
 ## Current authorization model
 
@@ -249,7 +266,8 @@ writes pass that suite.
 `CREATE/ALTER/DROP ROLE` and `GRANT/REVOKE` are later capabilities. Before exposure
 they require:
 
-- protected transactional control metadata written through DuckDB/DuckLake;
+- protected transactional control metadata written through DuckDB/DuckLake for
+  the local profile or the separate PostgreSQL control database for Shared 1.x;
 - atomic role/grant change plus schema/security epoch publication;
 - credential creation, expiry, rotation, revocation, and secure backup;
 - an explicit administrator role and no ambient superuser;

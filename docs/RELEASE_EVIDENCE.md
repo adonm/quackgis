@@ -56,7 +56,7 @@ The release packet must include:
 
 - source SHA, version, Rust lockfile, DuckDB/extension versions and digests;
 - server binary checksum and runtime image digest;
-- all M1–M4 test/client/performance reports;
+- all M1–M4 and I0 test/client/performance reports;
 - the declared PostgreSQL 18 compatibility manifest and normalized differential
   catalog/session fixtures;
 - stable OID, RowDescription origin, schema/security epoch, restart, rename,
@@ -66,6 +66,15 @@ The release packet must include:
 - named client versions and copied-data manifests;
 - exact 10M profile hardware/data/budget/results;
 - query/COPY memory, spill, cancellation, and admission evidence;
+- direct TCP, iroh direct-path, public-relay-default, configured-relay, and forced-
+  relay reports covering connection/first-row latency, result/COPY throughput,
+  CPU, RSS, streams, cancellation, reconnect, and relay selection;
+- named pgwire and HTTP client evidence entering through the packaged tiny client,
+  plus release-profile refusal of direct application connections to the worker;
+- adaptive-compression reports covering disabled/automatic modes, compressible and
+  incompressible shapes, bytes saved, codec CPU/latency, raw-path overhead,
+  bounded decode failures, and proof that authentication/control traffic and
+  cross-session dictionaries are never compressed;
 - backup/restore and upgrade/rollback transcripts;
 - TLS/auth/secret-rotation evidence;
 - authenticator/JWT role-mapping, request-context cleanup, multi-replica REST,
@@ -89,8 +98,22 @@ The release packet must include:
 
 ## Shared 1.x evidence
 
-Shared claims additionally require two repeatable managed-service runs covering
-multi-process visibility, conflicts/response loss, throttling/interruption,
-credential rotation, backup/restore, cleanup, independent DuckDB reopen, and a
-24-hour measured topology. Local emulator results are companion evidence, not
-managed-service proof.
+Shared claims additionally require two repeatable managed-service runs covering:
+
+- multi-process DuckLake visibility, conflicts/response loss,
+  throttling/interruption, cleanup, independent DuckDB reopen, and the 24-hour
+  measured topology;
+- PostgreSQL control-database backup/restore of users, roles, client credentials,
+  revocation, pools, assignments, and security/configuration epochs without
+  private keys;
+- one-time pairing, registered-key/access-lease/password rotation, explicit
+  revocation, and one-credential/one-worker assignment fencing during graceful
+  drain and abrupt failure;
+- public-default and explicitly configured hosted relays, adaptive compression,
+  reconnect, cancellation, common pgwire/HTTP delivery, and one serverless client
+  profile; and
+- the declared mostly-idle client-session target with bounded native leases,
+  pinned work, active queries, queues, RSS, and per-credential fairness on one
+  worker.
+
+Local emulator results are companion evidence, not managed-service proof.

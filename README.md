@@ -19,8 +19,9 @@ PostgREST-style HTTP read interface through the same pgwire boundary.
 
 The product direction makes PostgreSQL 18 catalog, role, privilege, and session
 semantics first-class QuackGIS capabilities. The REST edge will become a normal
-authenticator/role-switching pgwire client and generate role-aware OpenAPI from
-that common contract; this target is planned, not part of the current preview.
+authenticator/role-switching pgwire client of the packaged tiny iroh bridge and
+generate role-aware OpenAPI from that common contract; this target is planned,
+not part of the current preview.
 
 There is no PostgreSQL, DataFusion, or Sedona query engine. DuckDB is the sole
 planner/executor and official DuckLake is the sole writer for new storage.
