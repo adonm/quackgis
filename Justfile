@@ -141,7 +141,7 @@ test:
     cargo test --workspace
 
 # Faster local regression loop that compiles the native-runtime integration gates.
-test-fast: arrow-encoder-test iroh-protocol-test iroh-direct-smoke
+test-fast: arrow-encoder-test iroh-protocol-test iroh-direct-smoke iroh-custom-relay-smoke
     cargo test -p quackgis-server --lib --test duckdb_adbc_storage --test duckdb_wire_read --test roadmap_profiles --test catalog_contract --test iroh_direct
 
 # Execute the maintained vendored Arrow-to-pgwire properties and regressions.
@@ -156,6 +156,14 @@ iroh-protocol-test:
 iroh-direct-smoke:
     cargo test -p quackgis-edge --test direct_path
 
+# Force the authenticated bridge and adaptive codec through one deterministic custom relay.
+iroh-custom-relay-smoke:
+    cargo test -p quackgis-edge --test relay_path custom_relay_forces_application_bytes_off_direct_paths -- --exact
+
+# Exercise omitted relay configuration against iroh's real public preset (requires outbound network).
+iroh-public-relay-smoke:
+    cargo test -p quackgis-edge --test relay_path omitted_configuration_uses_public_relay_for_reconnect -- --ignored --exact --nocapture --test-threads=1
+
 # Differentially run result/type/error/portal/transaction/COPY/cancellation oracles over direct TCP and local iroh.
 iroh-duckdb-smoke driver=duckdb_adbc_driver:
     @set -eu; driver_arg='{{driver}}'; driver_arg="${driver_arg#driver=}"; \
@@ -163,6 +171,19 @@ iroh-duckdb-smoke driver=duckdb_adbc_driver:
     driver_arg="$(realpath "$driver_arg")"; duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; \
     HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" \
       cargo test -p quackgis-server --test iroh_direct duckdb_pgwire_oracles_pass_through_local_iroh -- --ignored --exact --nocapture --test-threads=1
+
+# Run the same native DuckDB differential oracle over a relay-only custom iroh path.
+iroh-duckdb-relay-smoke driver=duckdb_adbc_driver:
+    @set -eu; driver_arg='{{driver}}'; driver_arg="${driver_arg#driver=}"; \
+    if [ ! -f "$driver_arg" ]; then echo 'DuckDB ADBC driver is missing; run `mise run duckdb-bootstrap`' >&2; exit 2; fi; \
+    driver_arg="$(realpath "$driver_arg")"; duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; \
+    HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" \
+      cargo test -p quackgis-server --test iroh_direct duckdb_pgwire_oracles_pass_through_forced_custom_relay -- --ignored --exact --nocapture --test-threads=1
+
+# Measure TCP, direct iroh, and forced-relay off/auto transport behavior and enforce I0 budgets.
+iroh-transport-profile out=".tmp/iroh-transport-profile/smoke.json":
+    @set -eu; out_arg='{{out}}'; out_arg="${out_arg#out=}"; out_arg="$(realpath -m "$out_arg")"; \
+    QUACKGIS_IROH_PROFILE_OUT="$out_arg" cargo test --release -p quackgis-edge --test transport_profile direct_and_relay_transport_profile -- --ignored --exact --nocapture --test-threads=1
 
 # Install checksum-pinned libduckdb and signed extensions into ignored .tmp.
 duckdb-bootstrap duckdb_bin=duckdb_bin:
@@ -416,7 +437,7 @@ check: fmt-check clippy test
 check-fast: fmt-check clippy test-fast
 
 # Run the same gate used by GitHub Actions CI.
-ci: check-fast project-contract-check duckdb-adbc-compile-check duckdb-adbc-storage-test duckdb-pgwire-workflow-test iroh-duckdb-smoke rest-postgrest-smoke duckdb-catalog-contract-test duckdb-catalog-identity-test duckdb-result-stream-smoke duckdb-wide-result-smoke duckdb-cancellation-smoke duckdb-mixed-concurrency-smoke duckdb-termination-smoke duckdb-tls-rotation-smoke duckdb-copy-smoke evidence-manifest-check probe-static-check runtime-static-check kind-static-check
+ci: check-fast project-contract-check duckdb-adbc-compile-check duckdb-adbc-storage-test duckdb-pgwire-workflow-test iroh-duckdb-smoke iroh-duckdb-relay-smoke iroh-transport-profile rest-postgrest-smoke duckdb-catalog-contract-test duckdb-catalog-identity-test duckdb-result-stream-smoke duckdb-wide-result-smoke duckdb-cancellation-smoke duckdb-mixed-concurrency-smoke duckdb-termination-smoke duckdb-tls-rotation-smoke duckdb-copy-smoke evidence-manifest-check probe-static-check runtime-static-check kind-static-check
 
 # Run the dev QuackGIS server on QUACKGIS_HOST/QUACKGIS_PORT.
 server:

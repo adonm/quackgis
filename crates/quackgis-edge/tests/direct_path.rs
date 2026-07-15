@@ -60,11 +60,7 @@ async fn one_lease_multiplexes_independent_pgwire_sessions() -> Result<()> {
     let (_worker_shutdown_guard, worker_shutdown) = watch::channel(false);
     let worker_task = tokio::spawn(serve_worker(
         worker.clone(),
-        WorkerAuthority {
-            bootstrap_public_key: bootstrap_secret.public(),
-            backend: backend_address,
-            max_streams_per_connection: 4,
-        },
+        WorkerAuthority::new(bootstrap_secret.public(), backend_address, 4),
         4,
         worker_shutdown,
     ));

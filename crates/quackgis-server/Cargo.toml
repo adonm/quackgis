@@ -85,5 +85,6 @@ libc = "0.2"
 sha2 = { workspace = true }
 bytes = "1"
 regex = { workspace = true }
-iroh = { workspace = true }
+iroh = { workspace = true, features = ["test-utils"] }
+iroh-relay = { workspace = true, features = ["server", "test-utils"] }
 quackgis-edge = { path = "../quackgis-edge" }

@@ -34,7 +34,13 @@ env_logger = { workspace = true }
 hex = { workspace = true }
 iroh = { workspace = true }
 log = { workspace = true }
+lz4_flex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+
+[dev-dependencies]
+iroh = { workspace = true, features = ["test-utils"] }
+iroh-relay = { workspace = true, features = ["server", "test-utils"] }
+libc = "0.2"

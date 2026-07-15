@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use iroh::{EndpointAddr, EndpointId, PublicKey, RelayUrl, SecretKey};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::{MAX_LEASE_TTL_SECONDS, RelayPolicy};
+use crate::{CompressionPolicy, MAX_LEASE_TTL_SECONDS, RelayPolicy};
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAX_KEY_BYTES: u64 = 256;
@@ -62,6 +62,8 @@ pub struct WorkerConfig {
     pub bootstrap_public_key: String,
     pub backend: SocketAddr,
     pub relays: Option<Vec<String>>,
+    #[serde(default)]
+    pub compression: CompressionPolicy,
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
     #[serde(default = "default_max_streams")]
@@ -102,6 +104,8 @@ pub struct ClientConfig {
     pub bootstrap: EndpointAddressConfig,
     pub listen: SocketAddr,
     pub relays: Option<Vec<String>>,
+    #[serde(default)]
+    pub compression: CompressionPolicy,
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
 }

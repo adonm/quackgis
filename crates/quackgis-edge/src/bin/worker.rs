@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Parser;
 use quackgis_edge::EDGE_ALPN;
+use quackgis_edge::compression::TransportMetrics;
 use quackgis_edge::config::{WorkerConfig, endpoint_document};
 use quackgis_edge::runtime::{WorkerAuthority, bind_endpoint, run_until_signal, serve_worker};
 use tokio::sync::watch;
@@ -29,15 +30,22 @@ async fn main() -> Result<()> {
     .await?;
     endpoint.online().await;
     println!("{}", endpoint_document(endpoint.id(), &endpoint.addr())?);
-    let authority = WorkerAuthority {
-        bootstrap_public_key: config.bootstrap_public_key()?,
-        backend: config.backend,
-        max_streams_per_connection: config.max_streams_per_connection,
-    };
+    let metrics = TransportMetrics::default();
+    let authority = WorkerAuthority::new(
+        config.bootstrap_public_key()?,
+        config.backend,
+        config.max_streams_per_connection,
+    )
+    .with_compression(config.compression, metrics.clone());
     let (_shutdown_guard, shutdown) = watch::channel(false);
-    run_until_signal(
+    let result = run_until_signal(
         endpoint.clone(),
         serve_worker(endpoint, authority, config.max_connections, shutdown),
     )
-    .await
+    .await;
+    log::info!(
+        "transport_metrics={}",
+        serde_json::to_string(&metrics.snapshot())?
+    );
+    result
 }

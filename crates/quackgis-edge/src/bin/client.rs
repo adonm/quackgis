@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Parser;
+use quackgis_edge::compression::TransportMetrics;
 use quackgis_edge::config::ClientConfig;
 use quackgis_edge::runtime::{
     ClientConnector, bind_endpoint, run_until_signal, serve_local_client,
@@ -30,14 +31,21 @@ async fn main() -> Result<()> {
         &config.relay_policy()?,
     )
     .await?;
-    let connector = ClientConnector::new(endpoint.clone(), credential, config.bootstrap.parse()?);
+    let metrics = TransportMetrics::default();
+    let connector = ClientConnector::new(endpoint.clone(), credential, config.bootstrap.parse()?)
+        .with_compression(config.compression, metrics.clone());
     connector.connect().await?;
     let listener = TcpListener::bind(config.listen).await?;
     log::info!("tiny pgwire client listening on {}", listener.local_addr()?);
     let (_shutdown_guard, shutdown) = watch::channel(false);
-    run_until_signal(
+    let result = run_until_signal(
         endpoint.clone(),
         serve_local_client(listener, connector, config.max_connections, shutdown),
     )
-    .await
+    .await;
+    log::info!(
+        "transport_metrics={}",
+        serde_json::to_string(&metrics.snapshot())?
+    );
+    result
 }

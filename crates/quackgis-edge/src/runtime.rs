@@ -17,10 +17,11 @@ use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
 
 use crate::{
-    AccessLeaseClaims, ApplicationProtocol, CONTROL_ALPN, CompressionCodec, EDGE_ALPN,
-    EdgeAuthenticate, EdgeAuthenticated, EdgeChallenge, LeaseRequest, MAX_CONTROL_MESSAGE_BYTES,
-    PROTOCOL_VERSION, RelayPolicy, SignedAccessLease, StreamPrelude, decode_control,
-    encode_control,
+    AccessLeaseClaims, ApplicationProtocol, CONTROL_ALPN, CompressionCodec, CompressionPolicy,
+    EDGE_ALPN, EdgeAuthenticate, EdgeAuthenticated, EdgeChallenge, LeaseRequest,
+    MAX_CONTROL_MESSAGE_BYTES, PROTOCOL_VERSION, RelayPolicy, SignedAccessLease, StreamPrelude,
+    compression::{Direction, TransportMetrics, copy_application},
+    decode_control, encode_control,
 };
 
 const NONCE_CACHE_CAPACITY: usize = 4096;
@@ -209,11 +210,39 @@ async fn handle_bootstrap_connection(
     Ok(())
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct WorkerAuthority {
     pub bootstrap_public_key: PublicKey,
     pub backend: SocketAddr,
     pub max_streams_per_connection: usize,
+    pub compression_policy: CompressionPolicy,
+    pub metrics: TransportMetrics,
+}
+
+impl WorkerAuthority {
+    pub fn new(
+        bootstrap_public_key: PublicKey,
+        backend: SocketAddr,
+        max_streams_per_connection: usize,
+    ) -> Self {
+        Self {
+            bootstrap_public_key,
+            backend,
+            max_streams_per_connection,
+            compression_policy: CompressionPolicy::Off,
+            metrics: TransportMetrics::default(),
+        }
+    }
+
+    pub fn with_compression(
+        mut self,
+        compression_policy: CompressionPolicy,
+        metrics: TransportMetrics,
+    ) -> Self {
+        self.compression_policy = compression_policy;
+        self.metrics = metrics;
+        self
+    }
 }
 
 pub async fn serve_worker(
@@ -246,6 +275,7 @@ pub async fn serve_worker(
                     continue;
                 };
                 let endpoint_id = endpoint.id();
+                let authority = authority.clone();
                 tasks.spawn(async move {
                     let _permit = permit;
                     if let Err(error) = handle_worker_connection(connection, endpoint_id, authority).await {
@@ -292,8 +322,11 @@ async fn handle_worker_connection(
         remote_transport,
         &challenge,
     )?;
+    let selected_compression = authority
+        .compression_policy
+        .select(&authentication.compression_offers)?;
     let authenticated =
-        EdgeAuthenticated::select(CompressionCodec::None, &authentication.compression_offers)?;
+        EdgeAuthenticated::select(selected_compression, &authentication.compression_offers)?;
     write_control(&mut auth_send, &authenticated).await?;
     auth_send
         .finish()
@@ -313,6 +346,7 @@ async fn handle_worker_connection(
             continue;
         };
         let lease = authentication.lease.clone();
+        let authority = authority.clone();
         streams.spawn(async move {
             let _permit = permit;
             if let Err(error) = forward_application_stream(
@@ -360,6 +394,9 @@ async fn forward_application_stream(
     }
 
     let initial = read_pgwire_packet(recv).await?;
+    authority
+        .metrics
+        .record_latency_sensitive(Direction::Upstream, initial.len());
     let packet_kind = classify_initial_packet(&initial)?;
     let expected = match packet_kind {
         InitialPacketKind::Cancellation => ApplicationProtocol::Cancellation,
@@ -378,7 +415,13 @@ async fn forward_application_stream(
                 send.write_all(b"N")
                     .await
                     .map_err(|error| anyhow!("cannot reject nested pgwire encryption: {error}"))?;
+                authority
+                    .metrics
+                    .record_latency_sensitive(Direction::Downstream, 1);
                 startup = read_pgwire_packet(recv).await?;
+                authority
+                    .metrics
+                    .record_latency_sensitive(Direction::Upstream, startup.len());
             }
             InitialPacketKind::Startup => {
                 let user = startup_user(&startup)?;
@@ -405,21 +448,40 @@ async fn forward_application_stream(
     send.write_all(&first_response)
         .await
         .map_err(|error| anyhow!("cannot forward backend startup response: {error}"))?;
+    authority
+        .metrics
+        .record_latency_sensitive(Direction::Downstream, first_response.len());
 
     let (mut backend_read, mut backend_write) = backend.into_split();
+    let upstream_metrics = authority.metrics.clone();
     let upstream = async {
-        tokio::io::copy(recv, &mut backend_write)
-            .await
-            .map_err(|error| anyhow!(error))?;
+        copy_application(
+            recv,
+            &mut backend_write,
+            compression,
+            false,
+            &upstream_metrics,
+            Direction::Upstream,
+        )
+        .await
+        .map_err(|error| anyhow!(error))?;
         backend_write
             .shutdown()
             .await
             .map_err(|error| anyhow!(error))
     };
+    let downstream_metrics = authority.metrics.clone();
     let downstream = async {
-        tokio::io::copy(&mut backend_read, send)
-            .await
-            .map_err(|error| anyhow!(error))?;
+        copy_application(
+            &mut backend_read,
+            send,
+            compression,
+            true,
+            &downstream_metrics,
+            Direction::Downstream,
+        )
+        .await
+        .map_err(|error| anyhow!(error))?;
         send.finish()
             .map_err(|error| anyhow!("cannot finish edge result stream: {error}"))
     };
@@ -438,6 +500,8 @@ pub struct ClientConnector {
     endpoint: Endpoint,
     credential_secret: SecretKey,
     bootstrap: EndpointAddr,
+    compression_policy: CompressionPolicy,
+    metrics: TransportMetrics,
 }
 
 impl ClientConnector {
@@ -446,7 +510,23 @@ impl ClientConnector {
             endpoint,
             credential_secret,
             bootstrap,
+            compression_policy: CompressionPolicy::Off,
+            metrics: TransportMetrics::default(),
         }
+    }
+
+    pub fn with_compression(
+        mut self,
+        compression_policy: CompressionPolicy,
+        metrics: TransportMetrics,
+    ) -> Self {
+        self.compression_policy = compression_policy;
+        self.metrics = metrics;
+        self
+    }
+
+    pub fn metrics(&self) -> TransportMetrics {
+        self.metrics.clone()
     }
 
     pub async fn connect(&self) -> Result<EdgeSession> {
@@ -480,14 +560,16 @@ impl ClientConnector {
             &self.credential_secret,
             self.endpoint.id(),
             challenge,
-            vec![CompressionCodec::None],
+            self.compression_policy.offers(),
         )?;
         write_control(&mut send, &authentication).await?;
         send.finish()
             .map_err(|error| anyhow!("cannot finish edge proof: {error}"))?;
         let authenticated: EdgeAuthenticated = read_control(&mut recv).await?;
         if authenticated.version != PROTOCOL_VERSION
-            || authenticated.compression != CompressionCodec::None
+            || !authentication
+                .compression_offers
+                .contains(&authenticated.compression)
         {
             bail!("worker selected an unsupported transport capability");
         }
@@ -495,6 +577,7 @@ impl ClientConnector {
             connection,
             lease,
             compression: authenticated.compression,
+            metrics: self.metrics.clone(),
         })
     }
 }
@@ -504,6 +587,7 @@ pub struct EdgeSession {
     connection: Connection,
     lease: SignedAccessLease,
     compression: CompressionCodec,
+    metrics: TransportMetrics,
 }
 
 impl EdgeSession {
@@ -527,7 +611,12 @@ impl EdgeSession {
             .open_bi()
             .await
             .map_err(|error| anyhow!("cannot open edge stream: {error}"))?;
-        write_control(&mut send, &StreamPrelude::new(protocol, self.compression)).await?;
+        let compression = match protocol {
+            ApplicationProtocol::Cancellation => CompressionCodec::None,
+            _ => self.compression,
+        };
+        write_control(&mut send, &StreamPrelude::new(protocol, compression)).await?;
+        self.metrics.record_stream(protocol);
         Ok((send, recv))
     }
 }
@@ -606,7 +695,7 @@ async fn forward_local_connection(
     connector: ClientConnector,
     session: Arc<tokio::sync::Mutex<Option<EdgeSession>>>,
 ) -> Result<()> {
-    let initial = read_pgwire_packet(&mut socket).await?;
+    let mut initial = read_pgwire_packet(&mut socket).await?;
     let protocol = match classify_initial_packet(&initial)? {
         InitialPacketKind::Cancellation => ApplicationProtocol::Cancellation,
         _ => ApplicationProtocol::Pgwire,
@@ -622,21 +711,78 @@ async fn forward_local_connection(
             .ok_or_else(|| anyhow!("edge session was not established"))?
     };
     let (mut send, mut recv) = edge.open(protocol).await?;
-    send.write_all(&initial)
-        .await
-        .map_err(|error| anyhow!("cannot forward pgwire startup: {error}"))?;
-    let (mut local_read, mut local_write) = socket.into_split();
-    let upstream = async {
-        tokio::io::copy(&mut local_read, &mut send)
+    loop {
+        let packet_kind = classify_initial_packet(&initial)?;
+        send.write_all(&initial)
             .await
-            .map_err(|error| anyhow!(error))?;
+            .map_err(|error| anyhow!("cannot forward pgwire startup: {error}"))?;
+        edge.metrics
+            .record_latency_sensitive(Direction::Upstream, initial.len());
+        match packet_kind {
+            InitialPacketKind::Ssl | InitialPacketKind::GssEnc => {
+                let mut denied = [0_u8; 1];
+                recv.read_exact(&mut denied)
+                    .await
+                    .map_err(|error| anyhow!("cannot read nested encryption denial: {error}"))?;
+                if denied != [b'N'] {
+                    bail!("worker returned an invalid nested encryption response");
+                }
+                edge.metrics
+                    .record_latency_sensitive(Direction::Downstream, denied.len());
+                socket.write_all(&denied).await?;
+                initial = read_pgwire_packet(&mut socket).await?;
+            }
+            InitialPacketKind::Startup => {
+                let first_response = read_backend_frame(&mut recv).await?;
+                validate_backend_authentication(&first_response)?;
+                edge.metrics
+                    .record_latency_sensitive(Direction::Downstream, first_response.len());
+                socket.write_all(&first_response).await?;
+                break;
+            }
+            InitialPacketKind::Cancellation => {
+                send.finish()
+                    .map_err(|error| anyhow!("cannot finish cancellation stream: {error}"))?;
+                let response = recv
+                    .read_to_end(1)
+                    .await
+                    .map_err(|error| anyhow!("cannot finish cancellation response: {error}"))?;
+                if !response.is_empty() {
+                    bail!("worker returned unexpected cancellation bytes");
+                }
+                socket.shutdown().await?;
+                return Ok(());
+            }
+        }
+    }
+    let (mut local_read, mut local_write) = socket.into_split();
+    let upstream_metrics = edge.metrics.clone();
+    let upstream = async {
+        copy_application(
+            &mut local_read,
+            &mut send,
+            edge.compression,
+            true,
+            &upstream_metrics,
+            Direction::Upstream,
+        )
+        .await
+        .map_err(|error| anyhow!(error))?;
         send.finish()
             .map_err(|error| anyhow!("cannot finish local edge stream: {error}"))
     };
+    let downstream_metrics = edge.metrics.clone();
     let downstream = async {
-        tokio::io::copy(&mut recv, &mut local_write)
-            .await
-            .map_err(|error| anyhow!(error))?;
+        copy_application(
+            &mut recv,
+            &mut local_write,
+            edge.compression,
+            false,
+            &downstream_metrics,
+            Direction::Downstream,
+        )
+        .await
+        .map_err(|error| anyhow!(error))?;
         local_write.shutdown().await.map_err(|error| anyhow!(error))
     };
     tokio::try_join!(upstream, downstream)?;
@@ -741,7 +887,10 @@ fn startup_user(packet: &[u8]) -> Result<String> {
         .ok_or_else(|| anyhow!("pgwire startup user is missing"))
 }
 
-async fn read_backend_frame(backend: &mut TcpStream) -> Result<Vec<u8>> {
+async fn read_backend_frame<R>(backend: &mut R) -> Result<Vec<u8>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
     let mut header = [0u8; 5];
     backend.read_exact(&mut header).await?;
     let length = u32::from_be_bytes(header[1..5].try_into().expect("fixed header")) as usize;

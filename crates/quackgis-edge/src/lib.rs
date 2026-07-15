@@ -7,6 +7,7 @@ use iroh::{EndpointAddr, EndpointId, PublicKey, RelayUrl, SecretKey, Signature};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
+pub mod compression;
 pub mod config;
 pub mod runtime;
 
@@ -80,6 +81,34 @@ pub enum ApplicationProtocol {
 #[serde(rename_all = "snake_case")]
 pub enum CompressionCodec {
     None,
+    Lz4Block,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompressionPolicy {
+    #[default]
+    Off,
+    Auto,
+}
+
+impl CompressionPolicy {
+    pub fn offers(self) -> Vec<CompressionCodec> {
+        match self {
+            Self::Off => vec![CompressionCodec::None],
+            Self::Auto => vec![CompressionCodec::None, CompressionCodec::Lz4Block],
+        }
+    }
+
+    pub fn select(self, offers: &[CompressionCodec]) -> Result<CompressionCodec, ProtocolError> {
+        validate_compression_offers(offers)?;
+        Ok(match self {
+            Self::Auto if offers.contains(&CompressionCodec::Lz4Block) => {
+                CompressionCodec::Lz4Block
+            }
+            _ => CompressionCodec::None,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -387,7 +416,11 @@ impl StreamPrelude {
         if !lease.permits(self.protocol) {
             return Err(ProtocolError::ProtocolNotPermitted);
         }
-        if self.compression != negotiated_compression {
+        let expected_compression = match self.protocol {
+            ApplicationProtocol::Cancellation => CompressionCodec::None,
+            _ => negotiated_compression,
+        };
+        if self.compression != expected_compression {
             return Err(ProtocolError::CompressionNotOffered);
         }
         Ok(())
@@ -469,7 +502,7 @@ fn validate_protocols(protocols: &[ApplicationProtocol]) -> Result<(), ProtocolE
 
 fn validate_compression_offers(offers: &[CompressionCodec]) -> Result<(), ProtocolError> {
     let unique = offers.iter().copied().collect::<HashSet<_>>();
-    if !offers.contains(&CompressionCodec::None) || offers.len() != unique.len() || offers.len() > 1
+    if !offers.contains(&CompressionCodec::None) || offers.len() != unique.len() || offers.len() > 2
     {
         return Err(ProtocolError::MissingUncompressedCodec);
     }
@@ -658,6 +691,39 @@ mod tests {
             ),
             Err(ProtocolError::WrongChallenge)
         ));
+    }
+
+    #[test]
+    fn compression_policy_requires_none_and_selects_lz4_only_in_auto_mode() {
+        let auto = CompressionPolicy::Auto.offers();
+        assert_eq!(
+            CompressionPolicy::Auto.select(&auto).unwrap(),
+            CompressionCodec::Lz4Block
+        );
+        assert_eq!(
+            CompressionPolicy::Off.select(&auto).unwrap(),
+            CompressionCodec::None
+        );
+        assert!(matches!(
+            CompressionPolicy::Auto.select(&[CompressionCodec::Lz4Block]),
+            Err(ProtocolError::MissingUncompressedCodec)
+        ));
+    }
+
+    #[test]
+    fn cancellation_streams_are_always_uncompressed() {
+        let (_, _, _, lease) = lease_fixture(1_700_000_000);
+        StreamPrelude::new(ApplicationProtocol::Cancellation, CompressionCodec::None)
+            .verify(&lease.claims, CompressionCodec::Lz4Block)
+            .unwrap();
+        assert!(
+            StreamPrelude::new(
+                ApplicationProtocol::Cancellation,
+                CompressionCodec::Lz4Block
+            )
+            .verify(&lease.claims, CompressionCodec::Lz4Block)
+            .is_err()
+        );
     }
 
     #[test]
