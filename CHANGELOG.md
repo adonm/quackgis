@@ -7,6 +7,11 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 
 ### Added
 
+- A shared `quackgis-edge` I0 protocol foundation with versioned control/edge
+  ALPNs, five-minute bootstrap-signed one-worker leases, transport-bound
+  registered-key refresh proofs, fresh worker challenges, typed application
+  streams, mandatory uncompressed negotiation, 16 KiB control-message bounds,
+  and fail-closed public-default/custom relay policy validation.
 - Local-first smoke/local/reference/external roadmap levels with explicit host
   performance, minimal-Kind topology, and managed-service claim boundaries.
 - A common profile evidence envelope with source dirty hashes, checksum-only native

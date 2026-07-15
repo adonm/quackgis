@@ -5,7 +5,7 @@
 #
 [workspace]
 resolver = "2"
-members = ["crates/quackgis-server", "crates/quackgis-rest"]
+members = ["crates/quackgis-edge", "crates/quackgis-server", "crates/quackgis-rest"]
 exclude = ["vendor/pgwire"]
 
 [workspace.package]
@@ -58,6 +58,8 @@ subtle = "2.6"
 tokio-postgres = "0.7"
 tokio-postgres-rustls = "0.14"
 url = "2.5"
+iroh = { version = "=1.0.2", default-features = false, features = ["tls-ring"] }
+thiserror = "2"
 
 [profile.release]
 strip = true

@@ -159,6 +159,8 @@ Read:
 - [docs/DUCKDB_ROADMAP_ALIGNMENT.md](./docs/DUCKDB_ROADMAP_ALIGNMENT.md) —
   conditional adoption/deletion gates for upstream DuckDB and DuckLake work.
 - [docs/OPERATIONS.md](./docs/OPERATIONS.md) — local runtime and security baseline.
+- [docs/IROH_TRANSPORT.md](./docs/IROH_TRANSPORT.md) — implemented I0 protocol,
+  lease, key-proof, relay, and transport boundaries.
 - [docs/QUICKSTART.md](./docs/QUICKSTART.md) — guided setup.
 - [DIVERGENCE.md](./DIVERGENCE.md) — retained `arrow-pg` divergence.
 - [docs/HISTORY.md](./docs/HISTORY.md) — retired architecture context.

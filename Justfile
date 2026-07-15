@@ -141,12 +141,16 @@ test:
     cargo test --workspace
 
 # Faster local regression loop that compiles the native-runtime integration gates.
-test-fast: arrow-encoder-test
+test-fast: arrow-encoder-test iroh-protocol-test
     cargo test -p quackgis-server --lib --test duckdb_adbc_storage --test duckdb_wire_read --test roadmap_profiles --test catalog_contract
 
 # Execute the maintained vendored Arrow-to-pgwire properties and regressions.
 arrow-encoder-test:
     cargo test -p arrow-pg
+
+# Verify signed I0 leases, key proofs, stream types, and relay policy.
+iroh-protocol-test:
+    cargo test -p quackgis-edge
 
 # Install checksum-pinned libduckdb and signed extensions into ignored .tmp.
 duckdb-bootstrap duckdb_bin=duckdb_bin:

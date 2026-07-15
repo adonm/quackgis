@@ -15,6 +15,13 @@ The machine-readable `pg18-column-core-v1` target and digest-pinned PostgreSQL
 They freeze desired behavior and do not imply that QuackGIS currently implements
 the listed catalogs or PostgreSQL result types.
 
+The shared `quackgis-edge` crate now implements the cryptographic I0 protocol
+foundation: bounded bootstrap-signed one-worker leases, registered credential-key
+proofs bound to the current iroh endpoint, fresh worker challenges, typed stream
+preludes, mandatory uncompressed negotiation, and fail-closed relay selection.
+`just iroh-protocol-test` is protocol evidence only; application traffic still
+uses direct TCP until the executable bootstrap/client/worker path lands.
+
 The exact OGR 3.11.5 client image also has a credential-free normalized
 copied-point trace against digest-pinned PostgreSQL 18.4/PostGIS. Its 21 query
 families are an implementation oracle, not evidence that copied spatial discovery
