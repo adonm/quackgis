@@ -15,12 +15,15 @@ The machine-readable `pg18-column-core-v1` target and digest-pinned PostgreSQL
 They freeze desired behavior and do not imply that QuackGIS currently implements
 the listed catalogs or PostgreSQL result types.
 
-The shared `quackgis-edge` crate now implements the cryptographic I0 protocol
-foundation: bounded bootstrap-signed one-worker leases, registered credential-key
-proofs bound to the current iroh endpoint, fresh worker challenges, typed stream
-preludes, mandatory uncompressed negotiation, and fail-closed relay selection.
-`just iroh-protocol-test` is protocol evidence only; application traffic still
-uses direct TCP until the executable bootstrap/client/worker path lands.
+The shared `quackgis-edge` crate implements the cryptographic I0 protocol and an
+executable local-direct seam: bounded bootstrap-signed one-worker leases,
+registered credential-key proofs bound to the current iroh endpoint, fresh worker
+challenges, typed streams, mandatory uncompressed negotiation, fail-closed relay
+selection, a loopback tiny client, and a worker bridge that binds pgwire startup
+to the leased role without carrying SCRAM. `just iroh-protocol-test` proves the
+pure contract; `just iroh-direct-smoke` uses real local iroh endpoints and a fake
+trust-mode pgwire backend. Actual DuckDB protocol/COPY/cancellation semantics and
+direct/relayed resource claims remain open.
 
 The exact OGR 3.11.5 client image also has a credential-free normalized
 copied-point trace against digest-pinned PostgreSQL 18.4/PostGIS. Its 21 query
@@ -136,6 +139,7 @@ mise exec -- just ci
 | psycopg | 3.2.13 TLS/SCRAM scalar smoke passes in Kind; copied-data workflow remains open |
 | SQLAlchemy, GeoPandas, pg_featureserv | target; named dependency workflows remain open |
 | `pg_dump`, logical replication, PL/pgSQL, triggers, LISTEN/NOTIFY | unsupported/non-goals |
+| Tiny iroh client bridge | executable local-direct pgwire/cancellation seam passes against a deterministic fake trust-mode backend; actual QuackGIS, public/custom relay, packaging, and resource qualification remain open |
 
 ## Spatial contract
 
@@ -162,6 +166,11 @@ unless a focused test says otherwise.
 ## Deliberate runtime limits
 
 - Local official DuckLake catalog and local data paths only.
+- The I0 tiny client and worker bridge are not release ingress yet. They require
+  loopback listeners, a trust-mode backend that immediately returns
+  `AuthenticationOk`, and the exact leased startup role; nested TLS/GSS and
+  password/SASL challenges are rejected. The registered direct test uses a fake
+  backend and makes no DuckDB semantics, relay, or performance claim.
 - Maintenance is disabled unless `QUACKGIS_MAINTENANCE_USER` names the caller;
   it remains constrained by the write table allowlist and cannot run inside an
   explicit transaction.

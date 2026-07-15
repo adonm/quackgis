@@ -3626,10 +3626,16 @@ dependencies = [
 name = "quackgis-edge"
 version = "0.2.0"
 dependencies = [
+ "anyhow",
+ "clap",
+ "env_logger",
+ "hex",
  "iroh",
+ "log",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

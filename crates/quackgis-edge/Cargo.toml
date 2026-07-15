@@ -11,8 +11,30 @@ homepage.workspace = true
 description = "Authenticated iroh edge protocol for QuackGIS"
 publish.workspace = true
 
+[[bin]]
+name = "quackgis-bootstrap"
+path = "src/bin/bootstrap.rs"
+
+[[bin]]
+name = "quackgis-worker-edge"
+path = "src/bin/worker.rs"
+
+[[bin]]
+name = "quackgis-client"
+path = "src/bin/client.rs"
+
+[[bin]]
+name = "quackgis-keygen"
+path = "src/bin/keygen.rs"
+
 [dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+env_logger = { workspace = true }
+hex = { workspace = true }
 iroh = { workspace = true }
+log = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }

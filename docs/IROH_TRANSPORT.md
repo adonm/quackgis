@@ -22,13 +22,116 @@ three independently evolving wire formats.
   codec will be added only after the I0 direct/relay measurements select one.
 - Omitted relay configuration selects iroh's public production preset. An
   explicitly empty, malformed, or duplicate custom list is rejected.
+- `quackgis-bootstrap` serves only lease requests and keeps a bounded replay
+  cache; it never receives or proxies application bytes.
+- `quackgis-worker-edge` accepts a bounded number of authenticated connections
+  and streams, validates the leased role from the PostgreSQL startup packet,
+  handles SSL/GSS negotiation with `N` so TLS is not nested inside iroh, and
+  forwards pgwire/cancellation to one loopback complete-worker boundary.
+- `quackgis-client` exposes a bounded loopback pgwire listener, obtains and
+  refreshes one lease, and multiplexes local sessions onto typed worker streams.
+  It recognizes only the initial pgwire packet needed to distinguish cancellation
+  and does not parse SQL.
+- The worker requires the loopback pgwire server to begin with PostgreSQL
+  `AuthenticationOk`. Any password/SASL challenge is rejected before the local
+  client can send credential material across the cluster leg.
+- Secret keys are loaded only from bounded, non-symlink files with no group/other
+  permissions. `quackgis-keygen` creates a new owner-only file without replacing
+  an existing path.
 
-Run this evidence with `just iroh-protocol-test`.
+Run the pure protocol evidence with `just iroh-protocol-test`. Run the executable
+local-direct seam with `just iroh-direct-smoke`; it creates real bootstrap,
+worker, and client iroh endpoints and proves concurrent sessions, local bridge
+forwarding, nested-TLS denial, and cancellation against a deterministic fake
+trust-mode pgwire backend.
 
-This is protocol and cryptographic evidence, not yet an application transport
-claim. The executable bootstrap, worker stream bridge, tiny local client, direct
-and relayed profiles, and compression measurements remain open and are tracked in
-[ROADMAP_STATUS.md](./ROADMAP_STATUS.md).
+This is not yet DuckDB application or performance evidence. The actual QuackGIS
+result/type/error/transaction/COPY/cancellation oracles, public-default and custom
+relay paths, reconnect/restart, and CPU/RSS/throughput/compression profiles remain
+open and are tracked in [ROADMAP_STATUS.md](./ROADMAP_STATUS.md).
+
+## Operator configuration
+
+Build the four focused binaries:
+
+```sh
+cargo build -p quackgis-edge --bins
+```
+
+Generate separate bootstrap, worker, credential, and client-transport keys. Each
+command prints the corresponding public key and creates the private file with
+mode `0600`:
+
+```sh
+target/debug/quackgis-keygen --out bootstrap.key
+target/debug/quackgis-keygen --out worker.key
+target/debug/quackgis-keygen --out credential.key
+target/debug/quackgis-keygen --out client-transport.key
+```
+
+The worker configuration names the bootstrap public key and a loopback pgwire
+server running in trust mode. I0 rejects a non-loopback backend; the backend must
+not request a password:
+
+```json
+{
+  "secret_key_path": "worker.key",
+  "bootstrap_public_key": "BOOTSTRAP_PUBLIC_KEY",
+  "backend": "127.0.0.1:5434",
+  "max_connections": 64,
+  "max_streams_per_connection": 64
+}
+```
+
+Start `quackgis-worker-edge --config worker.json`. Its first stdout line is the
+public endpoint document to place in the bootstrap configuration:
+
+```json
+{
+  "secret_key_path": "bootstrap.key",
+  "registered_credential": "CREDENTIAL_PUBLIC_KEY",
+  "login_role": "postgres",
+  "worker": {
+    "endpoint_id": "WORKER_ENDPOINT_ID",
+    "direct_addresses": ["192.0.2.10:4242"],
+    "relay_url": "https://example-relay.invalid"
+  },
+  "assignment_generation": 1,
+  "lease_ttl_seconds": 60,
+  "max_connections": 64
+}
+```
+
+Start `quackgis-bootstrap --config bootstrap.json` and copy its public endpoint
+document into the tiny-client configuration:
+
+```json
+{
+  "credential_secret_key_path": "credential.key",
+  "transport_secret_key_path": "client-transport.key",
+  "bootstrap": {
+    "endpoint_id": "BOOTSTRAP_ENDPOINT_ID",
+    "direct_addresses": ["192.0.2.11:4242"],
+    "relay_url": "https://example-relay.invalid"
+  },
+  "listen": "127.0.0.1:5433",
+  "max_connections": 64
+}
+```
+
+Then run `quackgis-client --config client.json` and point PostgreSQL clients at
+`127.0.0.1:5433` with the leased `login_role`. Relative key paths resolve from the
+process working directory. Relay configuration is intentionally omitted above,
+which selects iroh's public preset. To use hosted relays, add the same explicit,
+non-empty form independently to each process:
+
+```json
+"relays": ["https://relay.example.com"]
+```
+
+The direct TCP backend is an I0 development seam. It must stay loopback-only and
+is not release ingress; packaging it behind an owner-protected same-pod/process
+boundary and refusing direct application access remain K0/M5 work.
 
 ## Security boundary
 

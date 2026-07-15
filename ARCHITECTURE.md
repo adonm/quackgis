@@ -67,17 +67,18 @@ Pgwire startup terminates at the Rust edge. Trust mode is development-only;
 password mode uses SCRAM-SHA-256. TLS certificate and key must be configured
 together. Parsed read/write policy runs before ADBC prepare or schema lookup.
 
-The planned I0 ingress treats an authenticated, end-to-end encrypted iroh
-connection as an already secure pgwire channel; direct TCP continues to require
-configured TLS outside development, but the iroh cluster leg does not nest pgwire
-TLS inside QUIC. The local client boundary is protected separately by an
-owner-only socket, process isolation, or generated local credential. A minimal
-config-backed bootstrap registers the client public key and assigns one worker in
-a signed access lease. The worker validates that lease and key proof before
-attaching the preauthenticated LOGIN role; it never receives pairing passwords or
-SCRAM verifiers. Tunnel compression is enabled only after that authentication and
-pgwire startup. The tiny client may recognize startup framing such as cancellation
-but never parses SQL.
+The I0 ingress treats an authenticated, end-to-end encrypted iroh connection as
+an already secure pgwire channel; direct TCP continues to require configured TLS
+outside development, but the iroh cluster leg does not nest pgwire TLS inside
+QUIC. The shared protocol and executable seam now provide a config-backed
+registered credential, bootstrap-signed one-worker lease, challenged key proof,
+bounded loopback tiny client, and typed pgwire/cancellation worker streams. The
+worker validates pgwire startup `user` against the lease, answers SSL/GSS requests
+without nested encryption, and accepts only `AuthenticationOk` from the loopback
+backend before forwarding any client authentication traffic. The tiny client
+recognizes initial cancellation framing but never parses SQL. Current evidence
+uses a fake trust-mode backend; actual DuckDB oracle parity and an owner-protected
+packaged local boundary remain open.
 
 The release application path always enters through the tiny client. Bootstrap
 registers the client-generated credential public key, selects one worker, and

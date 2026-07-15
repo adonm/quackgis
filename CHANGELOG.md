@@ -12,6 +12,13 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   registered-key refresh proofs, fresh worker challenges, typed application
   streams, mandatory uncompressed negotiation, 16 KiB control-message bounds,
   and fail-closed public-default/custom relay policy validation.
+- Executable `quackgis-bootstrap`, `quackgis-worker-edge`, and tiny
+  `quackgis-client` binaries with owner-only key loading/generation, bounded
+  endpoint/stream admission, nonce replay protection, loopback-only backend and
+  client boundaries, leased pgwire startup-role enforcement, nested-TLS denial,
+  backend credential-challenge denial, lease refresh, and typed cancellation. A
+  real local-direct iroh gate proves concurrent multiplexed sessions and the
+  local bridge against a deterministic fake trust-mode pgwire backend.
 - Local-first smoke/local/reference/external roadmap levels with explicit host
   performance, minimal-Kind topology, and managed-service claim boundaries.
 - A common profile evidence envelope with source dirty hashes, checksum-only native

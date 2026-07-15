@@ -7,6 +7,9 @@ use iroh::{EndpointAddr, EndpointId, PublicKey, RelayUrl, SecretKey, Signature};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
+pub mod config;
+pub mod runtime;
+
 pub const CONTROL_ALPN: &[u8] = b"quackgis/control/1";
 pub const EDGE_ALPN: &[u8] = b"quackgis/edge/1";
 pub const PROTOCOL_VERSION: u8 = 1;

@@ -29,6 +29,8 @@ floor from the ordered security work.
 | bounded transaction-local `request.jwt.claims` context | real pgwire workflow + role/parser units |
 | common schema/table privilege enforcement | role/policy units + real pgwire role-denial/grant cases |
 | role-aware schema/table/column/grant/default/comment discovery | real pgwire workflow + development catalog/parser units |
+| signed I0 worker assignment and credential-key proof | edge protocol units + real local-direct iroh endpoints |
+| I0 cluster-leg credential exclusion | leased startup-role check, nested-TLS denial, and backend `AuthenticationOk`-only direct smoke |
 
 The role configuration parser validates stable explicit OIDs, LOGIN/NOLOGIN,
 INHERIT defaults, PostgreSQL 18 membership-edge options, cycles, owners, and the
@@ -45,10 +47,15 @@ infrastructure, and production failure drills remain open.
 1. **Client → pgwire:** current direct TCP uses SCRAM and
    `QUACKGIS_TLS_MODE=required` outside local development. `preferred` mode permits
    plaintext for development; required mode needs paired certificate/key material
-   and rejects insecure startup before auth. The planned iroh ingress is already
-   authenticated and end-to-end encrypted, so it satisfies the secure-channel
-   boundary without nesting pgwire TLS; its local socket/process boundary is
-   protected independently.
+   and rejects insecure startup before auth. The I0 ingress is authenticated and
+   end-to-end encrypted, so it satisfies the secure-channel boundary without
+   nesting pgwire TLS. The config-backed bootstrap, signed one-worker lease,
+   challenged key proof, loopback tiny client, and worker startup-role validation
+   are implemented. The worker answers SSL/GSS requests without nesting
+   encryption and refuses a backend unless its first frame is
+   `AuthenticationOk`, before a client can send password/SASL material. The
+   registered direct smoke uses a fake backend; owner-protected packaged local
+   boundaries and the actual DuckDB oracle remain open.
 2. **HTTP client → REST:** the current bearer token is a preview control. The
    Local 1.0 target validates JWT signature, issuer, audience, time bounds, and a
    bounded role claim before opening a database transaction. Shared 1.x uses the
