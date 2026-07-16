@@ -179,6 +179,30 @@ Together with the maintained 32-client/eight-reader native workflow, it closes t
 open M1 mixed-class admission evidence slice; write/commit interruption and the
 Local 1.0 mixed-workload soak remain separate gates.
 
+## Spatial scan profile
+
+The M4 scan profile creates the same ordered point fixture in 25 official-DuckLake
+Parquet files for two layouts: maintained WKB plus four bbox columns, and DuckDB
+1.5.4 native `GEOMETRY`. It runs selective and deliberately unpruned exact
+oracles, requires every count to agree through pgwire, inspects JSON plans for a
+candidate plus the original `ST_Intersects`, and enforces DuckDB's
+`OPERATOR_ROW_GROUPS_SCANNED` metrics against both a 5% ceiling and 20x reduction.
+
+```sh
+mise exec -- just duckdb-spatial-scan-profile \
+  level=local rows=1000000 \
+  out=.tmp/duckdb-spatial-scan/local-r1m.json
+```
+
+The clean 100k smoke on source `26156bd` uses 4,000 ordered points per file. All
+four queries return the same 100 rows. Maintained bbox pruning dispatches and
+scans one of 25 row groups; native geometry dispatches all 25 row groups to the
+Parquet reader, whose geometry statistics scan one. Both therefore pass at 4%
+and 25x. This establishes the plan/row-group oracle but does not claim compressed
+bytes or representative scale. Reference mode requires exactly 10M rows and a
+clean source with storage metadata; two passing 10M runs are required before a
+100M profile is introduced.
+
 ## Termination and restart profile
 
 The process-level termination profile starts the actual server binary, commits a
@@ -200,6 +224,7 @@ interruption behavior.
 ## Next profiles
 
 E1's result, cancellation, transport, mixed-class, and COPY reference budgets now
-pass. Later profiles cover selective scans, grouped aggregates, bounded spatial joins, fragmented-file
-compaction, plans, bytes scanned, spill, and configured-concurrency evidence. The
-exact M4 10M profile must pass twice before introducing 100M.
+pass. The first selective scan/plan/row-group smoke now passes. Later profiles add
+compressed bytes, grouped aggregates, bounded spatial joins, fragmented-file
+compaction, spill, and configured-concurrency evidence. The exact M4 10M profile
+must pass twice before introducing 100M.
