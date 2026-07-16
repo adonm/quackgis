@@ -237,6 +237,16 @@ change; direct-column origins are resolved from the same guarded registry
 snapshot. REST and other catalog caches do not consume it yet, and the security
 epoch remains future C4 work.
 
+Read-only PostgreSQL SQL cursors now share that prepared-statement and epoch
+boundary. Simple and extended protocol accept plain transaction control plus one
+parameter-free `DECLARE ... CURSOR FOR SELECT`, metadata-only `FETCH 0`, and
+bounded forward `FETCH`/`CLOSE`. A session may retain at most 16 cursors and one
+fetch may request at most 4,096 rows. The native stream starts on first non-zero
+fetch, pins its requested text/binary result format, and is drained in bounded
+pages before close or transaction end so an unfinished ADBC reader is not reused.
+Binary/scroll/hold declarations, backward/absolute movement, and format changes
+on a live cursor fail closed.
+
 ## Compatibility surfaces
 
 The profile grows in dependency order. A relation is supported only when its
@@ -707,14 +717,19 @@ Deliver:
 Gate: all Local 1.0 named clients pass in the pinned Kind topology and the same
 catalog tests pass directly on the host.
 
-Current progress: pinned psycopg 3.2.13 now passes one copied-data workflow in the
+Current progress: pinned psycopg 3.2.13 passes one copied-data workflow in the
 minimal Kind topology through the mutual-TLS tiny client. It creates/reuses a
 client-neutral official-DuckLake table, clears it, streams exact WKB and NULL rows
 with PostgreSQL text COPY, closes and reconnects, and verifies exact scalar and
-spatial readback. It passes again after ordered Pod replacement and mTLS/iroh key
-rotation with old-client denial. This closes the psycopg copied-data slice only.
-Psql describe, OGR read/COPY/no-FID behavior, and headless QGIS copied-layer
-qualification remain open.
+spatial readback. Pinned GDAL/OGR 3.11.5 then reads that same fixture through its
+unmodified extended-protocol SQL-result cursor lifecycle (`BEGIN`, `DECLARE`,
+`FETCH 0`, bounded `FETCH`, `CLOSE`, transaction end) and must produce exact
+GeoJSON for `POINT (1 2)` plus NULL geometry/property values. Both pass again
+after ordered Pod replacement and mTLS/iroh key rotation with old-client denial.
+This closes the psycopg copied-data slice and the OGR SQL-result read slice only.
+Psql describe/copied-data, OGR direct table discovery/COPY/no-FID behavior, and
+headless QGIS copied-layer qualification remain open; the OGR connection's
+optional `pg_proc` PostGIS probe still fails closed before the supported SQL path.
 
 ### H1 — migrate and package role-aware REST
 

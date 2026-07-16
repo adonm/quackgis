@@ -20,8 +20,11 @@ The psycopg 3.2.13 Job is a copied-data gate rather than a scalar connection
 smoke. It creates or reuses one client-neutral table, clears it, streams two rows
 with PostgreSQL text COPY (including exact WKB and NULLs), closes the connection,
 reconnects, and requires exact scalar and `POINT (1 2)` readback. The same gate is
-rerun after ordered replacement and mTLS/iroh key rotation. The psql and OGR Jobs
-remain scalar gates; their copied-data qualification is tracked separately.
+rerun after ordered replacement and mTLS/iroh key rotation. The OGR 3.11.5 Job
+waits for that fixture, reads it through the driver's unmodified SQL-result cursor
+lifecycle, converts it to GeoJSON, and requires exact `POINT (1 2)`, NULL geometry,
+and NULL property values. This qualifies OGR SQL-result reads, not direct layer
+discovery, OGR COPY/no-FID behavior, or QGIS. The psql Job remains a scalar gate.
 
 The complete server, worker, and bootstrap use Kubernetes native sidecar ordering;
 the tiny client is the regular container. Shutdown therefore removes ingress
@@ -80,7 +83,8 @@ unreachable named cluster is deleted and recreated before image loading.
 
 The client gates use `verify-full`, the generated client certificate, and the
 leased `postgres` role. The psycopg gate additionally proves copied-data COPY and
-reopen behavior through this exact path. No database password crosses the cluster leg: the worker
+reopen behavior, and the OGR gate proves copied-data SQL-result readback, through
+this exact path. No database password crosses the cluster leg: the worker
 requires the loopback server to return `AuthenticationOk`, and the bridge's mTLS
 boundary authenticates the packaged clients independently. Direct pgwire to
 `5434` is refused because the complete worker remains loopback-only.

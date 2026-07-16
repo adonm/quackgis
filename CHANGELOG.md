@@ -7,10 +7,17 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 
 ### Added
 
+- Bounded read-only PostgreSQL SQL cursors now support simple and extended
+  transaction/`DECLARE`/metadata-only and forward `FETCH`/`CLOSE` workflows with
+  session/fetch ceilings, role and catalog-epoch validation, text/binary format
+  pinning, and clean bounded drain on close. The pinned GDAL/OGR 3.11.5 Kind job
+  uses that unmodified SQL-result path to read the psycopg-created fixture and
+  requires exact Point/NULL GeoJSON through mTLS, replacement, and key rotation.
+  Direct OGR discovery/COPY/no-FID qualification remains open.
 - The pinned psycopg 3.2.13 Kind job now runs a copied-data workflow through the
   mutual-TLS tiny-client ingress: create/reuse an official-DuckLake table, clear
   it, stream PostgreSQL COPY with exact WKB and NULL rows, close/reconnect, and
-  verify exact scalar/spatial readback. It remains green after a 4.071-second
+  verify exact scalar/spatial readback. It remains green after a 5.042-second
   ordered replacement and packaged mTLS/iroh key rotation with old-client denial;
   the existing direct/plaintext/client-certificate denial jobs remain green.
 - The REST sidecar now re-reads its bounded regular-file HS256 key for every

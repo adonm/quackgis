@@ -92,7 +92,10 @@ smokes pass, direct/plaintext/certificate-free access fails, and replacement plu
 edge/mTLS rotation reconnect cleanly. The pinned psycopg 3.2.13 job additionally
 creates copied data, streams WKB/NULL rows with COPY, reconnects, and verifies
 exact spatial readback through that packaged ingress, including after ordered
-replacement and mTLS/edge-key rotation. Packaged resource and hosted-relay
+replacement and mTLS/edge-key rotation. Pinned OGR 3.11.5 reads the same fixture
+through its extended SQL-result cursor lifecycle and requires exact Point/NULL
+GeoJSON across those same operational gates. Direct OGR table discovery/COPY and
+QGIS copied-layer qualification remain open. Packaged resource and hosted-relay
 qualification remain open.
 
 TLS remains optional for local development. Set `QUACKGIS_TLS_MODE=required` with

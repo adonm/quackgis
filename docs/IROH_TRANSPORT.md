@@ -51,8 +51,9 @@ tiny client is the sole Service pgwire endpoint and requires a CA-verified clien
 certificate. Fixed UDP binds and DNS-resolved direct routes make this package
 independent of outbound relay access. Pinned psql, psycopg, and OGR Jobs enter
 through that boundary. The psycopg 3.2.13 Job creates copied data, streams exact
-WKB/NULL rows with COPY, reconnects, and verifies spatial readback; psql and OGR
-remain scalar package gates. Denial Jobs prove the Pod address cannot reach the
+WKB/NULL rows with COPY, reconnects, and verifies spatial readback. The OGR 3.11.5
+Job reads the same fixture through bounded SQL cursors and requires exact
+Point/NULL GeoJSON; psql remains a scalar package gate. Denial Jobs prove the Pod address cannot reach the
 worker's loopback pgwire port, plaintext is refused, and a client certificate is
 required. `just kind-restart-gate` proves ordered reconnect, while
 `just kind-secret-rotation-gate` rotates mTLS and edge keys and denies the prior
