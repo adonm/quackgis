@@ -7,13 +7,16 @@ use std::time::{Duration, Instant};
 use adbc_core::options::IngestMode;
 use arrow_array::builder::BinaryBuilder;
 use arrow_array::{
-    ArrayRef, BinaryArray, Float64Array, Int64Array, RecordBatch, RecordBatchReader, StringArray,
+    Array, ArrayRef, BinaryArray, Float64Array, Int64Array, RecordBatch, RecordBatchReader,
+    StringArray, UInt64Array,
 };
 use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use quackgis_server::auth::AuthConfig;
-use quackgis_server::engine_api::{EngineTableRef, IngestDisposition};
+use quackgis_server::engine_api::{
+    EngineMaintenanceRequest, EngineStorageKernel, EngineTableRef, IngestDisposition,
+};
 use quackgis_server::pgwire_server::ServerOptions;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -1313,6 +1316,12 @@ async fn spatial_scan_profile() {
             .unwrap_or_else(|error| panic!("ingest native profile file {file}: {error}"));
     }
     let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
+    let bbox_files_before = table_files(runtime.storage(), "bbox_scan_profile");
+    let native_files_before = table_files(runtime.storage(), "native_scan_profile");
+    assert_eq!(bbox_files_before.len() as u64, profile.files);
+    assert_eq!(native_files_before.len() as u64, profile.files);
+    let bbox_row_group_bytes = parquet_row_group_bytes(runtime.storage(), &bbox_files_before);
+    let native_row_group_bytes = parquet_row_group_bytes(runtime.storage(), &native_files_before);
 
     let (client, connection) = runtime.connect().await;
     let probe_max = rows_per_file.min(100).saturating_sub(1);
@@ -1390,6 +1399,42 @@ async fn spatial_scan_profile() {
     assert!(native_plan_text.contains("st_intersects"));
     assert_scan_budget("maintained bbox", bbox, bbox_unpruned);
     assert_scan_budget("native geometry", native, native_unpruned);
+    let bbox_bytes = scan_byte_metrics(&bbox_row_group_bytes, bbox, bbox_unpruned);
+    let native_bytes = scan_byte_metrics(&native_row_group_bytes, native, native_unpruned);
+
+    for table in ["bbox_scan_profile", "native_scan_profile"] {
+        runtime
+            .storage()
+            .maintain(EngineMaintenanceRequest::MergeAdjacentFiles {
+                schema: "main".to_owned(),
+                table: table.to_owned(),
+                max_compacted_files: Some(profile.files),
+                max_file_size: Some(1_073_741_824),
+                min_file_size: None,
+            })
+            .unwrap_or_else(|error| panic!("compact {table}: {error}"));
+    }
+    let bbox_files_after = table_files(runtime.storage(), "bbox_scan_profile").len() as u64;
+    let native_files_after = table_files(runtime.storage(), "native_scan_profile").len() as u64;
+    assert!(
+        bbox_files_after * 2 <= profile.files,
+        "bbox compaction did not halve file count"
+    );
+    assert!(
+        native_files_after * 2 <= profile.files,
+        "native compaction did not halve file count"
+    );
+    for (label, query) in [
+        ("compacted bbox", bbox_query.as_str()),
+        ("compacted native", native_query.as_str()),
+    ] {
+        let count = client
+            .query_one(query, &[])
+            .await
+            .unwrap_or_else(|error| panic!("{label} count: {error:?}"))
+            .get::<_, i64>(0);
+        assert_eq!(count, expected_count as i64, "{label} exact count");
+    }
 
     drop(client);
     connection.abort();
@@ -1400,7 +1445,7 @@ async fn spatial_scan_profile() {
     let evidence = EvidenceEnvelope::collect(
         EvidenceProfile::new(
             format!(
-                "duckdb-spatial-scan-{}-r{}-v1",
+                "duckdb-spatial-scan-{}-r{}-v2",
                 profile.level.as_str(),
                 profile.rows
             ),
@@ -1415,6 +1460,8 @@ async fn spatial_scan_profile() {
             "probe_max_coordinate": probe_max,
             "bbox_row_groups": bbox_unpruned.total,
             "native_row_groups": native_unpruned.total,
+            "bbox_file_bytes": bbox_files_before.iter().map(|file| file.bytes).sum::<u64>(),
+            "native_file_bytes": native_files_before.iter().map(|file| file.bytes).sum::<u64>(),
         }),
         json!({
             "expected_count": expected_count,
@@ -1426,6 +1473,8 @@ async fn spatial_scan_profile() {
             "bbox_plan_has_exact_recheck": true,
             "native_plan_has_candidate": true,
             "native_plan_has_exact_recheck": true,
+            "bbox_compacted_count": expected_count,
+            "native_compacted_count": expected_count,
         }),
         json!({
             "load_ms": load_ms,
@@ -1434,15 +1483,27 @@ async fn spatial_scan_profile() {
             "bbox_total_row_groups": bbox_unpruned.total,
             "bbox_scan_ratio": bbox_ratio,
             "bbox_row_group_improvement": bbox_improvement,
+            "bbox_compressed_row_group_bytes": bbox_bytes.total,
+            "bbox_scanned_bytes_upper_bound": bbox_bytes.scanned_upper_bound,
+            "bbox_scan_byte_ratio_upper_bound": bbox_bytes.ratio_upper_bound,
             "native_row_groups_scanned": native.scanned,
             "native_row_groups_dispatched": native.total,
             "native_total_row_groups": native_unpruned.total,
             "native_scan_ratio": native_ratio,
             "native_row_group_improvement": native_improvement,
+            "native_compressed_row_group_bytes": native_bytes.total,
+            "native_scanned_bytes_upper_bound": native_bytes.scanned_upper_bound,
+            "native_scan_byte_ratio_upper_bound": native_bytes.ratio_upper_bound,
+            "bbox_files_before_compaction": profile.files,
+            "bbox_files_after_compaction": bbox_files_after,
+            "native_files_before_compaction": profile.files,
+            "native_files_after_compaction": native_files_after,
         }),
         json!({
             "scan_ratio_max": 0.05,
+            "scan_byte_ratio_upper_bound_max": 0.05,
             "row_group_improvement_min": 20.0,
+            "compaction_file_reduction_min": 2.0,
             "exact_recheck_required": true,
             "reference_rows": 10_000_000,
             "reference_runs_before_100m": 2,
@@ -1975,6 +2036,84 @@ fn profile_point_wkb(coordinate: f64) -> [u8; 21] {
     wkb
 }
 
+struct TableFile {
+    path: String,
+    bytes: u64,
+}
+
+fn table_files(
+    storage: &quackgis_server::duckdb_adbc_storage::DuckDbAdbcStorage,
+    table: &str,
+) -> Vec<TableFile> {
+    let batches = storage
+        .query(&format!(
+            "SELECT data_file, data_file_size_bytes \
+             FROM ducklake_list_files('quackgis', '{}', schema => 'main') \
+             ORDER BY data_file",
+            table.replace('\'', "''")
+        ))
+        .unwrap_or_else(|error| panic!("list {table} DuckLake files: {error}"));
+    let mut files = Vec::new();
+    for batch in batches {
+        let paths = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("DuckLake data file paths");
+        let sizes = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .expect("DuckLake data file sizes");
+        for row in 0..batch.num_rows() {
+            assert!(!paths.is_null(row));
+            assert!(!sizes.is_null(row));
+            files.push(TableFile {
+                path: paths.value(row).to_owned(),
+                bytes: sizes.value(row),
+            });
+        }
+    }
+    assert!(!files.is_empty(), "{table} has no DuckLake data files");
+    files
+}
+
+fn parquet_row_group_bytes(
+    storage: &quackgis_server::duckdb_adbc_storage::DuckDbAdbcStorage,
+    files: &[TableFile],
+) -> Vec<u64> {
+    let paths = files
+        .iter()
+        .map(|file| format!("'{}'", file.path.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let batches = storage
+        .query(&format!(
+            "SELECT CAST(max(row_group_compressed_bytes) AS BIGINT) \
+             FROM parquet_metadata([{paths}]) \
+             GROUP BY file_name, row_group_id \
+             ORDER BY file_name, row_group_id"
+        ))
+        .expect("read Parquet row-group metadata");
+    let mut bytes = Vec::new();
+    for batch in batches {
+        let values = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("Parquet compressed row-group bytes");
+        for row in 0..batch.num_rows() {
+            assert!(!values.is_null(row));
+            bytes.push(
+                u64::try_from(values.value(row))
+                    .expect("non-negative Parquet compressed row-group bytes"),
+            );
+        }
+    }
+    assert!(!bytes.is_empty(), "Parquet metadata has no row groups");
+    bytes
+}
+
 fn analyze_query(
     storage: &quackgis_server::duckdb_adbc_storage::DuckDbAdbcStorage,
     query: &str,
@@ -1996,6 +2135,12 @@ fn analyze_query(
 struct ScanMetrics {
     scanned: u64,
     total: u64,
+}
+
+struct ScanByteMetrics {
+    total: u64,
+    scanned_upper_bound: u64,
+    ratio_upper_bound: f64,
 }
 
 fn scan_metrics(plan: &serde_json::Value) -> ScanMetrics {
@@ -2051,6 +2196,40 @@ fn assert_scan_budget(label: &str, selective: ScanMetrics, unpruned: ScanMetrics
         improvement >= 20.0,
         "{label} row-group scan improvement {improvement:.2}x is below 20x"
     );
+}
+
+fn scan_byte_metrics(
+    row_group_bytes: &[u64],
+    selective: ScanMetrics,
+    unpruned: ScanMetrics,
+) -> ScanByteMetrics {
+    assert_eq!(
+        row_group_bytes.len() as u64,
+        unpruned.total,
+        "Parquet metadata and exact-only profile row-group counts differ"
+    );
+    let total = row_group_bytes.iter().sum::<u64>();
+    assert!(
+        total > 0,
+        "compressed Parquet row-group bytes must be positive"
+    );
+    let mut largest = row_group_bytes.to_vec();
+    largest.sort_unstable_by(|left, right| right.cmp(left));
+    let scanned_upper_bound = largest
+        .into_iter()
+        .take(selective.scanned as usize)
+        .sum::<u64>();
+    let ratio_upper_bound = scanned_upper_bound as f64 / total as f64;
+    assert!(
+        ratio_upper_bound <= 0.05,
+        "conservative compressed scan-byte upper bound {:.2}% exceeds 5%",
+        ratio_upper_bound * 100.0
+    );
+    ScanByteMetrics {
+        total,
+        scanned_upper_bound,
+        ratio_upper_bound,
+    }
 }
 
 fn copy_text_chunk(start: u64, rows: u64, max_bytes: usize) -> (String, u64) {
