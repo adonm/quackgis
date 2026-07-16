@@ -75,6 +75,7 @@ def check_templates() -> None:
         "quackgis-worker-edge",
         "quackgis-client",
         "name: quackgis-edge-internal",
+        "name: quackgis-edge-access",
         "publishNotReadyAddresses: true",
         'args: ["--host", "127.0.0.1", "--port", "5434"]',
         "local_tls",

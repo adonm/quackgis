@@ -132,7 +132,7 @@ old_rest_config=$(cat <<EOF
   "transport_secret_key_path": "/var/run/quackgis-old-rest-edge/client-transport.key",
   "bootstrap": {
     "endpoint_id": "$bootstrap_public_key",
-    "direct_hosts": ["quackgis-edge-internal.quackgis.svc.cluster.local:4243"]
+    "direct_hosts": ["quackgis-edge-access.quackgis.svc.cluster.local:4243"]
   },
   "listen": "127.0.0.1:5432",
   "disable_relays": true,

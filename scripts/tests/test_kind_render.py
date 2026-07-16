@@ -98,6 +98,7 @@ def main() -> None:
         assert "Ym9vdHN0cmFwLXNlY3JldA==" in rendered
         assert '"listen": "0.0.0.0:5432"' in rendered
         assert "quackgis-edge-internal.quackgis.svc.cluster.local" in rendered
+        assert "name: quackgis-edge-access" in rendered
         assert rendered.count("publishNotReadyAddresses: true") == 1
         assert '"local_tls"' in rendered
         assert 'args: ["--host", "127.0.0.1", "--port", "5434"]' in rendered
@@ -110,6 +111,7 @@ def main() -> None:
         assert "kind: Deployment" in rest
         assert "replicas: 2" in rest
         assert '"listen": "127.0.0.1:5432"' in rest
+        assert "quackgis-edge-access.quackgis.svc.cluster.local" in rest
         assert "postgres://authenticator@127.0.0.1:5432/quackgis" in rest
         assert "QUACKGIS_REST_DATABASE_PASSWORD_FILE" not in rest
         assert "quackgis-data" not in rest

@@ -169,6 +169,24 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
+  name: quackgis-edge-access
+  namespace: quackgis
+spec:
+  selector:
+    app.kubernetes.io/name: quackgis
+  ports:
+    - name: worker-edge
+      protocol: UDP
+      port: 4242
+      targetPort: worker-edge
+    - name: bootstrap
+      protocol: UDP
+      port: 4243
+      targetPort: bootstrap
+---
+apiVersion: v1
+kind: Service
+metadata:
   name: quackgis-edge-internal
   namespace: quackgis
 spec:

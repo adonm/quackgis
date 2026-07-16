@@ -906,7 +906,10 @@ where
             .cloned()
             .ok_or_else(|| anyhow!("edge session was not established"))?
     };
-    let (mut send, mut recv) = edge.open(protocol).await?;
+    let (mut send, mut recv) =
+        tokio::time::timeout(EDGE_FIRST_RESPONSE_TIMEOUT, edge.open(protocol))
+            .await
+            .context("opening worker application stream timed out")??;
     loop {
         let packet_kind = classify_initial_packet(&initial)?;
         send.write_all(&initial)
