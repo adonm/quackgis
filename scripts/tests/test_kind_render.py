@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import stat
 import tempfile
 from argparse import Namespace
 from pathlib import Path
@@ -20,6 +21,7 @@ def main() -> None:
     kind_render.check_templates()
     cluster = (ROOT / "deploy/kind/cluster.yaml").read_text(encoding="utf-8")
     up = (ROOT / "deploy/kind/up.sh").read_text(encoding="utf-8")
+    rotate = (ROOT / "deploy/kind/rotate.sh").read_text(encoding="utf-8")
     clients_image = (ROOT / "deploy/Containerfile.kind-clients").read_text(
         encoding="utf-8"
     )
@@ -32,8 +34,17 @@ def main() -> None:
     assert "QUACKGIS_CLIENT_LOAD_IMAGE" in up
     assert "kind_cluster_stale" in up
     assert "get --raw=/readyz" in up
+    assert "kind_pod_replace" in up
+    assert "kind_statefulset_replace" in up
+    assert "quackgis-old-client-denied" in rotate
+    assert "previous-edge" in rotate
     assert "FROM registry.fedoraproject.org/fedora-minimal@sha256:" in clients_image
-    for client in ["postgresql", "python3-psycopg3", "gdal"]:
+    for client in [
+        "postgresql-18.3-2.fc43.x86_64",
+        "python3-psycopg3-3.2.13-1.fc43.noarch",
+        "python3-psycopg3_c-3.2.13-1.fc43.x86_64",
+        "gdal-3.11.5-1.fc43.x86_64",
+    ]:
         assert client in clients_image
     assert "USER 65532:65532" in clients_image
     digest = "example.invalid/image@sha256:" + "a" * 64
@@ -49,17 +60,22 @@ def main() -> None:
         root = Path(temporary)
         tls = root / "tls"
         tls.mkdir()
-        for name in ["tls.crt", "tls.key", "ca.crt"]:
+        for name in ["tls.crt", "tls.key", "ca.crt", "client.crt", "client.key"]:
             (tls / name).write_text(name, encoding="utf-8")
-        password = root / "password"
-        password.write_text("secret", encoding="utf-8")
+        edge = root / "edge"
+        edge.mkdir()
+        for name in ["bootstrap", "worker", "credential", "client-transport"]:
+            (edge / f"{name}.key").write_text(f"{name}-secret", encoding="utf-8")
         output = root / "rendered"
         kind_render.render(
             Namespace(
                 runtime_image=digest,
                 client_image=digest.replace("image", "clients"),
                 tls_dir=tls,
-                password_file=password,
+                edge_dir=edge,
+                bootstrap_public_key="bootstrap-public",
+                worker_public_key="worker-public",
+                credential_public_key="credential-public",
                 out_dir=output,
             )
         )
@@ -67,8 +83,20 @@ def main() -> None:
         clients = (output / "clients.yaml").read_text(encoding="utf-8")
         assert "@@" not in rendered + clients
         assert digest in rendered
-        assert "c2VjcmV0" in rendered
+        assert "Ym9vdHN0cmFwLXNlY3JldA==" in rendered
+        assert '"listen": "0.0.0.0:5432"' in rendered
+        assert "quackgis-edge-internal.quackgis.svc.cluster.local" in rendered
+        assert rendered.count("publishNotReadyAddresses: true") == 1
+        assert '"local_tls"' in rendered
+        assert 'args: ["--host", "127.0.0.1", "--port", "5434"]' in rendered
         assert "sslmode=verify-full" in clients
+        assert "PGSSLCERT" in clients
+        assert "quackgis-direct-denied" in clients
+        assert "quackgis-plaintext-denied" in clients
+        assert "quackgis-uncredentialed-denied" in clients
+        assert stat.S_IMODE(output.stat().st_mode) == 0o700
+        assert stat.S_IMODE((output / "core.yaml").stat().st_mode) == 0o600
+        assert stat.S_IMODE((output / "clients.yaml").stat().st_mode) == 0o600
     print("kind_render_test_ok")
 
 

@@ -5,6 +5,7 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 work="$root/.tmp/kind"
 tls="$work/tls"
+edge="$work/edge"
 rendered="$work/rendered"
 kubeconfig=${KUBECONFIG:-$work/kubeconfig}
 
@@ -29,13 +30,44 @@ if [ -z "$QUACKGIS_CLIENT_IMAGE" ] && [ -z "${QUACKGIS_CLIENT_LOAD_IMAGE:-}" ]; 
   printf 'set digest-pinned QUACKGIS_CLIENT_IMAGE or QUACKGIS_CLIENT_LOAD_IMAGE\n' >&2
   exit 2
 fi
-: "${QUACKGIS_AUTH_PASSWORD_FILE:?set QUACKGIS_AUTH_PASSWORD_FILE}"
-
 command -v kind >/dev/null
 command -v kubectl >/dev/null
-if [ ! -f "$tls/tls.crt" ]; then
+tls_valid=true
+for file in ca.crt ca.key tls.crt tls.key client.crt client.key; do
+  if [ ! -f "$tls/$file" ]; then tls_valid=false; fi
+done
+if [ "$tls_valid" = true ]; then
+  openssl verify -purpose sslserver -verify_hostname quackgis.quackgis.svc.cluster.local \
+    -CAfile "$tls/ca.crt" "$tls/tls.crt" >/dev/null 2>&1 || tls_valid=false
+  openssl verify -purpose sslclient -CAfile "$tls/ca.crt" "$tls/client.crt" >/dev/null 2>&1 || tls_valid=false
+  openssl x509 -checkend 86400 -noout -in "$tls/ca.crt" >/dev/null 2>&1 || tls_valid=false
+  openssl x509 -checkend 86400 -noout -in "$tls/tls.crt" >/dev/null 2>&1 || tls_valid=false
+  openssl x509 -checkend 86400 -noout -in "$tls/client.crt" >/dev/null 2>&1 || tls_valid=false
+  server_cert=$(openssl x509 -in "$tls/tls.crt" -pubkey -noout | sha256sum | cut -d' ' -f1)
+  server_key=$(openssl pkey -in "$tls/tls.key" -pubout | sha256sum | cut -d' ' -f1)
+  client_cert=$(openssl x509 -in "$tls/client.crt" -pubkey -noout | sha256sum | cut -d' ' -f1)
+  client_key=$(openssl pkey -in "$tls/client.key" -pubout | sha256sum | cut -d' ' -f1)
+  if [ "$server_cert" != "$server_key" ] || [ "$client_cert" != "$client_key" ]; then tls_valid=false; fi
+fi
+if [ "$tls_valid" = false ]; then
+  rm -rf "$tls"
   "$root/deploy/kind/generate_tls.sh" "$tls"
 fi
+
+keygen=${QUACKGIS_KEYGEN:-$root/target/release/quackgis-keygen}
+if [ ! -x "$keygen" ]; then
+  printf 'quackgis-keygen is missing; build the runtime context or set QUACKGIS_KEYGEN\n' >&2
+  exit 2
+fi
+mkdir -p "$edge"
+for name in bootstrap worker credential client-transport; do
+  if [ ! -f "$edge/$name.key" ]; then
+    "$keygen" --out "$edge/$name.key" >/dev/null
+  fi
+done
+bootstrap_public_key=$("$keygen" --public-from "$edge/bootstrap.key")
+worker_public_key=$("$keygen" --public-from "$edge/worker.key")
+credential_public_key=$("$keygen" --public-from "$edge/credential.key")
 
 cluster_exists=false
 if kind get clusters | grep -qx quackgis; then
@@ -110,10 +142,24 @@ python3 "$root/deploy/kind/render.py" \
   --runtime-image "$QUACKGIS_RUNTIME_IMAGE" \
   --client-image "$QUACKGIS_CLIENT_IMAGE" \
   --tls-dir "$tls" \
-  --password-file "$QUACKGIS_AUTH_PASSWORD_FILE" \
+  --edge-dir "$edge" \
+  --bootstrap-public-key "$bootstrap_public_key" \
+  --worker-public-key "$worker_public_key" \
+  --credential-public-key "$credential_public_key" \
   --out-dir "$rendered"
 
+current_service=$(kubectl -n quackgis get statefulset quackgis -o jsonpath='{.spec.serviceName}' 2>/dev/null || true)
+if [ -n "$current_service" ] && [ "$current_service" != quackgis-edge-internal ]; then
+  printf 'kind_statefulset_replace old_service=%s new_service=quackgis-edge-internal\n' "$current_service"
+  kubectl -n quackgis delete statefulset quackgis --cascade=foreground --wait=true
+fi
 kubectl apply -f "$rendered/core.yaml"
+desired_hash=$(kubectl -n quackgis get statefulset quackgis -o jsonpath='{.spec.template.metadata.annotations.quackgis\.dev/package-config-sha256}')
+pod_hash=$(kubectl -n quackgis get pod quackgis-0 -o jsonpath='{.metadata.annotations.quackgis\.dev/package-config-sha256}' 2>/dev/null || true)
+if [ -n "$pod_hash" ] && [ "$pod_hash" != "$desired_hash" ]; then
+  printf 'kind_pod_replace old_config=%s new_config=%s\n' "$pod_hash" "$desired_hash"
+  kubectl -n quackgis delete pod quackgis-0 --wait=false
+fi
 kubectl -n quackgis rollout status statefulset/quackgis --timeout=5m
 printf 'kind_up_ok provider=%s context=kind-quackgis kubeconfig=%s clients=%s\n' \
   "$KIND_EXPERIMENTAL_PROVIDER" "$kubeconfig" "$rendered/clients.yaml"

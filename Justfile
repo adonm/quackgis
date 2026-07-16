@@ -482,12 +482,13 @@ clean-dev:
 # Static validation for maintained helper scripts.
 probe-static-check:
     mkdir -p .tmp/pycache
-    PYTHONPYCACHEPREFIX=.tmp/pycache python3 -m py_compile scripts/*.py deploy/kind/render.py scripts/tests/test_duckdb_authority_probe.py scripts/tests/test_duckdb_catalog_identity_probe.py scripts/tests/test_duckdb_engine_probe.py scripts/tests/test_duckdb_runtime_static_check.py scripts/tests/test_duckdb_spatial_compat_probe.py scripts/tests/test_evidence_manifest_check.py scripts/tests/test_kind_render.py
+    PYTHONPYCACHEPREFIX=.tmp/pycache python3 -m py_compile scripts/*.py deploy/kind/render.py scripts/tests/test_duckdb_authority_probe.py scripts/tests/test_duckdb_catalog_identity_probe.py scripts/tests/test_duckdb_engine_probe.py scripts/tests/test_duckdb_runtime_static_check.py scripts/tests/test_duckdb_spatial_compat_probe.py scripts/tests/test_evidence_manifest_check.py scripts/tests/test_kind_render.py scripts/tests/test_prepare_duckdb_runtime.py
     python3 scripts/tests/test_duckdb_authority_probe.py
     python3 scripts/tests/test_duckdb_catalog_identity_probe.py
     python3 scripts/tests/test_duckdb_engine_probe.py
     python3 scripts/tests/test_duckdb_spatial_compat_probe.py
     python3 scripts/tests/test_duckdb_runtime_static_check.py
+    python3 scripts/tests/test_prepare_duckdb_runtime.py
     python3 scripts/tests/test_duckdb_local_backup.py
     python3 scripts/tests/test_evidence_manifest_check.py
 
@@ -495,19 +496,19 @@ probe-static-check:
 kind-static-check:
     python3 deploy/kind/render.py --check
     python3 scripts/tests/test_kind_render.py
-    sh -n deploy/kind/up.sh deploy/kind/down.sh
+    sh -n deploy/kind/up.sh deploy/kind/down.sh deploy/kind/rotate.sh
 
 # Build the non-root psql/psycopg/OGR qualification image with the selected engine.
 kind-client-image:
     @set -eu; engine="$(CONTAINER_ENGINE='{{container_engine}}' python3 scripts/project_doctor.py --container-engine)"; \
     "$engine" build -t {{kind_client_image}} -f deploy/Containerfile.kind-clients .; \
     "$engine" run --rm --entrypoint /bin/sh {{kind_client_image}} -c \
-      'set -eu; id; psql --version; python3 -c "import psycopg; print(\"psycopg \" + psycopg.__version__)"; ogrinfo --version; ogrinfo --formats | grep -F "PostgreSQL -vector-"'
+      'set -eu; id; test "$(psql --version)" = "psql (PostgreSQL) 18.3"; python3 -c "import psycopg; assert psycopg.__version__ == \"3.2.13\""; ogrinfo --version | grep -F "GDAL 3.11.5"; ogrinfo --formats | grep -F "PostgreSQL -vector-"; printf "kind_client_versions_ok psql=18.3 psycopg=3.2.13 ogr=3.11.5\n"'
 
 # Build both images used by the local Kind qualification topology.
 kind-local-images: duckdb-runtime-image kind-client-image
 
-# Create/update the local Kind cluster, load both local images, and wait for QuackGIS.
+# Create/update the local Kind cluster, load both local images, and wait for the packaged edge path.
 kind-up-local: doctor-kind kind-local-images
     @set -eu; engine="$(CONTAINER_ENGINE='{{container_engine}}' python3 scripts/project_doctor.py --container-engine)"; \
     CONTAINER_ENGINE="$engine" \
@@ -515,17 +516,37 @@ kind-up-local: doctor-kind kind-local-images
     QUACKGIS_CLIENT_LOAD_IMAGE='{{kind_client_image}}' \
     deploy/kind/up.sh
 
-# Run all rendered psql, psycopg, and OGR jobs against the local Kind service.
+# Run pinned clients through mutual TLS and prove direct worker pgwire is unreachable.
 kind-client-gates:
     @set -eu; export KUBECONFIG="${KUBECONFIG:-$PWD/.tmp/kind/kubeconfig}"; \
     kubectl delete -f .tmp/kind/rendered/clients.yaml --ignore-not-found >/dev/null; \
     kubectl apply -f .tmp/kind/rendered/clients.yaml; \
-    for job in quackgis-psql quackgis-psycopg quackgis-ogr; do \
+    for job in quackgis-psql quackgis-psycopg quackgis-ogr quackgis-direct-denied quackgis-plaintext-denied quackgis-uncredentialed-denied; do \
       if ! kubectl -n quackgis wait --for=condition=complete "job/$job" --timeout=2m; then \
         kubectl -n quackgis logs "job/$job" --all-containers=true || true; exit 1; \
       fi; \
       kubectl -n quackgis logs "job/$job" --all-containers=true; \
     done
+
+# Replace the packaged Pod in shutdown order, then prove every gate reconnects.
+kind-restart-gate:
+    @set -eu; export KUBECONFIG="${KUBECONFIG:-$PWD/.tmp/kind/kubeconfig}"; \
+    start="$(date +%s%3N)"; \
+    kubectl -n quackgis rollout restart statefulset/quackgis; \
+    kubectl -n quackgis rollout status statefulset/quackgis --timeout=3m; \
+    end="$(date +%s%3N)"; printf 'kind_restart_ok elapsed_ms=%s\n' "$((end-start))"; \
+    just kind-client-gates
+
+# Rotate packaged mTLS and iroh keys, reject the old certificate, then rerun clients.
+kind-secret-rotation-gate:
+    @set -eu; engine="$(CONTAINER_ENGINE='{{container_engine}}' python3 scripts/project_doctor.py --container-engine)"; \
+    CONTAINER_ENGINE="$engine" deploy/kind/rotate.sh; \
+    if just kind-client-gates; then \
+      rm -rf .tmp/kind/previous-tls .tmp/kind/previous-edge; \
+      printf 'kind_secret_rotation_ok old_client=denied current_gates=passed\n'; \
+    else \
+      printf 'rotation gate failed; previous material retained under .tmp/kind\n' >&2; exit 1; \
+    fi
 
 # Delete the named local Kind cluster using the auto-selected provider.
 kind-down:
@@ -547,9 +568,10 @@ duckdb-runtime-static-check:
 # Assemble a verified Linux x86_64 DuckDB runtime context under ignored .tmp.
 duckdb-runtime-context:
     cargo build -p quackgis-server --release
+    cargo build -p quackgis-edge --release --bins
     @duckdb_path="$(mise exec -- which duckdb)"; dirty_flag=""; \
     if [ "${QUACKGIS_ALLOW_DIRTY_RUNTIME:-0}" = 1 ]; then dirty_flag="--allow-dirty"; fi; \
-    python3 scripts/prepare_duckdb_runtime.py $dirty_flag --server target/release/quackgis-server --duckdb-bin "$duckdb_path"
+    python3 scripts/prepare_duckdb_runtime.py $dirty_flag --server target/release/quackgis-server --edge-bin-dir target/release --duckdb-bin "$duckdb_path"
 
 # Build the immutable local DuckDB evaluation runtime image.
 duckdb-runtime-image: duckdb-runtime-static-check duckdb-runtime-context
@@ -560,6 +582,9 @@ duckdb-runtime-image: duckdb-runtime-static-check duckdb-runtime-context
 duckdb-runtime-offline-smoke: duckdb-runtime-image
     @set -eu; \
     engine="$(CONTAINER_ENGINE='{{container_engine}}' python3 scripts/project_doctor.py --container-engine)"; \
+    for binary in quackgis-bootstrap quackgis-worker-edge quackgis-client quackgis-keygen; do \
+      "$engine" run --rm --network none --entrypoint "/usr/local/bin/$binary" {{duckdb_runtime_image}} --version; \
+    done; \
     "$engine" run --rm --network none --entrypoint /usr/local/bin/duckdb {{duckdb_runtime_image}} -csv -noheader :memory: -c "LOAD spatial; LOAD ducklake; SELECT ST_AsText(ST_Point(1, 2));"; \
     container_id="$("$engine" run -d --network none {{duckdb_runtime_image}})"; \
     trap '"$engine" rm -f "$container_id" >/dev/null 2>&1 || true' EXIT; \

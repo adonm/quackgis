@@ -36,7 +36,7 @@ spec:
 apiVersion: v1
 kind: Secret
 metadata:
-  name: quackgis-tls
+  name: quackgis-client-tls
   namespace: quackgis
 type: kubernetes.io/tls
 data:
@@ -47,11 +47,66 @@ data:
 apiVersion: v1
 kind: Secret
 metadata:
-  name: quackgis-auth
+  name: quackgis-edge-keys
   namespace: quackgis
 type: Opaque
 data:
-  password: @@AUTH_PASSWORD@@
+  bootstrap.key: @@BOOTSTRAP_SECRET_KEY@@
+  worker.key: @@WORKER_SECRET_KEY@@
+  credential.key: @@CREDENTIAL_SECRET_KEY@@
+  client-transport.key: @@CLIENT_TRANSPORT_SECRET_KEY@@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: quackgis-edge
+  namespace: quackgis
+data:
+  worker.json: |
+    {
+      "secret_key_path": "/var/run/quackgis-edge/worker.key",
+      "bootstrap_public_key": "@@BOOTSTRAP_PUBLIC_KEY@@",
+      "backend": "127.0.0.1:5434",
+      "disable_relays": true,
+      "bind": "0.0.0.0:4242",
+      "compression": "auto",
+      "max_connections": 64,
+      "max_streams_per_connection": 64
+    }
+  bootstrap.json: |
+    {
+      "secret_key_path": "/var/run/quackgis-edge/bootstrap.key",
+      "registered_credential": "@@CREDENTIAL_PUBLIC_KEY@@",
+      "login_role": "postgres",
+      "worker": {
+        "endpoint_id": "@@WORKER_PUBLIC_KEY@@",
+        "direct_hosts": ["quackgis-edge-internal.quackgis.svc.cluster.local:4242"]
+      },
+      "assignment_generation": 1,
+      "lease_ttl_seconds": 60,
+      "disable_relays": true,
+      "bind": "0.0.0.0:4243",
+      "max_connections": 64
+    }
+  client.json: |
+    {
+      "credential_secret_key_path": "/var/run/quackgis-edge/credential.key",
+      "transport_secret_key_path": "/var/run/quackgis-edge/client-transport.key",
+      "bootstrap": {
+        "endpoint_id": "@@BOOTSTRAP_PUBLIC_KEY@@",
+        "direct_hosts": ["quackgis-edge-internal.quackgis.svc.cluster.local:4243"]
+      },
+      "listen": "0.0.0.0:5432",
+      "local_tls": {
+        "certificate_path": "/etc/quackgis/client-tls/tls.crt",
+        "private_key_path": "/etc/quackgis/client-tls/tls.key",
+        "client_ca_path": "/etc/quackgis/client-tls/ca.crt"
+      },
+      "disable_relays": true,
+      "bind": "0.0.0.0:4244",
+      "compression": "auto",
+      "max_connections": 64
+    }
 ---
 apiVersion: v1
 kind: Service
@@ -63,11 +118,33 @@ spec:
     app.kubernetes.io/name: quackgis
   ports:
     - name: pgwire
+      protocol: TCP
       port: 5432
       targetPort: pgwire
     - name: status
+      protocol: TCP
       port: 9090
       targetPort: status
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: quackgis-edge-internal
+  namespace: quackgis
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: quackgis
+  ports:
+    - name: worker-edge
+      protocol: UDP
+      port: 4242
+      targetPort: worker-edge
+    - name: bootstrap
+      protocol: UDP
+      port: 4243
+      targetPort: bootstrap
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -75,7 +152,7 @@ metadata:
   name: quackgis
   namespace: quackgis
 spec:
-  serviceName: quackgis
+  serviceName: quackgis-edge-internal
   replicas: 1
   selector:
     matchLabels:
@@ -84,8 +161,10 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: quackgis
+      annotations:
+        quackgis.dev/package-config-sha256: "@@PACKAGE_CONFIG_HASH@@"
     spec:
-      terminationGracePeriodSeconds: 40
+      terminationGracePeriodSeconds: 90
       securityContext:
         fsGroup: 999
         fsGroupChangePolicy: OnRootMismatch
@@ -96,31 +175,46 @@ spec:
           image: "@@RUNTIME_IMAGE@@"
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "-ceu"]
-          args: ["mkdir -p /var/lib/quackgis/data /var/lib/quackgis/tmp && chown -R 999:999 /var/lib/quackgis"]
+          args:
+            - >-
+              mkdir -p /var/lib/quackgis/data /var/lib/quackgis/tmp /var/run/quackgis-edge-bootstrap /var/run/quackgis-edge-worker /var/run/quackgis-edge-client;
+              cp /var/run/quackgis-edge-source/bootstrap.key /var/run/quackgis-edge-bootstrap/;
+              cp /var/run/quackgis-edge-source/worker.key /var/run/quackgis-edge-worker/;
+              cp /var/run/quackgis-edge-source/credential.key /var/run/quackgis-edge-source/client-transport.key /var/run/quackgis-edge-client/;
+              chmod 600 /var/run/quackgis-edge-bootstrap/*.key /var/run/quackgis-edge-worker/*.key /var/run/quackgis-edge-client/*.key;
+              chown -R 999:999 /var/lib/quackgis /var/run/quackgis-edge-bootstrap /var/run/quackgis-edge-worker /var/run/quackgis-edge-client
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
-              add: ["CHOWN"]
+              add: ["CHOWN", "DAC_OVERRIDE"]
             runAsUser: 0
             seccompProfile:
               type: RuntimeDefault
           volumeMounts:
             - name: data
               mountPath: /var/lib/quackgis
-      containers:
-        - name: quackgis
+            - name: edge-key-source
+              mountPath: /var/run/quackgis-edge-source
+              readOnly: true
+            - name: edge-bootstrap-key
+              mountPath: /var/run/quackgis-edge-bootstrap
+            - name: edge-worker-key
+              mountPath: /var/run/quackgis-edge-worker
+            - name: edge-client-keys
+              mountPath: /var/run/quackgis-edge-client
+        - name: quackgis-server
+          restartPolicy: Always
           image: "@@RUNTIME_IMAGE@@"
           imagePullPolicy: IfNotPresent
-          args: ["--host", "0.0.0.0", "--port", "5434"]
+          args: ["--host", "127.0.0.1", "--port", "5434"]
           ports:
-            - name: pgwire
-              containerPort: 5434
             - name: status
               containerPort: 9090
+              protocol: TCP
           env:
             - name: QUACKGIS_HOST
-              value: 0.0.0.0
+              value: 127.0.0.1
             - name: QUACKGIS_METRICS_HOST
               value: 0.0.0.0
             - name: QUACKGIS_METRICS_PORT
@@ -132,20 +226,9 @@ spec:
             - name: QUACKGIS_DUCKDB_TEMP_DIRECTORY
               value: /var/lib/quackgis/tmp
             - name: QUACKGIS_TLS_MODE
-              value: required
-            - name: QUACKGIS_TLS_CERT
-              value: /etc/quackgis/tls/tls.crt
-            - name: QUACKGIS_TLS_KEY
-              value: /etc/quackgis/tls/tls.key
+              value: preferred
             - name: QUACKGIS_AUTH_MODE
-              value: password
-            - name: QUACKGIS_READWRITE_USER
-              value: postgres
-            - name: QUACKGIS_READWRITE_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: quackgis-auth
-                  key: password
+              value: trust
           resources:
             requests:
               cpu: 250m
@@ -168,11 +251,7 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
             timeoutSeconds: 2
-          lifecycle:
-            preStop:
-              exec:
-                command: ["/bin/sh", "-c", "sleep 2"]
-          securityContext:
+          securityContext: &runtime_security
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
@@ -183,14 +262,100 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/quackgis
-            - name: tls
-              mountPath: /etc/quackgis/tls
+        - name: quackgis-worker-edge
+          restartPolicy: Always
+          image: "@@RUNTIME_IMAGE@@"
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/quackgis-worker-edge"]
+          args: ["--config", "/etc/quackgis/edge/worker.json"]
+          ports:
+            - name: worker-edge
+              containerPort: 4242
+              protocol: UDP
+          resources: &edge_resources
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: "1"
+              memory: 128Mi
+          securityContext: *runtime_security
+          volumeMounts:
+            - name: edge-config
+              mountPath: /etc/quackgis/edge
+              readOnly: true
+            - name: edge-worker-key
+              mountPath: /var/run/quackgis-edge
+              readOnly: true
+        - name: quackgis-bootstrap
+          restartPolicy: Always
+          image: "@@RUNTIME_IMAGE@@"
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/quackgis-bootstrap"]
+          args: ["--config", "/etc/quackgis/edge/bootstrap.json"]
+          ports:
+            - name: bootstrap
+              containerPort: 4243
+              protocol: UDP
+          resources: *edge_resources
+          securityContext: *runtime_security
+          volumeMounts:
+            - name: edge-config
+              mountPath: /etc/quackgis/edge
+              readOnly: true
+            - name: edge-bootstrap-key
+              mountPath: /var/run/quackgis-edge
+              readOnly: true
+      containers:
+        - name: quackgis-client
+          image: "@@RUNTIME_IMAGE@@"
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/quackgis-client"]
+          args: ["--config", "/etc/quackgis/edge/client.json"]
+          ports:
+            - name: pgwire
+              containerPort: 5432
+              protocol: TCP
+            - name: client-edge
+              containerPort: 4244
+              protocol: UDP
+          startupProbe:
+            tcpSocket:
+              port: pgwire
+            periodSeconds: 2
+            timeoutSeconds: 1
+            failureThreshold: 30
+          resources: *edge_resources
+          securityContext: *runtime_security
+          volumeMounts:
+            - name: edge-config
+              mountPath: /etc/quackgis/edge
+              readOnly: true
+            - name: edge-client-keys
+              mountPath: /var/run/quackgis-edge
+              readOnly: true
+            - name: client-tls
+              mountPath: /etc/quackgis/client-tls
               readOnly: true
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: quackgis-data
-        - name: tls
+        - name: edge-config
+          configMap:
+            name: quackgis-edge
+            defaultMode: 292
+        - name: edge-key-source
           secret:
-            secretName: quackgis-tls
+            secretName: quackgis-edge-keys
+            defaultMode: 256
+        - name: edge-bootstrap-key
+          emptyDir: {}
+        - name: edge-worker-key
+          emptyDir: {}
+        - name: edge-client-keys
+          emptyDir: {}
+        - name: client-tls
+          secret:
+            secretName: quackgis-client-tls
             defaultMode: 288

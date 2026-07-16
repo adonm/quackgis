@@ -11,6 +11,10 @@ import sys
 
 EXPECTED_COPIES = {
     "COPY quackgis-server /usr/local/bin/quackgis-server",
+    "COPY quackgis-bootstrap /usr/local/bin/quackgis-bootstrap",
+    "COPY quackgis-worker-edge /usr/local/bin/quackgis-worker-edge",
+    "COPY quackgis-client /usr/local/bin/quackgis-client",
+    "COPY quackgis-keygen /usr/local/bin/quackgis-keygen",
     "COPY duckdb /usr/local/bin/duckdb",
     "COPY libduckdb.so /opt/quackgis/lib/libduckdb.so",
     "COPY duckdb-home /opt/quackgis/duckdb",

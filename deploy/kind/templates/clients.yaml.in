@@ -1,5 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 apiVersion: v1
+kind: Secret
+metadata:
+  name: quackgis-kind-client-tls
+  namespace: quackgis
+type: kubernetes.io/tls
+data:
+  tls.crt: @@CLIENT_TLS_CERTIFICATE@@
+  tls.key: @@CLIENT_TLS_PRIVATE_KEY@@
+  ca.crt: @@TLS_CA_CERTIFICATE@@
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: quackgis-kind-client-ca
+  namespace: quackgis
+type: Opaque
+data:
+  ca.crt: @@TLS_CA_CERTIFICATE@@
+---
+apiVersion: v1
 kind: List
 items:
   - apiVersion: batch/v1
@@ -16,6 +36,11 @@ items:
             app.kubernetes.io/name: quackgis-psql
         spec:
           restartPolicy: Never
+          securityContext: &pod_security
+            fsGroup: 65532
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile:
+              type: RuntimeDefault
           containers:
             - name: psql
               image: "@@CLIENT_IMAGE@@"
@@ -31,20 +56,21 @@ items:
                   value: quackgis
                 - name: PGUSER
                   value: postgres
-                - name: PGPASSWORD
-                  valueFrom:
-                    secretKeyRef:
-                      name: quackgis-auth
-                      key: password
                 - name: PGSSLMODE
                   value: verify-full
                 - name: PGSSLROOTCERT
                   value: /etc/quackgis/tls/ca.crt
+                - name: PGSSLCERT
+                  value: /etc/quackgis/tls/tls.crt
+                - name: PGSSLKEY
+                  value: /etc/quackgis/tls/tls.key
               securityContext: &client_security
                 allowPrivilegeEscalation: false
                 capabilities:
                   drop: ["ALL"]
                 runAsNonRoot: true
+                runAsUser: 65532
+                runAsGroup: 65532
                 seccompProfile:
                   type: RuntimeDefault
               volumeMounts: &tls_mount
@@ -54,8 +80,8 @@ items:
           volumes: &tls_volume
             - name: tls
               secret:
-                secretName: quackgis-tls
-                defaultMode: 292
+                secretName: quackgis-kind-client-tls
+                defaultMode: 288
   - apiVersion: batch/v1
     kind: Job
     metadata:
@@ -70,6 +96,7 @@ items:
             app.kubernetes.io/name: quackgis-psycopg
         spec:
           restartPolicy: Never
+          securityContext: *pod_security
           containers:
             - name: psycopg
               image: "@@CLIENT_IMAGE@@"
@@ -96,16 +123,107 @@ items:
             app.kubernetes.io/name: quackgis-ogr
         spec:
           restartPolicy: Never
+          securityContext: *pod_security
           containers:
             - name: ogr
               image: "@@CLIENT_IMAGE@@"
               imagePullPolicy: IfNotPresent
               command: ["ogrinfo"]
               args:
-                - "PG:host=quackgis.quackgis.svc.cluster.local port=5432 dbname=quackgis user=postgres sslmode=verify-full sslrootcert=/etc/quackgis/tls/ca.crt"
+                - "PG:host=quackgis.quackgis.svc.cluster.local port=5432 dbname=quackgis user=postgres sslmode=verify-full sslrootcert=/etc/quackgis/tls/ca.crt sslcert=/etc/quackgis/tls/tls.crt sslkey=/etc/quackgis/tls/tls.key"
                 - -sql
                 - "SELECT 1::INTEGER AS ok"
               env: *pg_environment
               securityContext: *client_security
               volumeMounts: *tls_mount
           volumes: *tls_volume
+  - apiVersion: batch/v1
+    kind: Job
+    metadata:
+      name: quackgis-direct-denied
+      namespace: quackgis
+    spec:
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 300
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: quackgis-direct-denied
+        spec:
+          restartPolicy: Never
+          securityContext: *pod_security
+          containers:
+            - name: direct-denied
+              image: "@@CLIENT_IMAGE@@"
+              imagePullPolicy: IfNotPresent
+              command: ["python3"]
+              args:
+                - -c
+                - "import socket; s=socket.socket(); s.settimeout(2); code=s.connect_ex(('quackgis-edge-internal.quackgis.svc.cluster.local', 5434)); s.close(); assert code != 0, 'loopback worker pgwire was reachable directly'"
+              securityContext: *client_security
+  - apiVersion: batch/v1
+    kind: Job
+    metadata:
+      name: quackgis-plaintext-denied
+      namespace: quackgis
+    spec:
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 300
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: quackgis-plaintext-denied
+        spec:
+          restartPolicy: Never
+          securityContext: *pod_security
+          containers:
+            - name: plaintext-denied
+              image: "@@CLIENT_IMAGE@@"
+              imagePullPolicy: IfNotPresent
+              command: ["/bin/sh", "-ceu"]
+              args:
+                - >-
+                  if PGCONNECT_TIMEOUT=3 PGSSLMODE=disable
+                  psql -h quackgis.quackgis.svc.cluster.local -p 5432
+                  -U postgres -d quackgis -c 'SELECT 1'; then
+                    echo 'plaintext tiny-client connection unexpectedly succeeded' >&2; exit 1;
+                  fi
+              securityContext: *client_security
+  - apiVersion: batch/v1
+    kind: Job
+    metadata:
+      name: quackgis-uncredentialed-denied
+      namespace: quackgis
+    spec:
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 300
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: quackgis-uncredentialed-denied
+        spec:
+          restartPolicy: Never
+          securityContext: *pod_security
+          containers:
+            - name: uncredentialed-denied
+              image: "@@CLIENT_IMAGE@@"
+              imagePullPolicy: IfNotPresent
+              command: ["/bin/sh", "-ceu"]
+              args:
+                - >-
+                  if PGCONNECT_TIMEOUT=3 PGSSLMODE=verify-full
+                  PGSSLROOTCERT=/etc/quackgis/tls/ca.crt
+                  psql -h quackgis.quackgis.svc.cluster.local -p 5432
+                  -U postgres -d quackgis -c 'SELECT 1'; then
+                    echo 'client-certificate-free connection unexpectedly succeeded' >&2; exit 1;
+                  fi
+              securityContext: *client_security
+              volumeMounts:
+                - name: ca
+                  mountPath: /etc/quackgis/tls
+                  readOnly: true
+          volumes:
+            - name: ca
+              secret:
+                secretName: quackgis-kind-client-ca
+                defaultMode: 292

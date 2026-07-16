@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -42,14 +43,28 @@ def require_hash(path: Path, expected: str) -> None:
 
 def prepare(
     server: Path,
+    edge_bin_dir: Path,
     duckdb_bin: Path,
     duckdb_root: Path,
     out: Path,
     *,
     allow_dirty: bool = False,
 ) -> dict[str, object]:
-    if not server.is_file() or not duckdb_bin.is_file():
-        raise ValueError("server and DuckDB CLI binaries must be regular files")
+    edge_binaries = [
+        edge_bin_dir / name
+        for name in [
+            "quackgis-bootstrap",
+            "quackgis-worker-edge",
+            "quackgis-client",
+            "quackgis-keygen",
+        ]
+    ]
+    if (
+        not server.is_file()
+        or not duckdb_bin.is_file()
+        or any(not binary.is_file() for binary in edge_binaries)
+    ):
+        raise ValueError("server, edge, and DuckDB CLI binaries must be regular files")
     version = subprocess.run(
         [str(duckdb_bin), "--version"], text=True, capture_output=True, check=True
     ).stdout.strip()
@@ -79,6 +94,8 @@ def prepare(
     target_extensions = out / "duckdb-home" / ".duckdb" / "extensions" / f"v{VERSION}" / "linux_amd64"
     target_extensions.mkdir(parents=True)
     shutil.copy2(server, out / "quackgis-server")
+    for binary in edge_binaries:
+        shutil.copy2(binary, out / binary.name)
     shutil.copy2(duckdb_bin, out / "duckdb")
     shutil.copy2(library, out / "libduckdb.so")
     for extension in extensions:
@@ -122,6 +139,7 @@ def prepare(
             "spatial.duckdb_extension": EXPECTED["spatial.duckdb_extension"],
             "duckdb": sha256(duckdb_bin),
             "quackgis-server": sha256(server),
+            **{binary.name: sha256(binary) for binary in edge_binaries},
             "licenses/LICENSE": sha256(licenses / "LICENSE"),
             "licenses/NOTICE": sha256(licenses / "NOTICE"),
             "licenses/THIRD_PARTY_LICENSES.md": sha256(
@@ -137,19 +155,43 @@ def prepare(
 
 
 def git_source() -> dict[str, object]:
+    root_result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if root_result.returncode != 0 or Path(root_result.stdout.strip()).resolve() != REPO_ROOT:
+        raise ValueError("cannot establish QuackGIS repository provenance")
     sha_result = subprocess.run(
-        ["git", "rev-parse", "HEAD"], capture_output=True, check=False
+        ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, capture_output=True, check=False
     )
     status_result = subprocess.run(
         ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        cwd=REPO_ROOT,
         capture_output=True,
         check=False,
     )
     diff_result = subprocess.run(
-        ["git", "diff", "--binary", "HEAD"], capture_output=True, check=False
+        ["git", "diff", "--binary", "HEAD"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=False,
     )
-    status = status_result.stdout if status_result.returncode == 0 else b"unknown"
-    diff = diff_result.stdout if diff_result.returncode == 0 else b"unknown"
+    untracked_result = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=False,
+    )
+    if any(
+        result.returncode != 0
+        for result in [sha_result, status_result, diff_result, untracked_result]
+    ):
+        raise ValueError("cannot capture complete QuackGIS source provenance")
+    status = status_result.stdout
+    diff = diff_result.stdout
     dirty = bool(status)
     return {
         "sha": (
@@ -160,12 +202,41 @@ def git_source() -> dict[str, object]:
         "dirty": dirty,
         "status_sha256": hashlib.sha256(status).hexdigest() if dirty else None,
         "diff_sha256": hashlib.sha256(diff).hexdigest() if dirty else None,
+        "source_state_sha256": (
+            source_state_sha256(status, diff, untracked_result.stdout, REPO_ROOT)
+            if dirty
+            else None
+        ),
     }
+
+
+def source_state_sha256(status: bytes, diff: bytes, untracked: bytes, root: Path) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"status\0" + status)
+    digest.update(b"diff\0" + diff)
+    for encoded_path in sorted(path for path in untracked.split(b"\0") if path):
+        relative = Path(os.fsdecode(encoded_path))
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("invalid untracked path in source provenance")
+        path = root / relative
+        metadata = path.lstat()
+        digest.update(b"untracked\0" + encoded_path + b"\0")
+        digest.update(f"{metadata.st_mode:o}".encode("ascii") + b"\0")
+        if path.is_symlink():
+            digest.update(b"symlink\0" + os.fsencode(path.readlink()))
+        elif path.is_file():
+            with path.open("rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        else:
+            raise ValueError(f"unsupported untracked source type: {relative}")
+    return digest.hexdigest()
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--server", type=Path, required=True)
+    parser.add_argument("--edge-bin-dir", type=Path, required=True)
     parser.add_argument("--duckdb-bin", type=Path, required=True)
     parser.add_argument("--duckdb-root", type=Path, default=Path(".tmp/duckdb"))
     parser.add_argument("--out", type=Path, default=Path(".tmp/duckdb-runtime"))
@@ -178,6 +249,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         manifest = prepare(
             args.server.resolve(),
+            args.edge_bin_dir.resolve(),
             args.duckdb_bin.resolve(),
             args.duckdb_root.resolve(),
             args.out.resolve(),
