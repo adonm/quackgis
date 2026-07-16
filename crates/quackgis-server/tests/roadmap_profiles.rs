@@ -33,6 +33,7 @@ const COPY_WKB: [u8; 21] = [
 ];
 const COPY_WKB_HEX: &str = "010100000000000000000000000000000000000000";
 const COPY_PROFILE_CHUNK_BYTES: usize = 60 * 1024;
+const SPATIAL_QUERY_SAMPLES: usize = 5;
 
 #[tokio::test]
 #[ignore = "requires the pinned DuckDB ADBC runtime"]
@@ -1302,7 +1303,7 @@ async fn spatial_scan_profile() {
             .ingest(
                 "main",
                 "bbox_scan_profile",
-                vec![spatial_layout_batch(start, end)],
+                vec![spatial_shape_batch(start, end)],
                 IngestMode::Append,
             )
             .unwrap_or_else(|error| panic!("ingest bbox profile file {file}: {error}"));
@@ -1310,8 +1311,16 @@ async fn spatial_scan_profile() {
             .storage()
             .execute_update(&format!(
                 "INSERT INTO quackgis.main.native_scan_profile \
-                 SELECT i, ST_Point(i::DOUBLE, i::DOUBLE)::GEOMETRY \
-                 FROM range({start}, {end}) AS profile_points(i)"
+                 SELECT i, CASE i % 3 \
+                   WHEN 0 THEN ST_Point(i::DOUBLE, i::DOUBLE) \
+                   WHEN 1 THEN ST_MakeLine([\
+                     ST_Point(i::DOUBLE, i::DOUBLE), \
+                     ST_Point(i::DOUBLE + 0.25, i::DOUBLE)]) \
+                   ELSE ST_MakeEnvelope(\
+                     i::DOUBLE, i::DOUBLE, \
+                     i::DOUBLE + 0.25, i::DOUBLE + 0.25) \
+                 END::GEOMETRY \
+                 FROM range({start}, {end}) AS profile_shapes(i)"
             ))
             .unwrap_or_else(|error| panic!("ingest native profile file {file}: {error}"));
     }
@@ -1402,6 +1411,58 @@ async fn spatial_scan_profile() {
     let bbox_bytes = scan_byte_metrics(&bbox_row_group_bytes, bbox, bbox_unpruned);
     let native_bytes = scan_byte_metrics(&native_row_group_bytes, native, native_unpruned);
 
+    let rss_sampler = RssSampler::start();
+    let resource_sampler = ResourceSampler::start(Arc::clone(runtime.storage()));
+    let bbox_latency = pgwire_count_latency(
+        &client,
+        "bbox selective latency",
+        &bbox_query,
+        expected_count,
+        SPATIAL_QUERY_SAMPLES,
+    )
+    .await;
+    let native_latency = pgwire_count_latency(
+        &client,
+        "native selective latency",
+        &native_query,
+        expected_count,
+        SPATIAL_QUERY_SAMPLES,
+    )
+    .await;
+    let resources = resource_sampler.finish().await;
+    let query_rss = rss_sampler.finish().await;
+    assert!(
+        bbox_latency.p95_ms <= profile.query_p95_budget_ms,
+        "bbox p95 {:.2} ms exceeded {:.2} ms",
+        bbox_latency.p95_ms,
+        profile.query_p95_budget_ms
+    );
+    assert!(
+        native_latency.p95_ms <= profile.query_p95_budget_ms,
+        "native p95 {:.2} ms exceeded {:.2} ms",
+        native_latency.p95_ms,
+        profile.query_p95_budget_ms
+    );
+    assert!(
+        query_rss.delta <= profile.query_rss_budget_bytes,
+        "spatial query RSS delta {} MiB exceeded {} MiB",
+        query_rss.delta / MIB,
+        profile.query_rss_budget_bytes / MIB
+    );
+    assert!(
+        resources.memory_delta <= profile.duckdb_memory_budget_bytes,
+        "DuckDB memory delta {} MiB exceeded {} MiB",
+        resources.memory_delta / MIB,
+        profile.duckdb_memory_budget_bytes / MIB
+    );
+    assert!(
+        resources.temporary_storage_peak <= profile.spill_budget_bytes,
+        "DuckDB temporary storage {} bytes exceeded {} bytes",
+        resources.temporary_storage_peak,
+        profile.spill_budget_bytes
+    );
+    assert_eq!(resources.failures, 0, "DuckDB resource samples failed");
+
     for table in ["bbox_scan_profile", "native_scan_profile"] {
         runtime
             .storage()
@@ -1445,16 +1506,20 @@ async fn spatial_scan_profile() {
     let evidence = EvidenceEnvelope::collect(
         EvidenceProfile::new(
             format!(
-                "duckdb-spatial-scan-{}-r{}-v2",
+                "duckdb-spatial-scan-{}-r{}-v3",
                 profile.level.as_str(),
                 profile.rows
             ),
             profile.level,
             profile.environment,
-            "ordered point data in official DuckLake Parquet files; exact counts run through pgwire while DuckDB 1.5.4 row-group metrics compare exact-only scans with maintained WKB/bbox and native GEOMETRY candidates",
+            "ordered point, linestring, and polygon data in official DuckLake Parquet files; exact counts and timed selective samples run through pgwire while DuckDB row-group metrics compare exact-only scans with maintained WKB/bbox and native GEOMETRY candidates",
         ),
         json!({
             "rows_per_layout": profile.rows,
+            "point_rows_per_layout": profile_shape_count(profile.rows, 0),
+            "linestring_rows_per_layout": profile_shape_count(profile.rows, 1),
+            "polygon_rows_per_layout": profile_shape_count(profile.rows, 2),
+            "geometry_families": ["POINT", "LINESTRING", "POLYGON"],
             "files_per_layout": profile.files,
             "rows_per_file": rows_per_file,
             "probe_max_coordinate": probe_max,
@@ -1494,6 +1559,26 @@ async fn spatial_scan_profile() {
             "native_compressed_row_group_bytes": native_bytes.total,
             "native_scanned_bytes_upper_bound": native_bytes.scanned_upper_bound,
             "native_scan_byte_ratio_upper_bound": native_bytes.ratio_upper_bound,
+            "query_samples_per_layout": SPATIAL_QUERY_SAMPLES,
+            "bbox_query_latency_min_ms": bbox_latency.min_ms,
+            "bbox_query_latency_p50_ms": bbox_latency.p50_ms,
+            "bbox_query_latency_p95_ms": bbox_latency.p95_ms,
+            "bbox_query_latency_p99_ms": bbox_latency.p99_ms,
+            "bbox_query_latency_max_ms": bbox_latency.max_ms,
+            "native_query_latency_min_ms": native_latency.min_ms,
+            "native_query_latency_p50_ms": native_latency.p50_ms,
+            "native_query_latency_p95_ms": native_latency.p95_ms,
+            "native_query_latency_p99_ms": native_latency.p99_ms,
+            "native_query_latency_max_ms": native_latency.max_ms,
+            "query_idle_rss_bytes": query_rss.idle,
+            "query_peak_rss_bytes": query_rss.peak,
+            "query_rss_delta_bytes": query_rss.delta,
+            "duckdb_memory_initial_bytes": resources.memory_initial,
+            "duckdb_memory_peak_bytes": resources.memory_peak,
+            "duckdb_memory_delta_bytes": resources.memory_delta,
+            "duckdb_temporary_storage_peak_bytes": resources.temporary_storage_peak,
+            "duckdb_resource_samples": resources.samples,
+            "duckdb_resource_sample_failures": resources.failures,
             "bbox_files_before_compaction": profile.files,
             "bbox_files_after_compaction": bbox_files_after,
             "native_files_before_compaction": profile.files,
@@ -1505,6 +1590,11 @@ async fn spatial_scan_profile() {
             "row_group_improvement_min": 20.0,
             "compaction_file_reduction_min": 2.0,
             "exact_recheck_required": true,
+            "query_samples_per_layout": SPATIAL_QUERY_SAMPLES,
+            "query_latency_p95_max_ms": profile.query_p95_budget_ms,
+            "query_rss_delta_max_bytes": profile.query_rss_budget_bytes,
+            "duckdb_memory_delta_max_bytes": profile.duckdb_memory_budget_bytes,
+            "duckdb_temporary_storage_max_bytes": profile.spill_budget_bytes,
             "reference_rows": 10_000_000,
             "reference_runs_before_100m": 2,
         }),
@@ -1514,12 +1604,15 @@ async fn spatial_scan_profile() {
         .write(&output_path)
         .expect("write spatial scan evidence");
     println!(
-        "duckdb_spatial_scan_profile_ok rows={} bbox={}/{} native={}/{} out={}",
+        "duckdb_spatial_scan_profile_ok rows={} bbox={}/{} native={}/{} bbox_p95_ms={:.2} native_p95_ms={:.2} rss_delta_mib={} out={}",
         profile.rows,
         bbox.scanned,
         bbox_unpruned.total,
         native.scanned,
         native_unpruned.total,
+        bbox_latency.p95_ms,
+        native_latency.p95_ms,
+        query_rss.delta / MIB,
         output_path.display()
     );
 }
@@ -1666,6 +1759,10 @@ struct SpatialScanProfile {
     environment: ExecutionEnvironment,
     rows: u64,
     files: u64,
+    query_p95_budget_ms: f64,
+    query_rss_budget_bytes: u64,
+    duckdb_memory_budget_bytes: u64,
+    spill_budget_bytes: u64,
 }
 
 impl SpatialScanProfile {
@@ -1714,6 +1811,15 @@ impl SpatialScanProfile {
             environment,
             rows,
             files,
+            query_p95_budget_ms: match level {
+                EvidenceLevel::Smoke => 2_000.0,
+                EvidenceLevel::Local => 1_000.0,
+                EvidenceLevel::Reference => 500.0,
+                EvidenceLevel::External => unreachable!("external rejected above"),
+            },
+            query_rss_budget_bytes: 128 * MIB,
+            duckdb_memory_budget_bytes: 256 * MIB,
+            spill_budget_bytes: 0,
         }
     }
 }
@@ -1918,6 +2024,26 @@ struct RssSample {
     delta: u64,
 }
 
+struct ResourceSampler {
+    storage: Arc<quackgis_server::duckdb_adbc_storage::DuckDbAdbcStorage>,
+    memory_initial: u64,
+    memory_peak: Arc<AtomicU64>,
+    temporary_storage_peak: Arc<AtomicU64>,
+    samples: Arc<AtomicU64>,
+    failures: Arc<AtomicU64>,
+    sampling: Arc<AtomicBool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+struct ResourceSampleSummary {
+    memory_initial: u64,
+    memory_peak: u64,
+    memory_delta: u64,
+    temporary_storage_peak: u64,
+    samples: u64,
+    failures: u64,
+}
+
 impl RssSampler {
     fn start() -> Self {
         let idle = process_rss_bytes().expect("Linux process RSS");
@@ -1949,6 +2075,78 @@ impl RssSampler {
             idle: self.idle,
             peak,
             delta: peak.saturating_sub(self.idle),
+        }
+    }
+}
+
+impl ResourceSampler {
+    fn start(storage: Arc<quackgis_server::duckdb_adbc_storage::DuckDbAdbcStorage>) -> Self {
+        let initial = storage
+            .resource_sample()
+            .expect("initial DuckDB resource sample");
+        let memory_peak = Arc::new(AtomicU64::new(initial.memory_bytes));
+        let temporary_storage_peak = Arc::new(AtomicU64::new(initial.temporary_storage_bytes));
+        let samples = Arc::new(AtomicU64::new(1));
+        let failures = Arc::new(AtomicU64::new(0));
+        let sampling = Arc::new(AtomicBool::new(true));
+        let sampler_storage = Arc::clone(&storage);
+        let sampler_memory_peak = Arc::clone(&memory_peak);
+        let sampler_temporary_storage_peak = Arc::clone(&temporary_storage_peak);
+        let sampler_samples = Arc::clone(&samples);
+        let sampler_failures = Arc::clone(&failures);
+        let sampler_sampling = Arc::clone(&sampling);
+        let task = tokio::spawn(async move {
+            while sampler_sampling.load(Ordering::Acquire) {
+                let storage = Arc::clone(&sampler_storage);
+                match tokio::task::spawn_blocking(move || storage.resource_sample()).await {
+                    Ok(Ok(sample)) => {
+                        sampler_memory_peak.fetch_max(sample.memory_bytes, Ordering::Relaxed);
+                        sampler_temporary_storage_peak
+                            .fetch_max(sample.temporary_storage_bytes, Ordering::Relaxed);
+                        sampler_samples.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Ok(Err(_)) | Err(_) => {
+                        sampler_failures.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        Self {
+            storage,
+            memory_initial: initial.memory_bytes,
+            memory_peak,
+            temporary_storage_peak,
+            samples,
+            failures,
+            sampling,
+            task,
+        }
+    }
+
+    async fn finish(self) -> ResourceSampleSummary {
+        self.sampling.store(false, Ordering::Release);
+        self.task.await.expect("DuckDB resource sampler");
+        match self.storage.resource_sample() {
+            Ok(sample) => {
+                self.memory_peak
+                    .fetch_max(sample.memory_bytes, Ordering::Relaxed);
+                self.temporary_storage_peak
+                    .fetch_max(sample.temporary_storage_bytes, Ordering::Relaxed);
+                self.samples.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(_) => {
+                self.failures.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let memory_peak = self.memory_peak.load(Ordering::Relaxed);
+        ResourceSampleSummary {
+            memory_initial: self.memory_initial,
+            memory_peak,
+            memory_delta: memory_peak.saturating_sub(self.memory_initial),
+            temporary_storage_peak: self.temporary_storage_peak.load(Ordering::Relaxed),
+            samples: self.samples.load(Ordering::Relaxed),
+            failures: self.failures.load(Ordering::Relaxed),
         }
     }
 }
@@ -1994,17 +2192,29 @@ fn generated_copy_schema() -> SchemaRef {
     ]))
 }
 
-fn spatial_layout_batch(start: u64, end: u64) -> RecordBatch {
+fn spatial_shape_batch(start: u64, end: u64) -> RecordBatch {
     let rows = usize::try_from(end - start).expect("spatial profile batch row count");
     let ids = Arc::new(Int64Array::from_iter_values(
         (start..end).map(|id| id as i64),
     )) as ArrayRef;
-    let coordinates = Arc::new(Float64Array::from_iter_values(
+    let minimum_coordinates = Arc::new(Float64Array::from_iter_values(
         (start..end).map(|id| id as f64),
     )) as ArrayRef;
-    let mut geometries = BinaryBuilder::with_capacity(rows, rows * 21);
+    let maximum_coordinates = Arc::new(Float64Array::from_iter_values((start..end).map(|id| {
+        if id % 3 == 0 {
+            id as f64
+        } else {
+            id as f64 + 0.25
+        }
+    }))) as ArrayRef;
+    let mut geometries = BinaryBuilder::with_capacity(rows, rows * 52);
     for id in start..end {
-        geometries.append_value(profile_point_wkb(id as f64));
+        match id % 3 {
+            0 => geometries.append_value(profile_point_wkb(id as f64)),
+            1 => geometries.append_value(profile_linestring_wkb(id as f64)),
+            2 => geometries.append_value(profile_polygon_wkb(id as f64)),
+            _ => unreachable!("remainder modulo three"),
+        }
     }
     RecordBatch::try_new(
         Arc::new(Schema::new(vec![
@@ -2018,13 +2228,13 @@ fn spatial_layout_batch(start: u64, end: u64) -> RecordBatch {
         vec![
             ids,
             Arc::new(geometries.finish()),
-            Arc::clone(&coordinates),
-            Arc::clone(&coordinates),
-            Arc::clone(&coordinates),
-            coordinates,
+            Arc::clone(&minimum_coordinates),
+            minimum_coordinates,
+            Arc::clone(&maximum_coordinates),
+            maximum_coordinates,
         ],
     )
-    .expect("spatial layout profile batch")
+    .expect("spatial shape profile batch")
 }
 
 fn profile_point_wkb(coordinate: f64) -> [u8; 21] {
@@ -2034,6 +2244,51 @@ fn profile_point_wkb(coordinate: f64) -> [u8; 21] {
     wkb[5..13].copy_from_slice(&coordinate.to_le_bytes());
     wkb[13..21].copy_from_slice(&coordinate.to_le_bytes());
     wkb
+}
+
+fn profile_linestring_wkb(coordinate: f64) -> [u8; 41] {
+    let mut wkb = [0_u8; 41];
+    wkb[0] = 1;
+    wkb[1..5].copy_from_slice(&2_u32.to_le_bytes());
+    wkb[5..9].copy_from_slice(&2_u32.to_le_bytes());
+    write_wkb_point(&mut wkb[9..25], coordinate, coordinate);
+    write_wkb_point(&mut wkb[25..41], coordinate + 0.25, coordinate);
+    wkb
+}
+
+fn profile_polygon_wkb(coordinate: f64) -> [u8; 93] {
+    let mut wkb = [0_u8; 93];
+    wkb[0] = 1;
+    wkb[1..5].copy_from_slice(&3_u32.to_le_bytes());
+    wkb[5..9].copy_from_slice(&1_u32.to_le_bytes());
+    wkb[9..13].copy_from_slice(&5_u32.to_le_bytes());
+    for (index, (x, y)) in [
+        (coordinate, coordinate),
+        (coordinate, coordinate + 0.25),
+        (coordinate + 0.25, coordinate + 0.25),
+        (coordinate + 0.25, coordinate),
+        (coordinate, coordinate),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let start = 13 + index * 16;
+        write_wkb_point(&mut wkb[start..start + 16], x, y);
+    }
+    wkb
+}
+
+fn write_wkb_point(target: &mut [u8], x: f64, y: f64) {
+    target[..8].copy_from_slice(&x.to_le_bytes());
+    target[8..16].copy_from_slice(&y.to_le_bytes());
+}
+
+fn profile_shape_count(rows: u64, remainder: u64) -> u64 {
+    if rows <= remainder {
+        0
+    } else {
+        (rows - 1 - remainder) / 3 + 1
+    }
 }
 
 struct TableFile {
@@ -2230,6 +2485,30 @@ fn scan_byte_metrics(
         scanned_upper_bound,
         ratio_upper_bound,
     }
+}
+
+async fn pgwire_count_latency(
+    client: &tokio_postgres::Client,
+    label: &str,
+    query: &str,
+    expected_count: u64,
+    samples: usize,
+) -> LatencySummary {
+    let mut latencies = Vec::with_capacity(samples);
+    for sample in 0..samples {
+        let started = Instant::now();
+        let count = client
+            .query_one(query, &[])
+            .await
+            .unwrap_or_else(|error| panic!("{label} sample {sample}: {error:?}"))
+            .get::<_, i64>(0);
+        latencies.push(started.elapsed().as_secs_f64() * 1000.0);
+        assert_eq!(
+            count, expected_count as i64,
+            "{label} sample {sample} exact count"
+        );
+    }
+    latency_summary(&latencies)
 }
 
 fn copy_text_chunk(start: u64, rows: u64, max_bytes: usize) -> (String, u64) {
