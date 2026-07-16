@@ -2684,6 +2684,8 @@ enum MaintainedPgFunction {
     Database,
     Schema,
     Schemas,
+    SchemaEpoch,
+    SecurityEpoch,
     FormatType,
     GetExpr,
     ColDescription,
@@ -2706,6 +2708,8 @@ impl MaintainedPgFunction {
             Self::Database => "quackgis_current_database",
             Self::Schema => "quackgis_current_schema",
             Self::Schemas => "quackgis_current_schemas",
+            Self::SchemaEpoch => "quackgis_pg_schema_epoch",
+            Self::SecurityEpoch => "quackgis_pg_security_epoch",
             Self::FormatType => "quackgis_pg_format_type",
             Self::GetExpr => "quackgis_pg_get_expr",
             Self::ColDescription => "quackgis_pg_col_description",
@@ -2723,20 +2727,21 @@ impl MaintainedPgFunction {
         }
     }
 
-    const fn result_hint(self) -> PgTypeHint {
+    const fn result_hint(self) -> Option<PgTypeHint> {
         match self {
-            Self::Database | Self::Schema => PgTypeHint::Name,
-            Self::Schemas => PgTypeHint::NameArray,
+            Self::Database | Self::Schema => Some(PgTypeHint::Name),
+            Self::Schemas => Some(PgTypeHint::NameArray),
+            Self::SchemaEpoch | Self::SecurityEpoch => None,
             Self::FormatType
             | Self::GetExpr
             | Self::ColDescription
             | Self::ObjDescription
             | Self::GetConstraintDef
-            | Self::GetIndexDef => PgTypeHint::Text,
-            Self::ToRegclass | Self::Regclass => PgTypeHint::Regclass,
-            Self::ToRegtype | Self::Regtype => PgTypeHint::Regtype,
-            Self::ToRegnamespace | Self::Regnamespace => PgTypeHint::Regnamespace,
-            Self::ToRegrole | Self::Regrole => PgTypeHint::Regrole,
+            | Self::GetIndexDef => Some(PgTypeHint::Text),
+            Self::ToRegclass | Self::Regclass => Some(PgTypeHint::Regclass),
+            Self::ToRegtype | Self::Regtype => Some(PgTypeHint::Regtype),
+            Self::ToRegnamespace | Self::Regnamespace => Some(PgTypeHint::Regnamespace),
+            Self::ToRegrole | Self::Regrole => Some(PgTypeHint::Regrole),
         }
     }
 
@@ -2746,7 +2751,7 @@ impl MaintainedPgFunction {
 
     const fn argument_count(self) -> usize {
         match self {
-            Self::Database | Self::Schema => 0,
+            Self::Database | Self::Schema | Self::SchemaEpoch | Self::SecurityEpoch => 0,
             Self::Schemas
             | Self::ToRegclass
             | Self::Regclass
@@ -2807,6 +2812,10 @@ fn maintained_pg_function(name: &ObjectName) -> Option<MaintainedPgFunction> {
         Some(MaintainedPgFunction::Schema)
     } else if pg_identifier_matches(function, "current_schemas") {
         Some(MaintainedPgFunction::Schemas)
+    } else if pg_identifier_matches(function, "quackgis_schema_epoch") {
+        Some(MaintainedPgFunction::SchemaEpoch)
+    } else if pg_identifier_matches(function, "quackgis_security_epoch") {
+        Some(MaintainedPgFunction::SecurityEpoch)
     } else if pg_identifier_matches(function, "format_type") {
         Some(MaintainedPgFunction::FormatType)
     } else if pg_identifier_matches(function, "pg_get_expr") {
@@ -2845,6 +2854,8 @@ fn private_maintained_pg_function(name: &ObjectName) -> Option<MaintainedPgFunct
         return None;
     };
     [
+        MaintainedPgFunction::SchemaEpoch,
+        MaintainedPgFunction::SecurityEpoch,
         MaintainedPgFunction::FormatType,
         MaintainedPgFunction::ToRegclass,
         MaintainedPgFunction::Regclass,
@@ -5103,7 +5114,7 @@ fn maintained_cast_hint(data_type: &sqlparser::ast::DataType) -> Option<PgTypeHi
     } else if maintained_text_cast(data_type) {
         Some(PgTypeHint::Text)
     } else {
-        maintained_pg_cast(data_type).map(MaintainedPgFunction::result_hint)
+        maintained_pg_cast(data_type).and_then(MaintainedPgFunction::result_hint)
     }
 }
 
@@ -5470,7 +5481,7 @@ fn maintained_function_hint(expression: &Expr) -> Option<PgTypeHint> {
                 pg_function_name_matches(&function.name, "set_config").then_some(PgTypeHint::Text)
             })
             .or_else(|| {
-                maintained_pg_function(&function.name).map(MaintainedPgFunction::result_hint)
+                maintained_pg_function(&function.name).and_then(MaintainedPgFunction::result_hint)
             }),
         Expr::Identifier(identifier)
             if identifier.quote_style.is_none()
@@ -6934,6 +6945,57 @@ mod tests {
                 )
                 .is_err(),
                 "private catalog function must fail closed: {private}"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_catalog_epochs_are_capability_gated_zero_argument_bigints() {
+        for sql in [
+            "SELECT quackgis_schema_epoch()",
+            "SELECT pg_catalog.quackgis_security_epoch()",
+        ] {
+            assert!(
+                validate_statement(sql, ProtocolMode::Extended).is_err(),
+                "{sql}"
+            );
+        }
+        let validated = validate_statement_with_catalog_identity(
+            "SELECT quackgis_schema_epoch() AS schema_epoch, \
+                    pg_catalog.quackgis_security_epoch() AS security_epoch",
+            ProtocolMode::Extended,
+            true,
+            None,
+            None,
+        )
+        .expect("shared catalog epochs");
+        assert!(validated.sql.contains("quackgis_pg_schema_epoch()"));
+        assert!(validated.sql.contains("quackgis_pg_security_epoch()"));
+        let schema = annotate_catalog_result_schema(
+            &validated.ast,
+            &Schema::new(vec![
+                Field::new("schema_epoch", DataType::Int64, false),
+                Field::new("security_epoch", DataType::Int64, false),
+            ]),
+        );
+        assert_eq!(field_into_pg_type(&schema.fields()[0]).unwrap(), Type::INT8);
+        assert_eq!(field_into_pg_type(&schema.fields()[1]).unwrap(), Type::INT8);
+        for sql in [
+            "SELECT quackgis_schema_epoch(1)",
+            "SELECT quackgis_security_epoch() OVER ()",
+            "SELECT quackgis_pg_schema_epoch()",
+            "SELECT quackgis_pg_security_epoch()",
+        ] {
+            assert!(
+                validate_statement_with_catalog_identity(
+                    sql,
+                    ProtocolMode::Extended,
+                    true,
+                    None,
+                    None,
+                )
+                .is_err(),
+                "unsupported epoch shape: {sql}"
             );
         }
     }

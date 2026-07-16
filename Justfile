@@ -486,6 +486,16 @@ rest-postgrest-smoke driver=duckdb_adbc_driver:
     HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" \
       cargo test -p quackgis-rest tests::actual_postgrest_compat_and_quackgis_extensions -- --ignored --exact
 
+# Exercise REST cache invalidation through shared development catalog/security epochs.
+rest-shared-epoch-smoke extension=dev_ducklake_extension sha256=dev_ducklake_extension_sha256 driver=duckdb_adbc_driver:
+    @set -eu; driver_arg='{{driver}}'; driver_arg="${driver_arg#driver=}"; extension_arg='{{extension}}'; extension_arg="${extension_arg#extension=}"; sha_arg='{{sha256}}'; sha_arg="${sha_arg#sha256=}"; \
+    if [ ! -f "$driver_arg" ]; then echo 'DuckDB ADBC driver is missing; run `mise run duckdb-bootstrap`' >&2; exit 2; fi; \
+    if [ ! -f "$extension_arg" ] || [ -z "$sha_arg" ]; then echo 'checksum-pinned development DuckLake extension is required' >&2; exit 2; fi; \
+    driver_arg="$(realpath "$driver_arg")"; extension_arg="$(realpath "$extension_arg")"; duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; \
+    HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" \
+      QUACKGIS_DEV_DUCKLAKE_EXTENSION="$extension_arg" QUACKGIS_DEV_DUCKLAKE_EXTENSION_SHA256="$sha_arg" \
+      cargo test -p quackgis-rest tests::shared_catalog_epochs_invalidate_rest_caches -- --ignored --exact
+
 # Connect with psql to a running dev server.
 psql:
     psql -h {{host}} -p {{port}} -U postgres -d quackgis

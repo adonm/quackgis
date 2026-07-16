@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -26,8 +27,9 @@ use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock};
 use tokio_postgres::config::SslMode;
+use tokio_postgres::error::SqlState;
 use tokio_postgres::types::{ToSql, Type};
-use tokio_postgres::{Client, Config, NoTls};
+use tokio_postgres::{Client, Config, NoTls, Row};
 use tokio_postgres_rustls::MakeRustlsConnect;
 
 const UPSTREAM_REVISION: &str = "b7915d3c3361f0fee45de6e292e62f6f6186375f";
@@ -38,6 +40,8 @@ const MAX_JWT_SECRET_BYTES: usize = 4096;
 const MAX_JWT_SECRET_FILE_BYTES: u64 = 8192;
 const MAX_DATABASE_PASSWORD_BYTES: usize = 4096;
 const MAX_DATABASE_PASSWORD_FILE_BYTES: u64 = 8192;
+const CATALOG_EPOCH_SQL: &str = "SELECT pg_catalog.quackgis_schema_epoch(), \
+    pg_catalog.quackgis_security_epoch()";
 const JWT_CLOCK_SKEW_SECONDS: u64 = 30;
 
 #[derive(Debug, Parser)]
@@ -82,6 +86,7 @@ struct AppState {
 struct DatabaseConnection {
     connector: DatabaseConnector,
     active: Mutex<Option<ActiveDatabaseClient>>,
+    next_generation: AtomicU64,
 }
 
 struct DatabaseConnector {
@@ -93,6 +98,8 @@ struct DatabaseConnector {
 struct ActiveDatabaseClient {
     client: Client,
     credential_revision: [u8; 32],
+    generation: u64,
+    epoch_capability: Option<bool>,
 }
 
 struct DatabaseCredential {
@@ -102,13 +109,30 @@ struct DatabaseCredential {
 
 #[derive(Clone)]
 struct SchemaCacheEntry {
+    role: String,
     schema: Arc<SchemaCache>,
-    revision: [u8; 32],
+    validation: SchemaValidation,
 }
 
 struct DiscoveredSchema {
     schema: SchemaCache,
-    revision: [u8; 32],
+    validation: SchemaValidation,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SchemaValidation {
+    Epochs {
+        schema: i64,
+        security: i64,
+        connection_generation: u64,
+    },
+    Revision([u8; 32]),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EpochValidation {
+    Available(SchemaValidation),
+    Unsupported,
 }
 
 #[derive(Clone)]
@@ -156,7 +180,7 @@ async fn main() -> Result<()> {
                 .keys()
                 .map(|table| table.name.clone()),
         );
-        caches.insert(role.clone(), discovered.into());
+        caches.insert(role.clone(), SchemaCacheEntry::new(role, discovered));
     }
     let mut missing = exposed_tables
         .difference(&discovered_tables)
@@ -270,8 +294,19 @@ impl DatabaseConnection {
             active: Mutex::new(Some(ActiveDatabaseClient {
                 client,
                 credential_revision: credential.revision,
+                generation: 1,
+                epoch_capability: None,
             })),
+            next_generation: AtomicU64::new(2),
         })
+    }
+
+    fn next_generation(&self) -> Result<u64> {
+        self.next_generation
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |generation| {
+                generation.checked_add(1)
+            })
+            .map_err(|_| anyhow::anyhow!("database connection generation exhausted"))
     }
 
     async fn active(&self) -> Result<tokio::sync::MutexGuard<'_, Option<ActiveDatabaseClient>>> {
@@ -292,9 +327,41 @@ impl DatabaseConnection {
             *active = Some(ActiveDatabaseClient {
                 client,
                 credential_revision: credential.revision,
+                generation: self.next_generation()?,
+                epoch_capability: None,
             });
         }
         Ok(active)
+    }
+
+    async fn epoch_validation(&self) -> Result<EpochValidation> {
+        let mut active = self.active().await?;
+        let result = {
+            let active = active.as_mut().expect("active database client");
+            if active.epoch_capability == Some(false) {
+                Ok(EpochValidation::Unsupported)
+            } else {
+                match query_catalog_epochs(&active.client).await {
+                    Ok((schema, security)) => {
+                        active.epoch_capability = Some(true);
+                        Ok(EpochValidation::Available(SchemaValidation::Epochs {
+                            schema,
+                            security,
+                            connection_generation: active.generation,
+                        }))
+                    }
+                    Err(error) if epoch_capability_is_unsupported(&error) => {
+                        active.epoch_capability = Some(false);
+                        Ok(EpochValidation::Unsupported)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+        };
+        if result.as_ref().is_err_and(tokio_postgres::Error::is_closed) {
+            active.take();
+        }
+        result.map_err(Into::into)
     }
 
     async fn discover_schema(
@@ -303,12 +370,30 @@ impl DatabaseConnection {
         role: &str,
     ) -> Result<DiscoveredSchema> {
         let mut active = self.active().await?;
-        let result = discover_schema(
-            &mut active.as_mut().expect("active database client").client,
-            exposed_tables,
-            role,
-        )
-        .await;
+        let result = {
+            let active = active.as_mut().expect("active database client");
+            let use_epochs = match active.epoch_capability {
+                Some(available) => available,
+                None => match query_catalog_epochs(&active.client).await {
+                    Ok(_) => {
+                        active.epoch_capability = Some(true);
+                        true
+                    }
+                    Err(error) if epoch_capability_is_unsupported(&error) => {
+                        active.epoch_capability = Some(false);
+                        false
+                    }
+                    Err(error) => return Err(error.into()),
+                },
+            };
+            discover_schema(
+                &mut active.client,
+                exposed_tables,
+                role,
+                use_epochs.then_some(active.generation),
+            )
+            .await
+        };
         if result.as_ref().is_err_and(database_error_is_closed) {
             active.take();
         }
@@ -389,16 +474,39 @@ fn database_error_is_closed(error: &anyhow::Error) -> bool {
         .is_some_and(tokio_postgres::Error::is_closed)
 }
 
+async fn query_catalog_epochs(client: &Client) -> Result<(i64, i64), tokio_postgres::Error> {
+    let row = client.query_one(CATALOG_EPOCH_SQL, &[]).await?;
+    Ok(catalog_epochs_from_row(&row))
+}
+
+fn catalog_epochs_from_row(row: &Row) -> (i64, i64) {
+    (row.get(0), row.get(1))
+}
+
+fn epoch_capability_is_unsupported(error: &tokio_postgres::Error) -> bool {
+    error
+        .as_db_error()
+        .is_some_and(|database| database.code() == &SqlState::FEATURE_NOT_SUPPORTED)
+}
+
 async fn discover_schema(
     client: &mut Client,
     exposed_tables: &HashSet<String>,
     role: &str,
+    connection_generation: Option<u64>,
 ) -> Result<DiscoveredSchema> {
     const SQL: &str = "SELECT table_name::VARCHAR, column_name::VARCHAR, \
         udt_name::VARCHAR, is_nullable::VARCHAR, column_default::VARCHAR \
         FROM information_schema.columns WHERE table_schema = 'public' \
         ORDER BY table_name, ordinal_position";
     let transaction = client.transaction().await?;
+    let epochs_before = if connection_generation.is_some() {
+        Some(catalog_epochs_from_row(
+            &transaction.query_one(CATALOG_EPOCH_SQL, &[]).await?,
+        ))
+    } else {
+        None
+    };
     transaction
         .batch_execute(&format!("SET LOCAL ROLE {role}"))
         .await?;
@@ -447,6 +555,22 @@ async fn discover_schema(
     for table in tables.values_mut() {
         table.rebuild_column_index();
     }
+    let validation = if let (Some(connection_generation), Some((schema, security))) =
+        (connection_generation, epochs_before)
+    {
+        let epochs_after =
+            catalog_epochs_from_row(&transaction.query_one(CATALOG_EPOCH_SQL, &[]).await?);
+        if epochs_after != (schema, security) {
+            bail!("catalog epochs changed during REST schema discovery");
+        }
+        SchemaValidation::Epochs {
+            schema,
+            security,
+            connection_generation,
+        }
+    } else {
+        SchemaValidation::Revision(revision.finalize().into())
+    };
     transaction.commit().await?;
     Ok(DiscoveredSchema {
         schema: SchemaCache {
@@ -454,7 +578,7 @@ async fn discover_schema(
             relationships: Vec::new(),
             functions: HashMap::new(),
         },
-        revision: revision.finalize().into(),
+        validation,
     })
 }
 
@@ -468,16 +592,38 @@ fn update_schema_revision(revision: &mut Sha256, value: Option<&str>) {
     }
 }
 
-impl From<DiscoveredSchema> for SchemaCacheEntry {
-    fn from(discovered: DiscoveredSchema) -> Self {
+impl SchemaCacheEntry {
+    fn new(role: &str, discovered: DiscoveredSchema) -> Self {
         Self {
+            role: role.to_owned(),
             schema: Arc::new(discovered.schema),
-            revision: discovered.revision,
+            validation: discovered.validation,
         }
+    }
+
+    fn matches(&self, role: &str, validation: SchemaValidation) -> bool {
+        self.role == role && self.validation == validation
     }
 }
 
-async fn role_schema(state: &AppState, role: &str) -> Result<Arc<SchemaCache>, ()> {
+async fn role_schema(
+    state: &AppState,
+    role: &str,
+    force_reload: bool,
+) -> Result<Arc<SchemaCache>, ()> {
+    if !force_reload {
+        let validation =
+            tokio::time::timeout(state.statement_timeout, state.database.epoch_validation())
+                .await
+                .map_err(|_| ())?
+                .map_err(|_| ())?;
+        if let EpochValidation::Available(validation) = validation
+            && let Some(cached) = state.caches.read().await.get(role)
+            && cached.matches(role, validation)
+        {
+            return Ok(Arc::clone(&cached.schema));
+        }
+    }
     let discovered = tokio::time::timeout(state.statement_timeout, async {
         state
             .database
@@ -490,11 +636,11 @@ async fn role_schema(state: &AppState, role: &str) -> Result<Arc<SchemaCache>, (
 
     let mut caches = state.caches.write().await;
     if let Some(cached) = caches.get(role)
-        && cached.revision == discovered.revision
+        && cached.matches(role, discovered.validation)
     {
         return Ok(Arc::clone(&cached.schema));
     }
-    let entry = SchemaCacheEntry::from(discovered);
+    let entry = SchemaCacheEntry::new(role, discovered);
     let schema = Arc::clone(&entry.schema);
     caches.insert(role.to_owned(), entry);
     Ok(schema)
@@ -531,7 +677,7 @@ async fn openapi(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Resp
         Ok(identity) => identity,
         Err(()) => return unauthorized(),
     };
-    let cache = match role_schema(&state, &identity.role).await {
+    let cache = match role_schema(&state, &identity.role, false).await {
         Ok(cache) => cache,
         Err(()) => {
             return api_error(
@@ -562,7 +708,7 @@ async fn reload(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Respo
         Ok(identity) => identity,
         Err(()) => return unauthorized(),
     };
-    match role_schema(&state, &identity.role).await {
+    match role_schema(&state, &identity.role, true).await {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(()) => api_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -605,7 +751,7 @@ async fn read_table_response(
         Ok(request) => request,
         Err(message) => return api_error(StatusCode::BAD_REQUEST, "PGRST100", &message),
     };
-    let cache = match role_schema(&state, &identity.role).await {
+    let cache = match role_schema(&state, &identity.role, false).await {
         Ok(cache) => cache,
         Err(()) => {
             return api_error(
@@ -1154,6 +1300,30 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires the pinned DuckDB ADBC runtime"]
     async fn actual_postgrest_compat_and_quackgis_extensions() {
+        actual_postgrest_compat_with_policy(ExtensionPolicy::LoadOnly, false).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the checksum-pinned development DuckLake extension"]
+    async fn shared_catalog_epochs_invalidate_rest_caches() {
+        let extension = std::env::var_os("QUACKGIS_DEV_DUCKLAKE_EXTENSION")
+            .expect("set QUACKGIS_DEV_DUCKLAKE_EXTENSION");
+        let sha256 = std::env::var("QUACKGIS_DEV_DUCKLAKE_EXTENSION_SHA256")
+            .expect("set QUACKGIS_DEV_DUCKLAKE_EXTENSION_SHA256");
+        actual_postgrest_compat_with_policy(
+            ExtensionPolicy::DevelopmentDuckLake {
+                path: extension.into(),
+                sha256,
+            },
+            true,
+        )
+        .await;
+    }
+
+    async fn actual_postgrest_compat_with_policy(
+        extension_policy: ExtensionPolicy,
+        expect_shared_epochs: bool,
+    ) {
         let driver_path = std::env::var_os("QUACKGIS_DUCKDB_ADBC_DRIVER")
             .expect("set QUACKGIS_DUCKDB_ADBC_DRIVER");
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1169,7 +1339,7 @@ mod tests {
                 ),
                 catalog_name: "quackgis".to_owned(),
                 data_path: data_path.display().to_string(),
-                extension_policy: ExtensionPolicy::LoadOnly,
+                extension_policy,
             })
             .expect("DuckDB storage"),
         );
@@ -1266,11 +1436,18 @@ mod tests {
         let jwt_secret_file = jwt.secret_file.clone();
         let reader_jwt = test_jwt("rest_reader", unix_time() + 300);
         let denied_jwt = test_jwt("denied_reader", unix_time() + 300);
-        let reader_entry = SchemaCacheEntry::from(cache);
+        assert_eq!(
+            matches!(cache.validation, SchemaValidation::Epochs { .. }),
+            expect_shared_epochs
+        );
+        let reader_entry = SchemaCacheEntry::new("rest_reader", cache);
         let reader_cache = Arc::clone(&reader_entry.schema);
         let caches = HashMap::from([
             ("rest_reader".to_owned(), reader_entry.clone()),
-            ("denied_reader".to_owned(), denied_cache.into()),
+            (
+                "denied_reader".to_owned(),
+                SchemaCacheEntry::new("denied_reader", denied_cache),
+            ),
         ]);
         let state = Arc::new(AppState {
             database,
@@ -1357,13 +1534,13 @@ mod tests {
             "{invalidated}"
         );
 
-        let initial_revision = state
+        let initial_validation = state
             .caches
             .read()
             .await
             .get("rest_reader")
             .expect("reader cache")
-            .revision;
+            .validation;
         storage
             .execute_update("ALTER TABLE quackgis.main.rest_points ADD COLUMN category VARCHAR")
             .expect("add REST-visible column");
@@ -1382,14 +1559,14 @@ mod tests {
                 && changed_schema.contains(r#"[{"id":1,"category":"new"}]"#),
             "{changed_schema}"
         );
-        let changed_revision = state
+        let changed_validation = state
             .caches
             .read()
             .await
             .get("rest_reader")
             .expect("updated reader cache")
-            .revision;
-        assert_ne!(initial_revision, changed_revision);
+            .validation;
+        assert_ne!(initial_validation, changed_validation);
 
         let missing = http_request(rest_port, "GET", "/missing_table", Some(&reader_jwt)).await;
         assert!(missing.starts_with("HTTP/1.1 404 Not Found"), "{missing}");

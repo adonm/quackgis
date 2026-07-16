@@ -199,8 +199,9 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
             parse_read_allowlist("catalog_projection,catalog_projection_renamed")
                 .expect("read allowlist"),
         )
-        .with_role_catalog(role_catalog)
+        .with_role_catalog(role_catalog.clone())
         .expect("development metadata role auth");
+    let epoch_auth = auth.clone();
     let server_storage = Arc::clone(&storage);
     let server = tokio::spawn(async move {
         quackgis_server::pgwire_server::serve_duckdb_on_listener(
@@ -223,6 +224,42 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
         .await
         .expect("development catalog pgwire connection");
     let connection = tokio::spawn(connection);
+
+    let shared_epochs = client
+        .query_one(
+            "SELECT quackgis_schema_epoch(), pg_catalog.quackgis_security_epoch()",
+            &[],
+        )
+        .await
+        .expect("shared catalog epochs");
+    assert_eq!(
+        shared_epochs.columns()[0].type_(),
+        &tokio_postgres::types::Type::INT8
+    );
+    assert_eq!(
+        shared_epochs.columns()[1].type_(),
+        &tokio_postgres::types::Type::INT8
+    );
+    let initial_epochs = storage
+        .catalog_epochs()
+        .expect("storage catalog epochs")
+        .expect("development catalog epochs");
+    assert_eq!(shared_epochs.get::<_, i64>(0), initial_epochs.schema as i64);
+    assert_eq!(
+        shared_epochs.get::<_, i64>(1),
+        initial_epochs.security as i64
+    );
+    storage
+        .install_role_catalog(&role_catalog, &epoch_auth)
+        .expect("reinstall unchanged role catalog");
+    assert_eq!(
+        storage
+            .catalog_epochs()
+            .expect("epochs after unchanged role install")
+            .expect("development catalog epochs")
+            .security,
+        initial_epochs.security
+    );
 
     client
         .batch_execute(
@@ -247,6 +284,11 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
         .catalog_schema_epoch()
         .expect("catalog epoch before comments")
         .expect("development catalog epoch");
+    let security_before_comments = storage
+        .catalog_epochs()
+        .expect("catalog epochs before comments")
+        .expect("development catalog epochs")
+        .security;
     execute_storage_update(
         &storage,
         "COMMENT ON TABLE quackgis.main.catalog_projection IS 'projected table'",
@@ -263,6 +305,14 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
             .expect("catalog epoch after comments")
             .expect("development catalog epoch"),
         epoch_before_comments + 2
+    );
+    assert_eq!(
+        storage
+            .catalog_epochs()
+            .expect("catalog epochs after comments")
+            .expect("development catalog epochs")
+            .security,
+        security_before_comments
     );
     execute_storage_update(
         &storage,
@@ -1189,6 +1239,61 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
     assert_eq!(
         recreated_resolution.get::<_, RegisteredOid>(1),
         RegisteredOid(recreated.get::<_, u32>(1))
+    );
+
+    let before_security_change = storage
+        .catalog_epochs()
+        .expect("epochs before security change")
+        .expect("development catalog epochs");
+    let changed_role_catalog = RoleCatalog::from_json(
+        r#"{
+          "roles": [
+            {"oid": 110001, "name": "writer", "login": true},
+            {"oid": 110002, "name": "reader", "login": true}
+          ],
+          "table_owners": [
+            {"table": "catalog_projection", "role": "writer"},
+            {"table": "catalog_projection_renamed", "role": "writer"},
+            {"table": "private_metadata", "role": "writer"}
+          ],
+          "schema_grants": [
+            {"schema": "public", "role": "PUBLIC", "privileges": ["USAGE"]}
+          ],
+          "table_grants": [
+            {"table": "catalog_projection", "role": "reader", "privileges": ["SELECT"]},
+            {"table": "private_metadata", "role": "reader", "privileges": ["SELECT", "DELETE"]}
+          ]
+        }"#,
+    )
+    .expect("changed development metadata role catalog");
+    storage
+        .install_role_catalog(&changed_role_catalog, &epoch_auth)
+        .expect("publish changed security catalogs");
+    let after_security_change = storage
+        .catalog_epochs()
+        .expect("epochs after security change")
+        .expect("development catalog epochs");
+    assert_eq!(
+        after_security_change,
+        quackgis_server::duckdb_adbc_storage::CatalogEpochs {
+            schema: before_security_change.schema,
+            security: before_security_change.security + 1,
+        }
+    );
+    let published_security = client
+        .query_one(
+            "SELECT quackgis_schema_epoch(), quackgis_security_epoch()",
+            &[],
+        )
+        .await
+        .expect("published security epochs");
+    assert_eq!(
+        published_security.get::<_, i64>(0),
+        after_security_change.schema as i64
+    );
+    assert_eq!(
+        published_security.get::<_, i64>(1),
+        after_security_change.security as i64
     );
 
     reader_connection.abort();

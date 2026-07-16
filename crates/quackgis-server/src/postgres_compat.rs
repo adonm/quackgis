@@ -1364,7 +1364,13 @@ pub fn duckdb_identity_catalog_bootstrap_sql(catalog: &str) -> String {
          SELECT NULL::INTEGER AS srid, NULL::VARCHAR AS auth_name,\n\
                 NULL::INTEGER AS auth_srid, NULL::VARCHAR AS srtext,\n\
                 NULL::VARCHAR AS proj4text WHERE false;\n\
-         {macros}",
+         {macros};\n\
+         CREATE OR REPLACE MACRO quackgis_pg_schema_epoch() AS\n\
+           (SELECT CAST(schema_epoch AS BIGINT)\n\
+            FROM {catalog_identifier}.{schema}.catalog_state WHERE singleton);\n\
+         CREATE OR REPLACE MACRO quackgis_pg_security_epoch() AS\n\
+           (SELECT CAST(security_epoch AS BIGINT)\n\
+            FROM {catalog_identifier}.{schema}.catalog_state WHERE singleton)",
         internal_schema_literal = quote_literal(INTERNAL_SCHEMA),
     )
 }
@@ -1388,10 +1394,17 @@ pub fn ducklake_identity_registry_bootstrap_sql(catalog: &str) -> String {
          CREATE TABLE IF NOT EXISTS {catalog}.{schema}.catalog_state(\n\
            singleton BOOLEAN NOT NULL, format_version USMALLINT NOT NULL,\n\
            next_oid UINTEGER NOT NULL, schema_epoch UBIGINT NOT NULL,\n\
-           identity_fingerprint VARCHAR);\n\
+           identity_fingerprint VARCHAR, security_epoch UBIGINT NOT NULL,\n\
+           security_fingerprint VARCHAR);\n\
+         ALTER TABLE {catalog}.{schema}.catalog_state\n\
+           ADD COLUMN IF NOT EXISTS security_epoch UBIGINT DEFAULT 0;\n\
+         ALTER TABLE {catalog}.{schema}.catalog_state\n\
+           ADD COLUMN IF NOT EXISTS security_fingerprint VARCHAR;\n\
+         UPDATE {catalog}.{schema}.catalog_state SET format_version = 2\n\
+           WHERE format_version = 1;\n\
          INSERT INTO {catalog}.{schema}.catalog_state\n\
-           SELECT true, 1::USMALLINT, {DYNAMIC_OBJECT_OID_START}::UINTEGER,\n\
-                  0::UBIGINT, NULL::VARCHAR\n\
+           SELECT true, 2::USMALLINT, {DYNAMIC_OBJECT_OID_START}::UINTEGER,\n\
+                  0::UBIGINT, NULL::VARCHAR, 0::UBIGINT, NULL::VARCHAR\n\
            WHERE NOT EXISTS (SELECT 1 FROM {catalog}.{schema}.catalog_state);\n\
          CREATE TABLE IF NOT EXISTS {catalog}.{schema}.namespace_oid(\n\
            schema_uuid UUID NOT NULL, schema_id BIGINT NOT NULL, oid UINTEGER NOT NULL);\n\
@@ -1404,6 +1417,28 @@ pub fn ducklake_identity_registry_bootstrap_sql(catalog: &str) -> String {
          CREATE TABLE IF NOT EXISTS {catalog}.{schema}.not_null_constraint_oid(\n\
            table_uuid UUID NOT NULL, column_id BIGINT NOT NULL,\n\
            oid UINTEGER NOT NULL, active BOOLEAN NOT NULL);"
+    )
+}
+
+pub fn ducklake_security_epoch_reconcile_sql(catalog: &str, fingerprint: &str) -> String {
+    let catalog = quote_identifier(catalog);
+    let schema = quote_identifier(INTERNAL_SCHEMA);
+    let fingerprint = quote_literal(fingerprint);
+    format!(
+        "UPDATE {catalog}.{schema}.catalog_state\n\
+         SET security_epoch = security_epoch + 1, security_fingerprint = {fingerprint}\n\
+         WHERE singleton AND security_fingerprint IS DISTINCT FROM {fingerprint}"
+    )
+}
+
+pub fn ducklake_security_epoch_prepare_sql(catalog: &str, fingerprint: &str) -> String {
+    let catalog = quote_identifier(catalog);
+    let schema = quote_identifier(INTERNAL_SCHEMA);
+    let fingerprint = quote_literal(fingerprint);
+    format!(
+        "UPDATE {catalog}.{schema}.catalog_state\n\
+         SET security_fingerprint = NULL\n\
+         WHERE singleton AND security_fingerprint IS DISTINCT FROM {fingerprint}"
     )
 }
 
@@ -1572,8 +1607,9 @@ pub fn ducklake_identity_registry_validation_sql(catalog: &str) -> String {
         "SELECT CASE WHEN\n\
            (SELECT count(*) FROM {catalog}.{schema}.catalog_state) = 1\n\
            AND (SELECT count(*) FROM {catalog}.{schema}.catalog_state\n\
-                WHERE singleton AND format_version = 1\n\
-                  AND next_oid >= {DYNAMIC_OBJECT_OID_START}) = 1\n\
+                WHERE singleton AND format_version = 2\n\
+                  AND next_oid >= {DYNAMIC_OBJECT_OID_START}\n\
+                  AND security_epoch IS NOT NULL) = 1\n\
            AND NOT EXISTS (\n\
              SELECT schema_uuid FROM {catalog}.{schema}.namespace_oid\n\
              GROUP BY schema_uuid HAVING count(*) <> 1)\n\
@@ -1769,11 +1805,14 @@ mod tests {
             }"#,
         )
         .expect("role catalog");
-        let auth =
-            crate::auth::AuthConfig::password("authenticator", "secret", None::<(&str, &str)>)
-                .expect("password auth")
-                .with_role_catalog(catalog.clone())
-                .expect("role auth");
+        let auth = crate::auth::AuthConfig::password(
+            "authenticator",
+            "unique-secret-marker",
+            None::<(&str, &str)>,
+        )
+        .expect("password auth")
+        .with_role_catalog(catalog.clone())
+        .expect("role auth");
         let sql = duckdb_role_catalog_sql(&catalog, &auth, true);
         assert!(sql.contains("100001::UINTEGER"));
         assert!(sql.contains("200001::UINTEGER"));
@@ -1794,7 +1833,7 @@ mod tests {
         assert!(sql.contains("'geometry_columns'::VARCHAR"));
         assert!(sql.contains("'spatial_ref_sys'::VARCHAR"));
         assert!(sql.contains("NULL::VARCHAR"));
-        assert!(!sql.contains("password-secret"));
+        assert!(!sql.contains("unique-secret-marker"));
     }
 
     #[test]
@@ -1803,6 +1842,8 @@ mod tests {
         assert!(bootstrap.contains("\"quackgis\".\"_quackgis\".catalog_state"));
         assert!(bootstrap.contains("100000::UINTEGER"));
         assert!(bootstrap.contains("format_version USMALLINT"));
+        assert!(bootstrap.contains("security_epoch UBIGINT"));
+        assert!(bootstrap.contains("format_version = 2"));
         assert!(!bootstrap.contains("PRIMARY KEY"));
         assert!(!bootstrap.contains("UNIQUE"));
 
@@ -1811,6 +1852,13 @@ mod tests {
         assert!(reconcile.contains("schema_name <> '_quackgis'"));
         assert!(reconcile.contains("2200::UINTEGER"));
         assert!(reconcile.contains("identity_fingerprint"));
+
+        let security = ducklake_security_epoch_reconcile_sql("quackgis", "fingerprint");
+        assert!(security.contains("security_epoch = security_epoch + 1"));
+        assert!(security.contains("security_fingerprint IS DISTINCT FROM 'fingerprint'"));
+        let prepare = ducklake_security_epoch_prepare_sql("quackgis", "fingerprint");
+        assert!(prepare.contains("security_fingerprint = NULL"));
+        assert!(prepare.contains("security_fingerprint IS DISTINCT FROM 'fingerprint'"));
 
         let validation = ducklake_identity_registry_validation_sql("quackgis");
         assert!(validation.contains("registry is inconsistent"));
@@ -1844,6 +1892,8 @@ mod tests {
             );
         }
         assert!(catalogs.contains("PostgreSQL catalog identity snapshot is not reconciled"));
+        assert!(catalogs.contains("quackgis_pg_schema_epoch"));
+        assert!(catalogs.contains("quackgis_pg_security_epoch"));
         assert!(catalogs.contains("unsupported DuckLake column type"));
         assert!(catalogs.contains("row_type_oid"));
         assert!(catalogs.contains("CAST(max(columns.attnum) AS SMALLINT) AS relnatts"));

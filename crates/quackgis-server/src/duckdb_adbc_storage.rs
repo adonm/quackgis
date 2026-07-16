@@ -78,6 +78,12 @@ pub struct CatalogTableIdentity {
     pub columns: Vec<CatalogColumnIdentity>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CatalogEpochs {
+    pub schema: u64,
+    pub security: u64,
+}
+
 /// Whether DuckDB may download the DuckLake extension during initialization.
 ///
 /// `LoadOnly` is the production-safe default: image construction must install
@@ -576,23 +582,50 @@ impl DuckDbAdbcStorage {
         catalog: &crate::role::RoleCatalog,
         auth: &crate::auth::AuthConfig,
     ) -> Result<()> {
-        self.execute_update(&crate::postgres_compat::duckdb_role_catalog_sql(
+        let sql = crate::postgres_compat::duckdb_role_catalog_sql(
             catalog,
             auth,
             self.catalog_identity_enabled,
-        ))
-        .context("installing immutable PostgreSQL role catalogs")?;
+        );
+        if self.catalog_identity_enabled {
+            let fingerprint = format!("{:x}", Sha256::digest(sql.as_bytes()));
+            let prepare_sql = crate::postgres_compat::ducklake_security_epoch_prepare_sql(
+                &self.catalog_name,
+                &fingerprint,
+            );
+            let security_sql = crate::postgres_compat::ducklake_security_epoch_reconcile_sql(
+                &self.catalog_name,
+                &fingerprint,
+            );
+            self.with_connection(|connection| {
+                execute_update_on(connection, &prepare_sql)
+                    .context("marking PostgreSQL security catalogs unreconciled")?;
+                execute_update_on(connection, &sql)
+                    .context("installing immutable PostgreSQL role catalogs")?;
+                execute_update_on(connection, &security_sql)
+                    .context("publishing immutable PostgreSQL security epoch")?;
+                Ok(())
+            })?;
+        } else {
+            self.execute_update(&sql)
+                .context("installing immutable PostgreSQL role catalogs")?;
+        }
         Ok(())
     }
 
-    pub fn catalog_schema_epoch(&self) -> EngineResult<Option<u64>> {
+    pub fn catalog_epochs(&self) -> EngineResult<Option<CatalogEpochs>> {
         if !self.catalog_identity_enabled {
             return Ok(None);
         }
         self.with_connection_engine(|connection| {
             let _catalog_commit = self.catalog_commit_guard().map_err(anyhow_engine_error)?;
-            catalog_schema_epoch_on(connection, &self.catalog_name).map(Some)
+            catalog_epochs_on(connection, &self.catalog_name).map(Some)
         })
+    }
+
+    pub fn catalog_schema_epoch(&self) -> EngineResult<Option<u64>> {
+        self.catalog_epochs()
+            .map(|epochs| epochs.map(|epochs| epochs.schema))
     }
 
     pub fn catalog_table_identity(
@@ -2565,8 +2598,16 @@ fn validate_catalog_identity_coverage_on(
 }
 
 fn catalog_schema_epoch_on(connection: &mut ManagedConnection, catalog: &str) -> EngineResult<u64> {
+    catalog_epochs_on(connection, catalog).map(|epochs| epochs.schema)
+}
+
+fn catalog_epochs_on(
+    connection: &mut ManagedConnection,
+    catalog: &str,
+) -> EngineResult<CatalogEpochs> {
     let sql = format!(
-        "SELECT CAST(schema_epoch AS BIGINT) FROM {}.{}.catalog_state WHERE singleton",
+        "SELECT CAST(schema_epoch AS BIGINT), CAST(security_epoch AS BIGINT) \
+         FROM {}.{}.catalog_state WHERE singleton",
         quote_identifier(catalog),
         quote_identifier(crate::postgres_compat::INTERNAL_SCHEMA),
     );
@@ -2574,22 +2615,30 @@ fn catalog_schema_epoch_on(connection: &mut ManagedConnection, catalog: &str) ->
     let batch = result.batches.first().ok_or_else(|| {
         EngineError::new(
             EngineErrorKind::Internal,
-            "catalog schema epoch query returned no batch",
+            "catalog epoch query returned no batch",
         )
     })?;
     if result.batches.len() != 1 || batch.num_rows() != 1 {
         return Err(EngineError::new(
             EngineErrorKind::Internal,
-            "catalog schema epoch query returned an invalid result shape",
+            "catalog epoch query returned an invalid result shape",
         ));
     }
-    let epoch = int64_column(batch, 0, "catalog schema epoch")?.value(0);
-    u64::try_from(epoch).map_err(|_| {
-        EngineError::new(
-            EngineErrorKind::Internal,
-            "catalog schema epoch is outside the supported range",
-        )
-    })
+    let schema =
+        u64::try_from(int64_column(batch, 0, "catalog schema epoch")?.value(0)).map_err(|_| {
+            EngineError::new(
+                EngineErrorKind::Internal,
+                "catalog schema epoch is outside the supported range",
+            )
+        })?;
+    let security = u64::try_from(int64_column(batch, 1, "catalog security epoch")?.value(0))
+        .map_err(|_| {
+            EngineError::new(
+                EngineErrorKind::Internal,
+                "catalog security epoch is outside the supported range",
+            )
+        })?;
+    Ok(CatalogEpochs { schema, security })
 }
 
 fn int64_column<'a>(
