@@ -518,7 +518,7 @@ kind-client-image:
     @set -eu; engine="$(CONTAINER_ENGINE='{{container_engine}}' python3 scripts/project_doctor.py --container-engine)"; \
     "$engine" build -t {{kind_client_image}} -f deploy/Containerfile.kind-clients .; \
     "$engine" run --rm --entrypoint /bin/sh {{kind_client_image}} -c \
-      'set -eu; id; test "$(psql --version)" = "psql (PostgreSQL) 18.3"; python3 -c "import psycopg; assert psycopg.__version__ == \"3.2.13\""; ogrinfo --version | grep -F "GDAL 3.11.5"; ogrinfo --formats | grep -F "PostgreSQL -vector-"; printf "kind_client_versions_ok psql=18.3 psycopg=3.2.13 ogr=3.11.5\n"'
+      'set -eu; id; test "$(psql --version)" = "psql (PostgreSQL) 18.3"; python3 -c "import psycopg; assert psycopg.__version__ == \"3.2.13\""; ogrinfo --version | grep -F "GDAL 3.11.5"; ogr2ogr --version | grep -F "GDAL 3.11.5"; ogrinfo --formats | grep -F "PostgreSQL -vector-"; printf "kind_client_versions_ok psql=18.3 psycopg=3.2.13 ogr=3.11.5\n"'
 
 # Build both images used by the local Kind qualification topology.
 kind-local-images: duckdb-runtime-image kind-client-image
@@ -531,7 +531,7 @@ kind-up-local: doctor-kind kind-local-images
     QUACKGIS_CLIENT_LOAD_IMAGE='{{kind_client_image}}' \
     deploy/kind/up.sh
 
-# Run pinned clients, including psycopg copied data, through mutual TLS and prove direct worker pgwire is unreachable.
+# Run pinned clients, including psycopg COPY and OGR copied-data readback, through mutual TLS and prove direct worker pgwire is unreachable.
 kind-client-gates:
     @set -eu; export KUBECONFIG="${KUBECONFIG:-$PWD/.tmp/kind/kubeconfig}"; \
     kubectl delete -f .tmp/kind/rendered/clients.yaml --ignore-not-found >/dev/null; \

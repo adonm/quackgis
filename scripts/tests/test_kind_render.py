@@ -92,6 +92,8 @@ def main() -> None:
         assert "sslmode=verify-full" in clients
         assert "PGSSLCERT" in clients
         assert "psycopg_copied_data_ok" in clients
+        assert "ogr_copied_data_ok" in clients
+        assert 'ST_GeomFromWKB(geom_wkb) AS "ST_AsEWKB"' in clients
         assert "kind_psycopg_points" in clients
         assert "quackgis-direct-denied" in clients
         assert "quackgis-plaintext-denied" in clients

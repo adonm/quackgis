@@ -76,6 +76,8 @@ def check_templates() -> None:
         "psycopg_copied_data_ok",
         "COPY {table} (id, name, geom_wkb) FROM STDIN",
         "quackgis-ogr",
+        "ogr_copied_data_ok",
+        'ST_GeomFromWKB(geom_wkb) AS "ST_AsEWKB"',
         "quackgis-direct-denied",
         "quackgis-plaintext-denied",
         "quackgis-uncredentialed-denied",
@@ -184,7 +186,7 @@ def main() -> None:
     args = parser().parse_args()
     if args.check:
         check_templates()
-        print("kind_template_check_ok topology=duckdb-only clients=6")
+        print("kind_template_check_ok topology=duckdb-only clients=6 copied_data=psycopg,ogr")
         return
     missing = [
         option

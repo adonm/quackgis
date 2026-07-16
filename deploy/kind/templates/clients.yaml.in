@@ -140,11 +140,43 @@ items:
             - name: ogr
               image: "@@CLIENT_IMAGE@@"
               imagePullPolicy: IfNotPresent
-              command: ["ogrinfo"]
+              command: ["/bin/sh", "-ceu"]
               args:
-                - "PG:host=quackgis.quackgis.svc.cluster.local port=5432 dbname=quackgis user=postgres sslmode=verify-full sslrootcert=/etc/quackgis/tls/ca.crt sslcert=/etc/quackgis/tls/tls.crt sslkey=/etc/quackgis/tls/tls.key"
-                - -sql
-                - "SELECT 1::INTEGER AS ok"
+                - |-
+                  python3 - <<'PY'
+                  import time
+                  import psycopg
+                  expected = [(1, "one", "POINT (1 2)"), (2, None, None)]
+                  deadline = time.monotonic() + 60
+                  last = None
+                  while time.monotonic() < deadline:
+                      try:
+                          with psycopg.connect("") as connection:
+                              last = connection.execute("SELECT id, name, CASE WHEN geom_wkb IS NULL THEN NULL ELSE ST_AsText(ST_GeomFromWKB(geom_wkb)) END FROM public.kind_psycopg_points ORDER BY id").fetchall()
+                          if last == expected:
+                              break
+                      except psycopg.Error:
+                          pass
+                      time.sleep(1)
+                  else:
+                      raise AssertionError(f"copied-data fixture was not ready: {last!r}")
+                  PY
+                  output_dir="$(mktemp -d)"
+                  trap 'rm -rf "$output_dir"' EXIT
+                  ogr2ogr -f GeoJSON "$output_dir/readback.geojson" \
+                    "PG:host=quackgis.quackgis.svc.cluster.local port=5432 dbname=quackgis user=postgres sslmode=verify-full sslrootcert=/etc/quackgis/tls/ca.crt sslcert=/etc/quackgis/tls/tls.crt sslkey=/etc/quackgis/tls/tls.key" \
+                    -sql 'SELECT id, name, ST_GeomFromWKB(geom_wkb) AS "ST_AsEWKB" FROM public.kind_psycopg_points ORDER BY id'
+                  python3 - "$output_dir/readback.geojson" <<'PY'
+                  import json
+                  import sys
+                  with open(sys.argv[1], encoding="utf-8") as source:
+                      features = json.load(source)["features"]
+                  assert features == [
+                      {"type": "Feature", "properties": {"id": 1, "name": "one"}, "geometry": {"type": "Point", "coordinates": [1.0, 2.0]}},
+                      {"type": "Feature", "properties": {"id": 2, "name": None}, "geometry": None},
+                  ], features
+                  print("ogr_copied_data_ok rows=2 geometry=point-null cursor=bounded")
+                  PY
               env: *pg_environment
               securityContext: *client_security
               volumeMounts: *tls_mount
