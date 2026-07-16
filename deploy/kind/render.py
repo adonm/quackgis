@@ -7,7 +7,6 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
-import json
 import os
 import re
 from pathlib import Path
@@ -30,14 +29,14 @@ EXPECTED_PLACEHOLDERS = {
         "@@WORKER_PUBLIC_KEY@@",
         "@@CREDENTIAL_PUBLIC_KEY@@",
         "@@REST_CREDENTIAL_PUBLIC_KEY@@",
-        "@@PACKAGE_CONFIG_HASH@@",
+        "@@CORE_CONFIG_HASH@@",
     },
     "rest.yaml.in": {
         "@@RUNTIME_IMAGE@@",
         "@@JWT_SECRET@@",
         "@@REST_CREDENTIAL_SECRET_KEY@@",
         "@@BOOTSTRAP_PUBLIC_KEY@@",
-        "@@PACKAGE_CONFIG_HASH@@",
+        "@@REST_CONFIG_HASH@@",
     },
     "rest-seed.yaml.in": {
         "@@CLIENT_IMAGE@@",
@@ -179,12 +178,6 @@ def render(args: argparse.Namespace) -> None:
             args.rest_credential_public_key, "--rest-credential-public-key"
         ),
     }
-    package_hash = hashlib.sha256()
-    package_hash.update(json.dumps(substitutions, sort_keys=True).encode("utf-8"))
-    for template_name in sorted(EXPECTED_PLACEHOLDERS):
-        template = (TEMPLATES / template_name).read_text(encoding="utf-8")
-        package_hash.update(template.replace("@@PACKAGE_CONFIG_HASH@@", "").encode("utf-8"))
-    substitutions["@@PACKAGE_CONFIG_HASH@@"] = package_hash.hexdigest()
     args.out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     args.out_dir.chmod(0o700)
     for source_name, output_name in [
@@ -196,6 +189,13 @@ def render(args: argparse.Namespace) -> None:
         text = (TEMPLATES / source_name).read_text(encoding="utf-8")
         for marker, value in substitutions.items():
             text = text.replace(marker, value)
+        config_marker = {
+            "runtime.yaml.in": "@@CORE_CONFIG_HASH@@",
+            "rest.yaml.in": "@@REST_CONFIG_HASH@@",
+        }.get(source_name)
+        if config_marker is not None:
+            digest = hashlib.sha256(text.replace(config_marker, "").encode("utf-8"))
+            text = text.replace(config_marker, digest.hexdigest())
         unresolved = placeholders(text)
         if unresolved:
             raise ValueError(f"unresolved placeholders in {source_name}: {sorted(unresolved)}")

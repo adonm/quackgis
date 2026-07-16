@@ -123,6 +123,25 @@ def main() -> None:
         assert "quackgis-direct-denied" in clients
         assert "quackgis-plaintext-denied" in clients
         assert "quackgis-uncredentialed-denied" in clients
+        first_core = rendered
+        first_rest = rest
+        jwt_secret.write_text("different-bounded-jwt-secret-value", encoding="utf-8")
+        kind_render.render(
+            Namespace(
+                runtime_image=digest,
+                client_image=digest.replace("image", "clients"),
+                tls_dir=tls,
+                edge_dir=edge,
+                bootstrap_public_key="bootstrap-public",
+                worker_public_key="worker-public",
+                credential_public_key="credential-public",
+                rest_credential_public_key="rest-credential-public",
+                jwt_secret_file=jwt_secret,
+                out_dir=output,
+            )
+        )
+        assert (output / "core.yaml").read_text(encoding="utf-8") == first_core
+        assert (output / "rest.yaml").read_text(encoding="utf-8") != first_rest
         assert stat.S_IMODE(output.stat().st_mode) == 0o700
         assert stat.S_IMODE((output / "core.yaml").stat().st_mode) == 0o600
         assert stat.S_IMODE((output / "clients.yaml").stat().st_mode) == 0o600

@@ -66,8 +66,17 @@ for name in bootstrap worker credential client-transport rest-credential; do
     "$keygen" --out "$edge/$name.key" >/dev/null
   fi
 done
-if [ ! -f "$rest/jwt-secret" ]; then
-  openssl rand -out "$rest/jwt-secret" 48
+jwt_valid=false
+if [ -f "$rest/jwt-secret" ] && JWT_SECRET_FILE="$rest/jwt-secret" python3 - <<'PY'
+import os
+value = open(os.environ["JWT_SECRET_FILE"], "rb").read()
+raise SystemExit(0 if 32 <= len(value) <= 4096 and not any(byte in b" \t\n\r\v\f" for byte in value) else 1)
+PY
+then
+  jwt_valid=true
+fi
+if [ "$jwt_valid" = false ]; then
+  openssl rand -hex 48 >"$rest/jwt-secret"
   chmod 600 "$rest/jwt-secret"
 fi
 bootstrap_public_key=$("$keygen" --public-from "$edge/bootstrap.key")

@@ -202,7 +202,7 @@ spec:
       labels:
         app.kubernetes.io/name: quackgis
       annotations:
-        quackgis.dev/package-config-sha256: "@@PACKAGE_CONFIG_HASH@@"
+        quackgis.dev/package-config-sha256: "@@CORE_CONFIG_HASH@@"
     spec:
       terminationGracePeriodSeconds: 90
       securityContext:

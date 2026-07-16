@@ -64,7 +64,7 @@ spec:
       labels:
         app.kubernetes.io/name: quackgis-rest
       annotations:
-        quackgis.dev/package-config-sha256: "@@PACKAGE_CONFIG_HASH@@"
+        quackgis.dev/package-config-sha256: "@@REST_CONFIG_HASH@@"
     spec:
       terminationGracePeriodSeconds: 30
       securityContext:

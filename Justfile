@@ -529,7 +529,7 @@ probe-static-check:
 kind-static-check:
     python3 deploy/kind/render.py --check
     python3 scripts/tests/test_kind_render.py
-    sh -n deploy/kind/up.sh deploy/kind/down.sh deploy/kind/rotate.sh deploy/kind/rest-gates.sh
+    sh -n deploy/kind/up.sh deploy/kind/down.sh deploy/kind/rotate.sh deploy/kind/rotate-rest-jwt.sh deploy/kind/rest-gates.sh
 
 # Build the non-root psql/psycopg/OGR qualification image with the selected engine.
 kind-client-image:
@@ -585,6 +585,13 @@ kind-secret-rotation-gate:
     else \
       printf 'rotation gate failed; previous material retained under .tmp/kind\n' >&2; exit 1; \
     fi
+
+# Replace the shared packaged JWT key, recreate both replicas, and deny old-key tokens per Pod.
+kind-rest-jwt-rotation-gate:
+    @set -eu; engine="$(CONTAINER_ENGINE='{{container_engine}}' python3 scripts/project_doctor.py --container-engine)"; \
+    CONTAINER_ENGINE="$engine" deploy/kind/rotate-rest-jwt.sh; \
+    rm -f .tmp/kind/previous-rest-jwt; \
+    printf 'kind_rest_jwt_rotation_ok old_tokens=denied replicas=2\n'
 
 # Delete the named local Kind cluster using the auto-selected provider.
 kind-down:

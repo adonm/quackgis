@@ -7,6 +7,7 @@ work="$root/.tmp/kind"
 kubeconfig=${KUBECONFIG:-$work/kubeconfig}
 export KUBECONFIG="$kubeconfig"
 secret="$work/rest/jwt-secret"
+old_token=${QUACKGIS_OLD_JWT:-}
 if [ ! -f "$secret" ]; then
   printf 'Kind REST JWT secret is missing: %s\n' "$secret" >&2
   exit 2
@@ -20,7 +21,7 @@ claims = enc(json.dumps({
     "iss":"https://kind.quackgis.test", "aud":"quackgis-rest",
     "sub":"kind-gate", "role":os.environ["JWT_ROLE"], "exp":int(time.time()) + 300,
 }, separators=(",", ":")).encode())
-secret = open(os.environ["JWT_SECRET_FILE"], "rb").read()
+secret = open(os.environ["JWT_SECRET_FILE"], "rb").read().strip(b" \t\n\r\v\f")
 signature = enc(hmac.new(secret, f"{header}.{claims}".encode(), hashlib.sha256).digest())
 print(f"{header}.{claims}.{signature}")
 PY
@@ -33,7 +34,7 @@ claims = enc(json.dumps({
     "iss":"https://kind.quackgis.test", "aud":"quackgis-rest",
     "sub":"kind-gate", "role":os.environ["JWT_ROLE"], "exp":int(time.time()) + 300,
 }, separators=(",", ":")).encode())
-secret = open(os.environ["JWT_SECRET_FILE"], "rb").read()
+secret = open(os.environ["JWT_SECRET_FILE"], "rb").read().strip(b" \t\n\r\v\f")
 signature = enc(hmac.new(secret, f"{header}.{claims}".encode(), hashlib.sha256).digest())
 print(f"{header}.{claims}.{signature}")
 PY
@@ -78,7 +79,7 @@ stop_forward() {
 
 check_endpoint() {
   base=$1
-  BASE_URL="$base" READER_TOKEN="$reader_token" DENIED_TOKEN="$denied_token" python3 - <<'PY'
+  BASE_URL="$base" READER_TOKEN="$reader_token" DENIED_TOKEN="$denied_token" OLD_TOKEN="$old_token" python3 - <<'PY'
 import json, os, urllib.error, urllib.request
 base = os.environ["BASE_URL"]
 
@@ -106,6 +107,27 @@ assert request("/kind_rest_points", denied)[0] == 404
 assert request("/kind_rest_points")[0] == 401
 assert request("/kind_rest_points", reader, "POST")[0] == 405
 assert request("/ready")[0] == 200
+old = os.environ.get("OLD_TOKEN")
+if old:
+    assert request("/kind_rest_points", old)[0] == 401
+PY
+}
+
+wait_ready() {
+  base=$1
+  BASE_URL="$base" python3 - <<'PY'
+import os, time, urllib.error, urllib.request
+url = os.environ["BASE_URL"] + "/ready"
+for _ in range(30):
+    try:
+        with urllib.request.urlopen(url, timeout=5) as response:
+            if response.status == 200:
+                break
+    except (OSError, urllib.error.HTTPError):
+        pass
+    time.sleep(0.5)
+else:
+    raise SystemExit("REST endpoint did not recover readiness")
 PY
 }
 
@@ -119,6 +141,7 @@ fi
 port=13001
 for pod in $pods; do
   start_forward "$pod" "$port"
+  wait_ready "http://127.0.0.1:$port"
   check_endpoint "http://127.0.0.1:$port"
   stop_forward
   port=$((port + 1))
@@ -152,6 +175,7 @@ print(sum(1 for item in value["items"] for endpoint in item.get("endpoints", [])
   sleep 0.25
 done
 start_forward service/quackgis-rest 13010
+wait_ready http://127.0.0.1:13010
 check_endpoint http://127.0.0.1:13010
 stop_forward
 kubectl -n quackgis rollout status deployment/quackgis-rest --timeout=3m
