@@ -6,6 +6,7 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 work="$root/.tmp/kind"
 tls="$work/tls"
 edge="$work/edge"
+rest="$work/rest"
 rendered="$work/rendered"
 kubeconfig=${KUBECONFIG:-$work/kubeconfig}
 
@@ -59,15 +60,20 @@ if [ ! -x "$keygen" ]; then
   printf 'quackgis-keygen is missing; build the runtime context or set QUACKGIS_KEYGEN\n' >&2
   exit 2
 fi
-mkdir -p "$edge"
-for name in bootstrap worker credential client-transport; do
+mkdir -p "$edge" "$rest"
+for name in bootstrap worker credential client-transport rest-credential; do
   if [ ! -f "$edge/$name.key" ]; then
     "$keygen" --out "$edge/$name.key" >/dev/null
   fi
 done
+if [ ! -f "$rest/jwt-secret" ]; then
+  openssl rand -out "$rest/jwt-secret" 48
+  chmod 600 "$rest/jwt-secret"
+fi
 bootstrap_public_key=$("$keygen" --public-from "$edge/bootstrap.key")
 worker_public_key=$("$keygen" --public-from "$edge/worker.key")
 credential_public_key=$("$keygen" --public-from "$edge/credential.key")
+rest_credential_public_key=$("$keygen" --public-from "$edge/rest-credential.key")
 
 cluster_exists=false
 if kind get clusters | grep -qx quackgis; then
@@ -146,6 +152,8 @@ python3 "$root/deploy/kind/render.py" \
   --bootstrap-public-key "$bootstrap_public_key" \
   --worker-public-key "$worker_public_key" \
   --credential-public-key "$credential_public_key" \
+  --rest-credential-public-key "$rest_credential_public_key" \
+  --jwt-secret-file "$rest/jwt-secret" \
   --out-dir "$rendered"
 
 current_service=$(kubectl -n quackgis get statefulset quackgis -o jsonpath='{.spec.serviceName}' 2>/dev/null || true)
@@ -161,5 +169,19 @@ if [ -n "$pod_hash" ] && [ "$pod_hash" != "$desired_hash" ]; then
   kubectl -n quackgis delete pod quackgis-0 --wait=false
 fi
 kubectl -n quackgis rollout status statefulset/quackgis --timeout=5m
-printf 'kind_up_ok provider=%s context=kind-quackgis kubeconfig=%s clients=%s\n' \
+kubectl -n quackgis delete job quackgis-rest-seed --ignore-not-found --wait=true >/dev/null
+kubectl apply -f "$rendered/rest-seed.yaml"
+if ! kubectl -n quackgis wait --for=condition=complete job/quackgis-rest-seed --timeout=2m; then
+  kubectl -n quackgis logs job/quackgis-rest-seed --all-containers=true || true
+  exit 1
+fi
+kubectl -n quackgis logs job/quackgis-rest-seed --all-containers=true
+kubectl apply -f "$rendered/rest.yaml"
+kubectl -n quackgis rollout status deployment/quackgis-rest --timeout=5m
+ready_rest=$(kubectl -n quackgis get deployment quackgis-rest -o jsonpath='{.status.readyReplicas}')
+if [ "$ready_rest" != 2 ]; then
+  printf 'expected two ready REST replicas, got %s\n' "${ready_rest:-0}" >&2
+  exit 1
+fi
+printf 'kind_up_ok provider=%s context=kind-quackgis kubeconfig=%s clients=%s rest_replicas=2\n' \
   "$KIND_EXPERIMENTAL_PROVIDER" "$kubeconfig" "$rendered/clients.yaml"

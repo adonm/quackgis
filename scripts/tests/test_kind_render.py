@@ -64,8 +64,16 @@ def main() -> None:
             (tls / name).write_text(name, encoding="utf-8")
         edge = root / "edge"
         edge.mkdir()
-        for name in ["bootstrap", "worker", "credential", "client-transport"]:
+        for name in [
+            "bootstrap",
+            "worker",
+            "credential",
+            "client-transport",
+            "rest-credential",
+        ]:
             (edge / f"{name}.key").write_text(f"{name}-secret", encoding="utf-8")
+        jwt_secret = root / "jwt-secret"
+        jwt_secret.write_text("bounded-jwt-secret", encoding="utf-8")
         output = root / "rendered"
         kind_render.render(
             Namespace(
@@ -76,12 +84,16 @@ def main() -> None:
                 bootstrap_public_key="bootstrap-public",
                 worker_public_key="worker-public",
                 credential_public_key="credential-public",
+                rest_credential_public_key="rest-credential-public",
+                jwt_secret_file=jwt_secret,
                 out_dir=output,
             )
         )
         rendered = (output / "core.yaml").read_text(encoding="utf-8")
         clients = (output / "clients.yaml").read_text(encoding="utf-8")
-        assert "@@" not in rendered + clients
+        rest = (output / "rest.yaml").read_text(encoding="utf-8")
+        seed = (output / "rest-seed.yaml").read_text(encoding="utf-8")
+        assert "@@" not in rendered + clients + rest + seed
         assert digest in rendered
         assert "Ym9vdHN0cmFwLXNlY3JldA==" in rendered
         assert '"listen": "0.0.0.0:5432"' in rendered
@@ -89,6 +101,19 @@ def main() -> None:
         assert rendered.count("publishNotReadyAddresses: true") == 1
         assert '"local_tls"' in rendered
         assert 'args: ["--host", "127.0.0.1", "--port", "5434"]' in rendered
+        assert '"login_role": "postgres"' in rendered
+        assert '"login_role": "authenticator"' in rendered
+        assert "value: edge-preauthenticated" in rendered
+        assert "kind_psycopg_points" in rendered
+        assert "kind_rest_points" in rendered
+        assert "rest-credential-public" in rendered
+        assert "kind: Deployment" in rest
+        assert "replicas: 2" in rest
+        assert '"listen": "127.0.0.1:5432"' in rest
+        assert "postgres://authenticator@127.0.0.1:5432/quackgis" in rest
+        assert "QUACKGIS_REST_DATABASE_PASSWORD_FILE" not in rest
+        assert "quackgis-data" not in rest
+        assert "kind_rest_seed_ok" in seed
         assert "sslmode=verify-full" in clients
         assert "PGSSLCERT" in clients
         assert "psycopg_copied_data_ok" in clients
@@ -101,6 +126,8 @@ def main() -> None:
         assert stat.S_IMODE(output.stat().st_mode) == 0o700
         assert stat.S_IMODE((output / "core.yaml").stat().st_mode) == 0o600
         assert stat.S_IMODE((output / "clients.yaml").stat().st_mode) == 0o600
+        assert stat.S_IMODE((output / "rest.yaml").stat().st_mode) == 0o600
+        assert stat.S_IMODE((output / "rest-seed.yaml").stat().st_mode) == 0o600
     print("kind_render_test_ok")
 
 

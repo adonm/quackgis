@@ -76,8 +76,16 @@ data:
   bootstrap.json: |
     {
       "secret_key_path": "/var/run/quackgis-edge/bootstrap.key",
-      "registered_credential": "@@CREDENTIAL_PUBLIC_KEY@@",
-      "login_role": "postgres",
+      "registrations": [
+        {
+          "credential": "@@CREDENTIAL_PUBLIC_KEY@@",
+          "login_role": "postgres"
+        },
+        {
+          "credential": "@@REST_CREDENTIAL_PUBLIC_KEY@@",
+          "login_role": "authenticator"
+        }
+      ],
       "worker": {
         "endpoint_id": "@@WORKER_PUBLIC_KEY@@",
         "direct_hosts": ["quackgis-edge-internal.quackgis.svc.cluster.local:4242"]
@@ -106,6 +114,38 @@ data:
       "bind": "0.0.0.0:4244",
       "compression": "auto",
       "max_connections": 64
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: quackgis-roles
+  namespace: quackgis
+data:
+  roles.json: |
+    {
+      "roles": [
+        {"oid": 100001, "name": "postgres", "login": true},
+        {"oid": 100002, "name": "authenticator", "login": true, "inherit": false},
+        {"oid": 100003, "name": "rest_reader"},
+        {"oid": 100004, "name": "rest_denied"}
+      ],
+      "memberships": [
+        {"oid": 200001, "role": "rest_reader", "member": "authenticator",
+         "inherit_option": false, "set_option": true},
+        {"oid": 200002, "role": "rest_denied", "member": "authenticator",
+         "inherit_option": false, "set_option": true}
+      ],
+      "schema_grants": [
+        {"schema": "public", "role": "PUBLIC", "privileges": ["USAGE"]}
+      ],
+      "table_owners": [
+        {"table": "kind_psycopg_points", "role": "postgres"},
+        {"table": "kind_rest_points", "role": "postgres"}
+      ],
+      "table_grants": [
+        {"table": "kind_rest_points", "role": "rest_reader", "privileges": ["SELECT"]}
+      ]
     }
 ---
 apiVersion: v1
@@ -228,7 +268,9 @@ spec:
             - name: QUACKGIS_TLS_MODE
               value: preferred
             - name: QUACKGIS_AUTH_MODE
-              value: trust
+              value: edge-preauthenticated
+            - name: QUACKGIS_ROLE_CONFIG
+              value: /etc/quackgis/roles/roles.json
           resources:
             requests:
               cpu: 250m
@@ -262,6 +304,9 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/quackgis
+            - name: role-config
+              mountPath: /etc/quackgis/roles
+              readOnly: true
         - name: quackgis-worker-edge
           restartPolicy: Always
           image: "@@RUNTIME_IMAGE@@"
@@ -344,6 +389,10 @@ spec:
         - name: edge-config
           configMap:
             name: quackgis-edge
+            defaultMode: 292
+        - name: role-config
+          configMap:
+            name: quackgis-roles
             defaultMode: 292
         - name: edge-key-source
           secret:

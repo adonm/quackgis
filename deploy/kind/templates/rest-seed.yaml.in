@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: Secret
+metadata:
+  name: quackgis-rest-seed-tls
+  namespace: quackgis
+type: kubernetes.io/tls
+data:
+  tls.crt: @@CLIENT_TLS_CERTIFICATE@@
+  tls.key: @@CLIENT_TLS_PRIVATE_KEY@@
+  ca.crt: @@TLS_CA_CERTIFICATE@@
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: quackgis-rest-seed
+  namespace: quackgis
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: seed
+          image: "@@CLIENT_IMAGE@@"
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-ceu"]
+          args:
+            - >-
+              export PGCONNECT_TIMEOUT=5 PGSSLMODE=verify-full
+              PGSSLROOTCERT=/etc/quackgis/tls/ca.crt
+              PGSSLCERT=/etc/quackgis/tls/tls.crt
+              PGSSLKEY=/etc/quackgis/tls/tls.key;
+              connection='-h quackgis.quackgis.svc.cluster.local -p 5432 -U postgres -d quackgis';
+              psql $connection -v ON_ERROR_STOP=1 -c
+              'CREATE TABLE IF NOT EXISTS quackgis.main.kind_rest_points(id INTEGER, name VARCHAR)';
+              psql $connection -v ON_ERROR_STOP=1 -c
+              'DELETE FROM quackgis.main.kind_rest_points';
+              psql $connection -v ON_ERROR_STOP=1 -c
+              "INSERT INTO quackgis.main.kind_rest_points VALUES (1, 'one'), (2, 'two')";
+              echo kind_rest_seed_ok
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/quackgis/tls
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: quackgis-rest-seed-tls
+            defaultMode: 288

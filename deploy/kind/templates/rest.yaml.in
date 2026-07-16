@@ -1,0 +1,187 @@
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: Secret
+metadata:
+  name: quackgis-rest-secrets
+  namespace: quackgis
+type: Opaque
+data:
+  jwt-secret: @@JWT_SECRET@@
+  credential.key: @@REST_CREDENTIAL_SECRET_KEY@@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: quackgis-rest-edge
+  namespace: quackgis
+data:
+  client.json: |
+    {
+      "credential_secret_key_path": "/var/run/quackgis-rest-edge/credential.key",
+      "transport_secret_key_path": "/var/run/quackgis-rest-edge/client-transport.key",
+      "bootstrap": {
+        "endpoint_id": "@@BOOTSTRAP_PUBLIC_KEY@@",
+        "direct_hosts": ["quackgis-edge-internal.quackgis.svc.cluster.local:4243"]
+      },
+      "listen": "127.0.0.1:5432",
+      "disable_relays": true,
+      "bind": "0.0.0.0:0",
+      "compression": "auto",
+      "max_connections": 32
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: quackgis-rest
+  namespace: quackgis
+spec:
+  selector:
+    app.kubernetes.io/name: quackgis-rest
+  ports:
+    - name: http
+      protocol: TCP
+      port: 3000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: quackgis-rest
+  namespace: quackgis
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: quackgis-rest
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: quackgis-rest
+      annotations:
+        quackgis.dev/package-config-sha256: "@@PACKAGE_CONFIG_HASH@@"
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: prepare-rest-edge
+          image: "@@RUNTIME_IMAGE@@"
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-ceu"]
+          args:
+            - >-
+              cp /var/run/quackgis-rest-secret/credential.key /var/run/quackgis-rest-edge/credential.key;
+              /usr/local/bin/quackgis-keygen --out /var/run/quackgis-rest-edge/client-transport.key >/dev/null;
+              chmod 600 /var/run/quackgis-rest-edge/*.key
+          securityContext: &rest_security
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: rest-secret
+              mountPath: /var/run/quackgis-rest-secret
+              readOnly: true
+            - name: rest-edge-keys
+              mountPath: /var/run/quackgis-rest-edge
+        - name: quackgis-rest-client
+          restartPolicy: Always
+          image: "@@RUNTIME_IMAGE@@"
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/quackgis-client"]
+          args: ["--config", "/etc/quackgis/rest-edge/client.json"]
+          resources: &rest_edge_resources
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: "1"
+              memory: 128Mi
+          securityContext: *rest_security
+          volumeMounts:
+            - name: rest-edge-config
+              mountPath: /etc/quackgis/rest-edge
+              readOnly: true
+            - name: rest-edge-keys
+              mountPath: /var/run/quackgis-rest-edge
+              readOnly: true
+      containers:
+        - name: quackgis-rest
+          image: "@@RUNTIME_IMAGE@@"
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/quackgis-rest"]
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          env:
+            - name: QUACKGIS_REST_HOST
+              value: 0.0.0.0
+            - name: QUACKGIS_REST_PORT
+              value: "3000"
+            - name: QUACKGIS_REST_DATABASE_URL
+              value: postgres://authenticator@127.0.0.1:5432/quackgis
+            - name: QUACKGIS_REST_DATABASE_AUTH_MODE
+              value: edge-preauthenticated
+            - name: QUACKGIS_REST_JWT_SECRET_FILE
+              value: /etc/quackgis/rest-secret/jwt-secret
+            - name: QUACKGIS_REST_JWT_ISSUER
+              value: https://kind.quackgis.test
+            - name: QUACKGIS_REST_JWT_AUDIENCE
+              value: quackgis-rest
+            - name: QUACKGIS_REST_JWT_ROLES
+              value: rest_reader,rest_denied
+            - name: QUACKGIS_REST_TABLES
+              value: kind_rest_points
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+          securityContext: *rest_security
+          volumeMounts:
+            - name: rest-secret
+              mountPath: /etc/quackgis/rest-secret
+              readOnly: true
+      volumes:
+        - name: rest-secret
+          secret:
+            secretName: quackgis-rest-secrets
+            defaultMode: 288
+        - name: rest-edge-config
+          configMap:
+            name: quackgis-rest-edge
+            defaultMode: 292
+        - name: rest-edge-keys
+          emptyDir: {}

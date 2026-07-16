@@ -29,7 +29,21 @@ EXPECTED_PLACEHOLDERS = {
         "@@BOOTSTRAP_PUBLIC_KEY@@",
         "@@WORKER_PUBLIC_KEY@@",
         "@@CREDENTIAL_PUBLIC_KEY@@",
+        "@@REST_CREDENTIAL_PUBLIC_KEY@@",
         "@@PACKAGE_CONFIG_HASH@@",
+    },
+    "rest.yaml.in": {
+        "@@RUNTIME_IMAGE@@",
+        "@@JWT_SECRET@@",
+        "@@REST_CREDENTIAL_SECRET_KEY@@",
+        "@@BOOTSTRAP_PUBLIC_KEY@@",
+        "@@PACKAGE_CONFIG_HASH@@",
+    },
+    "rest-seed.yaml.in": {
+        "@@CLIENT_IMAGE@@",
+        "@@TLS_CA_CERTIFICATE@@",
+        "@@CLIENT_TLS_CERTIFICATE@@",
+        "@@CLIENT_TLS_PRIVATE_KEY@@",
     },
     "clients.yaml.in": {
         "@@CLIENT_IMAGE@@",
@@ -52,6 +66,8 @@ def check_templates() -> None:
             raise ValueError(f"{name} placeholders {sorted(actual)} != {sorted(expected)}")
     core = (TEMPLATES / "runtime.yaml.in").read_text(encoding="utf-8")
     clients = (TEMPLATES / "clients.yaml.in").read_text(encoding="utf-8")
+    rest = (TEMPLATES / "rest.yaml.in").read_text(encoding="utf-8")
+    seed = (TEMPLATES / "rest-seed.yaml.in").read_text(encoding="utf-8")
     for required in [
         "kind: StatefulSet",
         "replicas: 1",
@@ -67,6 +83,9 @@ def check_templates() -> None:
         "disable_relays",
         "path: /readyz",
         "path: /healthz",
+        '"login_role": "authenticator"',
+        "value: edge-preauthenticated",
+        "name: quackgis-roles",
     ]:
         if required not in core:
             raise ValueError(f"core template is missing {required!r}")
@@ -86,10 +105,25 @@ def check_templates() -> None:
     ]:
         if required not in clients:
             raise ValueError(f"client template is missing {required!r}")
+    for required in [
+        "kind: Deployment",
+        "replicas: 2",
+        "name: quackgis-rest-client",
+        '"listen": "127.0.0.1:5432"',
+        "value: edge-preauthenticated",
+        "name: quackgis-rest",
+        "path: /ready",
+        "path: /live",
+    ]:
+        if required not in rest:
+            raise ValueError(f"REST template is missing {required!r}")
+    for required in ["name: quackgis-rest-seed", "kind_rest_points", "kind_rest_seed_ok"]:
+        if required not in seed:
+            raise ValueError(f"REST seed template is missing {required!r}")
     if core.count("publishNotReadyAddresses: true") != 1:
         raise ValueError("only the internal edge Service may publish unready addresses")
     forbidden = ["datafusion", "sedona", "linkerd", "minio", "postgresql"]
-    combined = f"{core}\n{clients}".lower()
+    combined = f"{core}\n{clients}\n{rest}\n{seed}".lower()
     present = [value for value in forbidden if value in combined]
     if present:
         raise ValueError(f"retired/deferred topology names present: {present}")
@@ -132,12 +166,17 @@ def render(args: argparse.Namespace) -> None:
         "@@WORKER_SECRET_KEY@@": encoded(edge_dir / "worker.key"),
         "@@CREDENTIAL_SECRET_KEY@@": encoded(edge_dir / "credential.key"),
         "@@CLIENT_TRANSPORT_SECRET_KEY@@": encoded(edge_dir / "client-transport.key"),
+        "@@REST_CREDENTIAL_SECRET_KEY@@": encoded(edge_dir / "rest-credential.key"),
+        "@@JWT_SECRET@@": encoded(args.jwt_secret_file.resolve()),
         "@@BOOTSTRAP_PUBLIC_KEY@@": public_key(
             args.bootstrap_public_key, "--bootstrap-public-key"
         ),
         "@@WORKER_PUBLIC_KEY@@": public_key(args.worker_public_key, "--worker-public-key"),
         "@@CREDENTIAL_PUBLIC_KEY@@": public_key(
             args.credential_public_key, "--credential-public-key"
+        ),
+        "@@REST_CREDENTIAL_PUBLIC_KEY@@": public_key(
+            args.rest_credential_public_key, "--rest-credential-public-key"
         ),
     }
     package_hash = hashlib.sha256()
@@ -150,6 +189,8 @@ def render(args: argparse.Namespace) -> None:
     args.out_dir.chmod(0o700)
     for source_name, output_name in [
         ("runtime.yaml.in", "core.yaml"),
+        ("rest-seed.yaml.in", "rest-seed.yaml"),
+        ("rest.yaml.in", "rest.yaml"),
         ("clients.yaml.in", "clients.yaml"),
     ]:
         text = (TEMPLATES / source_name).read_text(encoding="utf-8")
@@ -178,6 +219,8 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--bootstrap-public-key")
     value.add_argument("--worker-public-key")
     value.add_argument("--credential-public-key")
+    value.add_argument("--rest-credential-public-key")
+    value.add_argument("--jwt-secret-file", type=Path)
     value.add_argument("--out-dir", type=Path)
     return value
 

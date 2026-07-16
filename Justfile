@@ -529,7 +529,7 @@ probe-static-check:
 kind-static-check:
     python3 deploy/kind/render.py --check
     python3 scripts/tests/test_kind_render.py
-    sh -n deploy/kind/up.sh deploy/kind/down.sh deploy/kind/rotate.sh
+    sh -n deploy/kind/up.sh deploy/kind/down.sh deploy/kind/rotate.sh deploy/kind/rest-gates.sh
 
 # Build the non-root psql/psycopg/OGR qualification image with the selected engine.
 kind-client-image:
@@ -549,7 +549,7 @@ kind-up-local: doctor-kind kind-local-images
     QUACKGIS_CLIENT_LOAD_IMAGE='{{kind_client_image}}' \
     deploy/kind/up.sh
 
-# Run pinned clients, including psycopg COPY and OGR copied-data readback, through mutual TLS and prove direct worker pgwire is unreachable.
+# Run pinned pgwire clients plus both role-aware REST replicas and failover gates.
 kind-client-gates:
     @set -eu; export KUBECONFIG="${KUBECONFIG:-$PWD/.tmp/kind/kubeconfig}"; \
     kubectl delete -f .tmp/kind/rendered/clients.yaml --ignore-not-found >/dev/null; \
@@ -559,7 +559,12 @@ kind-client-gates:
         kubectl -n quackgis logs "job/$job" --all-containers=true || true; exit 1; \
       fi; \
       kubectl -n quackgis logs "job/$job" --all-containers=true; \
-    done
+    done; \
+    deploy/kind/rest-gates.sh
+
+# Prove both REST Pods, role denial, Service endpoints, and one-Pod failover.
+kind-rest-gates:
+    deploy/kind/rest-gates.sh
 
 # Replace the packaged Pod in shutdown order, then prove every gate reconnects.
 kind-restart-gate:
@@ -601,10 +606,11 @@ duckdb-runtime-static-check:
 # Assemble a verified Linux x86_64 DuckDB runtime context under ignored .tmp.
 duckdb-runtime-context:
     cargo build -p quackgis-server --release
+    cargo build -p quackgis-rest --release
     cargo build -p quackgis-edge --release --bins
     @duckdb_path="$(mise exec -- which duckdb)"; dirty_flag=""; \
     if [ "${QUACKGIS_ALLOW_DIRTY_RUNTIME:-0}" = 1 ]; then dirty_flag="--allow-dirty"; fi; \
-    python3 scripts/prepare_duckdb_runtime.py $dirty_flag --server target/release/quackgis-server --edge-bin-dir target/release --duckdb-bin "$duckdb_path"
+    python3 scripts/prepare_duckdb_runtime.py $dirty_flag --server target/release/quackgis-server --rest target/release/quackgis-rest --edge-bin-dir target/release --duckdb-bin "$duckdb_path"
 
 # Build the immutable local DuckDB evaluation runtime image.
 duckdb-runtime-image: duckdb-runtime-static-check duckdb-runtime-context
@@ -615,7 +621,7 @@ duckdb-runtime-image: duckdb-runtime-static-check duckdb-runtime-context
 duckdb-runtime-offline-smoke: duckdb-runtime-image
     @set -eu; \
     engine="$(CONTAINER_ENGINE='{{container_engine}}' python3 scripts/project_doctor.py --container-engine)"; \
-    for binary in quackgis-bootstrap quackgis-worker-edge quackgis-client quackgis-keygen; do \
+    for binary in quackgis-rest quackgis-bootstrap quackgis-worker-edge quackgis-client quackgis-keygen; do \
       "$engine" run --rm --network none --entrypoint "/usr/local/bin/$binary" {{duckdb_runtime_image}} --version; \
     done; \
     "$engine" run --rm --network none --entrypoint /usr/local/bin/duckdb {{duckdb_runtime_image}} -csv -noheader :memory: -c "LOAD spatial; LOAD ducklake; SELECT ST_AsText(ST_Point(1, 2));"; \
