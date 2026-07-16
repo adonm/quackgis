@@ -36,6 +36,8 @@ const MAX_JWT_BYTES: usize = 24_576;
 const MAX_JWT_CLAIMS_BYTES: usize = 16_384;
 const MAX_JWT_SECRET_BYTES: usize = 4096;
 const MAX_JWT_SECRET_FILE_BYTES: u64 = 8192;
+const MAX_DATABASE_PASSWORD_BYTES: usize = 4096;
+const MAX_DATABASE_PASSWORD_FILE_BYTES: u64 = 8192;
 const JWT_CLOCK_SKEW_SECONDS: u64 = 30;
 
 #[derive(Debug, Parser)]
@@ -49,6 +51,8 @@ struct Cli {
     database_url: String,
     #[arg(long, env = "QUACKGIS_REST_DATABASE_CA")]
     database_ca: Option<PathBuf>,
+    #[arg(long, env = "QUACKGIS_REST_DATABASE_PASSWORD_FILE")]
+    database_password_file: PathBuf,
     #[arg(long, env = "QUACKGIS_REST_JWT_SECRET_FILE")]
     jwt_secret_file: PathBuf,
     #[arg(long, env = "QUACKGIS_REST_JWT_ISSUER")]
@@ -68,11 +72,32 @@ struct Cli {
 }
 
 struct AppState {
-    client: Mutex<Client>,
+    database: DatabaseConnection,
     caches: RwLock<HashMap<String, SchemaCacheEntry>>,
     jwt: JwtVerifier,
     exposed_tables: HashSet<String>,
     statement_timeout: Duration,
+}
+
+struct DatabaseConnection {
+    connector: DatabaseConnector,
+    active: Mutex<Option<ActiveDatabaseClient>>,
+}
+
+struct DatabaseConnector {
+    database_url: String,
+    ca: Option<PathBuf>,
+    password_file: PathBuf,
+}
+
+struct ActiveDatabaseClient {
+    client: Client,
+    credential_revision: [u8; 32],
+}
+
+struct DatabaseCredential {
+    password: Vec<u8>,
+    revision: [u8; 32],
 }
 
 #[derive(Clone)]
@@ -112,13 +137,18 @@ async fn main() -> Result<()> {
         parse_roles(&cli.jwt_roles)?,
     )?;
     let exposed_tables = parse_tables(&cli.tables)?;
-    let mut client = connect_database(&cli.database_url, cli.database_ca.as_deref()).await?;
+    let database = DatabaseConnection::new(
+        cli.database_url,
+        cli.database_ca,
+        cli.database_password_file,
+    )
+    .await?;
     let mut caches = HashMap::new();
     let mut discovered_tables = HashSet::new();
     let mut roles = jwt.roles.iter().collect::<Vec<_>>();
     roles.sort_unstable();
     for role in roles {
-        let discovered = discover_schema(&mut client, &exposed_tables, role).await?;
+        let discovered = database.discover_schema(&exposed_tables, role).await?;
         discovered_tables.extend(
             discovered
                 .schema
@@ -140,7 +170,7 @@ async fn main() -> Result<()> {
         );
     }
     let state = Arc::new(AppState {
-        client: Mutex::new(client),
+        database,
         caches: RwLock::new(caches),
         jwt,
         exposed_tables,
@@ -167,8 +197,12 @@ fn build_router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-async fn connect_database(database_url: &str, ca: Option<&Path>) -> Result<Client> {
-    let mut config: Config = database_url.parse().context("parse database URL")?;
+async fn connect_database(
+    database_url: &str,
+    ca: Option<&Path>,
+    password: &[u8],
+) -> Result<Client> {
+    let mut config = database_config(database_url, password)?;
     if let Some(ca) = ca {
         config.ssl_mode(SslMode::Require);
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -207,6 +241,152 @@ async fn connect_database(database_url: &str, ca: Option<&Path>) -> Result<Clien
         });
         Ok(client)
     }
+}
+
+fn database_config(database_url: &str, password: &[u8]) -> Result<Config> {
+    let mut config: Config = database_url.parse().context("parse database URL")?;
+    if config.get_password().is_some() {
+        bail!("database URL must not contain a password; use --database-password-file");
+    }
+    config.password(password);
+    Ok(config)
+}
+
+impl DatabaseConnection {
+    async fn new(
+        database_url: String,
+        ca: Option<PathBuf>,
+        password_file: PathBuf,
+    ) -> Result<Self> {
+        let connector = DatabaseConnector {
+            database_url,
+            ca,
+            password_file,
+        };
+        let credential = connector.credential()?;
+        let client = connector.connect(&credential).await?;
+        Ok(Self {
+            connector,
+            active: Mutex::new(Some(ActiveDatabaseClient {
+                client,
+                credential_revision: credential.revision,
+            })),
+        })
+    }
+
+    async fn active(&self) -> Result<tokio::sync::MutexGuard<'_, Option<ActiveDatabaseClient>>> {
+        let mut active = self.active.lock().await;
+        let credential = match self.connector.credential() {
+            Ok(credential) => credential,
+            Err(error) => {
+                active.take();
+                return Err(error);
+            }
+        };
+        let replace = active.as_ref().is_none_or(|active| {
+            active.client.is_closed() || active.credential_revision != credential.revision
+        });
+        if replace {
+            active.take();
+            let client = self.connector.connect(&credential).await?;
+            *active = Some(ActiveDatabaseClient {
+                client,
+                credential_revision: credential.revision,
+            });
+        }
+        Ok(active)
+    }
+
+    async fn discover_schema(
+        &self,
+        exposed_tables: &HashSet<String>,
+        role: &str,
+    ) -> Result<DiscoveredSchema> {
+        let mut active = self.active().await?;
+        let result = discover_schema(
+            &mut active.as_mut().expect("active database client").client,
+            exposed_tables,
+            role,
+        )
+        .await;
+        if result.as_ref().is_err_and(database_error_is_closed) {
+            active.take();
+        }
+        result
+    }
+
+    async fn ready(&self) -> Result<()> {
+        let mut active = self.active().await?;
+        let result = active
+            .as_mut()
+            .expect("active database client")
+            .client
+            .simple_query("SELECT 1")
+            .await;
+        if result.as_ref().is_err_and(tokio_postgres::Error::is_closed) {
+            active.take();
+        }
+        result?;
+        Ok(())
+    }
+
+    async fn execute_read(
+        &self,
+        identity: &RequestIdentity,
+        sql: &str,
+        parameter_types: &[Type],
+        parameters: &[&(dyn ToSql + Sync)],
+    ) -> Result<String> {
+        let mut active = self.active().await?;
+        let result = execute_read_with_client(
+            &mut active.as_mut().expect("active database client").client,
+            identity,
+            sql,
+            parameter_types,
+            parameters,
+        )
+        .await;
+        if result.as_ref().is_err_and(tokio_postgres::Error::is_closed) {
+            active.take();
+        }
+        result.map_err(Into::into)
+    }
+
+    #[cfg(test)]
+    async fn session_identity(&self) -> Result<(String, Option<String>)> {
+        let mut active = self.active().await?;
+        let row = active
+            .as_mut()
+            .expect("active database client")
+            .client
+            .query_one(
+                "SELECT current_user, current_setting('request.jwt.claims', true)",
+                &[],
+            )
+            .await?;
+        Ok((row.get(0), row.get(1)))
+    }
+
+    #[cfg(test)]
+    async fn disconnect(&self) {
+        self.active.lock().await.take();
+    }
+}
+
+impl DatabaseConnector {
+    fn credential(&self) -> Result<DatabaseCredential> {
+        read_database_password(&self.password_file)
+    }
+
+    async fn connect(&self, credential: &DatabaseCredential) -> Result<Client> {
+        connect_database(&self.database_url, self.ca.as_deref(), &credential.password).await
+    }
+}
+
+fn database_error_is_closed(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<tokio_postgres::Error>()
+        .is_some_and(tokio_postgres::Error::is_closed)
 }
 
 async fn discover_schema(
@@ -299,8 +479,10 @@ impl From<DiscoveredSchema> for SchemaCacheEntry {
 
 async fn role_schema(state: &AppState, role: &str) -> Result<Arc<SchemaCache>, ()> {
     let discovered = tokio::time::timeout(state.statement_timeout, async {
-        let mut client = state.client.lock().await;
-        discover_schema(&mut client, &state.exposed_tables, role).await
+        state
+            .database
+            .discover_schema(&state.exposed_tables, role)
+            .await
     })
     .await
     .map_err(|_| ())?
@@ -331,8 +513,7 @@ async fn ready(State(state): State<Arc<AppState>>) -> Response {
         );
     }
     match tokio::time::timeout(state.statement_timeout, async {
-        let client = state.client.lock().await;
-        client.simple_query("SELECT 1").await
+        state.database.ready().await
     })
     .await
     {
@@ -447,7 +628,9 @@ async fn read_table_response(
     let parameter_types = vec![Type::TEXT; parameters.len()];
     let result = tokio::time::timeout(
         state.statement_timeout,
-        execute_read(&state, &identity, &sql, &parameter_types, &parameters),
+        state
+            .database
+            .execute_read(&identity, &sql, &parameter_types, &parameters),
     )
     .await;
     let body = match result {
@@ -710,6 +893,42 @@ fn read_jwt_secret(path: &Path) -> Result<Vec<u8>> {
     Ok(secret.to_vec())
 }
 
+fn read_database_password(path: &Path) -> Result<DatabaseCredential> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("read database password metadata {}", path.display()))?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > MAX_DATABASE_PASSWORD_FILE_BYTES
+    {
+        bail!("REST database password must be a regular non-symlink file of at most 8192 bytes");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            bail!("REST database password file must not grant group or other permissions");
+        }
+    }
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("open database password file {}", path.display()))?;
+    let mut bytes =
+        Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(MAX_DATABASE_PASSWORD_BYTES));
+    file.take(MAX_DATABASE_PASSWORD_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read database password file {}", path.display()))?;
+    let password = trim_ascii(&bytes);
+    if password.is_empty()
+        || password.len() > MAX_DATABASE_PASSWORD_BYTES
+        || password.iter().any(|byte| byte.is_ascii_control())
+    {
+        bail!("REST database password must contain 1 to 4096 bytes without control characters");
+    }
+    Ok(DatabaseCredential {
+        revision: Sha256::digest(password).into(),
+        password: password.to_vec(),
+    })
+}
+
 fn decode_json_segment(value: &str, max_bytes: usize) -> Result<serde_json::Value, ()> {
     if value.len() > max_bytes.saturating_mul(2) {
         return Err(());
@@ -738,14 +957,13 @@ fn valid_jwt_label(value: &str) -> bool {
             .all(|byte| byte.is_ascii_graphic() && !byte.is_ascii_control())
 }
 
-async fn execute_read(
-    state: &AppState,
+async fn execute_read_with_client(
+    client: &mut Client,
     identity: &RequestIdentity,
     sql: &str,
     parameter_types: &[Type],
     parameters: &[&(dyn ToSql + Sync)],
 ) -> Result<String, tokio_postgres::Error> {
-    let mut client = state.client.lock().await;
     let transaction = client.transaction().await?;
     transaction
         .batch_execute(&format!("SET LOCAL ROLE {}", identity.role))
@@ -763,9 +981,10 @@ async fn execute_read(
     Ok(body)
 }
 
-fn bounded_error(error: &tokio_postgres::Error) -> String {
+fn bounded_error(error: &anyhow::Error) -> String {
     error
-        .as_db_error()
+        .downcast_ref::<tokio_postgres::Error>()
+        .and_then(tokio_postgres::Error::as_db_error)
         .map_or_else(
             || error.to_string(),
             |database| database.message().to_owned(),
@@ -807,7 +1026,7 @@ mod tests {
     use quackgis_server::duckdb_adbc_storage::{
         DuckDbAdbcConfig, DuckDbAdbcStorage, ExtensionPolicy,
     };
-    use quackgis_server::pgwire_server::{ServerOptions, serve_duckdb_on_listener};
+    use quackgis_server::pgwire_server::{ServerOptions, serve_duckdb_on_listener_until};
     use quackgis_server::role::RoleCatalog;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -900,6 +1119,38 @@ mod tests {
         assert!(parse_roles("UpperCase").is_err());
     }
 
+    #[test]
+    fn database_password_is_owner_only_bounded_and_separate_from_url() {
+        let temp = tempfile::tempdir().expect("database password tempdir");
+        let password_file = temp.path().join("database-password");
+        write_secret_file(&password_file, b"database-secret\n");
+        let credential = read_database_password(&password_file).expect("database password");
+        assert_eq!(credential.password, b"database-secret");
+        assert!(
+            database_config(
+                "postgres://authenticator:embedded@127.0.0.1/quackgis",
+                b"database-secret"
+            )
+            .is_err()
+        );
+        write_secret_file(&password_file, b"invalid\ncontrol\n");
+        assert!(read_database_password(&password_file).is_err());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{PermissionsExt, symlink};
+            write_secret_file(&password_file, b"database-secret");
+            std::fs::set_permissions(&password_file, std::fs::Permissions::from_mode(0o640))
+                .expect("weaken database password permissions");
+            assert!(read_database_password(&password_file).is_err());
+            let target = temp.path().join("database-password-target");
+            write_secret_file(&target, b"database-secret");
+            let link = temp.path().join("database-password-link");
+            symlink(&target, &link).expect("database password symlink");
+            assert!(read_database_password(&link).is_err());
+        }
+    }
+
     #[tokio::test]
     #[ignore = "requires the pinned DuckDB ADBC runtime"]
     async fn actual_postgrest_compat_and_quackgis_extensions() {
@@ -964,21 +1215,33 @@ mod tests {
             None::<(&str, &str)>,
         )
         .expect("REST password auth")
-        .with_role_catalog(roles)
+        .with_role_catalog(roles.clone())
         .expect("REST role auth");
         let server_storage = Arc::clone(&storage);
+        let (pg_shutdown, pg_shutdown_rx) = tokio::sync::watch::channel(false);
         let pg_task = tokio::spawn(async move {
-            let _ = serve_duckdb_on_listener(server_storage, pg_listener, &pg_options, auth).await;
+            let _ = serve_duckdb_on_listener_until(
+                server_storage,
+                pg_listener,
+                &pg_options,
+                auth,
+                pg_shutdown_rx,
+            )
+            .await;
         });
 
-        let mut client = connect_database(
-            &format!("postgres://authenticator:authenticator-secret@127.0.0.1:{pg_port}/quackgis"),
+        let database_password_file = temp.path().join("database-password");
+        write_secret_file(&database_password_file, b"authenticator-secret");
+        let database = DatabaseConnection::new(
+            format!("postgres://authenticator@127.0.0.1:{pg_port}/quackgis"),
             None,
+            database_password_file.clone(),
         )
         .await
         .expect("REST pgwire connection");
         let exposed_tables = parse_tables("rest_points").unwrap();
-        let cache = discover_schema(&mut client, &exposed_tables, "rest_reader")
+        let cache = database
+            .discover_schema(&exposed_tables, "rest_reader")
             .await
             .expect("REST schema");
         assert!(
@@ -994,7 +1257,8 @@ mod tests {
         assert_eq!(rest_points.columns[0].pg_type, "int4");
         assert_eq!(rest_points.columns[1].pg_type, "text");
         assert_eq!(rest_points.columns[2].pg_type, "geometry");
-        let denied_cache = discover_schema(&mut client, &exposed_tables, "denied_reader")
+        let denied_cache = database
+            .discover_schema(&exposed_tables, "denied_reader")
             .await
             .expect("denied REST schema");
         assert!(denied_cache.schema.tables.is_empty());
@@ -1009,7 +1273,7 @@ mod tests {
             ("denied_reader".to_owned(), denied_cache.into()),
         ]);
         let state = Arc::new(AppState {
-            client: Mutex::new(client),
+            database,
             caches: RwLock::new(caches),
             jwt,
             exposed_tables,
@@ -1072,7 +1336,9 @@ mod tests {
             role: "denied_reader".to_owned(),
             claims: "{}".to_owned(),
         };
-        let database_denied = execute_read(&state, &denied_identity, &denied_sql, &[], &[])
+        let database_denied = state
+            .database
+            .execute_read(&denied_identity, &denied_sql, &[], &[])
             .await
             .expect_err("database must deny stale wide cache");
         assert!(
@@ -1178,23 +1444,114 @@ mod tests {
             ready_after_rotation.starts_with("HTTP/1.1 200 OK"),
             "{ready_after_rotation}"
         );
-        let client = state.client.lock().await;
-        let identity = client
-            .query_one(
-                "SELECT current_user, current_setting('request.jwt.claims', true)",
-                &[],
+
+        let replacement_password = database_password_file.with_extension("next");
+        write_secret_file(&replacement_password, ROTATED_TEST_DATABASE_PASSWORD);
+        std::fs::rename(&replacement_password, &database_password_file)
+            .expect("install replacement database password");
+        let credential_mismatch = http_request(rest_port, "GET", "/ready", None).await;
+        assert!(
+            credential_mismatch.starts_with("HTTP/1.1 503 Service Unavailable"),
+            "{credential_mismatch}"
+        );
+
+        pg_shutdown.send(true).expect("request database shutdown");
+        tokio::time::timeout(Duration::from_secs(5), pg_task)
+            .await
+            .expect("database shutdown deadline")
+            .expect("database task join");
+        let rotated_pg_listener = TcpListener::bind(("127.0.0.1", pg_port))
+            .await
+            .expect("bind rotated database");
+        let rotated_pg_options = ServerOptions::new()
+            .with_host("127.0.0.1".to_owned())
+            .with_port(pg_port);
+        let rotated_auth = AuthConfig::password(
+            "authenticator",
+            std::str::from_utf8(ROTATED_TEST_DATABASE_PASSWORD).unwrap(),
+            None::<(&str, &str)>,
+        )
+        .expect("rotated REST password auth")
+        .with_role_catalog(roles)
+        .expect("rotated REST role auth");
+        let rotated_storage = Arc::clone(&storage);
+        let (rotated_shutdown, rotated_shutdown_rx) = tokio::sync::watch::channel(false);
+        let rotated_pg_task = tokio::spawn(async move {
+            let _ = serve_duckdb_on_listener_until(
+                rotated_storage,
+                rotated_pg_listener,
+                &rotated_pg_options,
+                rotated_auth,
+                rotated_shutdown_rx,
             )
+            .await;
+        });
+
+        let mut ready_after_database_rotation = String::new();
+        for _ in 0..50 {
+            ready_after_database_rotation = http_request(rest_port, "GET", "/ready", None).await;
+            if ready_after_database_rotation.starts_with("HTTP/1.1 200 OK") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            ready_after_database_rotation.starts_with("HTTP/1.1 200 OK"),
+            "{ready_after_database_rotation}"
+        );
+        let old_database_password = connect_database(
+            &format!("postgres://authenticator@127.0.0.1:{pg_port}/quackgis"),
+            None,
+            b"authenticator-secret",
+        )
+        .await;
+        assert!(old_database_password.is_err());
+        let preserved_after_database_rotation = http_request(
+            rest_port,
+            "GET",
+            "/rest_points?select=id,name&order=id.asc",
+            Some(&rotated_jwt),
+        )
+        .await;
+        assert!(
+            preserved_after_database_rotation.starts_with("HTTP/1.1 200 OK")
+                && preserved_after_database_rotation.contains(
+                    r#"[{"id":1,"name":"one"},{"id":2,"name":"two"},{"id":3,"name":"three"}]"#
+                ),
+            "{preserved_after_database_rotation}"
+        );
+        let identity = state
+            .database
+            .session_identity()
             .await
             .expect("REST transaction-local context cleanup");
-        assert_eq!(identity.get::<_, String>(0), "authenticator");
-        assert_eq!(identity.get::<_, Option<String>>(1), None);
+        assert_eq!(identity.0, "authenticator");
+        assert_eq!(identity.1, None);
 
         rest_task.abort();
-        pg_task.abort();
+        state.database.disconnect().await;
+        rotated_shutdown
+            .send(true)
+            .expect("request rotated database shutdown");
+        tokio::time::timeout(Duration::from_secs(5), rotated_pg_task)
+            .await
+            .expect("rotated database shutdown deadline")
+            .expect("rotated database task join");
     }
 
     const TEST_JWT_SECRET: &[u8] = b"0123456789abcdef0123456789abcdef";
     const ROTATED_TEST_JWT_SECRET: &[u8] = b"fedcba9876543210fedcba9876543210";
+    const ROTATED_TEST_DATABASE_PASSWORD: &[u8] = b"rotated-authenticator-secret";
+
+    fn write_secret_file(path: &Path, value: &[u8]) {
+        std::fs::write(path, value).expect("write secret file");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .expect("protect secret file");
+        }
+    }
 
     fn test_verifier(roles: &[&str]) -> (tempfile::TempDir, JwtVerifier) {
         let secret_dir = tempfile::tempdir().expect("JWT secret tempdir");
