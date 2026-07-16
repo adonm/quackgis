@@ -50,7 +50,9 @@ ordered StatefulSet Pod. The server remains trust-mode loopback-only, while the
 tiny client is the sole Service pgwire endpoint and requires a CA-verified client
 certificate. Fixed UDP binds and DNS-resolved direct routes make this package
 independent of outbound relay access. Pinned psql, psycopg, and OGR Jobs enter
-through that boundary. Denial Jobs prove the Pod address cannot reach the
+through that boundary. The psycopg 3.2.13 Job creates copied data, streams exact
+WKB/NULL rows with COPY, reconnects, and verifies spatial readback; psql and OGR
+remain scalar package gates. Denial Jobs prove the Pod address cannot reach the
 worker's loopback pgwire port, plaintext is refused, and a client certificate is
 required. `just kind-restart-gate` proves ordered reconnect, while
 `just kind-secret-rotation-gate` rotates mTLS and edge keys and denies the prior

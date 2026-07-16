@@ -707,6 +707,15 @@ Deliver:
 Gate: all Local 1.0 named clients pass in the pinned Kind topology and the same
 catalog tests pass directly on the host.
 
+Current progress: pinned psycopg 3.2.13 now passes one copied-data workflow in the
+minimal Kind topology through the mutual-TLS tiny client. It creates/reuses a
+client-neutral official-DuckLake table, clears it, streams exact WKB and NULL rows
+with PostgreSQL text COPY, closes and reconnects, and verifies exact scalar and
+spatial readback. It passes again after ordered Pod replacement and mTLS/iroh key
+rotation with old-client denial. This closes the psycopg copied-data slice only.
+Psql describe, OGR read/COPY/no-FID behavior, and headless QGIS copied-layer
+qualification remain open.
+
 ### H1 — migrate and package role-aware REST
 
 Deliver:

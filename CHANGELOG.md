@@ -7,6 +7,12 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 
 ### Added
 
+- The pinned psycopg 3.2.13 Kind job now runs a copied-data workflow through the
+  mutual-TLS tiny-client ingress: create/reuse an official-DuckLake table, clear
+  it, stream PostgreSQL COPY with exact WKB and NULL rows, close/reconnect, and
+  verify exact scalar/spatial readback. It remains green after a 4.071-second
+  ordered replacement and packaged mTLS/iroh key rotation with old-client denial;
+  the existing direct/plaintext/client-certificate denial jobs remain green.
 - The REST sidecar now re-reads its bounded regular-file HS256 key for every
   verification and readiness check. Atomic key replacement accepts newly signed
   tokens immediately, rejects the old key, and makes `/ready` fail while key

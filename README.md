@@ -89,7 +89,10 @@ smoke/local/reference transport-resource budgets. K0 now packages the local
 direct path as one ordered Kind Pod: the DuckDB server remains loopback-only,
 the sole Service ingress is a mutual-TLS tiny client, pinned psql/psycopg/OGR
 smokes pass, direct/plaintext/certificate-free access fails, and replacement plus
-edge/mTLS rotation reconnect cleanly. Packaged resource and hosted-relay
+edge/mTLS rotation reconnect cleanly. The pinned psycopg 3.2.13 job additionally
+creates copied data, streams WKB/NULL rows with COPY, reconnects, and verifies
+exact spatial readback through that packaged ingress, including after ordered
+replacement and mTLS/edge-key rotation. Packaged resource and hosted-relay
 qualification remain open.
 
 TLS remains optional for local development. Set `QUACKGIS_TLS_MODE=required` with
