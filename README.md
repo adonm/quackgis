@@ -39,6 +39,9 @@ planner/executor and official DuckLake is the sole writer for new storage.
 - optional reserved bbox columns validated and maintained by DuckDB during COPY,
   with conservative exact-rechecked candidate injection for bounded one-table
   `ST_Intersects` shapes;
+- M4-complete mixed point/line/polygon selective scans, grouped aggregates,
+  bounded spatial joins, wide projections, and compaction with two clean 10M and
+  two clean 100M maintained-WKB/native-geometry references;
 - explicitly authorized adjacent-file compaction through a server-owned call;
 - SCRAM and parsed read/write table policy; and
 - 43 curated spatial cases using original PostGIS spellings through DuckDB native

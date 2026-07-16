@@ -24,7 +24,7 @@ one exact DuckDB/extension bundle.
 | `just duckdb-termination-profile` | actual-process forced drain, uncommitted rollback, same-path restart timing, exact state, and post-restart write evidence |
 | `just duckdb-tls-rotation-profile` | actual-process TLS/SCRAM, certificate/hostname verification, plaintext and wrong-trust denial, restart rotation, old-password rejection, and exact-state evidence |
 | `just duckdb-copy-profile` | direct ADBC versus pgwire COPY RSS, throughput, publication metrics, and exact WKB/count/sum oracle |
-| `just duckdb-spatial-scan-profile` | mixed point/line/polygon maintained-bbox versus native-geometry exact results, plan/recheck, row-group/scan-byte, latency, RSS, DuckDB-memory, spill, and compaction evidence |
+| `just duckdb-spatial-scan-profile` | M4 mixed point/line/polygon maintained-bbox versus native-geometry selective scan, grouped aggregate, bounded join, wide projection, exact plan/recheck, row-group/scan-byte, first-row/p50/p95/p99, RSS, DuckDB-memory, spill, file sizing, and compaction evidence |
 | `just kind-static-check` | minimal DuckDB-only topology shape, immutable image input, secret rendering, and client-job contract |
 | `just doctor` / `just doctor-kind` | installed/missing project tools, selected container engine, and local Kind prerequisites |
 | `just kind-up-local` / `just kind-client-gates` / `just kind-restart-gate` / `just kind-secret-rotation-gate` | rootless Podman-or-Docker execution of the node-local digest-addressed server/bootstrap/worker/client package; pinned psql/psycopg/OGR pass through mTLS, direct/plaintext/certificate-free paths fail, ordered replacement reconnects, and rotated old client credentials fail |

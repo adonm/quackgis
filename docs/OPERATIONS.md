@@ -287,7 +287,9 @@ published as NULL. Direct INSERT and reserved-column UPDATEs fail closed. A
 geometry UPDATE atomically refreshes all bounds only when the geometry value is a
 numbered bound parameter (optionally cast) or `NULL`; arbitrary expressions and
 tuple assignment fail closed. Ordinary-column UPDATEs are allowed because they
-leave maintained geometry and bounds unchanged.
+leave maintained geometry and bounds unchanged. Actual pgwire tests cover point,
+linestring, and polygon updates plus NULL, malformed, rollback, and point-reopen
+behavior.
 
 One-table `ST_Intersects` reads over a valid maintained layout automatically gain
 four planner-visible bbox overlap candidates when the data geometry is the
@@ -301,15 +303,15 @@ SQL. OR/NOT placement, joins, subqueries, multiple matching predicates, and
 arbitrary or oversized geometry expressions are not optimized; malformed or
 ambiguous reserved layouts fail closed. The registered profile records row groups,
 conservative compressed-byte bounds, five pgwire latency samples per layout,
-process RSS, sampled DuckDB memory, and temporary storage. Two clean 10M runs
-cover mixed points, lines, and polygons; pass the 500 ms p95, +128 MiB RSS,
-+256 MiB DuckDB-memory, zero-spill, 5% scan-byte, and 20x row-group budgets; and
-prove both maintained bbox and native geometry tables compact from 25 files to
-one without changing exact results. Local 1.0 retains maintained WKB/bbox storage.
-Two clean 100M runs pass the same exact, plan, scan-byte, load, latency, RSS,
-DuckDB-memory, spill, and compaction gates; they reduce 25 files to 7 bbox/4
-native files. Automatic DDL, general geometry-expression maintenance, grouped
-aggregates, bounded joins, and wide projections remain roadmap work.
+process RSS, sampled DuckDB memory, and temporary storage. The v5 profile adds
+grouped aggregates, bounded spatial joins, and nine-column wide projections to
+the selective scan and compaction oracle. Two clean 10M runs precede two 100M
+runs on source `8490ed7`; all results and plans survive compaction, all committed
+load/first-row/p50/p95/p99/RSS/DuckDB-memory/zero-spill/scan-byte/file/row-group
+budgets pass, and 25 files reduce to 7 bbox/4 native files at 100M. Local 1.0
+retains maintained WKB/bbox storage, a 1 GiB maximum compaction file, and DuckDB's
+default row-group sizing. Automatic DDL and arbitrary geometry-expression
+maintenance remain unsupported by design rather than open M4 work.
 
 ## Maintained checks
 

@@ -240,9 +240,11 @@ unless a focused test says otherwise.
 - Direct `INSERT` and reserved bbox UPDATEs on a maintained layout return `0A000`.
   A geometry UPDATE is supported only when its right-hand side is one numbered
   bound parameter (optionally cast) or `NULL`; DuckDB recomputes all four bounds
-  in the same statement. Arbitrary geometry expressions and tuple assignments
-  remain `0A000`. UPDATEs of ordinary columns preserve existing geometry/bounds,
-  and `DELETE` remains supported.
+  in the same statement. Actual pgwire proves point, linestring, and polygon
+  updates plus NULL, malformed-input, rollback, and point-reopen outcomes.
+  Arbitrary geometry expressions and tuple assignments remain `0A000`. UPDATEs
+  of ordinary columns preserve existing geometry/bounds, and `DELETE` remains
+  supported.
 - A one-table exact `ST_Intersects` over the maintained WKB column gains
   conservative four-axis bbox candidates for bounded literal envelopes/text
   geometries and numbered-bound WKB. The exact DuckDB predicate remains in the
@@ -251,19 +253,18 @@ unless a focused test says otherwise.
   pgwire covers the literal path. OR/NOT placement, joins, subqueries, multiple
   matching predicates, and arbitrary or oversized probe expressions are
   deliberately left unoptimized; malformed/ambiguous reserved layouts fail
-  closed. Two clean registered 10M references on source `365c769` compare mixed
-  `POINT`, `LINESTRING`, and `POLYGON` data across 25 ordered official-DuckLake
-  files for this layout and native `GEOMETRY`. Exact pgwire counts agree, each
-  plan keeps its exact `ST_Intersects` recheck, and conservative compressed
-  scan-byte upper bounds stay below 5%. Five timed samples per layout also pass
-  the 500 ms p95, +128 MiB process-RSS, +256 MiB DuckDB-memory, and zero-spill
-  budgets. Both layouts compact from 25 files to one without result changes.
-  Local 1.0 retains maintained WKB/bbox storage because native geometry does not
-  yet have the same COPY, mutation, pgwire, and catalog contract. Broad
-  analytical workloads remain unqualified. Two clean 100M references on source
-  `bd4f0ab` preserve the same exact/plan contract, scan 1/825 row groups and at
-  most 0.129% compressed bytes, pass the committed load/latency/RSS/memory/spill
-  budgets, and compact 25 files to 7 bbox/4 native files.
+  closed. The M4-complete v5 profile on source `8490ed7` compares mixed `POINT`,
+  `LINESTRING`, and `POLYGON` data across 25 ordered official-DuckLake files for
+  this layout and native `GEOMETRY`. Selective counts, grouped aggregates,
+  bounded spatial joins, and wide projections have exact pgwire result and plan
+  oracles before and after compaction. Two 10M runs precede two 100M runs. At
+  100M, selective/grouped/wide plans scan 1/825 row groups and at most 0.129%
+  conservative compressed bytes; first-row/p50/p95/p99, +128 MiB process-RSS,
+  +256 MiB DuckDB-memory, zero-spill, load, file, and row-group budgets pass; and
+  25 files compact to 7 bbox/4 native files under the 1 GiB policy. Local 1.0
+  retains maintained WKB/bbox storage because native geometry does not yet have
+  the same COPY, mutation, pgwire, and catalog contract. These are maintained
+  workload claims, not general spatial-index or arbitrary-join compatibility.
 - `pg_catalog`, unmaintained `information_schema`, broad spatial discovery, and
   GIS client-specific metadata are incomplete. A client-neutral executable
   fixture structurally maps explicit and implicit namespace/database/type/range/collation/owner-role

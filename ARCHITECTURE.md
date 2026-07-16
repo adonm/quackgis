@@ -256,10 +256,10 @@ Layout columns should be computed in DuckDB during COPY or compaction. Rust must
 not decode table geometry row-by-row. Native DuckDB/DuckLake statistics,
 partitioning, and geometry representation are preferred when measurements pass.
 For Local 1.0, WKB plus the opt-in maintained bbox columns remains the stored
-contract: the 10M mixed-shape profile proves its scan/resource behavior and its
-write/client lifecycle, while native `GEOMETRY` is a smaller measured candidate
-that also passes the 100M scan/resource gate but has not yet passed the same
-lifecycle contract.
+contract. M4 proves selective scans, grouped aggregates, bounded spatial joins,
+wide projections, compaction, and resources twice at both 10M and 100M. Native
+`GEOMETRY` is a smaller measured candidate that passes the same analytical gates
+but has not yet passed the maintained path's write/client lifecycle contract.
 
 ## PostgreSQL compatibility
 

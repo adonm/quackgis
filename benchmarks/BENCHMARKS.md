@@ -192,11 +192,21 @@ row groups as a conservative upper bound for N reported scans, and requires
 DuckLake compaction to at least halve 25 fragmented files without changing exact
 results.
 
-Five warmed selective count samples per layout run through pgwire. Reference
-budgets require p95 at or below 500 ms, process RSS growth at or below 128 MiB,
-sampled DuckDB-memory growth at or below 256 MiB, and zero temporary-storage use.
-The process RSS and independent `duckdb_memory()` sampler cover both layouts in
-one timed interval; per-layout latency remains separate.
+The v5 workload runs five warmed pgwire samples per layout for:
+
+- a selective exact count;
+- an eight-group count/min/max/sum aggregate;
+- a four-probe bounded spatial join with candidate and exact predicates; and
+- a nine-column ordered projection containing geometry bytes, four bounds, and a
+  1 KiB payload, with separate first-row and completion timing.
+
+Plans for selective, grouped, join, and wide queries must retain both the
+candidate and exact predicate. Selective, grouped, and wide scans must meet the
+row-group budget. Every workload reruns after compaction. Reference budgets
+require p50/p95/p99 at or below 250/500/750 ms, process RSS growth at or below
+128 MiB, sampled DuckDB-memory growth at or below 256 MiB, and zero temporary
+storage. The process RSS and independent `duckdb_memory()` sampler cover both
+layouts and all timed workloads in one interval.
 
 ```sh
 mise exec -- just duckdb-spatial-scan-profile \
@@ -204,43 +214,35 @@ mise exec -- just duckdb-spatial-scan-profile \
   out=.tmp/duckdb-spatial-scan/local-r1m.json
 ```
 
-Two consecutive clean 10M references on source `365c769` and the recorded Ryzen 7
-7700X/64 GiB/HP FX700 NVMe/Btrfs host pass. Each layout contains 3,333,334 points,
-3,333,333 lines, and 3,333,333 polygons:
+Reference mode admits only exact 10M or 100M row counts. Two consecutive clean
+10M v5 runs on source `8490ed7` and the recorded Ryzen 7 7700X/64 GiB/HP FX700
+NVMe/Btrfs host pass before 100M promotion. Each layout contains 3,333,334 points,
+3,333,333 lines, and 3,333,333 polygons. Both runs scan one row group per
+selective/grouped/wide plan, stay at or below 1.271% conservative compressed
+bytes, complete every p95/p99 in at most 22.08 ms, grow process RSS by at most
+35.49 MiB and DuckDB memory by 29.39 MiB, use zero temporary storage, and compact
+both layouts from 25 files to one without changing any workload result.
 
-| Run/layout | Row groups scanned | Compressed-byte upper bound | pgwire p50 / p95 | Data-file bytes | Files after compaction |
-|---|---:|---:|---:|---:|---:|
-| 1 / bbox | 1 / 143 | 1.045% | 14.94 / 18.50 ms | 355,588,058 | 1 |
-| 1 / native | 1 / 100 | 1.266% | 18.77 / 20.52 ms | 196,233,092 | 1 |
-| 2 / bbox | 1 / 145 | 1.016% | 15.25 / 15.46 ms | 355,588,356 | 1 |
-| 2 / native | 1 / 100 | 1.266% | 18.40 / 19.41 ms | 196,233,092 | 1 |
-
-All four query variants return the same 100 rows through pgwire before and after
-compaction. Across the timed interval, process RSS grows by 1.90 MiB and 0.72 MiB,
-sampled DuckDB memory grows by 10.10 MiB in each run, and temporary storage stays
-at zero. Native geometry files are about 45% smaller, but maintained WKB/bbox is
-the Local 1.0 storage decision because only that path currently has the required
-COPY, mutation, pgwire, and catalog contract. Native geometry remains the deletion
-candidate when it passes those lifecycle gates.
-
-The same v4 profile admits only exact 10M or 100M row counts in reference mode.
-Two consecutive clean 100M references on source `bd4f0ab` pass on the same host;
+Two consecutive clean 100M v5 references then pass on the same source and host;
 each layout contains 33,333,334 points, 33,333,333 lines, and 33,333,333 polygons:
 
-| Run/layout | Row groups scanned | Compressed-byte upper bound | pgwire p50 / p95 / p99 | Data-file bytes | Files after compaction |
-|---|---:|---:|---:|---:|---:|
-| 1 / bbox | 1 / 825 | 0.1284% | 19.90 / 20.25 / 20.25 ms | 3,516,175,451 | 7 |
-| 1 / native | 1 / 825 | 0.1294% | 19.34 / 19.88 / 19.88 ms | 1,919,798,008 | 4 |
-| 2 / bbox | 1 / 825 | 0.1284% | 18.31 / 20.32 / 20.32 ms | 3,516,176,060 | 7 |
-| 2 / native | 1 / 825 | 0.1294% | 17.59 / 19.40 / 19.40 ms | 1,919,798,008 | 4 |
+| Run | Load both layouts | Max wide first-row p95 | Max workload p50 / p95 / p99 | Query RSS | DuckDB memory | Spill | Files after compaction bbox/native |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 24.35 s | 19.74 ms | 20.22 / 21.79 / 21.79 ms | 94.21 MiB | 31.90 MiB | 0 | 7 / 4 |
+| 2 | 24.39 s | 19.74 ms | 21.90 / 23.58 / 23.58 ms | 113.03 MiB | 32.62 MiB | 0 | 7 / 4 |
 
-Loading both layouts takes 23.92 and 23.83 seconds against the 120-second
-reference budget. The timed query interval grows process RSS by 15.44 MiB and
-4.64 MiB, sampled DuckDB memory by 13.20 MiB and 12.19 MiB, and temporary storage
-by zero. Every query still returns the same 100 exact rows through pgwire before
-and after compaction. This closes the two-run 100M selective scan/resource gate;
-it does not qualify grouped aggregates, bounded spatial joins, or wide
-projections.
+Every selective, grouped, and wide plan scans 1/825 row groups. Conservative
+compressed-byte upper bounds are 0.1284% for maintained bbox and 0.1294% for
+native geometry. Input data files occupy approximately 3.516 GB and 1.920 GB;
+native geometry is about 45% smaller. Compacted files top out at 541 MiB bbox and
+584 MiB native, below the selected 1 GiB policy. The observed 121,212 average rows
+per row group validate retaining DuckDB's approximately 122,880-row default.
+
+This completes M4. Local 1.0 retains maintained WKB/bbox because only that path
+has the required COPY, mutation, pgwire, and catalog lifecycle. Native geometry
+remains the deletion candidate when it passes those lifecycle gates. The evidence
+qualifies the maintained workload shapes, not a general spatial index, arbitrary
+joins, or clustered performance.
 
 ## Termination and restart profile
 
@@ -263,7 +265,6 @@ interruption behavior.
 ## Next profiles
 
 E1's result, cancellation, transport, mixed-class, and COPY reference budgets now
-pass. The selective mixed-shape scan/byte/latency/resource/compaction oracle passes
-twice at both 10M and 100M. Next profiles add grouped aggregates, bounded spatial
-joins, wide projections, and broader mutation and configured-concurrency
-evidence.
+pass, and M4's complete mixed-shape analytical workload passes twice at both 10M
+and 100M. Next profiles belong to M5: packaged I0 resources/hosted relay,
+write-capacity readiness, recovery/upgrade, mixed release workload, and soak.

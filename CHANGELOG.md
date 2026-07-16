@@ -64,10 +64,12 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   `GEOMETRY` over ordered official-DuckLake files using exact pgwire results,
   visible exact rechecks, DuckDB row-group metrics, conservative compressed-byte
   bounds, timed queries, process RSS, DuckDB memory/spill, and fragmented-file
-  compaction. Two clean 10M mixed point/line/polygon runs on source `365c769`
-  pass every committed budget and compact both layouts from 25 files to one. Two
-  clean 100M runs on source `bd4f0ab` also pass load, p50/p95/p99, RSS, memory,
-  zero-spill, scan-byte, exact-result, plan, and compaction budgets.
+  compaction. The M4-complete v5 workload adds grouped aggregates, bounded
+  spatial joins, nine-column/1 KiB-payload wide projections, first-row timing,
+  point/line/polygon mutation, and explicit 1 GiB file/default-row-group policy.
+  Two clean 10M runs precede two clean 100M runs on source `8490ed7`; every
+  exact-result, plan, load, first-row, p50/p95/p99, RSS, memory, zero-spill,
+  scan-byte, file, row-group, and compaction budget passes.
 - Warm, interleaved ADBC/pgwire transport sampling with an exact-result oracle and
   fail-closed reference enforcement of the one-second eligibility and 15% p50
   overhead limits.

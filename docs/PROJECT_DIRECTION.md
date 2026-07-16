@@ -358,8 +358,10 @@ contract. Two clean 10M mixed point/line/polygon references show native
 resource budgets while only the maintained WKB path has proven COPY, mutation,
 pgwire, and catalog behavior. Re-evaluate this decision for each pinned DuckDB
 candidate and delete the bbox machinery when native geometry also passes those
-write/client contracts. Native geometry now passes the mixed-shape 100M scan and
-resource gates but not that lifecycle boundary.
+write/client contracts. M4's complete v5 workload proves both layouts through
+selective scans, grouped aggregates, bounded joins, wide projections, and
+compaction at 10M/100M; native geometry passes those analytical gates but not the
+write/client lifecycle boundary.
 
 ### Observability
 
