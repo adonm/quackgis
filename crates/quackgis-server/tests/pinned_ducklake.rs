@@ -63,6 +63,18 @@ impl<'a> tokio_postgres::types::FromSql<'a> for RegisteredOid {
     }
 }
 
+fn captured_trace_sql(raw: &str, query_id: &str) -> String {
+    let trace: serde_json::Value = serde_json::from_str(raw).expect("captured client trace");
+    trace["queries"]
+        .as_array()
+        .expect("captured trace queries")
+        .iter()
+        .find(|query| query["id"] == query_id)
+        .and_then(|query| query["sql"].as_str())
+        .unwrap_or_else(|| panic!("captured trace query {query_id}"))
+        .to_owned()
+}
+
 fn identity_rows(batches: &[RecordBatch]) -> Vec<IdentityRow> {
     let mut rows = Vec::new();
     for batch in batches {
@@ -742,6 +754,86 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
     assert_eq!(structural_metadata.get::<_, String>(3), "'7'");
     assert_eq!(structural_metadata.get::<_, String>(4), "stable identifier");
     assert_eq!(structural_metadata.get::<_, String>(5), "projected table");
+
+    let qgis_attribute_sql = captured_trace_sql(
+        include_str!("../../../tests/fixtures/qgis_3_44_postgresql18_trace.json"),
+        "attribute_structure",
+    )
+    .replace(":relation_oid", &relation_oid.to_string());
+    let qgis_attribute = client
+        .prepare(&qgis_attribute_sql)
+        .await
+        .expect("prepare captured QGIS attribute structure query");
+    let qgis_attribute_types = [
+        tokio_postgres::types::Type::OID,
+        tokio_postgres::types::Type::INT2,
+        tokio_postgres::types::Type::TEXT,
+        tokio_postgres::types::Type::TEXT,
+        tokio_postgres::types::Type::TEXT,
+        tokio_postgres::types::Type::OID,
+        tokio_postgres::types::Type::INT4,
+        tokio_postgres::types::Type::INT4,
+        tokio_postgres::types::Type::CHAR,
+        tokio_postgres::types::Type::CHAR,
+    ];
+    for (column, expected) in qgis_attribute.columns().iter().zip(qgis_attribute_types) {
+        assert_eq!(column.type_(), &expected, "QGIS field {}", column.name());
+    }
+    let qgis_attributes = client
+        .query(&qgis_attribute, &[])
+        .await
+        .expect("captured QGIS attribute structure query");
+    assert_eq!(qgis_attributes.len(), 6);
+    let qgis_id = qgis_attributes
+        .iter()
+        .find(|row| row.get::<_, i16>(1) == 1)
+        .expect("QGIS identifier attribute");
+    assert_eq!(qgis_id.get::<_, u32>(0), relation_oid);
+    assert_eq!(qgis_id.get::<_, String>(2), "bigint");
+    assert_eq!(qgis_id.get::<_, String>(3), "stable identifier");
+    assert_eq!(qgis_id.get::<_, String>(4), "'7'");
+    assert_eq!(qgis_id.get::<_, u32>(5), 20);
+    assert_eq!(qgis_id.get::<_, i32>(6), 1);
+    assert_eq!(qgis_id.get::<_, Option<i32>>(7), None);
+
+    let ogr_column_sql = captured_trace_sql(
+        include_str!("../../../tests/fixtures/ogr_3_11_5_postgresql18_trace.json"),
+        "column_structure",
+    )
+    .replace(":relation_oid", &relation_oid.to_string());
+    let ogr_column = client
+        .prepare(&ogr_column_sql)
+        .await
+        .expect("prepare captured OGR column structure query");
+    let ogr_column_types = [
+        tokio_postgres::types::Type::NAME,
+        tokio_postgres::types::Type::NAME,
+        tokio_postgres::types::Type::INT2,
+        tokio_postgres::types::Type::TEXT,
+        tokio_postgres::types::Type::BOOL,
+        tokio_postgres::types::Type::TEXT,
+        tokio_postgres::types::Type::BOOL,
+        tokio_postgres::types::Type::TEXT,
+        tokio_postgres::types::Type::CHAR,
+    ];
+    for (column, expected) in ogr_column.columns().iter().zip(ogr_column_types) {
+        assert_eq!(column.type_(), &expected, "OGR field {}", column.name());
+    }
+    let ogr_columns = client
+        .query(&ogr_column, &[])
+        .await
+        .expect("captured OGR column structure query");
+    assert_eq!(ogr_columns.len(), 6);
+    let ogr_id = &ogr_columns[0];
+    assert_eq!(ogr_id.get::<_, String>(0), "id");
+    assert_eq!(ogr_id.get::<_, String>(1), "int8");
+    assert_eq!(ogr_id.get::<_, i16>(2), 8);
+    assert_eq!(ogr_id.get::<_, String>(3), "bigint");
+    assert!(ogr_id.get::<_, bool>(4));
+    assert_eq!(ogr_id.get::<_, String>(5), "'7'");
+    assert_eq!(ogr_id.get::<_, Option<bool>>(6), None);
+    assert_eq!(ogr_id.get::<_, String>(7), "stable identifier");
+
     let descriptions = client
         .query(
             "SELECT objsubid, description FROM pg_description \
@@ -756,6 +848,11 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
     assert_eq!(descriptions[0].get::<_, String>(1), "projected table");
     assert_eq!(descriptions[1].get::<_, i32>(0), 1);
     assert_eq!(descriptions[1].get::<_, String>(1), "stable identifier");
+    let private_relation_oid = client
+        .query_one("SELECT to_regclass('private_metadata')::oid", &[])
+        .await
+        .expect("private metadata relation OID")
+        .get::<_, u32>(0);
 
     let mut reader_config = tokio_postgres::Config::new();
     reader_config
@@ -779,6 +876,21 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
         .expect("role and legacy-filtered structural metadata");
     assert_eq!(reader_descriptions.get::<_, String>(0), "projected table");
     assert_eq!(reader_descriptions.get::<_, Option<String>>(1), None);
+    let private_qgis_attribute_sql = captured_trace_sql(
+        include_str!("../../../tests/fixtures/qgis_3_44_postgresql18_trace.json"),
+        "attribute_structure",
+    )
+    .replace(":relation_oid", &private_relation_oid.to_string());
+    let private_qgis_attributes = reader
+        .query(&private_qgis_attribute_sql, &[])
+        .await
+        .expect("filtered captured QGIS attribute query");
+    assert_eq!(private_qgis_attributes.len(), 2);
+    assert!(private_qgis_attributes.iter().all(|row| {
+        row.get::<_, Option<String>>(3).is_none()
+            && row.get::<_, Option<String>>(4).is_none()
+            && row.get::<_, Option<i32>>(7).is_none()
+    }));
     assert_eq!(
         reader
             .query_one(

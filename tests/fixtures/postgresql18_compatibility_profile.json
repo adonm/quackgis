@@ -371,6 +371,47 @@
       ]
     },
     {
+      "id": "attribute_structure",
+      "stage": "C5",
+      "trace_status": "captured_qgis_3_44_implemented_native_pgwire",
+      "protocol": "extended",
+      "consumers": ["QGIS 3.44", "pinned identity catalog contract"],
+      "sql": "SELECT attrelid, attnum, pg_catalog.format_type(atttypid,atttypmod), pg_catalog.col_description(attrelid,attnum), pg_catalog.pg_get_expr(adbin,adrelid), atttypid, attnotnull::int, indisunique::int, attidentity, attgenerated FROM pg_attribute LEFT OUTER JOIN pg_attrdef ON attrelid = adrelid AND attnum = adnum LEFT OUTER JOIN (SELECT DISTINCT indrelid, indkey, indisunique FROM pg_index WHERE indisunique) uniq ON attrelid = indrelid AND attnum::text = indkey::text WHERE attrelid IN (:relation_oid)",
+      "parameter_type_oids": [],
+      "expected_columns": [
+        { "name": "attrelid", "type_oid": 26, "nullable": false },
+        { "name": "attnum", "type_oid": 21, "nullable": false },
+        { "name": "format_type", "type_oid": 25, "nullable": false },
+        { "name": "col_description", "type_oid": 25, "nullable": true },
+        { "name": "pg_get_expr", "type_oid": 25, "nullable": true },
+        { "name": "atttypid", "type_oid": 26, "nullable": false },
+        { "name": "attnotnull", "type_oid": 23, "nullable": false },
+        { "name": "indisunique", "type_oid": 23, "nullable": true },
+        { "name": "attidentity", "type_oid": 18, "nullable": false },
+        { "name": "attgenerated", "type_oid": 18, "nullable": false }
+      ]
+    },
+    {
+      "id": "column_structure",
+      "stage": "C5",
+      "trace_status": "captured_ogr_3_11_5_implemented_native_pgwire",
+      "protocol": "extended",
+      "consumers": ["GDAL/OGR 3.11.5", "pinned identity catalog contract"],
+      "sql": "SELECT a.attname, t.typname, a.attlen, format_type(a.atttypid, a.atttypmod), a.attnotnull, def.def, i.indisunique, descr.description, a.attgenerated FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid LEFT JOIN (SELECT adrelid, adnum, pg_get_expr(adbin, adrelid) AS def FROM pg_attrdef) def ON def.adrelid = a.attrelid AND def.adnum = a.attnum LEFT JOIN (SELECT DISTINCT indrelid, indkey, indisunique FROM pg_index WHERE indisunique) i ON i.indrelid = a.attrelid AND i.indkey[0] = a.attnum AND i.indkey[1] IS NULL LEFT JOIN pg_description descr ON descr.objoid = a.attrelid AND descr.classoid = 'pg_class'::regclass::oid AND descr.objsubid = a.attnum WHERE a.attnum > 0 AND a.attrelid = :relation_oid ORDER BY a.attnum",
+      "parameter_type_oids": [],
+      "expected_columns": [
+        { "name": "attname", "type_oid": 19, "nullable": false },
+        { "name": "typname", "type_oid": 19, "nullable": false },
+        { "name": "attlen", "type_oid": 21, "nullable": false },
+        { "name": "format_type", "type_oid": 25, "nullable": false },
+        { "name": "attnotnull", "type_oid": 16, "nullable": false },
+        { "name": "def", "type_oid": 25, "nullable": true },
+        { "name": "indisunique", "type_oid": 16, "nullable": true },
+        { "name": "description", "type_oid": 25, "nullable": true },
+        { "name": "attgenerated", "type_oid": 18, "nullable": false }
+      ]
+    },
+    {
       "id": "tokio_postgres_custom_type_lookup",
       "stage": "C3",
       "trace_status": "captured",
@@ -590,7 +631,7 @@
       "id": "ogr_copied_spatial_table",
       "version": "3.11.5",
       "fixture": "tests/fixtures/ogr_3_11_5_postgresql18_trace.json",
-      "status": "captured_against_postgresql18_postgis; QuackGIS implementation pending"
+      "status": "captured_against_postgresql18_postgis; pg_proc namespace and column_structure pass pinned native actual-pgwire; full packaged client qualification pending"
     },
     {
       "id": "psql_describe_copied_table",
@@ -602,7 +643,7 @@
       "id": "qgis_headless_copied_layer",
       "version": "3.44.11",
       "fixture": "tests/fixtures/qgis_3_44_postgresql18_trace.json",
-      "status": "captured_against_postgresql18_postgis; exact binary cursor messages pass native actual-pgwire; full packaged client qualification pending"
+      "status": "captured_against_postgresql18_postgis; attribute_structure and exact binary cursor messages pass native actual-pgwire; full packaged client qualification pending"
     }
   ],
   "pending_trace_families": [

@@ -4374,9 +4374,9 @@ fn catalog_query_shape_supported(statement: &Statement) -> bool {
         return false;
     };
     if select.from.iter().any(|table| {
-        !matches!(&table.relation, TableFactor::Table { .. })
+        !supported_catalog_table_factor(&table.relation)
             || table.joins.iter().any(|join| {
-                !matches!(&join.relation, TableFactor::Table { .. })
+                !supported_catalog_table_factor(&join.relation)
                     || join_uses_implicit_catalog_columns(&join.join_operator)
             })
     }) {
@@ -4422,6 +4422,39 @@ fn catalog_query_shape_supported(statement: &Statement) -> bool {
         return false;
     }
     aliases.len() == relation_count
+}
+
+fn supported_catalog_table_factor(factor: &TableFactor) -> bool {
+    match factor {
+        TableFactor::Table { name, .. } => maintained_catalog_relation(name).is_some(),
+        TableFactor::Derived { .. } => derived_catalog_relation(factor).is_some(),
+        _ => false,
+    }
+}
+
+fn derived_catalog_relation(factor: &TableFactor) -> Option<&'static str> {
+    let TableFactor::Derived {
+        lateral,
+        subquery,
+        alias,
+        sample,
+    } = factor
+    else {
+        return None;
+    };
+    let alias = alias.as_ref()?;
+    if *lateral || sample.is_some() || !alias.columns.is_empty() || alias.at.is_some() {
+        return None;
+    }
+    match subquery.to_string().to_ascii_lowercase().as_str() {
+        "select adrelid, adnum, pg_get_expr(adbin, adrelid) as def from pg_attrdef" => {
+            Some("derived_pg_attrdef")
+        }
+        "select distinct indrelid, indkey, indisunique from pg_index where indisunique" => {
+            Some("derived_pg_index")
+        }
+        _ => None,
+    }
 }
 
 fn information_schema_wildcard_projection(
@@ -4926,19 +4959,30 @@ fn top_level_catalog_aliases(statement: &Statement) -> HashMap<String, &'static 
 }
 
 fn collect_catalog_alias(factor: &TableFactor, aliases: &mut HashMap<String, &'static str>) {
-    let TableFactor::Table { name, alias, .. } = factor else {
-        return;
+    let (identifier, relation) = match factor {
+        TableFactor::Table { name, alias, .. } => {
+            let Some(relation) = maintained_catalog_relation(name) else {
+                return;
+            };
+            let identifier =
+                alias
+                    .as_ref()
+                    .map(|alias| &alias.name)
+                    .or_else(|| match name.0.last() {
+                        Some(ObjectNamePart::Identifier(identifier)) => Some(identifier),
+                        _ => None,
+                    });
+            (identifier, relation)
+        }
+        TableFactor::Derived { alias, .. } => (
+            alias.as_ref().map(|alias| &alias.name),
+            match derived_catalog_relation(factor) {
+                Some(relation) => relation,
+                None => return,
+            },
+        ),
+        _ => return,
     };
-    let Some(relation) = maintained_catalog_relation(name) else {
-        return;
-    };
-    let identifier = alias
-        .as_ref()
-        .map(|alias| &alias.name)
-        .or_else(|| match name.0.last() {
-            Some(ObjectNamePart::Identifier(identifier)) => Some(identifier),
-            _ => None,
-        });
     if let Some(identifier) = identifier {
         aliases.insert(identifier_key(identifier), relation);
     }
@@ -5013,6 +5057,11 @@ fn catalog_columns(relation: &str) -> &'static [(&'static str, PgTypeHint)] {
         ],
         "pg_index" => &[
             ("indexrelid", PgTypeHint::Oid),
+            ("indrelid", PgTypeHint::Oid),
+            ("indkey", PgTypeHint::Int2Vector),
+        ],
+        "derived_pg_attrdef" => &[("adrelid", PgTypeHint::Oid), ("def", PgTypeHint::Text)],
+        "derived_pg_index" => &[
             ("indrelid", PgTypeHint::Oid),
             ("indkey", PgTypeHint::Int2Vector),
         ],
@@ -5196,6 +5245,8 @@ fn catalog_column_names(relation: &str) -> &'static [&'static str] {
             "indisreplident",
             "indkey",
         ],
+        "derived_pg_attrdef" => &["adrelid", "adnum", "def"],
+        "derived_pg_index" => &["indrelid", "indkey", "indisunique"],
         "geometry_columns" => &[
             "f_table_catalog",
             "f_table_schema",
@@ -5321,8 +5372,12 @@ fn catalog_expression_hint(
             let relation = aliases.get(&identifier_key(&identifiers[0]))?;
             catalog_column_hint(relation, &identifiers[1])
         }
-        Expr::Identifier(column) if aliases.len() == 1 => {
-            catalog_column_hint(aliases.values().next()?, column)
+        Expr::Identifier(column) => {
+            let mut hints = aliases
+                .values()
+                .filter_map(|relation| catalog_column_hint(relation, column));
+            let hint = hints.next()?;
+            hints.next().is_none().then_some(hint)
         }
         Expr::Cast {
             expr,
@@ -7023,6 +7078,46 @@ mod tests {
             assert!(!validated.sql.contains("WHEN 90001"));
         }
 
+        for derived_catalog_query in [
+            "SELECT attrelid, attnum, pg_catalog.format_type(atttypid,atttypmod), \
+                    pg_catalog.col_description(attrelid,attnum), \
+                    pg_catalog.pg_get_expr(adbin,adrelid), atttypid, \
+                    attnotnull::int, indisunique::int, attidentity, attgenerated \
+             FROM pg_attribute \
+             LEFT OUTER JOIN pg_attrdef ON attrelid = adrelid AND attnum = adnum \
+             LEFT OUTER JOIN (SELECT DISTINCT indrelid, indkey, indisunique \
+                              FROM pg_index WHERE indisunique) uniq \
+               ON attrelid = indrelid AND attnum::text = indkey::text \
+             WHERE attrelid IN (100000)",
+            "SELECT a.attname, t.typname, a.attlen, \
+                    format_type(a.atttypid, a.atttypmod), a.attnotnull, def.def, \
+                    i.indisunique, descr.description, a.attgenerated \
+             FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid \
+             LEFT JOIN (SELECT adrelid, adnum, pg_get_expr(adbin, adrelid) AS def \
+                        FROM pg_attrdef) def \
+               ON def.adrelid = a.attrelid AND def.adnum = a.attnum \
+             LEFT JOIN (SELECT DISTINCT indrelid, indkey, indisunique \
+                        FROM pg_index WHERE indisunique) i \
+               ON i.indrelid = a.attrelid AND i.indkey[0] = a.attnum \
+                  AND i.indkey[1] IS NULL \
+             LEFT JOIN pg_description descr \
+               ON descr.objoid = a.attrelid \
+                  AND descr.classoid = 'pg_class'::regclass::oid \
+                  AND descr.objsubid = a.attnum \
+             WHERE a.attnum > 0 AND a.attrelid = 100000 ORDER BY a.attnum",
+        ] {
+            let validated = validate_statement_with_catalog_identity(
+                derived_catalog_query,
+                ProtocolMode::Extended,
+                true,
+                None,
+                None,
+            )
+            .unwrap_or_else(|error| panic!("derived catalog SQL: {error}"));
+            assert!(validated.sql.contains("quackgis_pg_catalog.pg_attribute"));
+            assert!(validated.sql.contains("quackgis_pg_catalog.pg_index"));
+        }
+
         for unsupported in [
             "SELECT relname FROM pg_catalog.pg_class",
             "SELECT relname FROM pg_class",
@@ -7037,6 +7132,9 @@ mod tests {
             "WITH pg_type AS (SELECT 1 AS oid) SELECT oid FROM pg_type",
             "SELECT t.typname FROM pg_type t WHERE EXISTS (SELECT 1 FROM quackgis.main.user_oids u WHERE u.oid = t.oid)",
             "SELECT d.oid FROM pg_type t CROSS JOIN LATERAL (SELECT t.*) d",
+            "SELECT d.oid FROM pg_type t JOIN (SELECT oid FROM pg_type) d ON true",
+            "SELECT d.def FROM pg_type t JOIN (SELECT adrelid, adnum, adbin AS def FROM pg_attrdef) d ON true",
+            "SELECT t.oid FROM pg_type t JOIN quackgis.main.user_oids u ON u.oid = t.oid",
             "SELECT pg_catalog.pg_type.oid FROM pg_catalog.pg_type",
             "SELECT t.\"TYPLEN\" FROM pg_type t",
             "SELECT oid FROM quackgis_pg_catalog.pg_type",

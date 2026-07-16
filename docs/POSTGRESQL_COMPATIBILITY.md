@@ -257,6 +257,19 @@ close or transaction end so an unfinished ADBC reader is not reused.
 Scroll/hold declarations, non-NDR `ST_AsBinary`, backward/absolute movement, and
 format changes on a live non-binary cursor fail closed.
 
+Catalog subqueries remain fail-closed except for two normalized, non-lateral
+derived projections required by the frozen clients: the QGIS/OGR empty-index
+projection over `pg_index`, and OGR's default-expression projection over
+`pg_attrdef`. Arbitrary derived tables, changed projection expressions, CTEs,
+set operations, lateral correlation, implicit join columns, and user/catalog
+mixing remain rejected. Actual pgwire against the pinned identity runtime now
+executes QGIS `attribute_structure` and OGR `column_structure` directly from the
+captured fixtures. It verifies PostgreSQL OID/name/char/text wire types,
+default/comment values, and NULL uniqueness from the truthfully empty `pg_index`;
+role and legacy filtering still removes hidden defaults, comments, and indexes.
+This does not claim primary/unique keys, richer index semantics, or authoritative
+geometry subtype/dimension/SRID metadata.
+
 ## Compatibility surfaces
 
 The profile grows in dependency order. A relation is supported only when its
@@ -749,8 +762,9 @@ The remaining clients were retried through current mutual TLS. In that older-ima
 run, psql 18.3 `\d+` stopped at unavailable `pg_class`, while OGR direct discovery
 reported the optional `pg_proc` failure and then stopped at `pg_class`. The native
 catalog contract now executes OGR's exact `pg_proc` PostGIS namespace lookup with
-four stable maintained routine identities; the pinned-image rerun and downstream
-COPY/no-FID work remain open. Exact offscreen QGIS 3.44.11 retries direct, no-FID,
+four stable maintained routine identities and its captured derived
+`column_structure` query. The pinned-image rerun and downstream COPY/no-FID work
+remain open. Exact offscreen QGIS 3.44.11 retries direct, no-FID,
 and copied-SQL layers. The pinned lane now executes its full layer privilege
 projection with PostgreSQL `bool` `pg_is_in_recovery=false`, while all startup
 modes advertise PostgreSQL 18.4 and `version()`/`SHOW server_version[_num]` agree.
@@ -759,8 +773,10 @@ Simple and extended idle transaction end, failed `COMMIT`-as-rollback, subsequen
 client-name branch. Native actual-pgwire coverage now executes the exact captured
 QGIS read-only/binary cursor start, `FETCH FORWARD 2000`, and close/commit shapes;
 it verifies binary raw WKB/BIGINT/text/NULL values, close/rollback, failed-declare
-status, and read-only `25006` cleanup. Broader catalog shapes, the pinned package
-rerun, and full headless QGIS qualification remain C6 blockers.
+status, and read-only `25006` cleanup. The pinned identity lane also executes the
+captured QGIS `attribute_structure` query with exact default/comment/empty-index
+semantics. Broader catalog shapes, the pinned package rerun, and full headless
+QGIS qualification remain C6 blockers.
 
 ### H1 — migrate and package role-aware REST
 

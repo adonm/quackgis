@@ -36,6 +36,10 @@ reconnect behavior against a fresh local DuckLake worker. Run it with
   RowDescription/type evidence from the digest-pinned PostgreSQL 18.4 oracle.
   `just project-contract-check` validates both files together; they are target
   contracts, not QuackGIS implementation claims.
+  The profile now also records two source-executable captured query families:
+  QGIS `attribute_structure` and OGR `column_structure`. The pinned identity test
+  reads their SQL from the trace fixtures and proves exact wire types and rows;
+  all other trace statements remain targets unless separately named as evidence.
 - `fixtures/ogr_3_11_5_postgresql18_trace.json` is a credential-free normalized
   trace from the exact pinned OGR image against digest-pinned PostgreSQL
   18.4/PostGIS. It freezes copied-point discovery SQL and observed results; it does

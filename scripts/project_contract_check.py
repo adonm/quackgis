@@ -279,6 +279,10 @@ def check_postgresql_profile(errors: list[str]) -> None:
     trace_namespace_query = ogr_query_by_id.get("find_postgis_namespace", {}).get("sql")
     if profile_namespace_query != trace_namespace_query:
         errors.append("PostgreSQL profile find_postgis_namespace SQL drifted from OGR trace")
+    if query_by_id.get("column_structure", {}).get("sql") != ogr_query_by_id.get(
+        "column_structure", {}
+    ).get("sql"):
+        errors.append("PostgreSQL profile column_structure SQL drifted from OGR trace")
 
     if psql_trace.get("trace_id") != "psql-18.3-postgresql18-describe-spatial-table-v1":
         errors.append("psql trace_id is missing or unsupported")
@@ -355,6 +359,11 @@ def check_postgresql_profile(errors: list[str]) -> None:
     missing_qgis_queries = sorted(required_qgis_queries - set(qgis_query_ids))
     if missing_qgis_queries:
         errors.append(f"QGIS trace missing required query families: {missing_qgis_queries}")
+    qgis_query_by_id = {query.get("id"): query for query in qgis_queries}
+    if query_by_id.get("attribute_structure", {}).get("sql") != qgis_query_by_id.get(
+        "attribute_structure", {}
+    ).get("sql"):
+        errors.append("PostgreSQL profile attribute_structure SQL drifted from QGIS trace")
 
 
 def main() -> int:
