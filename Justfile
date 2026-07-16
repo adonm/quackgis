@@ -486,6 +486,14 @@ rest-postgrest-smoke driver=duckdb_adbc_driver:
     HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" \
       cargo test -p quackgis-rest tests::actual_postgrest_compat_and_quackgis_extensions -- --ignored --exact
 
+# Prove passwordless REST connects only to the loopback edge-preauthenticated backend.
+rest-edge-preauth-smoke driver=duckdb_adbc_driver:
+    @set -eu; driver_arg='{{driver}}'; driver_arg="${driver_arg#driver=}"; \
+    if [ ! -f "$driver_arg" ]; then echo 'DuckDB ADBC driver is missing; run `mise run duckdb-bootstrap`' >&2; exit 2; fi; \
+    driver_arg="$(realpath "$driver_arg")"; duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; \
+    HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" \
+      cargo test -p quackgis-rest tests::edge_preauthenticated_rest_connector_uses_no_database_password -- --ignored --exact
+
 # Exercise REST cache invalidation through shared development catalog/security epochs.
 rest-shared-epoch-smoke extension=dev_ducklake_extension sha256=dev_ducklake_extension_sha256 driver=duckdb_adbc_driver:
     @set -eu; driver_arg='{{driver}}'; driver_arg="${driver_arg#driver=}"; extension_arg='{{extension}}'; extension_arg="${extension_arg#extension=}"; sha_arg='{{sha256}}'; sha_arg="${sha_arg#sha256=}"; \

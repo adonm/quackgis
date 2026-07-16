@@ -26,7 +26,7 @@ use rustls::RootCertStore;
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock};
-use tokio_postgres::config::SslMode;
+use tokio_postgres::config::{Host, SslMode};
 use tokio_postgres::error::SqlState;
 use tokio_postgres::types::{ToSql, Type};
 use tokio_postgres::{Client, Config, NoTls, Row};
@@ -56,7 +56,14 @@ struct Cli {
     #[arg(long, env = "QUACKGIS_REST_DATABASE_CA")]
     database_ca: Option<PathBuf>,
     #[arg(long, env = "QUACKGIS_REST_DATABASE_PASSWORD_FILE")]
-    database_password_file: PathBuf,
+    database_password_file: Option<PathBuf>,
+    #[arg(
+        long,
+        env = "QUACKGIS_REST_DATABASE_AUTH_MODE",
+        value_enum,
+        default_value_t = DatabaseAuthMode::PasswordFile
+    )]
+    database_auth_mode: DatabaseAuthMode,
     #[arg(long, env = "QUACKGIS_REST_JWT_SECRET_FILE")]
     jwt_secret_file: PathBuf,
     #[arg(long, env = "QUACKGIS_REST_JWT_ISSUER")]
@@ -73,6 +80,12 @@ struct Cli {
         default_value_t = 30_000
     )]
     statement_timeout_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+enum DatabaseAuthMode {
+    PasswordFile,
+    EdgePreauthenticated,
 }
 
 struct AppState {
@@ -92,7 +105,12 @@ struct DatabaseConnection {
 struct DatabaseConnector {
     database_url: String,
     ca: Option<PathBuf>,
-    password_file: PathBuf,
+    authentication: DatabaseAuthentication,
+}
+
+enum DatabaseAuthentication {
+    PasswordFile(PathBuf),
+    EdgePreauthenticated,
 }
 
 struct ActiveDatabaseClient {
@@ -165,6 +183,7 @@ async fn main() -> Result<()> {
         cli.database_url,
         cli.database_ca,
         cli.database_password_file,
+        cli.database_auth_mode,
     )
     .await?;
     let mut caches = HashMap::new();
@@ -224,9 +243,17 @@ fn build_router(state: Arc<AppState>) -> Router {
 async fn connect_database(
     database_url: &str,
     ca: Option<&Path>,
-    password: &[u8],
+    password: Option<&[u8]>,
+    edge_preauthenticated: bool,
 ) -> Result<Client> {
     let mut config = database_config(database_url, password)?;
+    if edge_preauthenticated {
+        if ca.is_some() {
+            bail!("edge-preauthenticated database mode does not accept a database CA");
+        }
+        validate_loopback_database_hosts(&config)?;
+        config.ssl_mode(SslMode::Disable);
+    }
     if let Some(ca) = ca {
         config.ssl_mode(SslMode::Require);
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -267,25 +294,60 @@ async fn connect_database(
     }
 }
 
-fn database_config(database_url: &str, password: &[u8]) -> Result<Config> {
+fn database_config(database_url: &str, password: Option<&[u8]>) -> Result<Config> {
     let mut config: Config = database_url.parse().context("parse database URL")?;
     if config.get_password().is_some() {
         bail!("database URL must not contain a password; use --database-password-file");
     }
-    config.password(password);
+    if let Some(password) = password {
+        config.password(password);
+    }
     Ok(config)
+}
+
+fn validate_loopback_database_hosts(config: &Config) -> Result<()> {
+    if config.get_hosts().is_empty()
+        || config.get_hosts().iter().any(|host| match host {
+            Host::Tcp(host) => !host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback()),
+            #[cfg(unix)]
+            Host::Unix(_) => true,
+        })
+    {
+        bail!("edge-preauthenticated database mode requires literal loopback TCP hosts");
+    }
+    Ok(())
 }
 
 impl DatabaseConnection {
     async fn new(
         database_url: String,
         ca: Option<PathBuf>,
-        password_file: PathBuf,
+        password_file: Option<PathBuf>,
+        auth_mode: DatabaseAuthMode,
     ) -> Result<Self> {
+        let authentication = match auth_mode {
+            DatabaseAuthMode::PasswordFile => DatabaseAuthentication::PasswordFile(
+                password_file.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "--database-password-file is required with --database-auth-mode=password-file"
+                    )
+                })?,
+            ),
+            DatabaseAuthMode::EdgePreauthenticated => {
+                if password_file.is_some() {
+                    bail!(
+                        "--database-password-file is not accepted with --database-auth-mode=edge-preauthenticated"
+                    );
+                }
+                DatabaseAuthentication::EdgePreauthenticated
+            }
+        };
         let connector = DatabaseConnector {
             database_url,
             ca,
-            password_file,
+            authentication,
         };
         let credential = connector.credential()?;
         let client = connector.connect(&credential).await?;
@@ -460,11 +522,27 @@ impl DatabaseConnection {
 
 impl DatabaseConnector {
     fn credential(&self) -> Result<DatabaseCredential> {
-        read_database_password(&self.password_file)
+        match &self.authentication {
+            DatabaseAuthentication::PasswordFile(path) => read_database_password(path),
+            DatabaseAuthentication::EdgePreauthenticated => Ok(DatabaseCredential {
+                password: Vec::new(),
+                revision: [0; 32],
+            }),
+        }
     }
 
     async fn connect(&self, credential: &DatabaseCredential) -> Result<Client> {
-        connect_database(&self.database_url, self.ca.as_deref(), &credential.password).await
+        let edge_preauthenticated = matches!(
+            self.authentication,
+            DatabaseAuthentication::EdgePreauthenticated
+        );
+        connect_database(
+            &self.database_url,
+            self.ca.as_deref(),
+            (!edge_preauthenticated).then_some(credential.password.as_slice()),
+            edge_preauthenticated,
+        )
+        .await
     }
 }
 
@@ -1162,6 +1240,22 @@ async fn method_or_route_not_found() -> Response {
 }
 
 async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
+        match terminate {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = terminate.recv() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
     let _ = tokio::signal::ctrl_c().await;
 }
 
@@ -1275,10 +1369,19 @@ mod tests {
         assert!(
             database_config(
                 "postgres://authenticator:embedded@127.0.0.1/quackgis",
-                b"database-secret"
+                Some(b"database-secret")
             )
             .is_err()
         );
+        let loopback = database_config("postgres://authenticator@127.0.0.1/quackgis", None)
+            .expect("loopback database config");
+        validate_loopback_database_hosts(&loopback).expect("literal loopback host");
+        let named = database_config("postgres://authenticator@localhost/quackgis", None)
+            .expect("named database config");
+        assert!(validate_loopback_database_hosts(&named).is_err());
+        let remote = database_config("postgres://authenticator@192.0.2.1/quackgis", None)
+            .expect("remote database config");
+        assert!(validate_loopback_database_hosts(&remote).is_err());
         write_secret_file(&password_file, b"invalid\ncontrol\n");
         assert!(read_database_password(&password_file).is_err());
 
@@ -1318,6 +1421,113 @@ mod tests {
             true,
         )
         .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the pinned DuckDB ADBC runtime"]
+    async fn edge_preauthenticated_rest_connector_uses_no_database_password() {
+        let driver_path = std::env::var_os("QUACKGIS_DUCKDB_ADBC_DRIVER")
+            .expect("set QUACKGIS_DUCKDB_ADBC_DRIVER");
+        let temp = tempfile::tempdir().expect("edge REST tempdir");
+        let data_path = temp.path().join("data");
+        std::fs::create_dir(&data_path).expect("edge REST data path");
+        let storage = Arc::new(
+            DuckDbAdbcStorage::open(DuckDbAdbcConfig {
+                driver_path: driver_path.into(),
+                database_uri: ":memory:".to_owned(),
+                ducklake_uri: format!(
+                    "ducklake:{}",
+                    temp.path().join("catalog.ducklake").display()
+                ),
+                catalog_name: "quackgis".to_owned(),
+                data_path: data_path.display().to_string(),
+                extension_policy: ExtensionPolicy::LoadOnly,
+            })
+            .expect("edge REST storage"),
+        );
+        storage
+            .execute_update(
+                "CREATE TABLE quackgis.main.edge_rest_points(id INTEGER, name VARCHAR); \
+                 INSERT INTO quackgis.main.edge_rest_points VALUES (1, 'edge')",
+            )
+            .expect("edge REST fixture");
+        let roles = RoleCatalog::from_json(
+            r#"{
+              "roles": [
+                {"oid": 100001, "name": "authenticator", "login": true, "inherit": false},
+                {"oid": 100002, "name": "rest_reader"}
+              ],
+              "memberships": [
+                {"oid": 200001, "role": "rest_reader", "member": "authenticator",
+                 "inherit_option": false, "set_option": true}
+              ],
+              "schema_grants": [
+                {"schema": "public", "role": "PUBLIC", "privileges": ["USAGE"]}
+              ],
+              "table_owners": [
+                {"table": "edge_rest_points", "role": "rest_reader"}
+              ]
+            }"#,
+        )
+        .expect("edge REST role catalog");
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let options = ServerOptions::new()
+            .with_host("127.0.0.1".to_owned())
+            .with_port(port);
+        let server_storage = Arc::clone(&storage);
+        let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+        let server = tokio::spawn(async move {
+            serve_duckdb_on_listener_until(
+                server_storage,
+                listener,
+                &options,
+                AuthConfig::edge_preauthenticated(roles).unwrap(),
+                shutdown_rx,
+            )
+            .await
+        });
+        let database = DatabaseConnection::new(
+            format!("postgres://authenticator@127.0.0.1:{port}/quackgis"),
+            None,
+            None,
+            DatabaseAuthMode::EdgePreauthenticated,
+        )
+        .await
+        .expect("passwordless edge REST connection");
+        database.ready().await.expect("edge REST database ready");
+        let exposed_tables = parse_tables("edge_rest_points").unwrap();
+        let discovered = database
+            .discover_schema(&exposed_tables, "rest_reader")
+            .await
+            .expect("edge REST schema");
+        assert!(
+            discovered
+                .schema
+                .find_table("edge_rest_points", &["public".to_owned()])
+                .is_some()
+        );
+        let identity = RequestIdentity {
+            role: "rest_reader".to_owned(),
+            claims: "{}".to_owned(),
+        };
+        let body = database
+            .execute_read(
+                &identity,
+                "SELECT CAST(name AS VARCHAR) FROM quackgis.main.edge_rest_points WHERE id = 1",
+                &[],
+                &[],
+            )
+            .await
+            .expect("edge REST role read");
+        assert_eq!(body, "edge");
+        database.disconnect().await;
+        shutdown.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("edge REST server shutdown")
+            .expect("edge REST server join")
+            .expect("edge REST server result");
     }
 
     async fn actual_postgrest_compat_with_policy(
@@ -1405,7 +1615,8 @@ mod tests {
         let database = DatabaseConnection::new(
             format!("postgres://authenticator@127.0.0.1:{pg_port}/quackgis"),
             None,
-            database_password_file.clone(),
+            Some(database_password_file.clone()),
+            DatabaseAuthMode::PasswordFile,
         )
         .await
         .expect("REST pgwire connection");
@@ -1679,7 +1890,8 @@ mod tests {
         let old_database_password = connect_database(
             &format!("postgres://authenticator@127.0.0.1:{pg_port}/quackgis"),
             None,
-            b"authenticator-secret",
+            Some(b"authenticator-secret"),
+            false,
         )
         .await;
         assert!(old_database_password.is_err());

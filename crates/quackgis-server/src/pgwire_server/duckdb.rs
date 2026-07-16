@@ -89,6 +89,7 @@ pub async fn serve_duckdb_on_listener(
     options: &ServerOptions,
     auth: AuthConfig,
 ) -> Result<(), std::io::Error> {
+    validate_auth_listener(&listener, &auth)?;
     let factory = Arc::new(DuckDbHandlerFactory::new(storage, auth, options)?);
     serve_with_handlers_on_listener(factory, listener, options).await
 }
@@ -99,9 +100,10 @@ pub async fn serve_duckdb_until(
     auth: AuthConfig,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), std::io::Error> {
-    let factory = Arc::new(DuckDbHandlerFactory::new(storage, auth, options)?);
     let address = format!("{}:{}", options.host, options.port);
     let listener = tokio::net::TcpListener::bind(address).await?;
+    validate_auth_listener(&listener, &auth)?;
+    let factory = Arc::new(DuckDbHandlerFactory::new(storage, auth, options)?);
     serve_with_handlers_on_listener_until(factory, listener, options, shutdown).await
 }
 
@@ -112,6 +114,7 @@ pub async fn serve_duckdb_on_listener_until(
     auth: AuthConfig,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), std::io::Error> {
+    validate_auth_listener(&listener, &auth)?;
     let factory = Arc::new(DuckDbHandlerFactory::new(storage, auth, options)?);
     serve_with_handlers_on_listener_until(factory, listener, options, shutdown).await
 }
@@ -129,6 +132,17 @@ impl DuckDbHandlerFactory {
         auth: AuthConfig,
         options: &ServerOptions,
     ) -> Result<Self, std::io::Error> {
+        if auth.mode() == AuthMode::EdgePreauthenticated
+            && !options
+                .host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|host| host.is_loopback())
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "edge-preauthenticated pgwire must bind a literal loopback address",
+            ));
+        }
         if let Some(catalog) = auth.role_catalog() {
             storage
                 .install_role_catalog(catalog, &auth)
@@ -169,6 +183,12 @@ impl DuckDbHandlerFactory {
             AuthMode::Password => super::StartupAuthHandler::Password(Box::new(
                 super::PerConnectionScramStartupHandler::new(auth.clone(), Arc::clone(&manager)),
             )),
+            AuthMode::EdgePreauthenticated => super::StartupAuthHandler::EdgePreauthenticated {
+                handler: SimpleStartupHandler {
+                    connection_manager: Arc::clone(&manager),
+                },
+                auth: auth.clone(),
+            },
         };
         let startup = QuackGisStartupHandler {
             auth: startup_auth,
@@ -184,6 +204,19 @@ impl DuckDbHandlerFactory {
             copy: Arc::new(DuckDbCopyHandler),
         })
     }
+}
+
+fn validate_auth_listener(
+    listener: &tokio::net::TcpListener,
+    auth: &AuthConfig,
+) -> Result<(), std::io::Error> {
+    if auth.mode() == AuthMode::EdgePreauthenticated && !listener.local_addr()?.ip().is_loopback() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "edge-preauthenticated pgwire must bind a loopback address",
+        ));
+    }
+    Ok(())
 }
 
 struct DuckDbCancelHandler {
@@ -6998,6 +7031,19 @@ mod tests {
                 "unsupported epoch shape: {sql}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn edge_preauthentication_rejects_non_loopback_listener() {
+        let roles = crate::role::RoleCatalog::from_json(
+            r#"{"roles":[{"oid":100001,"name":"authenticator","login":true}]}"#,
+        )
+        .expect("preauthenticated role catalog");
+        let auth = AuthConfig::edge_preauthenticated(roles).expect("preauthenticated auth");
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:0")
+            .await
+            .expect("wildcard listener");
+        assert!(validate_auth_listener(&listener, &auth).is_err());
     }
 
     #[test]

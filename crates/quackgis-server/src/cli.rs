@@ -5,10 +5,11 @@ use clap::{Parser, ValueEnum};
 
 use crate::pgwire_server::DEFAULT_PGWIRE_MAX_FRAME_BYTES;
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum, Eq, PartialEq)]
 pub enum CliAuthMode {
     Trust,
     Password,
+    EdgePreauthenticated,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, Eq, PartialEq)]

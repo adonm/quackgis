@@ -19,6 +19,7 @@ const METADATA_USER: &str = "user";
 pub enum AuthMode {
     Trust,
     Password,
+    EdgePreauthenticated,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -193,6 +194,22 @@ impl AuthConfig {
         })
     }
 
+    pub fn edge_preauthenticated(role_catalog: RoleCatalog) -> Result<Self> {
+        if !role_catalog.roles().iter().any(|role| role.login) {
+            return Err(anyhow!(
+                "edge-preauthenticated role configuration requires at least one LOGIN role"
+            ));
+        }
+        Ok(Self {
+            mode: AuthMode::EdgePreauthenticated,
+            users: HashMap::new(),
+            trust_write_policy: TablePolicy::All,
+            read_policy: TablePolicy::All,
+            maintenance_user: None,
+            role_catalog: Some(Arc::new(role_catalog)),
+        })
+    }
+
     pub fn with_role_catalog(mut self, role_catalog: RoleCatalog) -> Result<Self> {
         if self.mode != AuthMode::Password {
             return Err(anyhow!(
@@ -226,12 +243,15 @@ impl AuthConfig {
                 "maintenance user cannot be empty or contain surrounding whitespace/control characters"
             ));
         }
-        if self.mode == AuthMode::Password
-            && !self
+        let valid_maintenance_user = match self.mode {
+            AuthMode::Trust => true,
+            AuthMode::Password => self
                 .users
                 .get(&user)
-                .is_some_and(|configured| configured.role == AccessRole::ReadWrite)
-        {
+                .is_some_and(|configured| configured.role == AccessRole::ReadWrite),
+            AuthMode::EdgePreauthenticated => self.allows_preauthenticated_login(&user),
+        };
+        if !valid_maintenance_user {
             return Err(anyhow!(
                 "maintenance user must name the configured readwrite identity"
             ));
@@ -253,6 +273,7 @@ impl AuthConfig {
                     }
                 }
             }
+            AuthMode::EdgePreauthenticated => self.trust_write_policy = policy,
         }
         self
     }
@@ -286,6 +307,9 @@ impl AuthConfig {
                 .ok_or_else(|| {
                     anyhow!("authenticated user is missing from password configuration")
                 })?,
+            AuthMode::EdgePreauthenticated => name
+                .filter(|name| self.allows_preauthenticated_login(name))
+                .ok_or_else(|| anyhow!("preauthenticated user is not a configured LOGIN role"))?,
         };
         RoleSessionState::new(session_user.to_owned(), self.role_catalog.clone())
     }
@@ -305,6 +329,13 @@ impl AuthConfig {
                 .and_then(|name| self.users.get(name))
                 .map(|user| user.role)
                 .unwrap_or(AccessRole::ReadOnly),
+            AuthMode::EdgePreauthenticated => {
+                if name.is_some_and(|name| self.allows_preauthenticated_login(name)) {
+                    AccessRole::ReadWrite
+                } else {
+                    AccessRole::ReadOnly
+                }
+            }
         }
     }
 
@@ -323,6 +354,10 @@ impl AuthConfig {
                 .is_some_and(|user| {
                     user.role == AccessRole::ReadWrite && user.write_policy.allows(target)
                 }),
+            AuthMode::EdgePreauthenticated => {
+                name.is_some_and(|name| self.allows_preauthenticated_login(name))
+                    && self.trust_write_policy.allows(target)
+            }
         }
     }
 
@@ -330,8 +365,20 @@ impl AuthConfig {
         let known_identity = match self.mode {
             AuthMode::Trust => true,
             AuthMode::Password => name.is_some_and(|name| self.users.contains_key(name)),
+            AuthMode::EdgePreauthenticated => {
+                name.is_some_and(|name| self.allows_preauthenticated_login(name))
+            }
         };
         known_identity && self.read_policy.allows(Some(target))
+    }
+
+    pub fn allows_preauthenticated_login(&self, name: &str) -> bool {
+        self.mode == AuthMode::EdgePreauthenticated
+            && self
+                .role_catalog
+                .as_ref()
+                .and_then(|catalog| catalog.role(name))
+                .is_some_and(|role| role.login)
     }
 
     pub fn allows_maintenance(&self, name: Option<&str>, target: (&str, &str)) -> bool {

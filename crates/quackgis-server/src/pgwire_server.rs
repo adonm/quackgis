@@ -478,6 +478,10 @@ impl StartupHandler for PerConnectionScramStartupHandler {
 enum StartupAuthHandler {
     Trust(SimpleStartupHandler),
     Password(Box<PerConnectionScramStartupHandler>),
+    EdgePreauthenticated {
+        handler: SimpleStartupHandler,
+        auth: AuthConfig,
+    },
 }
 
 struct QuackGisStartupHandler {
@@ -510,6 +514,22 @@ impl StartupHandler for QuackGisStartupHandler {
         match &self.auth {
             StartupAuthHandler::Trust(handler) => handler.on_startup(client, message).await,
             StartupAuthHandler::Password(handler) => handler.on_startup(client, message).await,
+            StartupAuthHandler::EdgePreauthenticated { handler, auth } => {
+                if let pgwire::messages::PgWireFrontendMessage::Startup(startup) = &message {
+                    let user = startup.parameters.get("user").map(String::as_str);
+                    if !user.is_some_and(|user| auth.allows_preauthenticated_login(user)) {
+                        return Err(pgwire::error::PgWireError::UserError(Box::new(
+                            ErrorInfo::new(
+                                "FATAL".to_owned(),
+                                "28000".to_owned(),
+                                "edge-preauthenticated user is not a configured LOGIN role"
+                                    .to_owned(),
+                            ),
+                        )));
+                    }
+                }
+                handler.on_startup(client, message).await
+            }
         }
     }
 }

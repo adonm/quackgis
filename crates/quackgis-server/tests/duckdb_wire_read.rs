@@ -9,14 +9,20 @@ use arrow_array::{Array, Int32Array, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt, stream};
+use quackgis_server::auth::AuthConfig;
 use quackgis_server::duckdb_adbc_storage::{DuckDbAdbcConfig, DuckDbAdbcStorage, ExtensionPolicy};
 use quackgis_server::pgwire_server::ServerOptions;
+use quackgis_server::role::RoleCatalog;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 mod support;
+#[path = "support/runtime.rs"]
+#[allow(dead_code)]
+mod test_runtime;
 use support::evidence::{EvidenceEnvelope, EvidenceLevel, EvidenceProfile, ExecutionEnvironment};
+use test_runtime::TestRuntime;
 
 #[derive(Debug, Eq, PartialEq)]
 struct GeometryBytes(Vec<u8>);
@@ -35,6 +41,115 @@ impl<'a> tokio_postgres::types::FromSql<'a> for GeometryBytes {
 }
 
 struct ChildGuard(std::process::Child);
+
+#[tokio::test]
+#[ignore = "requires the pinned DuckDB ADBC runtime"]
+async fn edge_preauthentication_requires_configured_login_and_role_grants() {
+    let roles = RoleCatalog::from_json(
+        r#"{
+          "roles": [
+            {"oid": 100001, "name": "postgres", "login": true},
+            {"oid": 100002, "name": "authenticator", "login": true, "inherit": false},
+            {"oid": 100003, "name": "rest_reader"}
+          ],
+          "memberships": [
+            {"oid": 200001, "role": "rest_reader", "member": "authenticator",
+             "inherit_option": false, "set_option": true}
+          ],
+          "schema_grants": [
+            {"schema": "public", "role": "PUBLIC", "privileges": ["USAGE"]}
+          ],
+          "table_owners": [
+            {"table": "preauthenticated_points", "role": "postgres"}
+          ],
+          "table_grants": [
+            {"table": "preauthenticated_points", "role": "rest_reader",
+             "privileges": ["SELECT"]}
+          ]
+        }"#,
+    )
+    .expect("edge-preauthenticated role catalog");
+    let runtime = TestRuntime::start_with_auth(
+        ServerOptions::new().with_max_connections(8),
+        AuthConfig::edge_preauthenticated(roles).expect("edge-preauthenticated auth"),
+    )
+    .await;
+    let database_url = |user: &str| {
+        format!(
+            "host=127.0.0.1 port={} user={user} dbname=quackgis",
+            runtime.port()
+        )
+    };
+    let (owner, owner_connection) =
+        tokio_postgres::connect(&database_url("postgres"), tokio_postgres::NoTls)
+            .await
+            .expect("preauthenticated owner");
+    let owner_connection = tokio::spawn(owner_connection);
+    owner
+        .batch_execute("CREATE TABLE quackgis.main.preauthenticated_points(id INTEGER)")
+        .await
+        .expect("preauthenticated owner table");
+    owner
+        .batch_execute("INSERT INTO quackgis.main.preauthenticated_points VALUES (1)")
+        .await
+        .expect("preauthenticated owner row");
+
+    let (mut authenticator, authenticator_connection) =
+        tokio_postgres::connect(&database_url("authenticator"), tokio_postgres::NoTls)
+            .await
+            .expect("preauthenticated authenticator");
+    let authenticator_connection = tokio::spawn(authenticator_connection);
+    let denied = authenticator
+        .query_one(
+            "SELECT count(*) FROM quackgis.main.preauthenticated_points",
+            &[],
+        )
+        .await
+        .expect_err("authenticator has no inherited table privilege");
+    assert_eq!(
+        denied.as_db_error().expect("database denial").code().code(),
+        "42501"
+    );
+    let transaction = authenticator.transaction().await.unwrap();
+    transaction
+        .batch_execute("SET LOCAL ROLE rest_reader")
+        .await
+        .expect("assume configured REST role");
+    assert_eq!(
+        transaction
+            .query_one(
+                "SELECT count(*)::BIGINT FROM quackgis.main.preauthenticated_points",
+                &[]
+            )
+            .await
+            .expect("role-authorized read")
+            .get::<_, i64>(0),
+        1
+    );
+    transaction.commit().await.unwrap();
+
+    for denied_user in ["rest_reader", "unknown_login"] {
+        let denied = match tokio_postgres::connect(
+            &database_url(denied_user),
+            tokio_postgres::NoTls,
+        )
+        .await
+        {
+            Ok(_) => panic!("unknown or NOLOGIN user reached AuthenticationOk"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            denied
+                .as_db_error()
+                .expect("authentication denial")
+                .code()
+                .code(),
+            "28000"
+        );
+    }
+    authenticator_connection.abort();
+    owner_connection.abort();
+}
 
 fn first_i64(batch: &RecordBatch, column: usize) -> i64 {
     batch

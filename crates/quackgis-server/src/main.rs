@@ -70,6 +70,31 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    if cli.auth_mode == CliAuthMode::EdgePreauthenticated {
+        let host = cli.host.parse::<std::net::IpAddr>().map_err(|_| {
+            anyhow::anyhow!("--auth-mode=edge-preauthenticated requires a literal loopback --host")
+        })?;
+        if !host.is_loopback() {
+            anyhow::bail!("--auth-mode=edge-preauthenticated requires a literal loopback --host");
+        }
+        if cli.readwrite_password.is_some() || cli.readonly_password.is_some() {
+            anyhow::bail!(
+                "password settings are not accepted with --auth-mode=edge-preauthenticated"
+            );
+        }
+    }
+    let role_catalog = if let Some(path) = cli.role_config.as_deref() {
+        let metadata = std::fs::metadata(path)?;
+        if !metadata.is_file() || metadata.len() > 1_048_576 {
+            anyhow::bail!(
+                "--role-config must name a regular JSON file no larger than 1048576 bytes"
+            );
+        }
+        let raw = std::fs::read_to_string(path)?;
+        Some(RoleCatalog::from_json(&raw)?)
+    } else {
+        None
+    };
     let mut auth = match cli.auth_mode {
         CliAuthMode::Trust => AuthConfig::trust(),
         CliAuthMode::Password => AuthConfig::password(
@@ -81,6 +106,11 @@ async fn main() -> anyhow::Result<()> {
                 .clone()
                 .map(|password| (cli.readonly_user.clone(), password)),
         )?,
+        CliAuthMode::EdgePreauthenticated => {
+            AuthConfig::edge_preauthenticated(role_catalog.clone().ok_or_else(|| {
+                anyhow::anyhow!("--role-config is required with --auth-mode=edge-preauthenticated")
+            })?)?
+        }
     };
     if let Some(raw) = cli.write_allowlist.as_deref() {
         auth = auth.with_readwrite_allowlist(parse_write_allowlist(raw)?);
@@ -91,15 +121,10 @@ async fn main() -> anyhow::Result<()> {
     if let Some(user) = cli.maintenance_user.as_deref() {
         auth = auth.with_maintenance_user(user)?;
     }
-    if let Some(path) = cli.role_config.as_deref() {
-        let metadata = std::fs::metadata(path)?;
-        if !metadata.is_file() || metadata.len() > 1_048_576 {
-            anyhow::bail!(
-                "--role-config must name a regular JSON file no larger than 1048576 bytes"
-            );
-        }
-        let raw = std::fs::read_to_string(path)?;
-        auth = auth.with_role_catalog(RoleCatalog::from_json(&raw)?)?;
+    if cli.auth_mode != CliAuthMode::EdgePreauthenticated
+        && let Some(role_catalog) = role_catalog
+    {
+        auth = auth.with_role_catalog(role_catalog)?;
     }
 
     let driver_path = cli.duckdb_driver.clone().ok_or_else(|| {
@@ -225,6 +250,7 @@ async fn main() -> anyhow::Result<()> {
         match auth.mode() {
             AuthMode::Trust => "trust auth (dev mode)",
             AuthMode::Password => "SCRAM password auth",
+            AuthMode::EdgePreauthenticated => "loopback edge-preauthenticated auth",
         },
         if development_ducklake {
             "checksum-pinned-development-DuckLake"
