@@ -38,6 +38,7 @@ const CANCEL_REQUEST_CODE: u32 = 80_877_102;
 const SSL_REQUEST_CODE: u32 = 80_877_103;
 const GSSENC_REQUEST_CODE: u32 = 80_877_104;
 const LOCAL_NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(10);
+const EDGE_FIRST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(3);
 const SERVICE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub async fn bind_endpoint(
@@ -867,6 +868,22 @@ async fn read_encryption_request(socket: &mut TcpStream) -> Result<InitialPacket
 }
 
 async fn forward_local_stream<S>(
+    socket: S,
+    initial: Vec<u8>,
+    connector: ClientConnector,
+    session: Arc<tokio::sync::Mutex<Option<EdgeSession>>>,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let result = forward_local_stream_once(socket, initial, connector, Arc::clone(&session)).await;
+    if result.is_err() {
+        session.lock().await.take();
+    }
+    result
+}
+
+async fn forward_local_stream_once<S>(
     mut socket: S,
     mut initial: Vec<u8>,
     connector: ClientConnector,
@@ -900,8 +917,9 @@ where
         match packet_kind {
             InitialPacketKind::Ssl | InitialPacketKind::GssEnc => {
                 let mut denied = [0_u8; 1];
-                recv.read_exact(&mut denied)
+                tokio::time::timeout(EDGE_FIRST_RESPONSE_TIMEOUT, recv.read_exact(&mut denied))
                     .await
+                    .context("worker nested encryption response timed out")?
                     .map_err(|error| anyhow!("cannot read nested encryption denial: {error}"))?;
                 if denied != [b'N'] {
                     bail!("worker returned an invalid nested encryption response");
@@ -912,7 +930,12 @@ where
                 initial = read_pgwire_packet(&mut socket).await?;
             }
             InitialPacketKind::Startup => {
-                let first_response = read_backend_frame(&mut recv).await?;
+                let first_response = tokio::time::timeout(
+                    EDGE_FIRST_RESPONSE_TIMEOUT,
+                    read_backend_frame(&mut recv),
+                )
+                .await
+                .context("worker authentication response timed out")??;
                 validate_backend_authentication(&first_response)?;
                 edge.metrics
                     .record_latency_sensitive(Direction::Downstream, first_response.len());
@@ -922,10 +945,11 @@ where
             InitialPacketKind::Cancellation => {
                 send.finish()
                     .map_err(|error| anyhow!("cannot finish cancellation stream: {error}"))?;
-                let response = recv
-                    .read_to_end(1)
-                    .await
-                    .map_err(|error| anyhow!("cannot finish cancellation response: {error}"))?;
+                let response =
+                    tokio::time::timeout(EDGE_FIRST_RESPONSE_TIMEOUT, recv.read_to_end(1))
+                        .await
+                        .context("worker cancellation response timed out")?
+                        .map_err(|error| anyhow!("cannot finish cancellation response: {error}"))?;
                 if !response.is_empty() {
                     bail!("worker returned unexpected cancellation bytes");
                 }
