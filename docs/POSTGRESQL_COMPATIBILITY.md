@@ -75,7 +75,9 @@ The current runtime has a bounded compatibility contract:
 The checksum-pinned development identity lane additionally provides stable
 user-object relation/attribute identity and RowDescription origins. That lane is
 not release-supported until the upstream identity API ships in a signed bundle.
-Spatial metadata, key/index semantics, and role-aware OpenAPI remain incomplete.
+Authoritative spatial metadata and key/index semantics remain incomplete.
+Role-aware REST/OpenAPI now passes at the direct-pgwire preview boundary, while
+automatic epoch invalidation and packaged replicas remain incomplete.
 The development lane covers defaults/comments and DuckLake's only supported
 constraint (`NOT NULL`), while publishing an empty index catalog rather than
 inventing primary/unique identity; this is not a broad PostgreSQL catalog claim.

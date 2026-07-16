@@ -93,16 +93,18 @@ qualification remain open.
 TLS remains optional for local development. Set `QUACKGIS_TLS_MODE=required` with
 `QUACKGIS_TLS_CERT` and `QUACKGIS_TLS_KEY` to fail closed on plaintext startup.
 The actual-process TLS profile verifies encrypted SCRAM, hostname/trust checking,
-plaintext denial, and restart-based certificate/password rotation; packaged Kind
-rotation remains open.
+plaintext denial, and restart-based certificate/password rotation. Packaged Kind
+mTLS/edge-key rotation also passes; JWT/authenticator/database rotation remains
+open.
 
 The maintained Rust pgwire client resolves PostgreSQL 18 profile/QGIS-required
 built-in types, their array partners, collations, and spatial sentinels through
 process-local relational compatibility views. Explicit and implicit `pg_catalog`
 lookup, reference integrity, PostgreSQL result types, and RowDescription text,
-binary, and NULL WKB transport pass. User-object catalogs are not implemented;
-traced unsupported relations fail closed, so this is not yet QGIS/OGR discovery
-evidence against QuackGIS.
+binary, and NULL WKB transport pass. Stable user-object catalogs, origins,
+defaults, comments, NOT-NULL constraints, and an empty index projection pass only
+in the checksum-pinned development identity lane; baseline startup rejects those
+surfaces. This is not yet full QGIS/OGR discovery evidence against QuackGIS.
 
 When `QUACKGIS_METRICS_PORT` is configured, the same loopback HTTP listener serves
 `/healthz`, startup/drain-aware readiness at `/readyz`, and Prometheus data at
