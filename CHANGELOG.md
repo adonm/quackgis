@@ -63,8 +63,9 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 - A registered M4 spatial scan profile compares maintained WKB/bbox with native
   `GEOMETRY` over ordered official-DuckLake files using exact pgwire results,
   visible exact rechecks, DuckDB row-group metrics, conservative compressed-byte
-  bounds, and fragmented-file compaction. Clean 100k/1M and two 10M runs pass;
-  both 10M layouts compact 25 files to one without result changes.
+  bounds, timed queries, process RSS, DuckDB memory/spill, and fragmented-file
+  compaction. Two clean 10M mixed point/line/polygon runs on source `365c769`
+  pass every committed budget and compact both layouts from 25 files to one.
 - Warm, interleaved ADBC/pgwire transport sampling with an exact-result oracle and
   fail-closed reference enforcement of the one-second eligibility and 15% p50
   overhead limits.

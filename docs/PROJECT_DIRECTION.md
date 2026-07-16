@@ -352,6 +352,14 @@ vectorized extension functions during bulk load and compaction. Prefer native
 statistics, partitioning, and geometry improvements when measurements justify
 them. Do not add a correctness-critical side index or spatial service.
 
+Local 1.0 retains WKB plus the opt-in maintained bbox layout as its stored spatial
+contract. Two clean 10M mixed point/line/polygon references show native
+`GEOMETRY` files are about 45% smaller, but both layouts meet selective scan and
+resource budgets while only the maintained WKB path has proven COPY, mutation,
+pgwire, and catalog behavior. Re-evaluate this decision for each pinned DuckDB
+candidate and delete the bbox machinery when native geometry also passes those
+write/client contracts and the 100M gates.
+
 ### Observability
 
 Measure queue/execution/time-to-first-row latency, Arrow batches, result/COPY

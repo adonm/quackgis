@@ -299,12 +299,15 @@ Every edge case compares the injected result to a deliberately unoptimized exact
 oracle; the pgwire workflow executes the literal form without client-written bbox
 SQL. OR/NOT placement, joins, subqueries, multiple matching predicates, and
 arbitrary or oversized geometry expressions are not optimized; malformed or
-ambiguous reserved layouts fail closed. The registered point profile now records
-row groups plus conservative compressed-byte bounds and proves both maintained
-bbox and native geometry tables compact from 25 files to one without changing
-exact results through 10M rows. Automatic DDL, general geometry-expression
-maintenance, representative non-point compaction, and broader scale/workload
-profiles remain roadmap work.
+ambiguous reserved layouts fail closed. The registered profile records row groups,
+conservative compressed-byte bounds, five pgwire latency samples per layout,
+process RSS, sampled DuckDB memory, and temporary storage. Two clean 10M runs
+cover mixed points, lines, and polygons; pass the 500 ms p95, +128 MiB RSS,
++256 MiB DuckDB-memory, zero-spill, 5% scan-byte, and 20x row-group budgets; and
+prove both maintained bbox and native geometry tables compact from 25 files to
+one without changing exact results. Local 1.0 retains maintained WKB/bbox storage.
+Automatic DDL, general geometry-expression maintenance, broader workloads, and
+100M profiles remain roadmap work.
 
 ## Maintained checks
 

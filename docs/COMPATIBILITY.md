@@ -251,12 +251,16 @@ unless a focused test says otherwise.
   pgwire covers the literal path. OR/NOT placement, joins, subqueries, multiple
   matching predicates, and arbitrary or oversized probe expressions are
   deliberately left unoptimized; malformed/ambiguous reserved layouts fail
-  closed. Clean registered 100k, 1M, and consecutive 10M point profiles compare
-  25 ordered official-DuckLake files for this layout and native `GEOMETRY`.
-  Exact pgwire counts agree, each plan keeps its exact `ST_Intersects` recheck,
-  and conservative compressed scan-byte upper bounds stay below 5%. Both 10M
-  layouts compact from 25 files to one without result changes. This does not yet
-  qualify non-point shapes, broad analytical workloads, or 100M scale.
+  closed. Two clean registered 10M references on source `365c769` compare mixed
+  `POINT`, `LINESTRING`, and `POLYGON` data across 25 ordered official-DuckLake
+  files for this layout and native `GEOMETRY`. Exact pgwire counts agree, each
+  plan keeps its exact `ST_Intersects` recheck, and conservative compressed
+  scan-byte upper bounds stay below 5%. Five timed samples per layout also pass
+  the 500 ms p95, +128 MiB process-RSS, +256 MiB DuckDB-memory, and zero-spill
+  budgets. Both layouts compact from 25 files to one without result changes.
+  Local 1.0 retains maintained WKB/bbox storage because native geometry does not
+  yet have the same COPY, mutation, pgwire, and catalog contract. Broad
+  analytical workloads and 100M scale remain unqualified.
 - `pg_catalog`, unmaintained `information_schema`, broad spatial discovery, and
   GIS client-specific metadata are incomplete. A client-neutral executable
   fixture structurally maps explicit and implicit namespace/database/type/range/collation/owner-role

@@ -181,15 +181,22 @@ Local 1.0 mixed-workload soak remain separate gates.
 
 ## Spatial scan profile
 
-The M4 scan profile creates the same ordered point fixture in 25 official-DuckLake
-Parquet files for two layouts: maintained WKB plus four bbox columns, and DuckDB
-1.5.4 native `GEOMETRY`. It runs selective and deliberately unpruned exact
-oracles, requires every count to agree through pgwire, inspects JSON plans for a
-candidate plus the original `ST_Intersects`, and enforces DuckDB's
-`OPERATOR_ROW_GROUPS_SCANNED` metrics against both a 5% ceiling and 20x reduction.
-It also reads Parquet metadata, uses the largest N compressed row groups as a
-conservative upper bound for N reported scans, and requires DuckLake compaction
-to at least halve 25 fragmented files without changing exact results.
+The M4 scan profile creates the same ordered mix of `POINT`, `LINESTRING`, and
+`POLYGON` rows in 25 official-DuckLake Parquet files for two layouts: maintained
+WKB plus four bbox columns, and DuckDB 1.5.4 native `GEOMETRY`. It runs selective
+and deliberately unpruned exact oracles, requires every count to agree through
+pgwire, inspects JSON plans for a candidate plus the original `ST_Intersects`, and
+enforces DuckDB's `OPERATOR_ROW_GROUPS_SCANNED` metrics against both a 5% ceiling
+and 20x reduction. It also reads Parquet metadata, uses the largest N compressed
+row groups as a conservative upper bound for N reported scans, and requires
+DuckLake compaction to at least halve 25 fragmented files without changing exact
+results.
+
+Five warmed selective count samples per layout run through pgwire. Reference
+budgets require p95 at or below 500 ms, process RSS growth at or below 128 MiB,
+sampled DuckDB-memory growth at or below 256 MiB, and zero temporary-storage use.
+The process RSS and independent `duckdb_memory()` sampler cover both layouts in
+one timed interval; per-layout latency remains separate.
 
 ```sh
 mise exec -- just duckdb-spatial-scan-profile \
@@ -197,22 +204,24 @@ mise exec -- just duckdb-spatial-scan-profile \
   out=.tmp/duckdb-spatial-scan/local-r1m.json
 ```
 
-Clean 100k and 1M runs on source `ba658ba` scan 1/25 row groups for both layouts,
-stay near 4% of compressed row-group bytes, and compact 25 files to one. Two
-consecutive clean 10M references on the same source and the recorded Ryzen 7
-7700X/64 GiB/HP FX700 NVMe host also pass:
+Two consecutive clean 10M references on source `365c769` and the recorded Ryzen 7
+7700X/64 GiB/HP FX700 NVMe/Btrfs host pass. Each layout contains 3,333,334 points,
+3,333,333 lines, and 3,333,333 polygons:
 
-| Run/layout | Row groups scanned | Compressed-byte upper bound | Data-file bytes | Files after compaction |
-|---|---:|---:|---:|---:|
-| 1 / bbox | 1 / 144 | 1.176% | 294,600,805 | 1 |
-| 1 / native | 1 / 100 | 1.272% | 143,541,707 | 1 |
-| 2 / bbox | 1 / 146 | 0.939% | 294,603,778 | 1 |
-| 2 / native | 1 / 100 | 1.272% | 143,541,707 | 1 |
+| Run/layout | Row groups scanned | Compressed-byte upper bound | pgwire p50 / p95 | Data-file bytes | Files after compaction |
+|---|---:|---:|---:|---:|---:|
+| 1 / bbox | 1 / 143 | 1.045% | 14.94 / 18.50 ms | 355,588,058 | 1 |
+| 1 / native | 1 / 100 | 1.266% | 18.77 / 20.52 ms | 196,233,092 | 1 |
+| 2 / bbox | 1 / 145 | 1.016% | 15.25 / 15.46 ms | 355,588,356 | 1 |
+| 2 / native | 1 / 100 | 1.266% | 18.40 / 19.41 ms | 196,233,092 | 1 |
 
 All four query variants return the same 100 rows through pgwire before and after
-compaction. Native geometry uses about 51% fewer file bytes for this point-only
-fixture, but that is not yet a representation decision: non-point shapes,
-mutation/client implications, query latency, RSS/spill, and 100M remain open.
+compaction. Across the timed interval, process RSS grows by 1.90 MiB and 0.72 MiB,
+sampled DuckDB memory grows by 10.10 MiB in each run, and temporary storage stays
+at zero. Native geometry files are about 45% smaller, but maintained WKB/bbox is
+the Local 1.0 storage decision because only that path currently has the required
+COPY, mutation, pgwire, and catalog contract. Native geometry remains the deletion
+candidate when it passes those lifecycle gates and the 100M profiles.
 
 ## Termination and restart profile
 
@@ -235,7 +244,7 @@ interruption behavior.
 ## Next profiles
 
 E1's result, cancellation, transport, mixed-class, and COPY reference budgets now
-pass. The selective point scan/byte/compaction oracle now passes twice at 10M.
-Later profiles add representative non-point shapes, grouped aggregates, bounded
-spatial joins, query-latency/RSS/spill budgets, configured-concurrency evidence,
-and then 100M.
+pass. The selective mixed-shape scan/byte/latency/resource/compaction oracle passes
+twice at 10M. Next profiles add grouped aggregates, bounded spatial joins, wide
+projections, broader mutation and configured-concurrency evidence, then two 100M
+runs.
