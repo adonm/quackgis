@@ -148,8 +148,8 @@ async fn connect_database(database_url: &str, ca: Option<&Path>) -> Result<Clien
 
 async fn discover_schema(client: &Client, exposed_tables: &HashSet<String>) -> Result<SchemaCache> {
     const SQL: &str = "SELECT table_name::VARCHAR, column_name::VARCHAR, \
-        data_type::VARCHAR, is_nullable::VARCHAR, column_default::VARCHAR \
-        FROM information_schema.columns WHERE table_schema = 'main' \
+        udt_name::VARCHAR, is_nullable::VARCHAR, column_default::VARCHAR \
+        FROM information_schema.columns WHERE table_schema = 'public' \
         ORDER BY table_name, ordinal_position";
     let rows = client.query(SQL, &[]).await?;
     let mut tables: HashMap<QualifiedName, Table> = HashMap::new();
@@ -159,7 +159,7 @@ async fn discover_schema(client: &Client, exposed_tables: &HashSet<String>) -> R
             continue;
         }
         let column_name: String = row.get(1);
-        let data_type: String = row.get(2);
+        let pg_type: String = row.get(2);
         let nullable: String = row.get(3);
         let default_expr: Option<String> = row.get(4);
         let key = QualifiedName::new("public", table_name);
@@ -176,7 +176,7 @@ async fn discover_schema(client: &Client, exposed_tables: &HashSet<String>) -> R
         });
         table.columns.push(Column {
             name: column_name,
-            pg_type: postgres_type_name(&data_type).to_owned(),
+            pg_type,
             nullable: nullable.eq_ignore_ascii_case("YES"),
             has_default: default_expr.is_some(),
             default_expr,
@@ -206,29 +206,6 @@ async fn discover_schema(client: &Client, exposed_tables: &HashSet<String>) -> R
         relationships: Vec::new(),
         functions: HashMap::new(),
     })
-}
-
-fn postgres_type_name(data_type: &str) -> &'static str {
-    let data_type = data_type.to_ascii_uppercase();
-    if data_type.starts_with("DECIMAL(") || data_type.starts_with("NUMERIC(") {
-        return "numeric";
-    }
-    match data_type.as_str() {
-        "TINYINT" | "SMALLINT" => "int2",
-        "INTEGER" => "int4",
-        "BIGINT" => "int8",
-        "UTINYINT" | "USMALLINT" | "UINTEGER" | "UBIGINT" => "numeric",
-        "REAL" | "FLOAT" => "float4",
-        "DOUBLE" => "float8",
-        "DECIMAL" => "numeric",
-        "BOOLEAN" => "bool",
-        "DATE" => "date",
-        "TIMESTAMP" | "TIMESTAMP WITHOUT TIME ZONE" => "timestamp",
-        "TIMESTAMP WITH TIME ZONE" => "timestamptz",
-        "BLOB" | "BYTEA" => "bytea",
-        "JSON" => "json",
-        _ => "text",
-    }
 }
 
 async fn live() -> impl IntoResponse {
@@ -497,6 +474,7 @@ mod tests {
         DuckDbAdbcConfig, DuckDbAdbcStorage, ExtensionPolicy,
     };
     use quackgis_server::pgwire_server::{ServerOptions, serve_duckdb_on_listener};
+    use quackgis_server::role::RoleCatalog;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
@@ -531,8 +509,6 @@ mod tests {
         assert_eq!(parse_tables("points, roads").unwrap().len(), 2);
         assert!(parse_tables("").is_err());
         assert!(parse_tables("points;drop").is_err());
-        assert_eq!(postgres_type_name("DECIMAL(10,2)"), "numeric");
-        assert_eq!(postgres_type_name("INTEGER"), "int4");
     }
 
     #[tokio::test]
@@ -573,19 +549,29 @@ mod tests {
         let pg_options = ServerOptions::new()
             .with_host("127.0.0.1".to_owned())
             .with_port(pg_port);
+        let roles = RoleCatalog::from_json(
+            r#"{
+              "roles": [{"oid": 100001, "name": "rest_reader", "login": true}],
+              "schema_grants": [
+                {"schema": "public", "role": "rest_reader", "privileges": ["USAGE"]}
+              ],
+              "table_grants": [
+                {"table": "rest_points", "role": "rest_reader", "privileges": ["SELECT"]}
+              ]
+            }"#,
+        )
+        .expect("REST role catalog");
+        let auth = AuthConfig::password("rest_reader", "reader-secret", None::<(&str, &str)>)
+            .expect("REST password auth")
+            .with_role_catalog(roles)
+            .expect("REST role auth");
         let server_storage = Arc::clone(&storage);
         let pg_task = tokio::spawn(async move {
-            let _ = serve_duckdb_on_listener(
-                server_storage,
-                pg_listener,
-                &pg_options,
-                AuthConfig::trust(),
-            )
-            .await;
+            let _ = serve_duckdb_on_listener(server_storage, pg_listener, &pg_options, auth).await;
         });
 
         let client = connect_database(
-            &format!("postgres://postgres@127.0.0.1:{pg_port}/quackgis"),
+            &format!("postgres://rest_reader:reader-secret@127.0.0.1:{pg_port}/quackgis"),
             None,
         )
         .await
@@ -599,6 +585,12 @@ mod tests {
                 .find_table("rest_points", &["public".to_owned()])
                 .is_some()
         );
+        let rest_points = cache
+            .find_table("rest_points", &["public".to_owned()])
+            .expect("REST table");
+        assert_eq!(rest_points.columns[0].pg_type, "int4");
+        assert_eq!(rest_points.columns[1].pg_type, "text");
+        assert_eq!(rest_points.columns[2].pg_type, "geometry");
         let state = Arc::new(AppState {
             client,
             cache: RwLock::new(Arc::new(cache)),

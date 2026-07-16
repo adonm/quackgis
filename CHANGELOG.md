@@ -7,6 +7,9 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 
 ### Added
 
+- REST schema discovery now consumes the role-filtered PostgreSQL `public`
+  information schema instead of DuckDB-internal `main` names and type
+  translation, with actual SCRAM/grant-backed pgwire evidence.
 - A shared `quackgis-edge` I0 protocol foundation with versioned control/edge
   ALPNs, five-minute bootstrap-signed one-worker leases, transport-bound
   registered-key refresh proofs, fresh worker challenges, typed application

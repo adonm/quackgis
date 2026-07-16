@@ -26,8 +26,10 @@ lease, policy, admission, epochs, and audit identity. See
   `Authorization: Bearer <token>`.
 - The token is loaded from a file, must contain at least 32 non-whitespace bytes,
   and is compared in constant time. It is never accepted on the command line.
-- The pgwire URL carries the database identity. Use a QuackGIS read-only identity;
-  the REST process does not emulate PostgreSQL role switching or RLS.
+- The pgwire URL carries the database identity. Use a configured QuackGIS
+  read-only identity; PostgreSQL-facing schema discovery and query execution are
+  filtered by that identity's common schema/table grants. The REST process does
+  not yet switch roles or emulate RLS.
 - The HTTP listener defaults to `127.0.0.1`. Terminate public TLS and enforce
   request/rate limits at the load balancer before binding it more broadly.
 - A CA file forces TLS and enables hostname-verified rustls for the pgwire
@@ -35,10 +37,11 @@ lease, policy, admission, epochs, and audit identity. See
   both selects plaintext and is suitable only for a same-host/private-loopback
   development connection.
 - `QUACKGIS_REST_TABLES` is a required explicit comma-separated table allowlist.
-  Startup and reload fail if an entry is absent from DuckDB's `main` schema. User
-  filter values remain text bind parameters; table and column names must resolve
-  through this bounded in-memory schema cache. The pgwire user's read policy is a
-  second independent authorization boundary.
+  Startup and reload fail if an entry is absent from the pgwire identity's
+  role-filtered PostgreSQL `public` schema. User filter values remain text bind
+  parameters; table and column names must resolve through this bounded in-memory
+  schema cache. The pgwire user's read policy is a second independent
+  authorization boundary.
 - Query execution has a fail-closed timeout. Native errors are bounded before
   entering the HTTP response.
 
@@ -62,8 +65,9 @@ roles, and all mutations remain open. Unsupported HTTP methods fail closed with
 
 ## Target role-aware architecture
 
-The current bearer token and per-process `information_schema.columns` cache are
-bootstrap controls. The target request path is:
+The current bearer token and per-process role-filtered
+`information_schema.columns` cache are bootstrap controls. The target request
+path is:
 
 ```text
 JWT request
@@ -84,8 +88,8 @@ DuckDB + official DuckLake
 Delivery is intentionally staged as an implementation decomposition of the
 M3/M5 gates in [../ROADMAP.md](../ROADMAP.md):
 
-1. replace direct DuckDB schema assumptions with maintained PostgreSQL catalog
-   discovery while retaining the explicit REST exposure ceiling;
+1. ~~replace direct DuckDB schema assumptions with maintained PostgreSQL catalog
+   discovery while retaining the explicit REST exposure ceiling;~~ complete;
 2. add JWT verification, one authenticator identity, bounded role mapping,
    transaction-local role/context, and role-aware OpenAPI cached by role and
    schema/security epoch;
@@ -152,9 +156,10 @@ mise exec -- just rest-postgrest-smoke
 ```
 
 The native smoke starts an actual DuckDB/DuckLake pgwire server and REST router,
-then proves authentication denial, OpenAPI discovery, table discovery, projection,
-typed filtering, ordering, pagination, missing-resource behavior, mutation denial,
-and escaped WKB transport. These cases seed the QuackGIS extension of the
+then proves SCRAM plus role-grant-backed PostgreSQL catalog discovery,
+authentication denial, OpenAPI discovery, projection, typed filtering, ordering,
+pagination, missing-resource behavior, mutation denial, and escaped WKB
+transport. These cases seed the QuackGIS extension of the
 PostgREST contract. Each additional PostgREST behavior must enter this executable
 suite before being listed as supported.
 

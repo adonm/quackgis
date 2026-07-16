@@ -145,6 +145,7 @@ mise exec -- just ci
 | QGIS | PostgreSQL 18.4/PostGIS oracle frozen for exact 3.44.11 headless read workflow; focused traced spatial metadata/version/extent surfaces pass, but full QuackGIS client execution and generic SRID 0 behavior remain unqualified |
 | GeoServer, Martin | target; client traces and QuackGIS qualification remain open |
 | psycopg | 3.2.13 TLS/SCRAM scalar smoke passes in Kind; copied-data workflow remains open |
+| `quackgis-rest` | authenticated read-only preview discovers exposed tables/columns and PostgreSQL type names through the pgwire identity's role-filtered maintained `information_schema`; projection/filter/order/pagination/OpenAPI and denial cases pass actual pgwire, while JWT role switching, role-aware OpenAPI, and packaging remain open |
 | SQLAlchemy, GeoPandas, pg_featureserv | target; named dependency workflows remain open |
 | `pg_dump`, logical replication, PL/pgSQL, triggers, LISTEN/NOTIFY | unsupported/non-goals |
 | Tiny iroh client bridge | executable direct, forced-custom-relay, and opt-in public-default-relay seams differentially match direct TCP for maintained result/type/error, simple/extended parameter/portal, spatial, transaction/disconnect, COPY atomicity, cancellation/quarantine, concurrent-session, and reconnect behavior. The packaged direct Kind path passes pinned psql/psycopg/OGR, direct/plaintext/certificate-free denial, ordered reconnect, and mTLS/edge-key rotation with old-certificate denial. Adaptive LZ4 host budgets pass; packaged resource and hosted-relay qualification remain open |
