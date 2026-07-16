@@ -17,8 +17,19 @@ pub const QUACKGIS_DATABASE_OID: u32 = 16_384;
 pub const PG_CLASS_RELATION_OID: u32 = 1_259;
 pub const GEOMETRY_ARRAY_OID: u32 = 90_003;
 pub const GEOGRAPHY_ARRAY_OID: u32 = 90_004;
+pub const POSTGIS_LIB_VERSION_PROC_OID: u32 = 90_005;
+pub const POSTGIS_VERSION_PROC_OID: u32 = 90_006;
+pub const POSTGIS_GEOS_VERSION_PROC_OID: u32 = 90_007;
+pub const POSTGIS_PROJ_VERSION_PROC_OID: u32 = 90_008;
 pub const DYNAMIC_OBJECT_OID_START: u32 = 100_000;
 pub const INTERNAL_SCHEMA: &str = "_quackgis";
+
+const PG_PROC_ROWS: [(u32, &str); 4] = [
+    (POSTGIS_LIB_VERSION_PROC_OID, "postgis_lib_version"),
+    (POSTGIS_VERSION_PROC_OID, "postgis_version"),
+    (POSTGIS_GEOS_VERSION_PROC_OID, "postgis_geos_version"),
+    (POSTGIS_PROJ_VERSION_PROC_OID, "postgis_proj_version"),
+];
 
 #[derive(Clone, Copy)]
 struct PgTypeRow {
@@ -234,6 +245,19 @@ fn identity_type_rows_sql() -> String {
     render_type_rows(TYPE_ROWS.iter().chain(IDENTITY_TYPE_ROWS))
 }
 
+fn pg_proc_rows_sql() -> String {
+    PG_PROC_ROWS
+        .iter()
+        .map(|(oid, name)| {
+            format!(
+                "({oid}::UINTEGER, '{}'::VARCHAR, {PUBLIC_NAMESPACE_OID}::UINTEGER)",
+                name
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",\n")
+}
+
 /// Create the first relational PostgreSQL compatibility catalog.
 ///
 /// These views live only in DuckDB's process-local control database. Client SQL
@@ -242,6 +266,7 @@ fn identity_type_rows_sql() -> String {
 /// derived from DuckDB/DuckLake metadata after the durable identity registry lands.
 pub fn duckdb_catalog_bootstrap_sql() -> String {
     let type_rows = type_rows_sql();
+    let pg_proc_rows = pg_proc_rows_sql();
     format!(
         "CREATE SCHEMA IF NOT EXISTS quackgis_pg_catalog;\n\
          CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_namespace AS\n\
@@ -253,6 +278,9 @@ pub fn duckdb_catalog_bootstrap_sql() -> String {
          SELECT {QUACKGIS_DATABASE_OID}::UINTEGER AS oid,\n\
                 'quackgis'::VARCHAR AS datname,\n\
                 {BOOTSTRAP_OWNER_OID}::UINTEGER AS datdba;\n\
+         CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_proc AS\n\
+         SELECT * FROM (VALUES\n{pg_proc_rows}\n\
+         ) AS p(oid, proname, pronamespace);\n\
          CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_type AS\n\
          SELECT * FROM (VALUES\n{type_rows}\n\
          ) AS t(oid, typname, typnamespace, typlen, typbyval, typtype, typcategory,\n\
@@ -1759,6 +1787,37 @@ mod tests {
         assert_eq!(TYPE_ROWS.len(), 28);
         let oids = TYPE_ROWS.iter().map(|row| row.oid).collect::<HashSet<_>>();
         assert_eq!(oids.len(), TYPE_ROWS.len());
+        let reserved_compatibility_oids = [
+            GEOMETRY_OID,
+            GEOGRAPHY_OID,
+            GEOMETRY_ARRAY_OID,
+            GEOGRAPHY_ARRAY_OID,
+            POSTGIS_LIB_VERSION_PROC_OID,
+            POSTGIS_VERSION_PROC_OID,
+            POSTGIS_GEOS_VERSION_PROC_OID,
+            POSTGIS_PROJ_VERSION_PROC_OID,
+        ];
+        assert_eq!(
+            reserved_compatibility_oids
+                .into_iter()
+                .collect::<HashSet<_>>()
+                .len(),
+            reserved_compatibility_oids.len()
+        );
+        assert!(
+            reserved_compatibility_oids
+                .iter()
+                .all(|oid| *oid < DYNAMIC_OBJECT_OID_START)
+        );
+        assert_eq!(PG_PROC_ROWS.len(), 4);
+        for (oid, name) in PG_PROC_ROWS {
+            assert!(oid < DYNAMIC_OBJECT_OID_START);
+            assert!(sql.contains(name));
+            assert!(
+                crate::spatial_compat::rewrite_postgis_sql(&format!("SELECT {name}()"))
+                    .contains(&format!("quackgis_{name}()"))
+            );
+        }
         for row in TYPE_ROWS {
             for reference in [row.element, row.array] {
                 assert!(reference == 0 || oids.contains(&reference));
@@ -1801,6 +1860,7 @@ mod tests {
         );
         assert!(sql.contains("quackgis_pg_catalog.pg_namespace"));
         assert!(sql.contains("quackgis_pg_catalog.pg_database"));
+        assert!(sql.contains("quackgis_pg_catalog.pg_proc"));
         assert!(sql.contains("quackgis_pg_catalog.pg_type"));
         assert!(sql.contains("quackgis_pg_catalog.pg_range"));
         assert!(sql.contains("quackgis_pg_catalog.pg_collation"));

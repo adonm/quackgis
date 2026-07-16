@@ -376,6 +376,10 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
             "SELECT oid, nspname, nspowner FROM pg_namespace WHERE nspname = 'public'",
         ),
         (
+            "pg_catalog.pg_proc",
+            "SELECT oid, proname, pronamespace FROM pg_proc ORDER BY oid",
+        ),
+        (
             "pg_catalog.pg_class",
             "SELECT oid, relname, relnamespace, reltype, relowner, relkind, relnatts, \
                     relrowsecurity FROM pg_class WHERE relname = 'catalog_projection'",

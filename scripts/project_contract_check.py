@@ -129,8 +129,12 @@ def check_postgresql_profile(errors: list[str]) -> None:
         identity.get("geography_oid"),
         identity.get("geometry_array_oid"),
         identity.get("geography_array_oid"),
-    ] != [90_001, 90_002, 90_003, 90_004]:
-        errors.append("PostGIS scalar/array compatibility OIDs drifted")
+        identity.get("postgis_lib_version_proc_oid"),
+        identity.get("postgis_version_proc_oid"),
+        identity.get("postgis_geos_version_proc_oid"),
+        identity.get("postgis_proj_version_proc_oid"),
+    ] != [90_001, 90_002, 90_003, 90_004, 90_005, 90_006, 90_007, 90_008]:
+        errors.append("PostGIS type/routine compatibility OIDs drifted")
     if reference.get("profile_id") != profile.get("profile_id"):
         errors.append("PostgreSQL reference output does not name the active profile")
     digest = reference.get("oracle", {}).get("image_digest", "")
@@ -151,6 +155,7 @@ def check_postgresql_profile(errors: list[str]) -> None:
     relation_names = [relation.get("name") for relation in relations]
     required_relations = {
         "pg_catalog.pg_namespace",
+        "pg_catalog.pg_proc",
         "pg_catalog.pg_type",
         "pg_catalog.pg_range",
         "pg_catalog.pg_collation",
@@ -256,6 +261,7 @@ def check_postgresql_profile(errors: list[str]) -> None:
     if len(ogr_query_ids) != len(set(ogr_query_ids)) or len(ogr_queries) < 20:
         errors.append("OGR trace query corpus is duplicate, unnamed, or incomplete")
     required_ogr_queries = {
+        "find_postgis_namespace",
         "discover_spatial_type_oids",
         "empty_geometry_srid",
         "relation_oid",
@@ -268,6 +274,11 @@ def check_postgresql_profile(errors: list[str]) -> None:
     missing_ogr_queries = sorted(required_ogr_queries - set(ogr_query_ids))
     if missing_ogr_queries:
         errors.append(f"OGR trace missing required query families: {missing_ogr_queries}")
+    ogr_query_by_id = {query.get("id"): query for query in ogr_queries}
+    profile_namespace_query = query_by_id.get("find_postgis_namespace", {}).get("sql")
+    trace_namespace_query = ogr_query_by_id.get("find_postgis_namespace", {}).get("sql")
+    if profile_namespace_query != trace_namespace_query:
+        errors.append("PostgreSQL profile find_postgis_namespace SQL drifted from OGR trace")
 
     if psql_trace.get("trace_id") != "psql-18.3-postgresql18-describe-spatial-table-v1":
         errors.append("psql trace_id is missing or unsupported")

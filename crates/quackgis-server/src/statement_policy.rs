@@ -402,6 +402,7 @@ fn unqualified_pg_catalog_name(name: &ObjectName) -> bool {
             name.to_ascii_lowercase().as_str(),
             "pg_namespace"
                 | "pg_database"
+                | "pg_proc"
                 | "pg_type"
                 | "pg_class"
                 | "pg_attribute"
@@ -509,6 +510,7 @@ mod tests {
             "SELECT typname FROM pg_catalog.pg_type",
             "SELECT typname FROM pg_type",
             "SELECT EXISTS (SELECT 1 FROM pg_type)",
+            "SELECT n.nspname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE proname = 'postgis_version'",
         ] {
             let statement = Parser::parse_sql(&PostgreSqlDialect {}, sql)
                 .unwrap()

@@ -739,10 +739,12 @@ unmodified extended-protocol SQL-result cursor lifecycle (`BEGIN`, `DECLARE`,
 GeoJSON for `POINT (1 2)` plus NULL geometry/property values. Both pass again
 after ordered Pod replacement and mTLS/iroh key rotation with old-client denial.
 This closes the psycopg copied-data slice and the OGR SQL-result read slice only.
-The remaining clients were retried through current mutual TLS. Psql 18.3 `\d+`
-connects but stops at unavailable `pg_class`. OGR direct discovery connects,
-reports the optional `pg_proc` failure, then stops at `pg_class`; COPY/no-FID are
-therefore still downstream. Exact offscreen QGIS 3.44.11 retries direct, no-FID,
+The remaining clients were retried through current mutual TLS. In that older-image
+run, psql 18.3 `\d+` stopped at unavailable `pg_class`, while OGR direct discovery
+reported the optional `pg_proc` failure and then stopped at `pg_class`. The native
+catalog contract now executes OGR's exact `pg_proc` PostGIS namespace lookup with
+four stable maintained routine identities; the pinned-image rerun and downstream
+COPY/no-FID work remain open. Exact offscreen QGIS 3.44.11 retries direct, no-FID,
 and copied-SQL layers. The pinned lane now executes its full layer privilege
 projection with PostgreSQL `bool` `pg_is_in_recovery=false`, while all startup
 modes advertise PostgreSQL 18.4 and `version()`/`SHOW server_version[_num]` agree.

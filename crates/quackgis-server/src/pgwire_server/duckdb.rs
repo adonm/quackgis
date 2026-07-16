@@ -3974,6 +3974,7 @@ fn maintained_pg_catalog_relation(name: &ObjectName) -> Option<&'static str> {
     [
         "pg_namespace",
         "pg_database",
+        "pg_proc",
         "pg_type",
         "pg_class",
         "pg_attribute",
@@ -4431,6 +4432,7 @@ fn stale_catalog_column_qualifier(expression: &Expr) -> bool {
         && [
             "pg_namespace",
             "pg_database",
+            "pg_proc",
             "pg_type",
             "pg_class",
             "pg_attribute",
@@ -4869,6 +4871,11 @@ fn catalog_columns(relation: &str) -> &'static [(&'static str, PgTypeHint)] {
             ("datname", PgTypeHint::Name),
             ("datdba", PgTypeHint::Oid),
         ],
+        "pg_proc" => &[
+            ("oid", PgTypeHint::Oid),
+            ("proname", PgTypeHint::Name),
+            ("pronamespace", PgTypeHint::Oid),
+        ],
         "pg_type" => &[
             ("oid", PgTypeHint::Oid),
             ("typname", PgTypeHint::Name),
@@ -5018,6 +5025,7 @@ fn catalog_column_names(relation: &str) -> &'static [&'static str] {
     match relation {
         "pg_namespace" => &["oid", "nspname", "nspowner"],
         "pg_database" => &["oid", "datname", "datdba"],
+        "pg_proc" => &["oid", "proname", "pronamespace"],
         "pg_type" => &[
             "oid",
             "typname",
@@ -6813,6 +6821,54 @@ mod tests {
         )
         .expect("implicit collation lookup");
         assert!(collation.sql.contains("quackgis_pg_catalog.pg_collation"));
+
+        let ogr_routine_namespace = validate_statement(
+            "SELECT n.nspname FROM pg_proc p JOIN pg_namespace n \
+             ON n.oid = p.pronamespace WHERE proname = 'postgis_version'",
+            ProtocolMode::Simple,
+        )
+        .expect("captured OGR routine namespace lookup");
+        assert!(
+            ogr_routine_namespace
+                .sql
+                .contains("quackgis_pg_catalog.pg_proc")
+        );
+        assert!(
+            ogr_routine_namespace
+                .sql
+                .contains("quackgis_pg_catalog.pg_namespace")
+        );
+        let routine_schema = annotate_catalog_result_schema(
+            &ogr_routine_namespace.ast,
+            &Schema::new(vec![Field::new("nspname", DataType::Utf8, false)]),
+        );
+        assert_eq!(
+            field_into_pg_type(&Arc::new(routine_schema.field(0).clone())).unwrap(),
+            Type::NAME
+        );
+
+        let routine_columns = validate_statement(
+            "SELECT p.oid, p.proname, p.pronamespace FROM pg_proc p",
+            ProtocolMode::Extended,
+        )
+        .expect("bounded routine catalog projection");
+        let routine_column_schema = annotate_catalog_result_schema(
+            &routine_columns.ast,
+            &Schema::new(vec![
+                Field::new("oid", DataType::UInt32, false),
+                Field::new("proname", DataType::Utf8, false),
+                Field::new("pronamespace", DataType::UInt32, false),
+            ]),
+        );
+        assert_eq!(
+            [Type::OID, Type::NAME, Type::OID],
+            routine_column_schema
+                .fields()
+                .iter()
+                .map(|field| field_into_pg_type(field).expect("routine catalog field"))
+                .collect::<Vec<_>>()
+                .as_slice()
+        );
 
         for relational_query in [
             "SELECT t.typname FROM pg_catalog.pg_type t \

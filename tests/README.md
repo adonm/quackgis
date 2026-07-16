@@ -27,6 +27,9 @@ reconnect behavior against a fresh local DuckLake worker. Run it with
   Schema version 5 adds stable logical-database/owner identity and structural
   `current_database`/`current_schema`/`current_schemas` behavior with exact
   PostgreSQL `name` and `name[]` wire types.
+  Schema version 6 adds the bounded relational `pg_proc` identity for the four
+  maintained PostGIS version routines and executes OGR's captured namespace
+  lookup with reciprocal namespace validation.
 - `fixtures/postgresql18_compatibility_profile.json` freezes the first target
   catalog/query/wire contract and names every still-pending client trace.
   `fixtures/postgresql18_column_core_reference.json` records normalized

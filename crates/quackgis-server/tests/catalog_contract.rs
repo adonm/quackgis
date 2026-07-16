@@ -151,7 +151,7 @@ async fn client_neutral_catalog_contract() {
         "../../../tests/fixtures/duckdb_catalog_contract.json"
     ))
     .expect("catalog contract fixture");
-    assert_eq!(contract.schema_version, 5);
+    assert_eq!(contract.schema_version, 6);
 
     let runtime = TestRuntime::start(ServerOptions::new().with_max_connections(4)).await;
     let _storage = runtime.storage();
@@ -553,7 +553,7 @@ fn decode_hex(value: &str) -> Vec<u8> {
 fn catalog_fixture_is_valid_and_client_neutral() {
     let raw = include_str!("../../../tests/fixtures/duckdb_catalog_contract.json");
     let contract: CatalogContract = serde_json::from_str(raw).expect("catalog contract fixture");
-    assert_eq!(contract.schema_version, 5);
+    assert_eq!(contract.schema_version, 6);
     let words = raw
         .split(|character: char| !character.is_ascii_alphanumeric())
         .map(str::to_ascii_lowercase)

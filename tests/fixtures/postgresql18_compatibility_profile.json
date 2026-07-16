@@ -20,6 +20,10 @@
     "geography_oid": 90002,
     "geometry_array_oid": 90003,
     "geography_array_oid": 90004,
+    "postgis_lib_version_proc_oid": 90005,
+    "postgis_version_proc_oid": 90006,
+    "postgis_geos_version_proc_oid": 90007,
+    "postgis_proj_version_proc_oid": 90008,
     "dynamic_oids": "installation-local, nonzero uint32 values stable for the supported object lifetime",
     "duckdb_runtime_oids_allowed": false,
     "name_hashes_allowed": false
@@ -33,6 +37,16 @@
         { "name": "oid", "type_oid": 26, "nullable": false },
         { "name": "nspname", "type_oid": 19, "nullable": false },
         { "name": "nspowner", "type_oid": 26, "nullable": false }
+      ]
+    },
+    {
+      "name": "pg_catalog.pg_proc",
+      "stage": "C7",
+      "trace_status": "captured_ogr_3_11_5_bounded_version_routines",
+      "required_columns": [
+        { "name": "oid", "type_oid": 26, "nullable": false },
+        { "name": "proname", "type_oid": 19, "nullable": false },
+        { "name": "pronamespace", "type_oid": 26, "nullable": false }
       ]
     },
     {
@@ -342,6 +356,18 @@
       "expected_columns": [
         { "name": "nspname", "type_oid": 19, "nullable": false },
         { "name": "rolname", "type_oid": 19, "nullable": false }
+      ]
+    },
+    {
+      "id": "find_postgis_namespace",
+      "stage": "C7",
+      "trace_status": "captured_ogr_3_11_5",
+      "protocol": "simple",
+      "consumers": ["client-neutral catalog contract", "GDAL/OGR 3.11.5"],
+      "sql": "SELECT n.nspname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE proname = 'postgis_version'",
+      "parameter_type_oids": [],
+      "expected_columns": [
+        { "name": "nspname", "type_oid": 19, "nullable": false }
       ]
     },
     {

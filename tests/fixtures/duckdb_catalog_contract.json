@@ -1,5 +1,5 @@
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "setup_sql": "CREATE TABLE quackgis.main.catalog_fixture(id BIGINT, name VARCHAR, geom_wkb BLOB, geog BLOB)",
   "copy_sql": "COPY quackgis.main.catalog_fixture (id, name, geom_wkb, geog) FROM STDIN",
   "copy_row": "1\torigin\t\\x010100000000000000000000000000000000000000\t\\x0101000000000000000000F03F000000000000F03F\n",
@@ -41,6 +41,14 @@
     {
       "sql": "SELECT n.nspname, r.rolname FROM pg_catalog.pg_namespace n INNER JOIN pg_catalog.pg_roles r ON r.oid = n.nspowner WHERE n.nspname IN ('pg_catalog', 'public') ORDER BY n.nspname",
       "expected_rows": [["pg_catalog", "quackgis_owner"], ["public", "quackgis_owner"]]
+    },
+    {
+      "sql": "SELECT n.nspname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE proname = 'postgis_version'",
+      "expected_rows": [["public"]]
+    },
+    {
+      "sql": "SELECT p.proname, n.nspname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace ORDER BY p.oid",
+      "expected_rows": [["postgis_lib_version", "public"], ["postgis_version", "public"], ["postgis_geos_version", "public"], ["postgis_proj_version", "public"]]
     }
   ],
   "ordinary_catalog_query": {
@@ -70,7 +78,8 @@
       "SELECT count(*)::BIGINT FROM pg_type t LEFT JOIN pg_namespace n ON n.oid = t.typnamespace WHERE n.oid IS NULL",
       "SELECT count(*)::BIGINT FROM pg_namespace n LEFT JOIN pg_roles r ON r.oid = n.nspowner WHERE r.oid IS NULL",
       "SELECT count(*)::BIGINT FROM pg_database d LEFT JOIN pg_roles r ON r.oid = d.datdba WHERE r.oid IS NULL",
-      "SELECT count(*)::BIGINT FROM pg_collation c LEFT JOIN pg_namespace n ON n.oid = c.collnamespace LEFT JOIN pg_roles r ON r.oid = c.collowner WHERE n.oid IS NULL OR r.oid IS NULL"
+      "SELECT count(*)::BIGINT FROM pg_collation c LEFT JOIN pg_namespace n ON n.oid = c.collnamespace LEFT JOIN pg_roles r ON r.oid = c.collowner WHERE n.oid IS NULL OR r.oid IS NULL",
+      "SELECT count(*)::BIGINT FROM pg_proc p LEFT JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.oid IS NULL"
     ],
     "expected_unresolved": 0
   },
