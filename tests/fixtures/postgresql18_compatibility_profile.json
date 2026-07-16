@@ -602,7 +602,7 @@
       "id": "qgis_headless_copied_layer",
       "version": "3.44.11",
       "fixture": "tests/fixtures/qgis_3_44_postgresql18_trace.json",
-      "status": "captured_against_postgresql18_postgis; QuackGIS implementation pending"
+      "status": "captured_against_postgresql18_postgis; exact binary cursor messages pass native actual-pgwire; full packaged client qualification pending"
     }
   ],
   "pending_trace_families": [

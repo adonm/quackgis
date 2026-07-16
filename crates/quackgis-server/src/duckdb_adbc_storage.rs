@@ -351,6 +351,7 @@ pub struct DuckDbAdbcStorage {
     catalog_identity_enabled: bool,
     catalog_commit_lock: Arc<Mutex<()>>,
     transaction_state: Mutex<EngineTransactionState>,
+    transaction_read_only: AtomicBool,
     lifecycle: Arc<RuntimeLifecycle>,
 }
 
@@ -546,6 +547,7 @@ impl DuckDbAdbcStorage {
             catalog_identity_enabled,
             catalog_commit_lock: Arc::new(Mutex::new(())),
             transaction_state: Mutex::new(EngineTransactionState::Idle),
+            transaction_read_only: AtomicBool::new(false),
             lifecycle: Arc::new(RuntimeLifecycle::default()),
         })
     }
@@ -567,6 +569,7 @@ impl DuckDbAdbcStorage {
             catalog_identity_enabled: self.catalog_identity_enabled,
             catalog_commit_lock: Arc::clone(&self.catalog_commit_lock),
             transaction_state: Mutex::new(EngineTransactionState::Idle),
+            transaction_read_only: AtomicBool::new(false),
             lifecycle: Arc::clone(&self.lifecycle),
         })
     }
@@ -737,6 +740,14 @@ impl DuckDbAdbcStorage {
     }
 
     pub fn begin_transaction(&self) -> Result<()> {
+        self.begin_transaction_with_access(false)
+    }
+
+    pub fn begin_read_only_transaction(&self) -> Result<()> {
+        self.begin_transaction_with_access(true)
+    }
+
+    fn begin_transaction_with_access(&self, read_only: bool) -> Result<()> {
         self.require_transaction_state(EngineTransactionState::Idle)?;
         if !self.lifecycle.try_start_transaction() {
             bail!("QuackGIS is draining and cannot start a new transaction");
@@ -749,7 +760,10 @@ impl DuckDbAdbcStorage {
             self.lifecycle.transaction_finished();
             return Err(error);
         }
+        self.transaction_read_only
+            .store(read_only, Ordering::Release);
         if let Err(error) = self.set_transaction_state(EngineTransactionState::Active) {
+            self.transaction_read_only.store(false, Ordering::Release);
             self.lifecycle.transaction_finished();
             return Err(error);
         }
@@ -815,6 +829,8 @@ impl DuckDbAdbcStorage {
 
     /// Execute DDL or DML in autocommit mode.
     pub fn execute_update(&self, sql: &str) -> Result<Option<i64>> {
+        self.require_writable_transaction()
+            .map_err(anyhow::Error::new)?;
         if self.catalog_identity_enabled {
             return self.transaction(|transaction| transaction.execute_update(sql));
         }
@@ -1059,6 +1075,7 @@ impl DuckDbAdbcStorage {
     }
 
     pub fn start_ingest_operation(self: &Arc<Self>) -> EngineResult<DuckDbIngestOperation> {
+        self.require_writable_transaction()?;
         let connection = self.take_connection_engine()?;
         let cancellation = Arc::new(DuckDbCancelHandle {
             connection: Mutex::new(connection.clone()),
@@ -1073,6 +1090,7 @@ impl DuckDbAdbcStorage {
     }
 
     pub fn start_update_operation(self: &Arc<Self>) -> EngineResult<DuckDbUpdateOperation> {
+        self.require_writable_transaction()?;
         let connection = self.take_connection_engine()?;
         let cancellation = Arc::new(DuckDbCancelHandle {
             connection: Mutex::new(connection.clone()),
@@ -1098,6 +1116,8 @@ impl DuckDbAdbcStorage {
         batches: Vec<RecordBatch>,
         mode: IngestMode,
     ) -> Result<Option<i64>> {
+        self.require_writable_transaction()
+            .map_err(anyhow::Error::new)?;
         if self.catalog_identity_enabled {
             return self
                 .transaction(|transaction| transaction.ingest(schema, table, batches, mode));
@@ -1269,6 +1289,22 @@ impl DuckDbAdbcStorage {
             self.lifecycle.transaction_finished();
         }
         *current = state;
+        if state != EngineTransactionState::Active {
+            self.transaction_read_only.store(false, Ordering::Release);
+        }
+        Ok(())
+    }
+
+    fn require_writable_transaction(&self) -> EngineResult<()> {
+        if self.transaction_state() == EngineTransactionState::Active
+            && self.transaction_read_only.load(Ordering::Acquire)
+        {
+            return Err(EngineError::new(
+                EngineErrorKind::Unauthorized,
+                "cannot execute a write in a read-only transaction",
+            )
+            .with_sqlstate("25006"));
+        }
         Ok(())
     }
 
@@ -1735,6 +1771,7 @@ impl EngineStorageKernel for DuckDbAdbcStorage {
     }
 
     fn execute_update_contract(&self, sql: &str) -> EngineResult<Option<i64>> {
+        self.require_writable_transaction()?;
         if self.catalog_identity_enabled {
             return self
                 .transaction(|transaction| {
@@ -1756,6 +1793,7 @@ impl EngineStorageKernel for DuckDbAdbcStorage {
         sql: &str,
         parameters: RecordBatch,
     ) -> EngineResult<Option<i64>> {
+        self.require_writable_transaction()?;
         if parameters.num_rows() != 1 {
             return Err(EngineError::new(
                 EngineErrorKind::InvalidQuery,
@@ -1793,6 +1831,7 @@ impl EngineStorageKernel for DuckDbAdbcStorage {
         batches: Vec<RecordBatch>,
         disposition: IngestDisposition,
     ) -> EngineResult<Option<i64>> {
+        self.require_writable_transaction()?;
         let mode = match disposition {
             IngestDisposition::Create => IngestMode::Create,
             IngestDisposition::Append => IngestMode::Append,

@@ -73,6 +73,11 @@ impl EngineError {
         self.transaction_outcome = outcome;
         self
     }
+
+    pub fn with_sqlstate(mut self, sqlstate: impl Into<String>) -> Self {
+        self.sqlstate = Some(sqlstate.into());
+        self
+    }
 }
 
 impl fmt::Display for EngineError {

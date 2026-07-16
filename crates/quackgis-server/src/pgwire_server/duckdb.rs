@@ -45,8 +45,9 @@ use sqlparser::ast::{
     DeclareType, Expr, FetchDirection, Function, FunctionArg, FunctionArgExpr,
     FunctionArgumentList, FunctionArguments, GroupByExpr, Ident, JoinConstraint, JoinOperator,
     ObjectName, ObjectNamePart, Reset, SelectFlavor, SelectItem, SelectItemQualifiedWildcardKind,
-    Set, SetExpr, Statement, TableFactor, Value, VisitMut, VisitorMut, WildcardAdditionalOptions,
-    visit_expressions, visit_expressions_mut, visit_relations_mut,
+    Set, SetExpr, Statement, TableFactor, TransactionAccessMode, TransactionMode, Value, VisitMut,
+    VisitorMut, WildcardAdditionalOptions, visit_expressions, visit_expressions_mut,
+    visit_relations_mut,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
@@ -415,7 +416,7 @@ impl QueryParser for DuckDbParser {
         }
         if matches!(
             validated.kind,
-            StatementKind::Begin
+            StatementKind::Begin { .. }
                 | StatementKind::Commit
                 | StatementKind::Rollback
                 | StatementKind::SessionSet
@@ -620,10 +621,15 @@ impl SimpleQueryHandler for DuckDbService {
         if client.transaction_status() == TransactionStatus::Error {
             validate_failed_transaction_command(query)?;
         }
-        if let Some(command) = parse_sql_cursor_command(query)? {
-            return handle_sql_cursor(self, client, command, &Format::UnifiedText)
-                .await
-                .map(|response| vec![response]);
+        if let Some(cursor) = parse_sql_cursor_input(query)? {
+            return match cursor {
+                SqlCursorInput::Command(command) => {
+                    handle_sql_cursor(self, client, command, &Format::UnifiedText)
+                        .await
+                        .map(|response| vec![response])
+                }
+                SqlCursorInput::Batch(batch) => handle_sql_cursor_batch(self, client, batch).await,
+            };
         }
         let (sql, kind, ast) = validate_simple_sql_with_catalog_identity(
             query,
@@ -631,7 +637,6 @@ impl SimpleQueryHandler for DuckDbService {
             Some(&identity),
             self.auth.role_catalog().map(Arc::as_ref),
         )?;
-        let failed_transaction = client.transaction_status() == TransactionStatus::Error;
         match (&kind, ast.as_ref()) {
             (SimpleStatementKind::Copy(target), _) => authorize_copy(client, &self.auth, target)?,
             (SimpleStatementKind::Maintenance(command), _) => {
@@ -747,96 +752,18 @@ impl SimpleQueryHandler for DuckDbService {
                 }
                 Ok(vec![Response::Execution(tag)])
             }
-            SimpleStatementKind::Begin => {
-                let _permit = self
-                    .control
-                    .admission
-                    .acquire(OperationClass::Writer)
-                    .await
-                    .map_err(admission_error)?;
-                self.control
-                    .blocking_workers
-                    .run_regular(move || storage.begin_transaction())
-                    .await
-                    .map_err(blocking_worker_error)?
-                    .map_err(anyhow_error)?;
-                Ok(vec![Response::TransactionStart(Tag::new("BEGIN"))])
-            }
+            SimpleStatementKind::Begin { read_only } => begin_transaction(self, storage, read_only)
+                .await
+                .map(|response| vec![response]),
             SimpleStatementKind::Commit => {
-                let _permit = self
-                    .control
-                    .admission
-                    .acquire(OperationClass::Writer)
+                end_transaction(self, client, TransactionEndCommand::Commit)
                     .await
-                    .map_err(admission_error)?;
-                close_all_sql_cursors(client).await?;
-                client.portal_store().clear_portals();
-                match storage.transaction_state() {
-                    EngineTransactionState::Idle if !failed_transaction => {
-                        role_session.end_transaction().map_err(role_session_error)?;
-                        return Ok(vec![Response::TransactionEnd(Tag::new("COMMIT"))]);
-                    }
-                    EngineTransactionState::Idle => {
-                        return Err(fatal_anyhow_error(anyhow::anyhow!(
-                            "pgwire failed-transaction state has no matching DuckDB transaction"
-                        )));
-                    }
-                    EngineTransactionState::Quarantined => {
-                        return Err(fatal_anyhow_error(anyhow::anyhow!(
-                            "DuckDB transaction state is quarantined"
-                        )));
-                    }
-                    EngineTransactionState::Active => {}
-                }
-                if failed_transaction {
-                    self.control
-                        .blocking_workers
-                        .run_regular(move || storage.rollback_transaction())
-                        .await
-                        .map_err(blocking_worker_error)?
-                        .map_err(anyhow_error)?;
-                    role_session.end_transaction().map_err(role_session_error)?;
-                    Ok(vec![Response::TransactionEnd(Tag::new("ROLLBACK"))])
-                } else {
-                    self.control
-                        .blocking_workers
-                        .run_regular(move || storage.commit_transaction())
-                        .await
-                        .map_err(blocking_worker_error)?
-                        .map_err(fatal_anyhow_error)?;
-                    role_session.end_transaction().map_err(role_session_error)?;
-                    Ok(vec![Response::TransactionEnd(Tag::new("COMMIT"))])
-                }
+                    .map(|response| vec![response])
             }
             SimpleStatementKind::Rollback => {
-                let _permit = self
-                    .control
-                    .admission
-                    .acquire(OperationClass::Writer)
+                end_transaction(self, client, TransactionEndCommand::Rollback)
                     .await
-                    .map_err(admission_error)?;
-                close_all_sql_cursors(client).await?;
-                client.portal_store().clear_portals();
-                match storage.transaction_state() {
-                    EngineTransactionState::Idle => {
-                        role_session.end_transaction().map_err(role_session_error)?;
-                        return Ok(vec![Response::TransactionEnd(Tag::new("ROLLBACK"))]);
-                    }
-                    EngineTransactionState::Quarantined => {
-                        return Err(fatal_anyhow_error(anyhow::anyhow!(
-                            "DuckDB transaction state is quarantined"
-                        )));
-                    }
-                    EngineTransactionState::Active => {}
-                }
-                self.control
-                    .blocking_workers
-                    .run_regular(move || storage.rollback_transaction())
-                    .await
-                    .map_err(blocking_worker_error)?
-                    .map_err(anyhow_error)?;
-                role_session.end_transaction().map_err(role_session_error)?;
-                Ok(vec![Response::TransactionEnd(Tag::new("ROLLBACK"))])
+                    .map(|response| vec![response])
             }
             SimpleStatementKind::Maintenance(command) => {
                 if storage.transaction_state() != EngineTransactionState::Idle {
@@ -1167,97 +1094,12 @@ impl ExtendedQueryHandler for DuckDbService {
                     &portal.result_column_format,
                 )?))
             }
-            StatementKind::Begin => {
-                let _permit = self
-                    .control
-                    .admission
-                    .acquire(OperationClass::Writer)
-                    .await
-                    .map_err(admission_error)?;
-                self.control
-                    .blocking_workers
-                    .run_regular(move || storage.begin_transaction())
-                    .await
-                    .map_err(blocking_worker_error)?
-                    .map_err(anyhow_error)?;
-                Ok(Response::TransactionStart(Tag::new("BEGIN")))
-            }
+            StatementKind::Begin { read_only } => begin_transaction(self, storage, read_only).await,
             StatementKind::Commit => {
-                let failed_transaction = client.transaction_status() == TransactionStatus::Error;
-                let _permit = self
-                    .control
-                    .admission
-                    .acquire(OperationClass::Writer)
-                    .await
-                    .map_err(admission_error)?;
-                close_all_sql_cursors(client).await?;
-                client.portal_store().clear_portals();
-                match storage.transaction_state() {
-                    EngineTransactionState::Idle if !failed_transaction => {
-                        role_session.end_transaction().map_err(role_session_error)?;
-                        return Ok(Response::TransactionEnd(Tag::new("COMMIT")));
-                    }
-                    EngineTransactionState::Idle => {
-                        return Err(fatal_anyhow_error(anyhow::anyhow!(
-                            "pgwire failed-transaction state has no matching DuckDB transaction"
-                        )));
-                    }
-                    EngineTransactionState::Quarantined => {
-                        return Err(fatal_anyhow_error(anyhow::anyhow!(
-                            "DuckDB transaction state is quarantined"
-                        )));
-                    }
-                    EngineTransactionState::Active => {}
-                }
-                if failed_transaction {
-                    self.control
-                        .blocking_workers
-                        .run_regular(move || storage.rollback_transaction())
-                        .await
-                        .map_err(blocking_worker_error)?
-                        .map_err(anyhow_error)?;
-                    role_session.end_transaction().map_err(role_session_error)?;
-                    Ok(Response::TransactionEnd(Tag::new("ROLLBACK")))
-                } else {
-                    self.control
-                        .blocking_workers
-                        .run_regular(move || storage.commit_transaction())
-                        .await
-                        .map_err(blocking_worker_error)?
-                        .map_err(fatal_anyhow_error)?;
-                    role_session.end_transaction().map_err(role_session_error)?;
-                    Ok(Response::TransactionEnd(Tag::new("COMMIT")))
-                }
+                end_transaction(self, client, TransactionEndCommand::Commit).await
             }
             StatementKind::Rollback => {
-                let _permit = self
-                    .control
-                    .admission
-                    .acquire(OperationClass::Writer)
-                    .await
-                    .map_err(admission_error)?;
-                close_all_sql_cursors(client).await?;
-                client.portal_store().clear_portals();
-                match storage.transaction_state() {
-                    EngineTransactionState::Idle => {
-                        role_session.end_transaction().map_err(role_session_error)?;
-                        return Ok(Response::TransactionEnd(Tag::new("ROLLBACK")));
-                    }
-                    EngineTransactionState::Quarantined => {
-                        return Err(fatal_anyhow_error(anyhow::anyhow!(
-                            "DuckDB transaction state is quarantined"
-                        )));
-                    }
-                    EngineTransactionState::Active => {}
-                }
-                self.control
-                    .blocking_workers
-                    .run_regular(move || storage.rollback_transaction())
-                    .await
-                    .map_err(blocking_worker_error)?
-                    .map_err(anyhow_error)?;
-                role_session.end_transaction().map_err(role_session_error)?;
-                Ok(Response::TransactionEnd(Tag::new("ROLLBACK")))
+                end_transaction(self, client, TransactionEndCommand::Rollback).await
             }
             StatementKind::Copy | StatementKind::SqlCursor | StatementKind::Maintenance => {
                 Err(user_error(
@@ -1273,7 +1115,7 @@ impl ExtendedQueryHandler for DuckDbService {
 enum StatementKind {
     Read,
     Write(&'static str),
-    Begin,
+    Begin { read_only: bool },
     Commit,
     Rollback,
     SessionSet,
@@ -1291,7 +1133,7 @@ impl StatementKind {
                 OperationClass::Reader
             }
             Self::Write(_)
-            | Self::Begin
+            | Self::Begin { .. }
             | Self::Commit
             | Self::Rollback
             | Self::Copy
@@ -1383,7 +1225,7 @@ fn validate_simple_sql_with_catalog_identity(
     let kind = match validated.kind {
         StatementKind::Read => SimpleStatementKind::Read,
         StatementKind::Write(command) => SimpleStatementKind::Write(command),
-        StatementKind::Begin => SimpleStatementKind::Begin,
+        StatementKind::Begin { read_only } => SimpleStatementKind::Begin { read_only },
         StatementKind::Commit => SimpleStatementKind::Commit,
         StatementKind::Rollback => SimpleStatementKind::Rollback,
         StatementKind::SessionSet => SimpleStatementKind::SessionSet,
@@ -1416,7 +1258,7 @@ fn validate_simple_sql_with_catalog_identity(
 enum SimpleStatementKind {
     Read,
     Write(&'static str),
-    Begin,
+    Begin { read_only: bool },
     Commit,
     Rollback,
     SessionSet,
@@ -1429,9 +1271,37 @@ enum SimpleStatementKind {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum SqlCursorCommand {
-    Declare { name: String, query: String },
-    Fetch { name: String, rows: usize },
-    Close { name: Option<String> },
+    Declare {
+        name: String,
+        query: String,
+        binary: bool,
+    },
+    Fetch {
+        name: String,
+        rows: usize,
+    },
+    Close {
+        name: Option<String>,
+    },
+}
+
+enum SqlCursorInput {
+    Command(SqlCursorCommand),
+    Batch(SqlCursorBatch),
+}
+
+enum SqlCursorBatch {
+    BeginReadOnlyDeclare(SqlCursorCommand),
+    CloseAndEnd {
+        close: SqlCursorCommand,
+        end: TransactionEndCommand,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransactionEndCommand {
+    Commit,
+    Rollback,
 }
 
 #[derive(Default)]
@@ -1444,17 +1314,66 @@ struct SqlCursorMetadata {
     result_schema: SchemaRef,
     result_origins: Vec<Option<CatalogColumnOrigin>>,
     result_formats: Option<Vec<FieldFormat>>,
+    binary: bool,
     portal: Arc<Portal<DuckDbStatement>>,
 }
 
 fn parse_sql_cursor_command(sql: &str) -> PgWireResult<Option<SqlCursorCommand>> {
-    let normalized = normalize_sql(sql)?;
-    let mut statements = Parser::parse_sql(&PostgreSqlDialect {}, &normalized)
-        .map_err(|error| user_error("42601", &error.to_string()))?;
-    if statements.len() != 1 {
-        return Ok(None);
+    match parse_sql_cursor_input(sql)? {
+        Some(SqlCursorInput::Command(command)) => Ok(Some(command)),
+        Some(SqlCursorInput::Batch(_)) | None => Ok(None),
     }
-    let statement = statements.pop().expect("one parsed statement");
+}
+
+fn parse_sql_cursor_input(sql: &str) -> PgWireResult<Option<SqlCursorInput>> {
+    let normalized = normalize_sql(sql)?;
+    let statements = Parser::parse_sql(&PostgreSqlDialect {}, &normalized)
+        .map_err(|error| user_error("42601", &error.to_string()))?;
+    match statements.len() {
+        1 => {
+            parse_sql_cursor_statement(statements.into_iter().next().expect("one parsed statement"))
+                .map(|command| command.map(SqlCursorInput::Command))
+        }
+        2 => parse_sql_cursor_batch(statements).map(|batch| batch.map(SqlCursorInput::Batch)),
+        _ => Ok(None),
+    }
+}
+
+fn parse_sql_cursor_batch(statements: Vec<Statement>) -> PgWireResult<Option<SqlCursorBatch>> {
+    let mut statements = statements.into_iter();
+    let first = statements.next().expect("two parsed statements");
+    let second = statements.next().expect("two parsed statements");
+    if supported_transaction_begin(&first) == Some(true)
+        && let Some(command @ SqlCursorCommand::Declare { binary: true, .. }) =
+            parse_sql_cursor_statement(second.clone())?
+    {
+        return Ok(Some(SqlCursorBatch::BeginReadOnlyDeclare(command)));
+    }
+    if let Some(end) = transaction_end_command(&second)
+        && let Some(close @ SqlCursorCommand::Close { name: Some(_) }) =
+            parse_sql_cursor_statement(first)?
+    {
+        return Ok(Some(SqlCursorBatch::CloseAndEnd { close, end }));
+    }
+    Ok(None)
+}
+
+fn transaction_end_command(statement: &Statement) -> Option<TransactionEndCommand> {
+    match statement {
+        Statement::Commit {
+            chain: false,
+            end: false,
+            modifier: None,
+        } => Some(TransactionEndCommand::Commit),
+        Statement::Rollback {
+            chain: false,
+            savepoint: None,
+        } => Some(TransactionEndCommand::Rollback),
+        _ => None,
+    }
+}
+
+fn parse_sql_cursor_statement(statement: Statement) -> PgWireResult<Option<SqlCursorCommand>> {
     match statement {
         Statement::Declare { stmts } => {
             let [declaration] = stmts.as_slice() else {
@@ -1472,7 +1391,6 @@ fn parse_sql_cursor_command(sql: &str) -> PgWireResult<Option<SqlCursorCommand>>
             if declaration.data_type.is_some()
                 || declaration.assignment.is_some()
                 || declaration.declare_type != Some(DeclareType::Cursor)
-                || declaration.binary == Some(true)
                 || declaration.sensitive.is_some()
                 || declaration.scroll == Some(true)
                 || declaration.hold == Some(true)
@@ -1488,6 +1406,7 @@ fn parse_sql_cursor_command(sql: &str) -> PgWireResult<Option<SqlCursorCommand>>
             Ok(Some(SqlCursorCommand::Declare {
                 name: sql_cursor_name(name)?,
                 query: query.to_string(),
+                binary: declaration.binary == Some(true),
             }))
         }
         Statement::Fetch {
@@ -1551,6 +1470,148 @@ fn sql_cursor_fetch_rows(direction: &FetchDirection) -> PgWireResult<usize> {
     Ok(value)
 }
 
+async fn begin_transaction(
+    service: &DuckDbService,
+    storage: Arc<DuckDbAdbcStorage>,
+    read_only: bool,
+) -> PgWireResult<Response> {
+    let _permit = service
+        .control
+        .admission
+        .acquire(OperationClass::Writer)
+        .await
+        .map_err(admission_error)?;
+    service
+        .control
+        .blocking_workers
+        .run_regular(move || {
+            if read_only {
+                storage.begin_read_only_transaction()
+            } else {
+                storage.begin_transaction()
+            }
+        })
+        .await
+        .map_err(blocking_worker_error)?
+        .map_err(anyhow_error)?;
+    Ok(Response::TransactionStart(Tag::new("BEGIN")))
+}
+
+async fn end_transaction<C>(
+    service: &DuckDbService,
+    client: &mut C,
+    command: TransactionEndCommand,
+) -> PgWireResult<Response>
+where
+    C: ClientInfo + ClientPortalStore + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+    C::PortalStore: PortalStore,
+    C::Error: Debug,
+    PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+{
+    let failed_transaction = client.transaction_status() == TransactionStatus::Error;
+    let role_session = client_role_session(client, &service.auth)?;
+    let storage = client_session(
+        client,
+        Arc::clone(&service.storage),
+        Arc::clone(&service.control.blocking_workers),
+    )
+    .await?;
+    let _permit = service
+        .control
+        .admission
+        .acquire(OperationClass::Writer)
+        .await
+        .map_err(admission_error)?;
+    close_all_sql_cursors(client).await?;
+    client.portal_store().clear_portals();
+    match storage.transaction_state() {
+        EngineTransactionState::Idle
+            if command == TransactionEndCommand::Commit && failed_transaction =>
+        {
+            return Err(fatal_anyhow_error(anyhow::anyhow!(
+                "pgwire failed-transaction state has no matching DuckDB transaction"
+            )));
+        }
+        EngineTransactionState::Idle => {
+            role_session.end_transaction().map_err(role_session_error)?;
+            let tag = match command {
+                TransactionEndCommand::Commit => "COMMIT",
+                TransactionEndCommand::Rollback => "ROLLBACK",
+            };
+            return Ok(Response::TransactionEnd(Tag::new(tag)));
+        }
+        EngineTransactionState::Quarantined => {
+            return Err(fatal_anyhow_error(anyhow::anyhow!(
+                "DuckDB transaction state is quarantined"
+            )));
+        }
+        EngineTransactionState::Active => {}
+    }
+    let rollback = command == TransactionEndCommand::Rollback || failed_transaction;
+    if rollback {
+        service
+            .control
+            .blocking_workers
+            .run_regular(move || storage.rollback_transaction())
+            .await
+            .map_err(blocking_worker_error)?
+            .map_err(anyhow_error)?;
+    } else {
+        service
+            .control
+            .blocking_workers
+            .run_regular(move || storage.commit_transaction())
+            .await
+            .map_err(blocking_worker_error)?
+            .map_err(fatal_anyhow_error)?;
+    }
+    role_session.end_transaction().map_err(role_session_error)?;
+    Ok(Response::TransactionEnd(Tag::new(if rollback {
+        "ROLLBACK"
+    } else {
+        "COMMIT"
+    })))
+}
+
+async fn handle_sql_cursor_batch<C>(
+    service: &DuckDbService,
+    client: &mut C,
+    batch: SqlCursorBatch,
+) -> PgWireResult<Vec<Response>>
+where
+    C: ClientInfo + ClientPortalStore + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+    C::PortalStore: PortalStore,
+    C::Error: Debug,
+    PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+{
+    match batch {
+        SqlCursorBatch::BeginReadOnlyDeclare(declare) => {
+            let storage = client_session(
+                client,
+                Arc::clone(&service.storage),
+                Arc::clone(&service.control.blocking_workers),
+            )
+            .await?;
+            let begin = begin_transaction(service, storage, true).await?;
+            match handle_sql_cursor(service, client, declare, &Format::UnifiedText).await {
+                Ok(declare) => Ok(vec![begin, declare]),
+                Err(PgWireError::UserError(error)) if !error.is_fatal() => {
+                    Ok(vec![begin, Response::Error(error)])
+                }
+                Err(error) => {
+                    end_transaction(service, client, TransactionEndCommand::Rollback).await?;
+                    Err(error)
+                }
+            }
+        }
+        SqlCursorBatch::CloseAndEnd { close, end } => {
+            let close = handle_sql_cursor(service, client, close, &Format::UnifiedText).await?;
+            let end = end_transaction(service, client, end).await?;
+            Ok(vec![close, end])
+        }
+    }
+}
+
 async fn handle_sql_cursor<C>(
     service: &DuckDbService,
     client: &mut C,
@@ -1579,7 +1640,11 @@ where
         .session_extensions()
         .get_or_insert_with(SqlCursorSessionState::default);
     match command {
-        SqlCursorCommand::Declare { name, query } => {
+        SqlCursorCommand::Declare {
+            name,
+            query,
+            binary,
+        } => {
             {
                 let cursors = state
                     .cursors
@@ -1619,6 +1684,7 @@ where
                         result_schema,
                         result_origins,
                         result_formats: None,
+                        binary,
                         portal,
                     },
                 );
@@ -1626,6 +1692,12 @@ where
         }
         SqlCursorCommand::Fetch { name, rows } => {
             let metadata = sql_cursor_metadata(client, &name)?;
+            let binary_format = Format::UnifiedBinary;
+            let result_format = if metadata.binary {
+                &binary_format
+            } else {
+                result_format
+            };
             if rows == 0 {
                 return empty_sql_cursor_response(&metadata, result_format).map(Response::Query);
             }
@@ -1871,6 +1943,28 @@ fn validate_failed_transaction_command(sql: &str) -> PgWireResult<()> {
     }
 }
 
+fn supported_transaction_begin(statement: &Statement) -> Option<bool> {
+    let Statement::StartTransaction {
+        modes,
+        modifier,
+        statements,
+        exception,
+        has_end_keyword,
+        ..
+    } = statement
+    else {
+        return None;
+    };
+    if modifier.is_some() || !statements.is_empty() || exception.is_some() || *has_end_keyword {
+        return None;
+    }
+    match modes.as_slice() {
+        [] => Some(false),
+        [TransactionMode::AccessMode(TransactionAccessMode::ReadOnly)] => Some(true),
+        _ => None,
+    }
+}
+
 fn validate_statement_with_catalog_identity(
     sql: &str,
     mode: ProtocolMode,
@@ -1988,6 +2082,7 @@ fn validate_statement_with_catalog_identity(
         ));
     }
     let role_command = parse_role_command(&statement);
+    let transaction_read_only = supported_transaction_begin(&statement);
     let kind = match &statement {
         Statement::Query(_) if request_command.is_some() => StatementKind::RequestContext,
         Statement::Query(_) => StatementKind::Read,
@@ -1995,20 +2090,10 @@ fn validate_statement_with_catalog_identity(
         Statement::Insert(_) => StatementKind::Write("INSERT"),
         Statement::Update { .. } => StatementKind::Write("UPDATE"),
         Statement::Delete(_) => StatementKind::Write("DELETE"),
-        Statement::StartTransaction {
-            modes,
-            modifier,
-            statements,
-            exception,
-            has_end_keyword,
-            ..
-        } if modes.is_empty()
-            && modifier.is_none()
-            && statements.is_empty()
-            && exception.is_none()
-            && !has_end_keyword =>
-        {
-            StatementKind::Begin
+        Statement::StartTransaction { .. } if transaction_read_only.is_some() => {
+            StatementKind::Begin {
+                read_only: transaction_read_only.expect("validated transaction access mode"),
+            }
         }
         Statement::Commit {
             chain: false,
@@ -6683,8 +6768,15 @@ mod tests {
             validate_statement("BEGIN", ProtocolMode::Extended)
                 .expect("extended transaction start")
                 .kind,
-            StatementKind::Begin
+            StatementKind::Begin { read_only: false }
         );
+        assert_eq!(
+            validate_statement("BEGIN READ ONLY", ProtocolMode::Extended)
+                .expect("extended read-only transaction start")
+                .kind,
+            StatementKind::Begin { read_only: true }
+        );
+        assert!(validate_statement("BEGIN READ WRITE", ProtocolMode::Extended).is_err());
         assert!(
             validate_statement("BEGIN ISOLATION LEVEL SERIALIZABLE", ProtocolMode::Extended)
                 .is_err()
@@ -6700,6 +6792,7 @@ mod tests {
             Some(SqlCursorCommand::Declare {
                 name: "ogr_reader".to_owned(),
                 query: "SELECT id FROM points".to_owned(),
+                binary: false,
             })
         );
         assert_eq!(
@@ -6724,7 +6817,43 @@ mod tests {
         );
         assert!(parse_sql_cursor_command("FETCH ALL IN ogr_reader").is_err());
         assert!(parse_sql_cursor_command("FETCH 4097 IN ogr_reader").is_err());
-        assert!(parse_sql_cursor_command("DECLARE ogr_reader BINARY CURSOR FOR SELECT 1").is_err());
+        assert!(matches!(
+            parse_sql_cursor_command("DECLARE qgis_reader BINARY CURSOR FOR SELECT 1")
+                .expect("binary cursor declaration"),
+            Some(SqlCursorCommand::Declare {
+                name,
+                binary: true,
+                ..
+            }) if name == "qgis_reader"
+        ));
+        assert!(matches!(
+            parse_sql_cursor_input(
+                "BEGIN READ ONLY; DECLARE qgis_reader BINARY CURSOR FOR SELECT 1"
+            )
+            .expect("QGIS cursor start batch"),
+            Some(SqlCursorInput::Batch(SqlCursorBatch::BeginReadOnlyDeclare(
+                SqlCursorCommand::Declare {
+                    name,
+                    binary: true,
+                    ..
+                }
+            ))) if name == "qgis_reader"
+        ));
+        for end in ["COMMIT", "ROLLBACK"] {
+            assert!(matches!(
+                parse_sql_cursor_input(&format!("CLOSE qgis_reader; {end}"))
+                    .expect("QGIS cursor end batch"),
+                Some(SqlCursorInput::Batch(SqlCursorBatch::CloseAndEnd {
+                    close: SqlCursorCommand::Close { name: Some(name) },
+                    ..
+                })) if name == "qgis_reader"
+            ));
+        }
+        assert!(
+            parse_sql_cursor_input("BEGIN; DECLARE qgis_reader BINARY CURSOR FOR SELECT 1")
+                .expect("unsupported non-read-only batch")
+                .is_none()
+        );
     }
 
     #[test]

@@ -13,6 +13,9 @@ CREATE OR REPLACE MACRO quackgis_postgis_lib_version() AS '3.4.0';
 CREATE OR REPLACE MACRO quackgis_postgis_version() AS '3.4.0 QUACKGIS';
 CREATE OR REPLACE MACRO quackgis_st_geomfromewkt(ewkt) AS
     ST_GeomFromText(regexp_replace(CAST(ewkt AS VARCHAR), '^[sS][rR][iI][dD]=[0-9]+;', ''));
+CREATE OR REPLACE MACRO quackgis_st_asbinary(g, byte_order) AS
+    CASE WHEN upper(CAST(byte_order AS VARCHAR)) = 'NDR' THEN ST_AsWKB(g)
+         ELSE error('QuackGIS ST_AsBinary supports NDR byte order only') END;
 CREATE OR REPLACE MACRO quackgis_st_ashexewkb(g) AS hex(ST_AsWKB(g));
 CREATE OR REPLACE MACRO quackgis_geometry_type(g) AS
     upper(CAST(ST_GeometryType(g) AS VARCHAR));
@@ -111,6 +114,8 @@ fn rewrite_function_name(identifier: &str) -> Option<&'static str> {
         Some("quackgis_st_geomfromewkt")
     } else if identifier.eq_ignore_ascii_case("st_makepoint") {
         Some("ST_Point")
+    } else if identifier.eq_ignore_ascii_case("st_asbinary") {
+        Some("quackgis_st_asbinary")
     } else if identifier.eq_ignore_ascii_case("st_ashexewkb") {
         Some("quackgis_st_ashexewkb")
     } else if identifier.eq_ignore_ascii_case("geometrytype") {
@@ -255,6 +260,7 @@ mod tests {
         for (source, target) in [
             ("postgis_lib_version()", "quackgis_postgis_lib_version()"),
             ("ST_GeomFromEWKT($1)", "quackgis_st_geomfromewkt($1)"),
+            ("st_asbinary(g, 'NDR')", "quackgis_st_asbinary(g, 'NDR')"),
             ("ST_AsHEXEWKB(g)", "quackgis_st_ashexewkb(g)"),
             ("GeometryType(g)", "quackgis_geometry_type(g)"),
             ("ST_CurveToLine(g)", "quackgis_st_curvetoline(g)"),

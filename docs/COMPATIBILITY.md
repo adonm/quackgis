@@ -46,7 +46,9 @@ also a target corpus, not current QuackGIS describe support.
 An offscreen, digest-pinned QGIS 3.44.11 PostgreSQL provider oracle also succeeds
 for layer open, field/CRS discovery, privilege and owner inquiry, count, 3D extent,
 and first-feature binary cursor read. Its 32 statements (26 unique families) are
-frozen as targets; the same workflow does not yet pass against QuackGIS.
+frozen as targets. QuackGIS actual-pgwire now executes the three frozen binary
+cursor messages with exact payload and transaction-state assertions; the full
+headless client workflow does not yet pass against the packaged runtime.
 
 ## Proven local contract
 
@@ -143,7 +145,7 @@ mise exec -- just ci
 | `tokio-postgres` | maintained real-driver integration client |
 | PostgreSQL text COPY clients | bounded maintained type set supported |
 | GDAL/OGR | pinned 3.11.5 reads the psycopg-created copied-data fixture through the mutual-TLS tiny client and its unmodified SQL-result cursor lifecycle, with exact Point/NULL GeoJSON. The native catalog contract now executes the captured `pg_proc` PostGIS namespace lookup; the last older-image packaged direct-discovery retry stopped at `pg_proc`/`pg_class`, so a pinned-image rerun and downstream COPY/no-FID/CRS qualification remain open |
-| QGIS | exact offscreen 3.44.11 connects through current mutual TLS and retries direct, no-FID, and copied-SQL layers. The pinned lane passes its QGIS-shaped OID privilege/recovery projection with `pg_is_in_recovery=false`; PostgreSQL 18.4 startup/version identity, `25P02` precedence, failed COMMIT/ROLLBACK cleanup, and idle transaction end pass. Exact read-only/binary cursor query shapes and full copied-layer qualification remain open |
+| QGIS | exact offscreen 3.44.11 connects through current mutual TLS and retries direct, no-FID, and copied-SQL layers. The pinned lane passes its QGIS-shaped OID privilege/recovery projection with `pg_is_in_recovery=false`; PostgreSQL 18.4 startup/version identity and failed/idle transaction cleanup pass. Native actual-pgwire executes the exact captured read-only binary-cursor messages with all-binary RowDescription, exact WKB/BIGINT/text/NULL DataRows, COMMIT/ROLLBACK, and `25006` write denial. Pinned-image and full copied-layer qualification remain open |
 | GeoServer, Martin | target; client traces and QuackGIS qualification remain open |
 | psycopg | pinned 3.2.13 passes a mutual-TLS tiny-client copied-data workflow in Kind: create/reuse, delete, text COPY with exact WKB/NULL values, close/reconnect, and exact spatial readback |
 | `quackgis-rest` | signed-HS256-JWT read-only preview maps a bounded role claim and uses transaction-local role/claims. Direct SCRAM rotation, shared epoch invalidation with pinned identity, and exact signed-only fallback pass. K0 packages two replicas behind separately registered authenticator tiny clients with no database password; role-aware data/OpenAPI, two endpoints, one-Pod failover, core reconnect, and old authenticator/JWT denial pass. Pinned-epoch package rerun, multi-key overlap, public HTTP policy, and full PostgREST remain open |

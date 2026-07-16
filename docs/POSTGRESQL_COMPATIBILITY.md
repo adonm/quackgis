@@ -244,12 +244,18 @@ Kind cache/client rerun remains open.
 Read-only PostgreSQL SQL cursors now share that prepared-statement and epoch
 boundary. Simple and extended protocol accept plain transaction control plus one
 parameter-free `DECLARE ... CURSOR FOR SELECT`, metadata-only `FETCH 0`, and
-bounded forward `FETCH`/`CLOSE`. A session may retain at most 16 cursors and one
+bounded forward `FETCH`/`CLOSE`. The simple protocol additionally accepts only
+the frozen QGIS two-statement shapes `BEGIN READ ONLY; DECLARE ... BINARY CURSOR`
+and `CLOSE ...; COMMIT|ROLLBACK`. The transaction mode is enforced at both DML/DDL
+and COPY ingest entry points with SQLSTATE `25006`; it is not syntax-only. A
+binary declaration forces every result column to PostgreSQL binary format,
+including metadata-only and EOF fetches. `ST_AsBinary(..., 'NDR')` maps to raw WKB
+through a bounded NDR-only macro. A session may retain at most 16 cursors and one
 fetch may request at most 4,096 rows. The native stream starts on first non-zero
-fetch, pins its requested text/binary result format, and is drained in bounded
-pages before close or transaction end so an unfinished ADBC reader is not reused.
-Binary/scroll/hold declarations, backward/absolute movement, and format changes
-on a live cursor fail closed.
+fetch, pins its requested result format, and is drained in bounded pages before
+close or transaction end so an unfinished ADBC reader is not reused.
+Scroll/hold declarations, non-NDR `ST_AsBinary`, backward/absolute movement, and
+format changes on a live non-binary cursor fail closed.
 
 ## Compatibility surfaces
 
@@ -750,8 +756,11 @@ projection with PostgreSQL `bool` `pg_is_in_recovery=false`, while all startup
 modes advertise PostgreSQL 18.4 and `version()`/`SHOW server_version[_num]` agree.
 Simple and extended idle transaction end, failed `COMMIT`-as-rollback, subsequent
 `ROLLBACK`, explicit failed `ROLLBACK`, and `25P02` precedence pass without a
-client-name branch. Exact QGIS read-only/binary cursor query shapes, broader
-catalog shapes, and the pinned package rerun remain C6 blockers.
+client-name branch. Native actual-pgwire coverage now executes the exact captured
+QGIS read-only/binary cursor start, `FETCH FORWARD 2000`, and close/commit shapes;
+it verifies binary raw WKB/BIGINT/text/NULL values, close/rollback, failed-declare
+status, and read-only `25006` cleanup. Broader catalog shapes, the pinned package
+rerun, and full headless QGIS qualification remain C6 blockers.
 
 ### H1 — migrate and package role-aware REST
 

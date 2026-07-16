@@ -217,18 +217,29 @@ async fn raw_pgwire_startup(port: u16) -> tokio::net::TcpStream {
 
 async fn raw_pgwire_wait_for(stream: &mut tokio::net::TcpStream, expected: u8) {
     loop {
-        let message_type = stream.read_u8().await.expect("raw backend message type");
-        let length = stream.read_i32().await.expect("raw backend message length");
-        assert!((4..=16 * 1024 * 1024).contains(&length));
-        let mut body = vec![0_u8; length as usize - 4];
-        stream
-            .read_exact(&mut body)
-            .await
-            .expect("raw backend message body");
-        if message_type == expected {
+        let message = raw_pgwire_read_message(stream).await;
+        if message.kind == expected {
             return;
         }
     }
+}
+
+#[derive(Debug)]
+struct RawPgwireMessage {
+    kind: u8,
+    body: Vec<u8>,
+}
+
+async fn raw_pgwire_read_message(stream: &mut tokio::net::TcpStream) -> RawPgwireMessage {
+    let kind = stream.read_u8().await.expect("raw backend message type");
+    let length = stream.read_i32().await.expect("raw backend message length");
+    assert!((4..=16 * 1024 * 1024).contains(&length));
+    let mut body = vec![0_u8; length as usize - 4];
+    stream
+        .read_exact(&mut body)
+        .await
+        .expect("raw backend message body");
+    RawPgwireMessage { kind, body }
 }
 
 async fn raw_pgwire_query(stream: &mut tokio::net::TcpStream, sql: &str) {
@@ -242,6 +253,308 @@ async fn raw_pgwire_query(stream: &mut tokio::net::TcpStream, sql: &str) {
         .await
         .expect("raw query body");
     stream.write_u8(0).await.expect("raw query terminator");
+}
+
+async fn raw_pgwire_query_messages(
+    stream: &mut tokio::net::TcpStream,
+    sql: &str,
+) -> Vec<RawPgwireMessage> {
+    raw_pgwire_query(stream, sql).await;
+    let mut messages = Vec::new();
+    loop {
+        let message = raw_pgwire_read_message(stream).await;
+        let ready = message.kind == b'Z';
+        messages.push(message);
+        if ready {
+            return messages;
+        }
+    }
+}
+
+fn raw_command_tags(messages: &[RawPgwireMessage]) -> Vec<String> {
+    messages
+        .iter()
+        .filter(|message| message.kind == b'C')
+        .map(|message| {
+            String::from_utf8(
+                message
+                    .body
+                    .strip_suffix(&[0])
+                    .expect("command tag terminator")
+                    .to_vec(),
+            )
+            .expect("UTF-8 command tag")
+        })
+        .collect()
+}
+
+fn raw_ready_status(messages: &[RawPgwireMessage]) -> u8 {
+    let ready = messages
+        .last()
+        .filter(|message| message.kind == b'Z')
+        .expect("ReadyForQuery message");
+    assert_eq!(ready.body.len(), 1);
+    ready.body[0]
+}
+
+fn raw_i16(body: &[u8], offset: &mut usize) -> i16 {
+    let value = i16::from_be_bytes(body[*offset..*offset + 2].try_into().expect("i16 field"));
+    *offset += 2;
+    value
+}
+
+fn raw_i32(body: &[u8], offset: &mut usize) -> i32 {
+    let value = i32::from_be_bytes(body[*offset..*offset + 4].try_into().expect("i32 field"));
+    *offset += 4;
+    value
+}
+
+fn raw_row_description(body: &[u8]) -> Vec<(u32, i16)> {
+    let mut offset = 0;
+    let columns = usize::try_from(raw_i16(body, &mut offset)).expect("column count");
+    (0..columns)
+        .map(|_| {
+            let name_end = body[offset..]
+                .iter()
+                .position(|byte| *byte == 0)
+                .map(|end| offset + end)
+                .expect("column name terminator");
+            offset = name_end + 1;
+            offset += 4 + 2;
+            let type_oid = u32::try_from(raw_i32(body, &mut offset)).expect("type OID");
+            offset += 2 + 4;
+            let format = raw_i16(body, &mut offset);
+            (type_oid, format)
+        })
+        .collect()
+}
+
+fn raw_data_row(body: &[u8]) -> Vec<Option<Vec<u8>>> {
+    let mut offset = 0;
+    let columns = usize::try_from(raw_i16(body, &mut offset)).expect("column count");
+    (0..columns)
+        .map(|_| {
+            let length = raw_i32(body, &mut offset);
+            if length == -1 {
+                None
+            } else {
+                let length = usize::try_from(length).expect("non-negative column length");
+                let value = body[offset..offset + length].to_vec();
+                offset += length;
+                Some(value)
+            }
+        })
+        .collect()
+}
+
+fn raw_error_sqlstate(body: &[u8]) -> Option<String> {
+    let mut offset = 0;
+    while body.get(offset).copied().unwrap_or(0) != 0 {
+        let field = body[offset];
+        offset += 1;
+        let end = body[offset..].iter().position(|byte| *byte == 0)? + offset;
+        let value = std::str::from_utf8(&body[offset..end]).ok()?;
+        if field == b'C' {
+            return Some(value.to_owned());
+        }
+        offset = end + 1;
+    }
+    None
+}
+
+fn captured_qgis_sql(query_id: &str, cursor_name: &str) -> String {
+    let trace: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/qgis_3_44_postgresql18_trace.json"
+    ))
+    .expect("captured QGIS trace");
+    trace["queries"]
+        .as_array()
+        .expect("captured QGIS queries")
+        .iter()
+        .find(|query| query["id"] == query_id)
+        .and_then(|query| query["sql"].as_str())
+        .unwrap_or_else(|| panic!("captured QGIS query {query_id}"))
+        .replace(":cursor_name", cursor_name)
+}
+
+#[tokio::test]
+#[ignore = "requires the pinned DuckDB ADBC runtime"]
+async fn qgis_read_only_binary_cursor_batches_are_exact_and_enforced() {
+    let runtime = TestRuntime::start(ServerOptions::new().with_max_connections(4)).await;
+    let (client, connection) = runtime.connect().await;
+    client
+        .batch_execute(
+            "CREATE TABLE quackgis.main.trace_qgis(\
+             id BIGINT, name VARCHAR, nullable_text VARCHAR, geom GEOMETRY)",
+        )
+        .await
+        .expect("create exact QGIS cursor fixture");
+    client
+        .batch_execute(
+            "INSERT INTO quackgis.main.trace_qgis VALUES \
+             (7, 'one', NULL, ST_GeomFromText('POINT (1 2)'))",
+        )
+        .await
+        .expect("seed exact QGIS cursor fixture");
+    let unsupported_byte_order = client
+        .simple_query("SELECT st_asbinary(ST_Point(1, 2), 'XDR')")
+        .await
+        .expect_err("unsupported ST_AsBinary byte order");
+    assert!(
+        unsupported_byte_order
+            .as_db_error()
+            .is_some_and(|error| error.message().contains("NDR"))
+    );
+
+    let read_only_storage = Arc::new(
+        runtime
+            .storage()
+            .open_session()
+            .expect("independent read-only storage session"),
+    );
+    read_only_storage
+        .begin_read_only_transaction()
+        .expect("begin direct read-only transaction");
+    for error in [
+        match read_only_storage.start_update_operation() {
+            Ok(_) => panic!("update operation started in a read-only transaction"),
+            Err(error) => error,
+        },
+        match read_only_storage.start_ingest_operation() {
+            Ok(_) => panic!("ingest operation started in a read-only transaction"),
+            Err(error) => error,
+        },
+    ] {
+        assert_eq!(error.sqlstate.as_deref(), Some("25006"));
+    }
+    for error in [
+        read_only_storage
+            .execute_update("CREATE TABLE quackgis.main.read_only_bypass(id INTEGER)")
+            .expect_err("direct update rejected in read-only transaction"),
+        read_only_storage
+            .ingest("main", "read_only_bypass", Vec::new(), IngestMode::Create)
+            .expect_err("direct ingest rejected in read-only transaction"),
+    ] {
+        assert_eq!(
+            error
+                .downcast_ref::<quackgis_server::engine_api::EngineError>()
+                .and_then(|error| error.sqlstate.as_deref()),
+            Some("25006")
+        );
+    }
+    read_only_storage
+        .rollback_transaction()
+        .expect("rollback direct read-only transaction");
+
+    let mut raw = raw_pgwire_startup(runtime.port()).await;
+    let begin = raw_pgwire_query_messages(
+        &mut raw,
+        &captured_qgis_sql("binary_read_cursor", "qgis_reader"),
+    )
+    .await;
+    assert_eq!(
+        begin.iter().map(|message| message.kind).collect::<Vec<_>>(),
+        vec![b'C', b'C', b'Z']
+    );
+    assert_eq!(raw_command_tags(&begin), vec!["BEGIN", "DECLARE CURSOR"]);
+    assert_eq!(raw_ready_status(&begin), b'T');
+
+    let fetch = raw_pgwire_query_messages(
+        &mut raw,
+        &captured_qgis_sql("binary_read_fetch", "qgis_reader"),
+    )
+    .await;
+    assert_eq!(
+        fetch.iter().map(|message| message.kind).collect::<Vec<_>>(),
+        vec![b'T', b'D', b'C', b'Z']
+    );
+    let description = fetch
+        .iter()
+        .find(|message| message.kind == b'T')
+        .expect("binary RowDescription");
+    assert_eq!(
+        raw_row_description(&description.body),
+        vec![(17, 1), (20, 1), (25, 1), (25, 1)]
+    );
+    let row = fetch
+        .iter()
+        .find(|message| message.kind == b'D')
+        .expect("binary DataRow");
+    assert_eq!(
+        raw_data_row(&row.body),
+        vec![
+            Some(point_wkb(1.0, 2.0)),
+            Some(7_i64.to_be_bytes().to_vec()),
+            Some(b"one".to_vec()),
+            None,
+        ]
+    );
+    assert_eq!(raw_command_tags(&fetch), vec!["FETCH 1"]);
+    assert_eq!(raw_ready_status(&fetch), b'T');
+
+    let commit = raw_pgwire_query_messages(
+        &mut raw,
+        &captured_qgis_sql("binary_read_close", "qgis_reader"),
+    )
+    .await;
+    assert_eq!(raw_command_tags(&commit), vec!["CLOSE CURSOR", "COMMIT"]);
+    assert_eq!(raw_ready_status(&commit), b'I');
+
+    let begin_rollback = raw_pgwire_query_messages(
+        &mut raw,
+        "BEGIN READ ONLY; DECLARE qgis_rollback BINARY CURSOR FOR SELECT 1",
+    )
+    .await;
+    assert_eq!(
+        raw_command_tags(&begin_rollback),
+        vec!["BEGIN", "DECLARE CURSOR"]
+    );
+    assert_eq!(raw_ready_status(&begin_rollback), b'T');
+    let rollback = raw_pgwire_query_messages(&mut raw, "CLOSE qgis_rollback; ROLLBACK").await;
+    assert_eq!(
+        raw_command_tags(&rollback),
+        vec!["CLOSE CURSOR", "ROLLBACK"]
+    );
+    assert_eq!(raw_ready_status(&rollback), b'I');
+
+    let invalid_declare = raw_pgwire_query_messages(
+        &mut raw,
+        "BEGIN READ ONLY; DECLARE missing_reader BINARY CURSOR FOR \
+         SELECT id FROM public.missing_qgis_table",
+    )
+    .await;
+    assert_eq!(
+        invalid_declare
+            .iter()
+            .map(|message| message.kind)
+            .collect::<Vec<_>>(),
+        vec![b'C', b'E', b'Z']
+    );
+    assert_eq!(raw_command_tags(&invalid_declare), vec!["BEGIN"]);
+    assert_eq!(raw_ready_status(&invalid_declare), b'E');
+    let invalid_rollback = raw_pgwire_query_messages(&mut raw, "ROLLBACK").await;
+    assert_eq!(raw_command_tags(&invalid_rollback), vec!["ROLLBACK"]);
+    assert_eq!(raw_ready_status(&invalid_rollback), b'I');
+
+    let standalone = raw_pgwire_query_messages(&mut raw, "BEGIN READ ONLY").await;
+    assert_eq!(raw_command_tags(&standalone), vec!["BEGIN"]);
+    assert_eq!(raw_ready_status(&standalone), b'T');
+    let denied = raw_pgwire_query_messages(
+        &mut raw,
+        "INSERT INTO quackgis.main.trace_qgis(id, name) VALUES (8, 'denied')",
+    )
+    .await;
+    let error = denied
+        .iter()
+        .find(|message| message.kind == b'E')
+        .expect("read-only transaction error");
+    assert_eq!(raw_error_sqlstate(&error.body).as_deref(), Some("25006"));
+    assert_eq!(raw_ready_status(&denied), b'E');
+    let failed_rollback = raw_pgwire_query_messages(&mut raw, "ROLLBACK").await;
+    assert_eq!(raw_command_tags(&failed_rollback), vec!["ROLLBACK"]);
+    assert_eq!(raw_ready_status(&failed_rollback), b'I');
+
+    connection.abort();
 }
 
 impl Drop for ChildGuard {
