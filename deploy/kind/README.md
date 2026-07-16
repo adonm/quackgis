@@ -2,19 +2,31 @@
 
 This directory owns the K0 packaged functional boundary. One StatefulSet Pod runs
 exactly one complete QuackGIS server, one iroh worker edge, one bootstrap, and one
-tiny-client bridge. The complete server binds trust-mode pgwire only to
-`127.0.0.1:5434`; it is not a Service endpoint. The worker carries that loopback
-session over authenticated iroh, and the only application pgwire port is the tiny
-client on `5432`. The application Service publishes only Ready Pods; a separate
-headless Service may publish unready addresses solely for bootstrap/worker UDP
-startup routing.
+mutual-TLS `postgres` tiny-client bridge. The complete server binds role-catalog
+edge-preauthenticated pgwire only to `127.0.0.1:5434`; it is not a Service
+endpoint. Bootstrap maps two distinct proven credentials to exact signed leases:
+the existing client credential to `postgres` and a REST service credential to
+`authenticator`. Clients never request a role. The worker requires the startup
+user to equal the lease, and the loopback server rejects unknown or `NOLOGIN`
+users before `AuthenticationOk`.
 
-The tiny-client Service boundary requires mutual TLS. Generated edge credentials,
-server/client certificates, retained local PV/PVC, readiness/liveness probes, and
-pinned psql, psycopg, and GDAL/OGR Jobs are included. Three denial Jobs prove that
-the worker's loopback pgwire port, plaintext bridge access, and bridge access
-without a client certificate are refused. There is no service mesh, PostgreSQL,
-MinIO, DataFusion, or Sedona service.
+A separate Deployment runs two `quackgis-rest` Pods. Each has its own loopback
+tiny-client native sidecar, a unique ephemeral transport key, the shared
+`authenticator` service credential, and no database password. A namespace-local
+ClusterIP balances HTTP over only Ready replicas. The REST pgwire listener is not
+published by any Service. A stable internal UDP Service lets those sidecars
+reconnect after StatefulSet replacement; the headless Service remains solely for
+StatefulSet identity and core startup routing.
+
+The public pgwire tiny-client Service boundary requires mutual TLS. Generated
+edge credentials, server/client certificates, retained local PV/PVC,
+readiness/liveness probes, and pinned psql, psycopg, and GDAL/OGR Jobs are
+included. Three denial Jobs prove that the worker's loopback pgwire port,
+plaintext bridge access, and bridge access without a client certificate are
+refused. REST gates address each Pod independently, require two ready
+EndpointSlice addresses, prove reader/denied OpenAPI and direct-request behavior,
+and delete one Pod while the Service remains available. There is no service mesh,
+PostgreSQL, MinIO, DataFusion, or Sedona service.
 
 The psycopg 3.2.13 Job is a copied-data gate rather than a scalar connection
 smoke. It creates or reuses one client-neutral table, clears it, streams two rows
@@ -67,6 +79,7 @@ mise exec -- just kind-up-local
 mise exec -- just kind-client-gates
 mise exec -- just kind-restart-gate
 mise exec -- just kind-secret-rotation-gate
+mise exec -- just kind-rest-jwt-rotation-gate
 ```
 
 `kind-up-local` builds `localhost/quackgis-duckdb-runtime:dev` and
@@ -74,27 +87,35 @@ mise exec -- just kind-secret-rotation-gate
 loads them with `kind load image-archive`, reads the resulting CRI repository
 manifest digests from each Kind node, installs matching containerd digest aliases,
 and deploys only those immutable references. The runtime image contains the
-provenance-pinned DuckDB bundle plus the server, bootstrap, worker, client, and
-keygen binaries. The archive path avoids Kind's `load docker-image` assumption
+provenance-pinned DuckDB bundle plus the server, REST, bootstrap, worker, client,
+and keygen binaries. The archive path avoids Kind's `load docker-image` assumption
 that a Docker CLI exists when Podman is selected. `imagePullPolicy: IfNotPresent`
 keeps node-local images offline after loading. Cluster access is isolated in
 `.tmp/kind/kubeconfig`. An existing healthy `quackgis` cluster is reused; an
 unreachable named cluster is deleted and recreated before image loading.
 
-The client gates use `verify-full`, the generated client certificate, and the
-leased `postgres` role. The psycopg gate additionally proves copied-data COPY and
-reopen behavior, and the OGR gate proves copied-data SQL-result readback, through
-this exact path. No database password crosses the cluster leg: the worker
-requires the loopback server to return `AuthenticationOk`, and the bridge's mTLS
-boundary authenticates the packaged clients independently. Direct pgwire to
-`5434` is refused because the complete worker remains loopback-only.
+The pgwire client gates use `verify-full`, the generated client certificate, and
+the leased `postgres` role. The psycopg gate additionally proves copied-data COPY
+and reopen behavior, and the OGR gate proves copied-data SQL-result readback,
+through this exact path. The REST Deployment uses only the separately leased
+`authenticator` role; its transaction-local `rest_reader` assumption succeeds and
+`rest_denied` sees neither the table path nor direct data. No database password
+exists in the packaged edge path: each authenticated bridge requires the
+loopback server to return `AuthenticationOk`. Direct pgwire to `5434` is refused
+because the complete worker remains loopback-only.
 
-`kind-restart-gate` performs an ordered StatefulSet replacement and reruns all six
-positive/negative Jobs. `kind-secret-rotation-gate` stages replacement mTLS and
-iroh keys, rolls the content-hashed Pod template, proves the prior client
-certificate is denied, then reruns the current client Jobs. Failed rotation keeps
-the previous owner-only material under `.tmp/kind/` for explicit recovery rather
-than silently deleting it.
+`kind-restart-gate` performs an ordered StatefulSet replacement, requires the
+long-lived REST sidecars to discard stale worker sessions and reconnect through
+the stable UDP Service, then reruns all pgwire and REST gates.
+`kind-secret-rotation-gate` stages replacement mTLS and iroh keys, rolls the
+content-hashed core and REST templates, proves the prior client certificate and
+prior REST service credential cannot authenticate, then reruns the current
+copied-data, denial, replica, and failover gates. `kind-rest-jwt-rotation-gate`
+replaces the shared JWT key, rolls only the REST Deployment, accepts new-key
+tokens, and denies an old-key token against each replacement Pod. This is a
+bounded replacement operation after rollout, not a zero-downtime multi-key
+overlap contract. Failed rotation keeps previous owner-only material under
+`.tmp/kind/` for explicit recovery rather than silently deleting it.
 
 Delete the disposable node when finished. This deletes its node-local PV data by
 design even though the Kubernetes PV reclaim policy is `Retain`:

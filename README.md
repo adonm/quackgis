@@ -23,9 +23,10 @@ bounded HS256 JWTs, maps a configured role claim, and uses one authenticator
 pgwire identity with transaction-local role/context for reads and role-aware
 OpenAPI. REST consumes durable monotonic schema/security epochs in the
 checksum-pinned identity lane and otherwise validates exact role-filtered catalog
-revisions before requests. Routing that authenticator through the packaged tiny
-iroh bridge, shipping the epochs in the signed runtime, and multiple packaged
-replicas remain planned.
+revisions before requests. K0 now routes a separately registered `authenticator`
+lease through a loopback tiny-client sidecar in each of two REST Pods and proves
+role denial, balancing, failover, core reconnect, and credential replacement.
+Shipping shared epochs in the signed runtime remains planned.
 
 There is no PostgreSQL, DataFusion, or Sedona query engine. DuckDB is the sole
 planner/executor and official DuckLake is the sole writer for new storage.
@@ -88,16 +89,21 @@ TLS/backend-password denial, and differential DuckDB result/type/error, portal,
 transaction, COPY, cancellation/quarantine, concurrent-session, and reconnect
 behavior. Mandatory raw plus optional bounded adaptive LZ4 passes clean
 smoke/local/reference transport-resource budgets. K0 now packages the local
-direct path as one ordered Kind Pod: the DuckDB server remains loopback-only,
-the sole Service ingress is a mutual-TLS tiny client, pinned psql/psycopg/OGR
-smokes pass, direct/plaintext/certificate-free access fails, and replacement plus
-edge/mTLS rotation reconnect cleanly. The pinned psycopg 3.2.13 job additionally
+direct path with one ordered core Pod and two REST replicas. The DuckDB server
+remains loopback-only behind role-catalog edge preauthentication; distinct proven
+credentials lease `postgres` to the mutual-TLS pgwire ingress and `authenticator`
+to per-REST-Pod loopback sidecars. Pinned psql/psycopg/OGR smokes pass,
+direct/plaintext/certificate-free access fails, and replacement plus edge/mTLS
+rotation reconnect cleanly. The pinned psycopg 3.2.13 job additionally
 creates copied data, streams WKB/NULL rows with COPY, reconnects, and verifies
 exact spatial readback through that packaged ingress, including after ordered
 replacement and mTLS/edge-key rotation. Pinned OGR 3.11.5 reads the same fixture
 through its extended SQL-result cursor lifecycle and requires exact Point/NULL
-GeoJSON across those same operational gates. Direct OGR table discovery/COPY and
-QGIS copied-layer qualification remain open. Packaged resource and hosted-relay
+GeoJSON across those same operational gates. Both REST Pods independently pass
+reader/denied OpenAPI and exact data gates; the Service survives one Pod deletion,
+core replacement recovers, and old authenticator/JWT credentials are denied after
+replacement. Direct OGR table discovery/COPY and QGIS copied-layer qualification
+remain blocked by the catalog/identity bundle. Packaged resource and hosted-relay
 qualification remain open.
 
 TLS remains optional for local development. Set `QUACKGIS_TLS_MODE=required` with
@@ -108,7 +114,9 @@ mTLS/edge-key rotation also passes. The direct REST preview hot-reloads atomic
 HS256 key-file replacements and denies old-key tokens. It also reloads an
 owner-only authenticator-password file when reconnecting after a same-state
 database restart, fails readiness while credentials disagree, and denies the old
-password. Packaged database/JWT rotation remains open.
+password. Packaged Kind independently replaces the REST service credential and
+JWT key, requires both replacement Pods, and denies the old lease/token. A
+zero-downtime multi-key overlap and durable revocation remain open.
 
 The maintained Rust pgwire client resolves PostgreSQL 18 profile/QGIS-required
 built-in types, their array partners, collations, and spatial sentinels through

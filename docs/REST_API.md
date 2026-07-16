@@ -34,11 +34,15 @@ lease, policy, admission, epochs, and audit identity. See
   database work. Invalid tokens and unavailable key material receive the same
   generic API error.
 - The pgwire URL carries one privileged authenticator identity but must not carry
-  its password. The password is read from a bounded, owner-only, non-symlink
-  regular file. REST validates that file before each database operation and uses
-  it only while opening a connection. A file revision change discards the prior
-  connection and reconnects with the replacement credential; invalid or
-  database-mismatched material makes `/ready` and database work fail closed.
+  its password. Direct TCP mode reads the password from a bounded, owner-only,
+  non-symlink regular file. REST validates that file before each database
+  operation and uses it only while opening a connection. A file revision change
+  discards the prior connection and reconnects with the replacement credential;
+  invalid or database-mismatched material makes `/ready` and database work fail
+  closed. Packaged `edge-preauthenticated` mode rejects a password file and CA,
+  requires a literal loopback TCP host, and relies on the sidecar's separately
+  registered `authenticator` lease plus the server's loopback role-catalog
+  preauthentication. It is not a general plaintext-network mode.
   Every discovery and read transaction assumes only the validated, statically
   configured role and binds normalized claims to transaction-local
   `request.jwt.claims`. Database grants remain authoritative; claims do not
@@ -57,12 +61,14 @@ lease, policy, admission, epochs, and audit identity. See
   policy and effective role's grants are independent authorization ceilings.
 - Query execution has a fail-closed timeout. Native errors are bounded before
   entering the HTTP response.
-- Before OpenAPI or request SQL is generated, the sidecar re-reads the maintained
-  role-filtered catalog and compares a length-framed SHA-256 revision over only
-  REST-exposed columns, types, nullability, and defaults. An unchanged revision
-  reuses the immutable cache; a changed revision replaces it. Validation failure
-  returns `503`. Database authorization remains authoritative if state changes
-  between validation and execution.
+- Before OpenAPI or request SQL is generated, the sidecar compares shared
+  schema/security epochs where the server exposes durable identity. The cache key
+  also includes effective role and connection generation. When that capability
+  returns `0A000`, as in the signed package, REST caches the capability result per
+  connection and re-reads the exact role-filtered catalog revision. A change
+  replaces the immutable cache; validation failure returns `503`. Database
+  authorization remains authoritative if state changes between validation and
+  execution.
 
 ## Current PostgREST subset
 
@@ -73,7 +79,8 @@ Supported now:
   using the pinned upstream parser/query engine;
 - JSON array responses generated in DuckDB;
 - authenticated role-aware OpenAPI 3 discovery at `/`;
-- automatic role-filtered schema revision validation before API/OpenAPI requests;
+- role-filtered shared-epoch validation where available and exact revision
+  fallback before API/OpenAPI requests;
 - explicit authenticated schema validation at `POST /reload`; and
 - `/live` and database-backed `/ready`.
 
@@ -114,9 +121,9 @@ M3/M5 gates in [../ROADMAP.md](../ROADMAP.md):
 3. automatic role-filtered schema/security invalidation — complete at the
    direct-pgwire boundary. REST consumes shared monotonic epochs in the
    checksum-pinned identity lane and retains exact revision validation when the
-   signed runtime reports that capability unavailable; next package multiple
-   immutable stateless replicas with denial, readiness, load balancing, and
-   credential rotation; then
+   signed runtime reports that capability unavailable. Two immutable packaged
+   replicas now pass role denial, readiness, balancing, one-Pod failover, core
+   reconnect, service-credential rotation, and replacement JWT rotation; then
 4. add relationships and mutations only after common key metadata, object
    privileges, cancellation/transaction outcomes, and maintained bbox invariants
    pass through direct pgwire.
@@ -141,6 +148,26 @@ performs full discovery rather than accepting an unchanged epoch.
 An operation omitted by OpenAPI must also be denied when requested directly. An
 operation allowed by database grants can still be hidden by the REST exposure
 ceiling, but REST can never widen a database grant.
+
+## Packaged Kind profile
+
+The K0 profile runs two REST Pods behind one namespace-local ClusterIP Service.
+Each Pod owns a loopback `quackgis-client`, a unique ephemeral transport key, and
+the shared REST service credential. Bootstrap—not the client—maps that credential
+to `authenticator`; the existing mTLS pgwire credential remains independently
+mapped to `postgres`. The core backend is loopback-only and rejects any startup
+user not declared as `LOGIN` in the immutable role catalog before
+`AuthenticationOk`.
+
+`just kind-rest-gates` addresses both Pods independently, requires two ready
+EndpointSlice addresses, verifies exact reader data/OpenAPI and denied-role
+absence/`404`, rejects missing JWTs and writes, and deletes one Pod while the
+Service remains usable. `just kind-restart-gate` proves the sidecars invalidate a
+stale worker session and reacquire a lease after core replacement.
+`just kind-secret-rotation-gate` denies the prior REST credential's next lease.
+`just kind-rest-jwt-rotation-gate` waits for both replacement Pods, accepts the
+new key, and denies an old-key token against each Pod. The JWT operation has no
+multi-key overlap and therefore does not claim zero-downtime token transition.
 
 ## Run locally
 

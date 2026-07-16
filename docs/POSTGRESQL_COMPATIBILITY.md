@@ -76,9 +76,9 @@ The checksum-pinned development identity lane additionally provides stable
 user-object relation/attribute identity and RowDescription origins. That lane is
 not release-supported until the upstream identity API ships in a signed bundle.
 Authoritative spatial metadata and key/index semantics remain incomplete.
-Role-aware REST/OpenAPI and automatic role-filtered catalog revision invalidation
-now pass at the direct-pgwire preview boundary. Shared monotonic epoch consumption
-and packaged replicas remain incomplete.
+Role-aware REST/OpenAPI passes directly and in two packaged replicas. The
+development lane consumes shared monotonic epochs; the signed packaged lane uses
+exact role-filtered revision fallback until the official identity bundle ships.
 The development lane covers defaults/comments and DuckLake's only supported
 constraint (`NOT NULL`), while publishing an empty index catalog rather than
 inventing primary/unique identity; this is not a broad PostgreSQL catalog claim.
@@ -733,9 +733,15 @@ unmodified extended-protocol SQL-result cursor lifecycle (`BEGIN`, `DECLARE`,
 GeoJSON for `POINT (1 2)` plus NULL geometry/property values. Both pass again
 after ordered Pod replacement and mTLS/iroh key rotation with old-client denial.
 This closes the psycopg copied-data slice and the OGR SQL-result read slice only.
-Psql describe/copied-data, OGR direct table discovery/COPY/no-FID behavior, and
-headless QGIS copied-layer qualification remain open; the OGR connection's
-optional `pg_proc` PostGIS probe still fails closed before the supported SQL path.
+The remaining clients were retried through current mutual TLS. Psql 18.3 `\d+`
+connects but stops at unavailable `pg_class`. OGR direct discovery connects,
+reports the optional `pg_proc` failure, then stops at `pg_class`; COPY/no-FID are
+therefore still downstream. Exact offscreen QGIS 3.44.11 retries direct, no-FID,
+and copied-SQL layers. It first reaches OID/expression privilege inquiry, which
+correctly requires durable identity, and additionally exposes missing
+`pg_is_in_recovery` plus failed-transaction COMMIT/ROLLBACK cleanup behavior. No
+client-name branch or catalog bypass was added. The official identity bundle and
+those generic PostgreSQL gaps remain the C6 blockers.
 
 ### H1 — migrate and package role-aware REST
 
@@ -751,26 +757,25 @@ Deliver:
 Gate: two REST replicas produce the same role-specific API, cannot exceed the REST
 exposure ceiling or database grants, and continue to exercise only pgwire.
 
-Current progress: the direct-pgwire implementation now closes the first three
-functional slices. It validates bounded HS256 JWT signature, exact issuer and
-audience, expiry and optional not-before, and a statically allowed role claim.
-One SCRAM authenticator wraps discovery and reads in `SET LOCAL ROLE` transactions
-and binds normalized claims to `request.jwt.claims`. Role-filtered maintained
-`information_schema` drives per-role schema/OpenAPI caches, and actual pgwire
-proves a SELECT role can read while an assumable ungranted role sees no path and
-cannot call it directly; successful role/context cleanup also passes. Every
-API/OpenAPI request now validates a bounded digest of the exact role-filtered,
-REST-exposed catalog before SQL generation. Actual pgwire proves a live column
-change replaces the cache and an intentionally stale over-broad role cache is
-repaired, while database authorization independently denies that stale cache.
-The same smoke atomically replaces the bounded HS256 key file, accepts a new-key
-token, rejects the old key, and fails readiness for malformed key material. It
-also rotates an owner-only authenticator-password file, fails readiness while the
-file and database disagree, restarts the database on the same state, reconnects
-without restarting REST, and denies the old password. Shared monotonic epochs
-also drive REST invalidation in the checksum-pinned identity lane; the signed
-bundle, tiny-client routing, immutable multi-replica packaging, packaged
-database/JWT rotation, and balancing remain open before the H1 gate closes.
+Current progress: H1 is complete at the K0 package boundary. Direct mode validates
+bounded HS256 JWTs, exact issuer/audience/time/role, role-filtered discovery,
+transaction-local role/claims cleanup, exact cache fallback, shared epochs where
+durable identity exists, and owner-only JWT/authenticator rotation. Packaged mode
+uses no database password: bootstrap derives `authenticator` from a distinct
+proven service credential, the worker binds the pgwire startup user to that
+lease, and the server accepts only configured `LOGIN` roles on its loopback
+edge-preauthenticated listener before `AuthenticationOk`.
+
+Two REST Pods each run a loopback tiny client with a unique transport key. Both
+independently return the same exact reader data/OpenAPI, hide and deny an ungranted
+role, reject missing JWTs and writes, and publish two ready EndpointSlice
+addresses. Deleting one Pod leaves the HTTP Service usable. A stable internal UDP
+Service and bounded stale-session invalidation recover both replicas after a
+3.935-second core replacement. Packaged mTLS/edge rotation denies the old client
+certificate and old authenticator credential's next lease; a separate JWT
+replacement denies an old token against each replacement Pod. Signed shared
+epochs, public HTTP TLS/rate policy, zero-downtime multi-key overlap, full
+PostgREST behavior, and RLS remain follow-on work.
 
 ### C7 — add relationships and broader PostgreSQL structure
 

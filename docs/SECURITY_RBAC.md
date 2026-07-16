@@ -49,19 +49,18 @@ infrastructure, and production failure drills remain open.
    plaintext for development; required mode needs paired certificate/key material
    and rejects insecure startup before auth. The I0 ingress is authenticated and
    end-to-end encrypted, so it satisfies the secure-channel boundary without
-   nesting pgwire TLS. The config-backed bootstrap, signed one-worker lease,
-   challenged key proof, loopback or mutual-TLS tiny client, and worker startup-role validation
-   are implemented. K0 packages one mTLS bridge as the only Service ingress;
-   separate owner-only volumes expose only the bootstrap key to bootstrap, worker
-   key to worker, and credential/transport keys to the client. Plaintext,
-   missing-certificate, rotated-old-certificate, and direct worker TCP access are
-   denied. The worker answers SSL/GSS requests without nesting
-   encryption and refuses a backend unless its first frame is
-   `AuthenticationOk`, before a client can send password/SASL material. The
-   registered native smoke reaches the DuckDB/DuckLake server for the maintained
-   differential oracle; role-catalog preauthentication, packaged resource
-   budgets, and hosted-relay qualification remain open.
-2. **HTTP client → REST:** the current direct-pgwire preview accepts HS256 only
+   nesting pgwire TLS. The config-backed bootstrap maps bounded proven
+   credentials to exact signed roles; challenged key proof, loopback or
+   mutual-TLS tiny clients, and worker startup-role validation are implemented.
+   K0 packages one `postgres` mTLS bridge plus two passwordless loopback
+   `authenticator` bridges. The core server's edge-preauthenticated listener is
+   loopback-only and validates configured `LOGIN` roles before
+   `AuthenticationOk`. Separate owner-only volumes expose only each process's
+   required key. Plaintext, missing-certificate, rotated-old-certificate, old
+   authenticator credential, unknown/`NOLOGIN` startup, and direct worker TCP
+   access are denied. Packaged resource budgets and hosted-relay qualification
+   remain open.
+2. **HTTP client → REST:** the direct and packaged previews accept HS256 only
    and validates its operator-file signature key, exact issuer/audience, time and
    size bounds, and a statically allowed role before opening a database
    transaction. Shared 1.x uses the paired client credential and assigned iroh
@@ -261,9 +260,11 @@ Security requirements:
   Changed visibility replaces the immutable cache, validation failure returns
   `503`, and database authorization remains the final non-widening decision.
 
-Possession of the authenticator database credential permits forged request
-context. It therefore receives the same secret handling, rotation, audit, and
-network restrictions as a signing key.
+Possession of the direct authenticator database password or packaged
+authenticator edge credential permits forged request context. Each therefore
+receives signing-key-grade handling and rotation. K0 mounts the edge credential
+only into owner-only tiny-client storage, never the REST container; bootstrap
+alone derives its exact `authenticator` lease, and old-key denial is executable.
 
 ## Row-level security boundary
 

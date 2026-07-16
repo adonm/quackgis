@@ -30,8 +30,9 @@ the current DuckDB/DuckLake worker. The same differential oracle passes a forced
 custom relay and the opt-in public relay preset. Clean 8/32/64 MiB transport
 profiles publish and enforce direct/relay CPU, RSS, latency, throughput,
 cancellation, stream, byte, codec, and decode budgets. K0 packages the direct
-path with one mTLS bridge and loopback-only worker; the resource measurements
-remain host evidence, not packaged WAN or hosted-relay SLOs.
+path with one mTLS `postgres` bridge, two loopback authenticator REST bridges, and
+a loopback-only role-catalog-preauthenticated worker; resource measurements remain
+host evidence, not packaged WAN or hosted-relay SLOs.
 
 The exact OGR 3.11.5 client image also has a credential-free normalized
 copied-point trace against digest-pinned PostgreSQL 18.4/PostGIS. Its 21 query
@@ -138,17 +139,17 @@ mise exec -- just ci
 
 | Client/surface | Current status |
 |---|---|
-| `psql` / PostgreSQL protocol clients | bounded simple/extended protocol supported; mutual-TLS scalar smoke passes with psql 18.3 through the tiny client in rootless-Podman Kind |
+| `psql` / PostgreSQL protocol clients | bounded simple/extended protocol supported; mutual-TLS scalar smoke passes with psql 18.3 through the tiny client in rootless-Podman Kind. Retried copied-table `\d+` still fails closed at unavailable `pg_class` identity |
 | `tokio-postgres` | maintained real-driver integration client |
 | PostgreSQL text COPY clients | bounded maintained type set supported |
-| GDAL/OGR | pinned 3.11.5 reads the psycopg-created copied-data fixture through the mutual-TLS tiny client and its unmodified SQL-result cursor lifecycle, with exact Point/NULL GeoJSON; traced generic spatial metadata/SRID/extent shapes also pass focused actual pgwire. Direct table discovery, OGR COPY, no-FID behavior, authoritative CRS metadata, and the optional `pg_proc` probe remain open |
-| QGIS | PostgreSQL 18.4/PostGIS oracle frozen for exact 3.44.11 headless read workflow; focused traced spatial metadata/version/extent surfaces pass, but full QuackGIS client execution and generic SRID 0 behavior remain unqualified |
+| GDAL/OGR | pinned 3.11.5 reads the psycopg-created copied-data fixture through the mutual-TLS tiny client and its unmodified SQL-result cursor lifecycle, with exact Point/NULL GeoJSON. A packaged direct-discovery retry connects successfully but reaches unavailable `pg_proc` and `pg_class`, so OGR COPY/no-FID and authoritative CRS behavior remain blocked |
+| QGIS | exact offscreen 3.44.11 connects through current mutual TLS and retries direct, no-FID, and copied-SQL layers. All remain invalid: the first provider probes require durable OID privilege inquiry; `pg_is_in_recovery` and failed-transaction COMMIT/ROLLBACK behavior are additional concrete gaps. Full copied-layer qualification remains blocked |
 | GeoServer, Martin | target; client traces and QuackGIS qualification remain open |
 | psycopg | pinned 3.2.13 passes a mutual-TLS tiny-client copied-data workflow in Kind: create/reuse, delete, text COPY with exact WKB/NULL values, close/reconnect, and exact spatial readback |
-| `quackgis-rest` | signed-HS256-JWT read-only preview maps a bounded role claim, uses one SCRAM authenticator with transaction-local role/claims, and discovers each role's exposed tables/columns and PostgreSQL types through maintained `information_schema`; projection/filter/order/pagination, role-aware OpenAPI/direct denial, context cleanup, shared monotonic epoch invalidation in the checksum-pinned identity lane with exact signed-runtime revision fallback, atomic HS256 rotation, and owner-only authenticator-password rotation with automatic reconnect/old-password denial pass actual pgwire, while the signed epoch bundle, tiny-client routing, packaged database/JWT rotation, and packaging remain open |
+| `quackgis-rest` | signed-HS256-JWT read-only preview maps a bounded role claim and uses transaction-local role/claims. Direct SCRAM rotation, shared epoch invalidation in the identity lane, and exact signed-runtime fallback pass. K0 packages two replicas behind separately registered authenticator tiny clients with no database password; role-aware data/OpenAPI, two endpoints, one-Pod failover, core reconnect, and old authenticator/JWT denial pass. Signed packaged epochs, multi-key overlap, public HTTP policy, and full PostgREST remain open |
 | SQLAlchemy, GeoPandas, pg_featureserv | target; named dependency workflows remain open |
 | `pg_dump`, logical replication, PL/pgSQL, triggers, LISTEN/NOTIFY | unsupported/non-goals |
-| Tiny iroh client bridge | executable direct, forced-custom-relay, and opt-in public-default-relay seams differentially match direct TCP for maintained result/type/error, simple/extended parameter/portal, spatial, transaction/disconnect, COPY atomicity, cancellation/quarantine, concurrent-session, and reconnect behavior. The packaged direct Kind path passes pinned psql/psycopg/OGR, including psycopg copied-data WKB/NULL COPY/reconnect and OGR exact SQL-result Point/NULL readback, plus direct/plaintext/certificate-free denial, ordered reconnect, and mTLS/edge-key rotation with old-certificate denial. Adaptive LZ4 host budgets pass; packaged resource and hosted-relay qualification remain open |
+| Tiny iroh client bridge | executable direct, forced-custom-relay, and opt-in public-default-relay seams differentially match direct TCP. Bootstrap now maps a bounded set of proven credentials to exact signed roles. The packaged path passes a mutual-TLS `postgres` ingress and two loopback authenticator REST sidecars, stale-worker recovery through a stable UDP Service, copied-data clients, role-aware REST/failover, and old certificate/authenticator denial. Adaptive LZ4 host budgets pass; packaged resource and hosted-relay qualification remain open |
 
 ## Spatial contract
 

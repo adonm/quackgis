@@ -45,19 +45,18 @@ three independently evolving wire formats.
   an existing path; `--public-from` derives its public identity without exposing
   the private value.
 
-The K0 package puts the server, worker, bootstrap, and one tiny client in one
-ordered StatefulSet Pod. The server remains trust-mode loopback-only, while the
-tiny client is the sole Service pgwire endpoint and requires a CA-verified client
-certificate. Fixed UDP binds and DNS-resolved direct routes make this package
-independent of outbound relay access. Pinned psql, psycopg, and OGR Jobs enter
-through that boundary. The psycopg 3.2.13 Job creates copied data, streams exact
-WKB/NULL rows with COPY, reconnects, and verifies spatial readback. The OGR 3.11.5
-Job reads the same fixture through bounded SQL cursors and requires exact
-Point/NULL GeoJSON; psql remains a scalar package gate. Denial Jobs prove the Pod address cannot reach the
-worker's loopback pgwire port, plaintext is refused, and a client certificate is
-required. `just kind-restart-gate` proves ordered reconnect, while
-`just kind-secret-rotation-gate` rotates mTLS and edge keys and denies the prior
-client certificate. Host profiles remain authoritative for I0 resource budgets.
+The K0 package puts the server, worker, bootstrap, and mutual-TLS `postgres`
+tiny client in one ordered core Pod, plus one loopback authenticator tiny client
+inside each of two REST Pods. Bootstrap owns a bounded credential-to-role map;
+clients cannot select roles. The server remains loopback-only in role-catalog
+edge-preauthenticated mode and validates `LOGIN` before `AuthenticationOk`.
+Stable internal UDP routing lets the REST sidecars reacquire leases after a core
+Pod IP change. Pinned psql, psycopg, and OGR Jobs enter through the mTLS boundary;
+psycopg copied-data COPY/reconnect and OGR exact SQL-result Point/NULL readback
+pass. REST independently proves two ready endpoints, exact reader/denied behavior,
+and one-Pod failover. Denial gates cover direct pgwire, plaintext, missing/old
+certificates, the old authenticator credential, and old JWTs after replacement.
+Host profiles remain authoritative for I0 resource budgets.
 
 Run the pure protocol evidence with `just iroh-protocol-test`. Run the executable
 local-direct seam with `just iroh-direct-smoke`; it creates real bootstrap,

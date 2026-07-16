@@ -7,6 +7,17 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 
 ### Added
 
+- K0 now packages two role-aware REST replicas. Bootstrap maps separate proven
+  credentials to exact `postgres` and `authenticator` leases without changing the
+  edge protocol; the core server accepts only configured `LOGIN` roles on a
+  loopback edge-preauthenticated listener. Each REST Pod has a unique transport
+  key, a passwordless loopback tiny client, and no database storage mount.
+  Rootless-Podman Kind proves two ready endpoints, exact reader/denied behavior,
+  one-Pod failover, core reconnect, and replacement mTLS/edge/authenticator/JWT
+  rotation with old-certificate, old-lease, and old-token denial.
+- The runtime image now includes `quackgis-rest`; a stable internal UDP Service
+  and bounded first-worker-response timeout let long-lived tiny clients discard
+  stale QUIC sessions after core replacement.
 - The checksum-pinned catalog identity lane now persists and exposes shared
   monotonic schema/security epochs as bounded `BIGINT` pgwire functions. REST
   keys role caches by the pair plus connection generation, refreshes atomically
