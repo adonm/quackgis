@@ -834,6 +834,37 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
     assert_eq!(ogr_id.get::<_, Option<bool>>(6), None);
     assert_eq!(ogr_id.get::<_, String>(7), "stable identifier");
 
+    let ogr_primary_key_sql = captured_trace_sql(
+        include_str!("../../../tests/fixtures/ogr_3_11_5_postgresql18_trace.json"),
+        "primary_key_columns",
+    )
+    .replace(":relation_oid", &relation_oid.to_string());
+    let ogr_primary_key = client
+        .prepare(&ogr_primary_key_sql)
+        .await
+        .expect("prepare captured OGR primary-key probe");
+    let ogr_primary_key_types = [
+        tokio_postgres::types::Type::NAME,
+        tokio_postgres::types::Type::INT2,
+        tokio_postgres::types::Type::NAME,
+        tokio_postgres::types::Type::BOOL,
+    ];
+    for (column, expected) in ogr_primary_key.columns().iter().zip(ogr_primary_key_types) {
+        assert_eq!(
+            column.type_(),
+            &expected,
+            "OGR primary-key field {}",
+            column.name()
+        );
+    }
+    assert!(
+        client
+            .query(&ogr_primary_key, &[])
+            .await
+            .expect("truthfully empty captured OGR primary-key probe")
+            .is_empty()
+    );
+
     let descriptions = client
         .query(
             "SELECT objsubid, description FROM pg_description \

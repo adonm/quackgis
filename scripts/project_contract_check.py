@@ -283,6 +283,10 @@ def check_postgresql_profile(errors: list[str]) -> None:
         "column_structure", {}
     ).get("sql"):
         errors.append("PostgreSQL profile column_structure SQL drifted from OGR trace")
+    if query_by_id.get("primary_key_columns", {}).get("sql") != ogr_query_by_id.get(
+        "primary_key_columns", {}
+    ).get("sql"):
+        errors.append("PostgreSQL profile primary_key_columns SQL drifted from OGR trace")
 
     if psql_trace.get("trace_id") != "psql-18.3-postgresql18-describe-spatial-table-v1":
         errors.append("psql trace_id is missing or unsupported")

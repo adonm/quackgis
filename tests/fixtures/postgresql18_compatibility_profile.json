@@ -412,6 +412,22 @@
       ]
     },
     {
+      "id": "primary_key_columns",
+      "stage": "C5",
+      "trace_status": "captured_ogr_3_11_5_implemented_empty_native_pgwire",
+      "protocol": "extended",
+      "consumers": ["GDAL/OGR 3.11.5", "pinned identity catalog contract"],
+      "sql": "SELECT a.attname, a.attnum, t.typname, t.typname = ANY(ARRAY['int2','int4','int8','serial','bigserial']) AS isfid FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid JOIN pg_index i ON i.indrelid = a.attrelid WHERE a.attnum > 0 AND a.attrelid = :relation_oid AND i.indisprimary = 't' AND t.typname !~ '^geom' AND a.attnum = ANY(i.indkey) ORDER BY a.attnum",
+      "parameter_type_oids": [],
+      "expected_columns": [
+        { "name": "attname", "type_oid": 19, "nullable": false },
+        { "name": "attnum", "type_oid": 21, "nullable": false },
+        { "name": "typname", "type_oid": 19, "nullable": false },
+        { "name": "isfid", "type_oid": 16, "nullable": false }
+      ],
+      "expected_rows": 0
+    },
+    {
       "id": "tokio_postgres_custom_type_lookup",
       "stage": "C3",
       "trace_status": "captured",
@@ -631,7 +647,7 @@
       "id": "ogr_copied_spatial_table",
       "version": "3.11.5",
       "fixture": "tests/fixtures/ogr_3_11_5_postgresql18_trace.json",
-      "status": "captured_against_postgresql18_postgis; pg_proc namespace and column_structure pass pinned native actual-pgwire; full packaged client qualification pending"
+      "status": "captured_against_postgresql18_postgis; pg_proc namespace, column_structure, and truthfully empty primary_key_columns pass pinned native actual-pgwire; full packaged client qualification pending"
     },
     {
       "id": "psql_describe_copied_table",

@@ -4417,11 +4417,29 @@ fn catalog_query_shape_supported(statement: &Statement) -> bool {
             _ => return false,
         };
         catalog_expression_hint(expression, &aliases).is_none()
+            && !supported_catalog_boolean_expression(expression, &aliases)
             && expression_contains_catalog_column(expression, &aliases)
     }) {
         return false;
     }
     aliases.len() == relation_count
+}
+
+fn supported_catalog_boolean_expression(
+    expression: &Expr,
+    aliases: &HashMap<String, &'static str>,
+) -> bool {
+    matches!(
+        expression,
+        Expr::AnyOp {
+            left,
+            compare_op: BinaryOperator::Eq,
+            right,
+            is_some: false,
+        } if catalog_expression_hint(left, aliases).is_some()
+            && matches!(right.as_ref(), Expr::Array(_))
+            && !expression_contains_catalog_column(right, aliases)
+    )
 }
 
 fn supported_catalog_table_factor(factor: &TableFactor) -> bool {
@@ -7117,6 +7135,26 @@ mod tests {
             assert!(validated.sql.contains("quackgis_pg_catalog.pg_attribute"));
             assert!(validated.sql.contains("quackgis_pg_catalog.pg_index"));
         }
+
+        let empty_primary_key_probe = validate_statement_with_catalog_identity(
+            "SELECT a.attname, a.attnum, t.typname, \
+                    t.typname = ANY(ARRAY['int2','int4','int8','serial','bigserial']) AS isfid \
+             FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid \
+             JOIN pg_index i ON i.indrelid = a.attrelid \
+             WHERE a.attnum > 0 AND a.attrelid = 100000 \
+               AND i.indisprimary = 't' AND t.typname !~ '^geom' \
+               AND a.attnum = ANY(i.indkey) ORDER BY a.attnum",
+            ProtocolMode::Extended,
+            true,
+            None,
+            None,
+        )
+        .expect("captured OGR empty primary-key probe");
+        assert!(
+            empty_primary_key_probe
+                .sql
+                .contains("quackgis_pg_catalog.pg_index")
+        );
 
         for unsupported in [
             "SELECT relname FROM pg_catalog.pg_class",

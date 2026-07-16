@@ -267,6 +267,9 @@ executes QGIS `attribute_structure` and OGR `column_structure` directly from the
 captured fixtures. It verifies PostgreSQL OID/name/char/text wire types,
 default/comment values, and NULL uniqueness from the truthfully empty `pg_index`;
 role and legacy filtering still removes hidden defaults, comments, and indexes.
+OGR's captured `primary_key_columns` query also executes with its PostgreSQL
+`name`/`int2`/`bool` description and returns zero rows, so direct discovery can
+select its no-FID path without QuackGIS fabricating a primary key.
 This does not claim primary/unique keys, richer index semantics, or authoritative
 geometry subtype/dimension/SRID metadata.
 
