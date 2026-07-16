@@ -628,6 +628,38 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
     assert!(relation_oid >= 100_000);
     assert!(row_type_oid >= 100_000);
     assert_ne!(relation_oid, row_type_oid);
+
+    let psql_resolve_sql = captured_trace_sql(
+        include_str!("../../../tests/fixtures/psql_18_3_postgresql18_describe_trace.json"),
+        "resolve_relation",
+    )
+    .replace(":table_name", "catalog_projection")
+    .replace(":schema_name", "public");
+    let psql_resolve = client
+        .prepare(&psql_resolve_sql)
+        .await
+        .expect("prepare captured psql relation resolution");
+    let psql_resolve_types = [
+        tokio_postgres::types::Type::OID,
+        tokio_postgres::types::Type::NAME,
+        tokio_postgres::types::Type::NAME,
+    ];
+    for (column, expected) in psql_resolve.columns().iter().zip(psql_resolve_types) {
+        assert_eq!(
+            column.type_(),
+            &expected,
+            "psql relation field {}",
+            column.name()
+        );
+    }
+    let psql_relation = client
+        .query_one(&psql_resolve, &[])
+        .await
+        .expect("captured psql relation resolution");
+    assert_eq!(psql_relation.get::<_, u32>(0), relation_oid);
+    assert_eq!(psql_relation.get::<_, String>(1), "public");
+    assert_eq!(psql_relation.get::<_, String>(2), "catalog_projection");
+
     let expected = [
         ("id", 20_u32, 8_i16, true),
         ("label", 25, -1, false),

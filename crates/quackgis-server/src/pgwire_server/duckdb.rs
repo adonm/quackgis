@@ -2033,6 +2033,12 @@ fn validate_statement_with_catalog_identity(
             "unsupported PostgreSQL registered-object cast shape",
         ));
     }
+    if !postgresql_operator_syntax_supported(&statement) {
+        return Err(user_error(
+            "0A000",
+            "unsupported PostgreSQL custom operator or collation shape",
+        ));
+    }
     if !catalog_identity_enabled && let Some(feature) = identity_catalog_feature(&statement) {
         return Err(user_error(
             "0A000",
@@ -2178,6 +2184,7 @@ fn validate_statement_with_catalog_identity(
                 }),
         );
         rewrite_pg_catalog_casts(&mut execution);
+        rewrite_pg_catalog_operator_syntax(&mut execution);
         if let Some(identity) = identity {
             rewrite_session_identity(&mut execution, identity);
         }
@@ -3241,6 +3248,75 @@ fn rewrite_pg_catalog_casts(statement: &mut Statement) {
             );
         } else if maintained_text_cast(data_type) {
             *data_type = sqlparser::ast::DataType::Varchar(None);
+        }
+        ControlFlow::Continue(())
+    });
+}
+
+fn postgresql_operator_syntax_supported(statement: &Statement) -> bool {
+    let mut rewritten = statement.clone();
+    rewrite_pg_catalog_operator_syntax(&mut rewritten);
+    let mut unsupported = false;
+    let _: ControlFlow<()> = visit_expressions(&rewritten, |expression| {
+        if matches!(expression, Expr::Collate { .. })
+            || matches!(
+                expression,
+                Expr::BinaryOp {
+                    op: BinaryOperator::PGCustomBinaryOperator(_),
+                    ..
+                }
+            )
+        {
+            unsupported = true;
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    !unsupported
+}
+
+fn rewrite_pg_catalog_operator_syntax(statement: &mut Statement) {
+    let _: ControlFlow<()> = visit_expressions_mut(statement, |expression| {
+        let replacement = match expression {
+            Expr::BinaryOp { op, right, .. } => {
+                let BinaryOperator::PGCustomBinaryOperator(parts) = &*op else {
+                    return ControlFlow::Continue(());
+                };
+                if parts.len() != 2
+                    || !parts[0].eq_ignore_ascii_case("pg_catalog")
+                    || parts[1] != "~"
+                {
+                    return ControlFlow::Continue(());
+                }
+                let Expr::Collate { expr, collation } = right.as_ref() else {
+                    return ControlFlow::Continue(());
+                };
+                let Expr::Value(value) = expr.as_ref() else {
+                    return ControlFlow::Continue(());
+                };
+                let Value::SingleQuotedString(pattern) = &value.value else {
+                    return ControlFlow::Continue(());
+                };
+                if !matches!(
+                    collation.0.as_slice(),
+                    [ObjectNamePart::Identifier(schema), ObjectNamePart::Identifier(name)]
+                        if pg_identifier_matches(schema, "pg_catalog")
+                            && pg_identifier_matches(name, "default")
+                ) || !pattern.starts_with("^(")
+                    || !pattern.ends_with(")$")
+                {
+                    return ControlFlow::Continue(());
+                }
+                Some(*expr.clone())
+            }
+            _ => None,
+        };
+        if let Some(right_expression) = replacement
+            && let Expr::BinaryOp { op, right, .. } = expression
+        {
+            *op = BinaryOperator::PGRegexMatch;
+            **right = right_expression;
         }
         ControlFlow::Continue(())
     });
@@ -7154,6 +7230,59 @@ mod tests {
             empty_primary_key_probe
                 .sql
                 .contains("quackgis_pg_catalog.pg_index")
+        );
+
+        let psql_relation_resolution = validate_statement_with_catalog_identity(
+            "SELECT c.oid, n.nspname, c.relname \
+             FROM pg_catalog.pg_class c \
+             LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.relname OPERATOR(pg_catalog.~) '^(catalog_projection)$' \
+                   COLLATE pg_catalog.default \
+               AND n.nspname OPERATOR(pg_catalog.~) '^(public)$' \
+                   COLLATE pg_catalog.default ORDER BY 2, 3",
+            ProtocolMode::Extended,
+            true,
+            None,
+            None,
+        )
+        .expect("captured psql relation resolution");
+        assert!(
+            psql_relation_resolution
+                .sql
+                .contains("quackgis_pg_catalog.pg_class")
+        );
+        assert!(!psql_relation_resolution.sql.contains("OPERATOR"));
+        assert!(!psql_relation_resolution.sql.contains("COLLATE"));
+
+        for unsupported_operator in [
+            "SELECT c.relname OPERATOR(pg_catalog.~) 'catalog' FROM pg_class c",
+            "SELECT c.relname OPERATOR(public.~) '^(catalog)$' COLLATE pg_catalog.default FROM pg_class c",
+            "SELECT c.relname COLLATE pg_catalog.default FROM pg_class c",
+        ] {
+            assert!(
+                validate_statement_with_catalog_identity(
+                    unsupported_operator,
+                    ProtocolMode::Extended,
+                    true,
+                    None,
+                    None,
+                )
+                .is_err(),
+                "unsupported PostgreSQL operator shape: {unsupported_operator}"
+            );
+        }
+
+        assert!(
+            validate_statement_with_catalog_identity(
+                "SELECT c.relchecks, am.amname FROM pg_class c \
+                 LEFT JOIN pg_am am ON c.relam = am.oid WHERE c.oid = 100000",
+                ProtocolMode::Extended,
+                true,
+                None,
+                None,
+            )
+            .is_err(),
+            "psql relation_properties must remain blocked until its catalog exists"
         );
 
         for unsupported in [

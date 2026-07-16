@@ -141,7 +141,7 @@ mise exec -- just ci
 
 | Client/surface | Current status |
 |---|---|
-| `psql` / PostgreSQL protocol clients | bounded simple/extended protocol supported; mutual-TLS scalar smoke passes with psql 18.3 through the tiny client in rootless-Podman Kind. Retried copied-table `\d+` still fails closed at unavailable `pg_class` identity |
+| `psql` / PostgreSQL protocol clients | bounded simple/extended protocol supported; mutual-TLS scalar smoke passes with psql 18.3 through the tiny client in rootless-Podman Kind. The pinned native lane executes the exact captured anchored-regex `resolve_relation` query with OID/name/name types; the older-image copied-table `\d+` retry stopped at `pg_class`, and the next `relation_properties` query remains unsupported |
 | `tokio-postgres` | maintained real-driver integration client |
 | PostgreSQL text COPY clients | bounded maintained type set supported |
 | GDAL/OGR | pinned 3.11.5 reads the psycopg-created copied-data fixture through the mutual-TLS tiny client and its unmodified SQL-result cursor lifecycle, with exact Point/NULL GeoJSON. The pinned native catalog contract executes the captured `pg_proc` namespace, derived `column_structure`, and zero-row `primary_key_columns` queries with exact types/defaults/comments and no invented key. The last older-image packaged direct-discovery retry stopped at `pg_proc`/`pg_class`, so a pinned-image rerun and downstream COPY/no-FID/CRS qualification remain open |

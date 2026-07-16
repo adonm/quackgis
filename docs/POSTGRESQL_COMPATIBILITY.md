@@ -273,6 +273,15 @@ select its no-FID path without QuackGIS fabricating a primary key.
 This does not claim primary/unique keys, richer index semantics, or authoritative
 geometry subtype/dimension/SRID metadata.
 
+The pinned identity lane also executes psql 18.3's first captured `resolve_relation`
+query. QuackGIS structurally rewrites only anchored literal
+`OPERATOR(pg_catalog.~)` comparisons carrying `COLLATE pg_catalog.default`; other
+custom operators, collations, or unanchored patterns fail with `0A000`. The result
+retains exact OID/name/name wire types. This advances psql to its next
+`relation_properties` query, which remains intentionally blocked because
+`pg_am` and multiple requested `pg_class` fields are not maintained. Full `\d+`
+support is therefore still not claimed.
+
 ## Compatibility surfaces
 
 The profile grows in dependency order. A relation is supported only when its

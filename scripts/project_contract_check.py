@@ -321,6 +321,11 @@ def check_postgresql_profile(errors: list[str]) -> None:
     missing_psql_queries = sorted(required_psql_queries - set(psql_query_ids))
     if missing_psql_queries:
         errors.append(f"psql trace missing required query families: {missing_psql_queries}")
+    psql_query_by_id = {query.get("id"): query for query in psql_queries}
+    if query_by_id.get("resolve_relation", {}).get("sql") != psql_query_by_id.get(
+        "resolve_relation", {}
+    ).get("sql"):
+        errors.append("PostgreSQL profile resolve_relation SQL drifted from psql trace")
 
     if qgis_trace.get("trace_id") != "qgis-3.44.11-postgresql18-read-point-v1":
         errors.append("QGIS trace_id is missing or unsupported")

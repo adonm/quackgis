@@ -428,6 +428,20 @@
       "expected_rows": 0
     },
     {
+      "id": "resolve_relation",
+      "stage": "C3",
+      "trace_status": "captured_psql_18_3_implemented_native_pgwire",
+      "protocol": "extended",
+      "consumers": ["psql 18.3", "pinned identity catalog contract"],
+      "sql": "SELECT c.oid, n.nspname, c.relname FROM pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relname OPERATOR(pg_catalog.~) '^(:table_name)$' COLLATE pg_catalog.default AND n.nspname OPERATOR(pg_catalog.~) '^(:schema_name)$' COLLATE pg_catalog.default ORDER BY 2, 3",
+      "parameter_type_oids": [],
+      "expected_columns": [
+        { "name": "oid", "type_oid": 26, "nullable": false },
+        { "name": "nspname", "type_oid": 19, "nullable": false },
+        { "name": "relname", "type_oid": 19, "nullable": false }
+      ]
+    },
+    {
       "id": "tokio_postgres_custom_type_lookup",
       "stage": "C3",
       "trace_status": "captured",
@@ -653,7 +667,7 @@
       "id": "psql_describe_copied_table",
       "version": "18.3",
       "fixture": "tests/fixtures/psql_18_3_postgresql18_describe_trace.json",
-      "status": "captured_against_postgresql18_postgis; QuackGIS implementation pending"
+      "status": "captured_against_postgresql18_postgis; resolve_relation passes pinned native actual-pgwire; relation_properties and full packaged describe remain pending"
     },
     {
       "id": "qgis_headless_copied_layer",
