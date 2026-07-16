@@ -5,7 +5,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use iroh::{Endpoint, RelayMap, SecretKey, TransportAddr, endpoint::presets};
+use iroh::{
+    Endpoint, RelayMap, SecretKey, TransportAddr,
+    endpoint::{TransportAddrUsage, presets},
+};
 use iroh_relay::tls::CaTlsConfig;
 use quackgis_edge::compression::TransportMetrics;
 use quackgis_edge::runtime::{
@@ -40,14 +43,19 @@ async fn custom_relay_forces_application_bytes_off_direct_paths() -> Result<()> 
     let worker_secret = SecretKey::from_bytes(&[52; 32]);
     let credential_secret = SecretKey::from_bytes(&[53; 32]);
     let client_transport_secret = SecretKey::from_bytes(&[54; 32]);
-    let worker = relay_endpoint(worker_secret, vec![EDGE_ALPN.to_vec()], relay_map.clone()).await?;
+    let worker = relay_endpoint(
+        worker_secret.clone(),
+        vec![EDGE_ALPN.to_vec()],
+        relay_map.clone(),
+    )
+    .await?;
     let bootstrap = relay_endpoint(
         bootstrap_secret.clone(),
         vec![CONTROL_ALPN.to_vec()],
         relay_map.clone(),
     )
     .await?;
-    let client = relay_endpoint(client_transport_secret, vec![], relay_map).await?;
+    let client = relay_endpoint(client_transport_secret, vec![], relay_map.clone()).await?;
     for endpoint in [&worker, &bootstrap, &client] {
         assert!(endpoint.addr().ip_addrs().next().is_none());
         assert_eq!(endpoint.addr().relay_urls().next(), Some(&relay_url));
@@ -57,7 +65,7 @@ async fn custom_relay_forces_application_bytes_off_direct_paths() -> Result<()> 
         bootstrap_secret.clone(),
         credential_secret.public(),
         "reader",
-        worker.addr(),
+        worker.addr().with_ip_addr("127.0.0.1:9".parse()?),
         1,
         60,
     )?;
@@ -78,8 +86,10 @@ async fn custom_relay_forces_application_bytes_off_direct_paths() -> Result<()> 
         worker_shutdown,
     ));
     let client_metrics = TransportMetrics::default();
-    let connector = ClientConnector::new(client.clone(), credential_secret, bootstrap.addr())
-        .with_compression(CompressionPolicy::Auto, client_metrics.clone());
+    let connector =
+        ClientConnector::new(client.clone(), credential_secret.clone(), bootstrap.addr())
+            .with_compression(CompressionPolicy::Auto, client_metrics.clone());
+    let reconnect_connector = connector.clone();
     let local_listener = TcpListener::bind("127.0.0.1:0").await?;
     let local_address = local_listener.local_addr()?;
     let (local_shutdown_tx, local_shutdown) = watch::channel(false);
@@ -98,8 +108,11 @@ async fn custom_relay_forces_application_bytes_off_direct_paths() -> Result<()> 
         .context("client has no worker route information")?;
     assert!(remote.addrs().any(|address| {
         matches!(address.addr(), TransportAddr::Relay(url) if url == &relay_url)
+            && matches!(address.usage(), TransportAddrUsage::Active)
     }));
-    assert!(remote.addrs().all(|address| !address.addr().is_ip()));
+    assert!(remote.addrs().all(|address| {
+        !address.addr().is_ip() || !matches!(address.usage(), TransportAddrUsage::Active)
+    }));
     assert_eq!(backend_connections.load(Ordering::SeqCst), 2);
 
     let client_snapshot = client_metrics.snapshot();
@@ -119,14 +132,101 @@ async fn custom_relay_forces_application_bytes_off_direct_paths() -> Result<()> 
     assert_eq!(client_metrics.snapshot().cancellation_streams, 1);
 
     local_shutdown_tx.send(true).ok();
-    worker_shutdown_tx.send(true).ok();
-    bootstrap_shutdown_tx.send(true).ok();
     local_client_task.await??;
+    worker_shutdown_tx.send(true).ok();
     worker_task.await??;
-    bootstrap_task.await??;
-    client.close().await;
-    bootstrap.close().await;
     worker.close().await;
+
+    let restarted_worker =
+        relay_endpoint(worker_secret, vec![EDGE_ALPN.to_vec()], relay_map.clone()).await?;
+    assert_eq!(restarted_worker.id(), worker.id());
+    let (restarted_worker_shutdown_tx, restarted_worker_shutdown) = watch::channel(false);
+    let restarted_worker_task = tokio::spawn(serve_worker(
+        restarted_worker.clone(),
+        WorkerAuthority::new(bootstrap_secret.public(), backend_address, 4)
+            .with_compression(CompressionPolicy::Auto, TransportMetrics::default()),
+        4,
+        restarted_worker_shutdown,
+    ));
+    let reconnect_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let reconnect_address = reconnect_listener.local_addr()?;
+    let (reconnect_shutdown_tx, reconnect_shutdown) = watch::channel(false);
+    let reconnect_task = tokio::spawn(serve_local_client(
+        reconnect_listener,
+        reconnect_connector,
+        4,
+        reconnect_shutdown,
+    ));
+    exercise_local_bridge(reconnect_address, 4096).await?;
+    reconnect_shutdown_tx.send(true).ok();
+    reconnect_task.await??;
+
+    bootstrap_shutdown_tx.send(true).ok();
+    bootstrap_task.await??;
+    bootstrap.close().await;
+
+    let rotated_credential = SecretKey::from_bytes(&[55; 32]);
+    let restarted_bootstrap = relay_endpoint(
+        bootstrap_secret.clone(),
+        vec![CONTROL_ALPN.to_vec()],
+        relay_map.clone(),
+    )
+    .await?;
+    let rotated_authority = BootstrapAuthority::new(
+        bootstrap_secret.clone(),
+        rotated_credential.public(),
+        "reader",
+        restarted_worker.addr(),
+        2,
+        60,
+    )?;
+    let (rotated_bootstrap_shutdown_tx, rotated_bootstrap_shutdown) = watch::channel(false);
+    let rotated_bootstrap_task = tokio::spawn(serve_bootstrap(
+        restarted_bootstrap.clone(),
+        rotated_authority,
+        4,
+        rotated_bootstrap_shutdown,
+    ));
+    let old_credential = ClientConnector::new(
+        client.clone(),
+        credential_secret,
+        restarted_bootstrap.addr(),
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), old_credential.connect())
+            .await
+            .context("old credential lease attempt timed out")?
+            .is_err()
+    );
+
+    let rotated_client =
+        relay_endpoint(SecretKey::from_bytes(&[56; 32]), vec![], relay_map).await?;
+    let rotated_connector = ClientConnector::new(
+        rotated_client.clone(),
+        rotated_credential,
+        restarted_bootstrap.addr(),
+    );
+    let rotated_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let rotated_address = rotated_listener.local_addr()?;
+    let (rotated_client_shutdown_tx, rotated_client_shutdown) = watch::channel(false);
+    let rotated_client_task = tokio::spawn(serve_local_client(
+        rotated_listener,
+        rotated_connector,
+        4,
+        rotated_client_shutdown,
+    ));
+    exercise_local_bridge(rotated_address, 4096).await?;
+
+    rotated_client_shutdown_tx.send(true).ok();
+    restarted_worker_shutdown_tx.send(true).ok();
+    rotated_bootstrap_shutdown_tx.send(true).ok();
+    rotated_client_task.await??;
+    restarted_worker_task.await??;
+    rotated_bootstrap_task.await??;
+    rotated_client.close().await;
+    client.close().await;
+    restarted_bootstrap.close().await;
+    restarted_worker.close().await;
     backend_task.abort();
     Ok(())
 }
