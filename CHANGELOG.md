@@ -7,6 +7,10 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 
 ### Added
 
+- The REST sidecar now re-reads its bounded regular-file HS256 key for every
+  verification and readiness check. Atomic key replacement accepts newly signed
+  tokens immediately, rejects the old key, and makes `/ready` fail while key
+  material is missing or invalid.
 - REST schema/OpenAPI caches now validate a bounded SHA-256 revision of the exact
   role-filtered, REST-exposed PostgreSQL catalog before every authenticated API
   request. Live column changes and stale over-broad role caches invalidate

@@ -733,8 +733,11 @@ API/OpenAPI request now validates a bounded digest of the exact role-filtered,
 REST-exposed catalog before SQL generation. Actual pgwire proves a live column
 change replaces the cache and an intentionally stale over-broad role cache is
 repaired, while database authorization independently denies that stale cache.
+The same smoke atomically replaces the bounded HS256 key file, accepts a new-key
+token, rejects the old key, and fails readiness for malformed key material.
 Shared monotonic epochs, tiny-client routing, immutable multi-replica packaging,
-rotation, and balancing remain open before the H1 gate closes.
+authenticator/database rotation, and balancing remain open before the H1 gate
+closes.
 
 ### C7 — add relationships and broader PostgreSQL structure
 

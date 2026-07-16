@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,6 +34,8 @@ const UPSTREAM_REVISION: &str = "b7915d3c3361f0fee45de6e292e62f6f6186375f";
 const RESERVED_PARAMS: &[&str] = &["select", "order", "limit", "offset"];
 const MAX_JWT_BYTES: usize = 24_576;
 const MAX_JWT_CLAIMS_BYTES: usize = 16_384;
+const MAX_JWT_SECRET_BYTES: usize = 4096;
+const MAX_JWT_SECRET_FILE_BYTES: u64 = 8192;
 const JWT_CLOCK_SKEW_SECONDS: u64 = 30;
 
 #[derive(Debug, Parser)]
@@ -85,7 +88,7 @@ struct DiscoveredSchema {
 
 #[derive(Clone)]
 struct JwtVerifier {
-    secret: Vec<u8>,
+    secret_file: PathBuf,
     issuer: String,
     audience: String,
     roles: HashSet<String>,
@@ -320,6 +323,13 @@ async fn live() -> impl IntoResponse {
 }
 
 async fn ready(State(state): State<Arc<AppState>>) -> Response {
+    if state.jwt.secret().is_err() {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "QGRST503",
+            "JWT signing key unavailable",
+        );
+    }
     match tokio::time::timeout(state.statement_timeout, async {
         let client = state.client.lock().await;
         client.simple_query("SELECT 1").await
@@ -584,17 +594,12 @@ impl JwtVerifier {
         audience: String,
         roles: HashSet<String>,
     ) -> Result<Self> {
-        let secret = std::fs::read(path)
-            .with_context(|| format!("read JWT secret file {}", path.display()))?;
-        let secret = trim_ascii(&secret);
-        if secret.len() < 32 || secret.len() > 4096 || secret.iter().any(u8::is_ascii_whitespace) {
-            bail!("REST JWT secret must contain 32 to 4096 non-whitespace bytes");
-        }
+        read_jwt_secret(path)?;
         if !valid_jwt_label(&issuer) || !valid_jwt_label(&audience) {
             bail!("REST JWT issuer and audience must be 1 to 256 printable bytes");
         }
         Ok(Self {
-            secret: secret.to_vec(),
+            secret_file: path.to_owned(),
             issuer,
             audience,
             roles,
@@ -630,7 +635,8 @@ impl JwtVerifier {
             return Err(());
         }
         let signature = URL_SAFE_NO_PAD.decode(encoded_signature).map_err(|_| ())?;
-        let key = hmac::Key::new(hmac::HMAC_SHA256, &self.secret);
+        let secret = self.secret().map_err(|_| ())?;
+        let key = hmac::Key::new(hmac::HMAC_SHA256, &secret);
         hmac::verify(
             &key,
             format!("{encoded_header}.{encoded_claims}").as_bytes(),
@@ -674,6 +680,34 @@ impl JwtVerifier {
         }
         Ok(RequestIdentity { role, claims })
     }
+
+    fn secret(&self) -> Result<Vec<u8>> {
+        read_jwt_secret(&self.secret_file)
+    }
+}
+
+fn read_jwt_secret(path: &Path) -> Result<Vec<u8>> {
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("open JWT secret file {}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("read JWT secret metadata {}", path.display()))?;
+    if !metadata.is_file() || metadata.len() > MAX_JWT_SECRET_FILE_BYTES {
+        bail!("REST JWT secret must be a regular file of at most 8192 bytes");
+    }
+    let mut bytes =
+        Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(MAX_JWT_SECRET_BYTES));
+    file.take(MAX_JWT_SECRET_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read JWT secret file {}", path.display()))?;
+    let secret = trim_ascii(&bytes);
+    if secret.len() < 32
+        || secret.len() > MAX_JWT_SECRET_BYTES
+        || secret.iter().any(u8::is_ascii_whitespace)
+    {
+        bail!("REST JWT secret must contain 32 to 4096 non-whitespace bytes");
+    }
+    Ok(secret.to_vec())
 }
 
 fn decode_json_segment(value: &str, max_bytes: usize) -> Result<serde_json::Value, ()> {
@@ -802,7 +836,7 @@ mod tests {
     #[test]
     fn jwt_validation_is_bounded_and_role_allowlisted() {
         assert_eq!(trim_ascii(b"  secret\n"), b"secret");
-        let verifier = test_verifier(&["rest_reader"]);
+        let (_secret_dir, verifier) = test_verifier(&["rest_reader"]);
         let token = test_jwt("rest_reader", unix_time() + 300);
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -817,8 +851,9 @@ mod tests {
                 .verify(&test_jwt("rest_reader", unix_time().saturating_sub(60)))
                 .is_err()
         );
-        assert!(test_verifier(&["other_role"]).verify(&token).is_err());
-        let mut wrong_audience = test_verifier(&["rest_reader"]);
+        let (_other_secret_dir, other_role) = test_verifier(&["other_role"]);
+        assert!(other_role.verify(&token).is_err());
+        let (_wrong_secret_dir, mut wrong_audience) = test_verifier(&["rest_reader"]);
         wrong_audience.audience = "other-audience".to_owned();
         assert!(wrong_audience.verify(&token).is_err());
         let mut future_claims = test_claims("rest_reader", unix_time() + 300);
@@ -963,7 +998,8 @@ mod tests {
             .await
             .expect("denied REST schema");
         assert!(denied_cache.schema.tables.is_empty());
-        let jwt = test_verifier(&["rest_reader", "denied_reader"]);
+        let (_jwt_secret_dir, jwt) = test_verifier(&["rest_reader", "denied_reader"]);
+        let jwt_secret_file = jwt.secret_file.clone();
         let reader_jwt = test_jwt("rest_reader", unix_time() + 300);
         let denied_jwt = test_jwt("denied_reader", unix_time() + 300);
         let reader_entry = SchemaCacheEntry::from(cache);
@@ -1101,6 +1137,47 @@ mod tests {
             unauthorized.starts_with("HTTP/1.1 401 Unauthorized"),
             "{unauthorized}"
         );
+        let replacement_secret = jwt_secret_file.with_extension("next");
+        std::fs::write(&replacement_secret, b"invalid").expect("write invalid JWT secret");
+        std::fs::rename(&replacement_secret, &jwt_secret_file).expect("install invalid JWT secret");
+        let unavailable_key = http_request(rest_port, "GET", "/ready", None).await;
+        assert!(
+            unavailable_key.starts_with("HTTP/1.1 503 Service Unavailable"),
+            "{unavailable_key}"
+        );
+        std::fs::write(&replacement_secret, ROTATED_TEST_JWT_SECRET)
+            .expect("write replacement JWT secret");
+        std::fs::rename(&replacement_secret, &jwt_secret_file).expect("rotate JWT secret");
+        let old_key_denied = http_request(
+            rest_port,
+            "GET",
+            "/rest_points?select=id&id=eq.1",
+            Some(&reader_jwt),
+        )
+        .await;
+        assert!(
+            old_key_denied.starts_with("HTTP/1.1 401 Unauthorized"),
+            "{old_key_denied}"
+        );
+        let rotated_jwt =
+            test_jwt_with_secret("rest_reader", unix_time() + 300, ROTATED_TEST_JWT_SECRET);
+        let new_key_accepted = http_request(
+            rest_port,
+            "GET",
+            "/rest_points?select=id&id=eq.1",
+            Some(&rotated_jwt),
+        )
+        .await;
+        assert!(
+            new_key_accepted.starts_with("HTTP/1.1 200 OK")
+                && new_key_accepted.contains(r#"[{"id":1}]"#),
+            "{new_key_accepted}"
+        );
+        let ready_after_rotation = http_request(rest_port, "GET", "/ready", None).await;
+        assert!(
+            ready_after_rotation.starts_with("HTTP/1.1 200 OK"),
+            "{ready_after_rotation}"
+        );
         let client = state.client.lock().await;
         let identity = client
             .query_one(
@@ -1116,19 +1193,52 @@ mod tests {
         pg_task.abort();
     }
 
-    fn test_verifier(roles: &[&str]) -> JwtVerifier {
-        JwtVerifier {
-            secret: b"0123456789abcdef0123456789abcdef".to_vec(),
-            issuer: "https://issuer.test".to_owned(),
-            audience: "quackgis-rest".to_owned(),
-            roles: roles.iter().map(|role| (*role).to_owned()).collect(),
-        }
+    const TEST_JWT_SECRET: &[u8] = b"0123456789abcdef0123456789abcdef";
+    const ROTATED_TEST_JWT_SECRET: &[u8] = b"fedcba9876543210fedcba9876543210";
+
+    fn test_verifier(roles: &[&str]) -> (tempfile::TempDir, JwtVerifier) {
+        let secret_dir = tempfile::tempdir().expect("JWT secret tempdir");
+        let secret_file = secret_dir.path().join("jwt-secret");
+        std::fs::write(&secret_file, TEST_JWT_SECRET).expect("write JWT secret");
+        let verifier = JwtVerifier::from_file(
+            &secret_file,
+            "https://issuer.test".to_owned(),
+            "quackgis-rest".to_owned(),
+            roles.iter().map(|role| (*role).to_owned()).collect(),
+        )
+        .expect("test JWT verifier");
+        (secret_dir, verifier)
     }
 
     fn test_jwt(role: &str, expires: u64) -> String {
-        sign_test_jwt(
+        test_jwt_with_secret(role, expires, TEST_JWT_SECRET)
+    }
+
+    fn test_jwt_with_secret(role: &str, expires: u64, secret: &[u8]) -> String {
+        sign_test_jwt_with_secret(
             serde_json::json!({"alg": "HS256", "typ": "JWT"}),
             test_claims(role, expires),
+            secret,
+        )
+    }
+
+    fn sign_test_jwt(header: serde_json::Value, claims: serde_json::Value) -> String {
+        sign_test_jwt_with_secret(header, claims, TEST_JWT_SECRET)
+    }
+
+    fn sign_test_jwt_with_secret(
+        header: serde_json::Value,
+        claims: serde_json::Value,
+        secret: &[u8],
+    ) -> String {
+        let header = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
+        let claims = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+        let signing_input = format!("{header}.{claims}");
+        let key = hmac::Key::new(hmac::HMAC_SHA256, secret);
+        let signature = hmac::sign(&key, signing_input.as_bytes());
+        format!(
+            "{signing_input}.{}",
+            URL_SAFE_NO_PAD.encode(signature.as_ref())
         )
     }
 
@@ -1140,18 +1250,6 @@ mod tests {
             "exp": expires,
             "role": role,
         })
-    }
-
-    fn sign_test_jwt(header: serde_json::Value, claims: serde_json::Value) -> String {
-        let header = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
-        let claims = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
-        let signing_input = format!("{header}.{claims}");
-        let key = hmac::Key::new(hmac::HMAC_SHA256, b"0123456789abcdef0123456789abcdef");
-        let signature = hmac::sign(&key, signing_input.as_bytes());
-        format!(
-            "{signing_input}.{}",
-            URL_SAFE_NO_PAD.encode(signature.as_ref())
-        )
     }
 
     fn unix_time() -> u64 {

@@ -96,8 +96,9 @@ TLS remains optional for local development. Set `QUACKGIS_TLS_MODE=required` wit
 `QUACKGIS_TLS_CERT` and `QUACKGIS_TLS_KEY` to fail closed on plaintext startup.
 The actual-process TLS profile verifies encrypted SCRAM, hostname/trust checking,
 plaintext denial, and restart-based certificate/password rotation. Packaged Kind
-mTLS/edge-key rotation also passes; JWT/authenticator/database rotation remains
-open.
+mTLS/edge-key rotation also passes. The direct REST preview hot-reloads atomic
+HS256 key-file replacements and denies old-key tokens; authenticator/database
+credential rotation and packaged JWT rotation remain open.
 
 The maintained Rust pgwire client resolves PostgreSQL 18 profile/QGIS-required
 built-in types, their array partners, collations, and spatial sentinels through

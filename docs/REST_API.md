@@ -25,10 +25,14 @@ lease, policy, admission, epochs, and audit identity. See
 - Every API, OpenAPI, and reload request requires a signed JWT in
   `Authorization: Bearer <token>`.
 - The current profile accepts HS256 only. Its operator-provisioned secret is read
-  from a file, must contain 32–4096 non-whitespace bytes, and is never accepted on
-  the command line. Signature, exact issuer/audience, expiry, optional
-  not-before, token/claim size, and the configured `role` allowlist are validated
-  before database work. Invalid tokens receive one generic error.
+  from a bounded regular file, must contain 32–4096 non-whitespace bytes, and is
+  never accepted on the command line. The file is re-read for every verification
+  and readiness check so an atomic replacement rotates the key without a process
+  restart. Missing/malformed material makes `/ready` fail and all API verification
+  fail closed. Signature, exact issuer/audience, expiry, optional not-before,
+  token/claim size, and the configured `role` allowlist are validated before
+  database work. Invalid tokens and unavailable key material receive the same
+  generic API error.
 - The pgwire URL carries one privileged authenticator identity. Every discovery
   and read transaction assumes only the validated, statically configured role and
   binds normalized claims to transaction-local `request.jwt.claims`. Database
@@ -179,6 +183,24 @@ curl --fail-with-body \
 unset QUACKGIS_REST_TOKEN
 ```
 
+Rotate the signing key by staging a valid owner-protected file in the same
+directory and atomically replacing the configured path. Issue tokens under the
+new key only after `/ready` returns `200`; previously signed tokens fail
+immediately after replacement. There is deliberately no old/new overlap window:
+
+```sh
+python3 - <<'PY'
+from pathlib import Path
+import os, secrets
+target = Path(os.environ['QUACKGIS_REST_JWT_SECRET_FILE'])
+staged = target.with_name(target.name + '.next')
+staged.write_text(secrets.token_urlsafe(48), encoding='utf-8')
+os.chmod(staged, 0o600)
+os.replace(staged, target)
+PY
+curl --fail-with-body http://127.0.0.1:3000/ready
+```
+
 ## Compatibility gates
 
 ```sh
@@ -191,9 +213,10 @@ then proves HS256 validation/denial, one SCRAM authenticator, transaction-local
 role/claim cleanup, grant-backed PostgreSQL catalog discovery, role-specific
 OpenAPI/direct denial, database denial even with an intentionally stale/wide
 cache, automatic repair of that stale role cache, and live-column revision
-invalidation, plus projection, typed filtering, ordering, pagination,
-missing-resource behavior, mutation denial, and escaped WKB transport. These
-cases seed the QuackGIS extension of the
+invalidation, plus atomic JWT key replacement, new-key acceptance, old-key
+denial, invalid-key readiness failure, projection, typed filtering, ordering,
+pagination, missing-resource behavior, mutation denial, and escaped WKB
+transport. These cases seed the QuackGIS extension of the
 PostgREST contract. Each additional PostgREST behavior must enter this executable
 suite before being listed as supported.
 

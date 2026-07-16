@@ -215,6 +215,14 @@ and denial Job. A failed rollout retains previous owner-only material under
 drill, not JWT/authenticator/database-password rotation, online revocation, or a
 production PKI procedure.
 
+The direct REST preview independently hot-reloads its HS256 signing key. Stage a
+valid 32–4096-byte secret beside `QUACKGIS_REST_JWT_SECRET_FILE`, protect it from
+other users, and atomically replace the configured path as shown in
+[`REST_API.md`](./REST_API.md). `/ready` validates the current file; after
+replacement, new-key tokens succeed and old-key tokens fail with no overlap
+window. This does not rotate the authenticator's pgwire password or package the
+REST process in Kind.
+
 ## Shutdown, backup, and recovery
 
 SIGINT/SIGTERM marks readiness as draining, stops accepting new pgwire sockets,

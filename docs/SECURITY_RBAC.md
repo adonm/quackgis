@@ -238,6 +238,10 @@ Security requirements:
 
 - HS256 and its key are operator-configured; the token-provided algorithm is
   required to match and cannot select another family.
+- The key is loaded from one bounded regular file for each verification and
+  readiness check. Atomic replacement has no old/new overlap: new-key tokens are
+  accepted and old-key tokens denied immediately; unreadable or malformed
+  material fails readiness and API authentication closed.
 - Issuer, audience, expiry, not-before, size, and role mapping are validated.
 - A claim can select only a statically configured role that the authenticator may
   assume.
