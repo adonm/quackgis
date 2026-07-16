@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use iroh::{EndpointAddr, EndpointId, PublicKey, RelayUrl, SecretKey};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::{CompressionPolicy, MAX_LEASE_TTL_SECONDS, RelayPolicy};
+use crate::{CompressionPolicy, MAX_BOOTSTRAP_REGISTRATIONS, MAX_LEASE_TTL_SECONDS, RelayPolicy};
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAX_KEY_BYTES: u64 = 256;
@@ -22,8 +22,7 @@ const MAX_DIRECT_HOST_BYTES: usize = 512;
 #[serde(deny_unknown_fields)]
 pub struct BootstrapConfig {
     pub secret_key_path: PathBuf,
-    pub registered_credential: String,
-    pub login_role: String,
+    pub registrations: Vec<BootstrapRegistrationConfig>,
     pub worker: EndpointAddressConfig,
     pub assignment_generation: u64,
     pub lease_ttl_seconds: u64,
@@ -42,7 +41,7 @@ impl BootstrapConfig {
         if config.lease_ttl_seconds == 0 || config.lease_ttl_seconds > MAX_LEASE_TTL_SECONDS {
             bail!("lease_ttl_seconds must be between 1 and {MAX_LEASE_TTL_SECONDS}");
         }
-        config.registered_credential()?;
+        config.registrations()?;
         config.worker.parse()?;
         config.relay_policy()?;
         Ok(config)
@@ -52,13 +51,39 @@ impl BootstrapConfig {
         load_secret_key(&self.secret_key_path)
     }
 
-    pub fn registered_credential(&self) -> Result<PublicKey> {
-        parse_public_key(&self.registered_credential, "registered_credential")
+    pub fn registrations(&self) -> Result<Vec<(PublicKey, String)>> {
+        if self.registrations.is_empty() || self.registrations.len() > MAX_BOOTSTRAP_REGISTRATIONS {
+            bail!(
+                "bootstrap registrations must contain between 1 and {MAX_BOOTSTRAP_REGISTRATIONS} entries"
+            );
+        }
+        let mut credentials = HashSet::new();
+        self.registrations
+            .iter()
+            .enumerate()
+            .map(|(index, registration)| {
+                let credential = parse_public_key(
+                    &registration.credential,
+                    &format!("registrations[{index}].credential"),
+                )?;
+                if !credentials.insert(credential) {
+                    bail!("bootstrap registrations contain a duplicate credential");
+                }
+                Ok((credential, registration.login_role.clone()))
+            })
+            .collect()
     }
 
     pub fn relay_policy(&self) -> Result<RelayPolicy> {
         relay_policy(self.disable_relays, self.relays.clone())
     }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BootstrapRegistrationConfig {
+    pub credential: String,
+    pub login_role: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -340,5 +365,43 @@ mod tests {
     fn explicit_direct_only_policy_conflicts_with_relay_configuration() {
         assert_eq!(relay_policy(true, None).unwrap(), RelayPolicy::Disabled);
         assert!(relay_policy(true, Some(vec!["https://relay.example".into()])).is_err());
+    }
+
+    #[test]
+    fn bootstrap_registrations_are_bounded_and_unique() {
+        let first = SecretKey::from_bytes(&[11; 32]).public().to_string();
+        let second = SecretKey::from_bytes(&[12; 32]).public().to_string();
+        let mut config = BootstrapConfig {
+            secret_key_path: "bootstrap.key".into(),
+            registrations: vec![
+                BootstrapRegistrationConfig {
+                    credential: first.clone(),
+                    login_role: "postgres".to_owned(),
+                },
+                BootstrapRegistrationConfig {
+                    credential: second,
+                    login_role: "authenticator".to_owned(),
+                },
+            ],
+            worker: EndpointAddressConfig {
+                endpoint_id: SecretKey::from_bytes(&[13; 32]).public().to_string(),
+                direct_addresses: vec!["127.0.0.1:4242".parse().unwrap()],
+                direct_hosts: Vec::new(),
+                relay_url: None,
+            },
+            assignment_generation: 1,
+            lease_ttl_seconds: 60,
+            relays: None,
+            disable_relays: true,
+            bind: None,
+            max_connections: 4,
+        };
+        let registrations = config.registrations().expect("two registrations");
+        assert_eq!(registrations[0].1, "postgres");
+        assert_eq!(registrations[1].1, "authenticator");
+        config.registrations[1].credential = first;
+        assert!(config.registrations().is_err());
+        config.registrations.clear();
+        assert!(config.registrations().is_err());
     }
 }

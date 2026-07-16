@@ -24,10 +24,9 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = BootstrapConfig::load(&cli.config)?;
     let secret = config.secret_key()?;
-    let authority = BootstrapAuthority::new(
+    let authority = BootstrapAuthority::new_registered(
         secret.clone(),
-        config.registered_credential()?,
-        config.login_role.clone(),
+        config.registrations()?,
         config.worker.parse()?,
         config.assignment_generation,
         config.lease_ttl_seconds,

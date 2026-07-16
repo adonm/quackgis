@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Executable I0 bootstrap, worker, and tiny-client transport path.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::future::Future;
 use std::io::{BufReader, Error as IoError, ErrorKind};
@@ -80,8 +80,7 @@ pub async fn bind_endpoint_at(
 #[derive(Clone)]
 pub struct BootstrapAuthority {
     secret_key: SecretKey,
-    registered_credential: PublicKey,
-    login_role: String,
+    registrations: Arc<HashMap<PublicKey, String>>,
     worker: EndpointAddr,
     assignment_generation: u64,
     lease_ttl_seconds: u64,
@@ -97,24 +96,54 @@ impl BootstrapAuthority {
         assignment_generation: u64,
         lease_ttl_seconds: u64,
     ) -> Result<Self> {
-        let now = unix_seconds()?;
-        AccessLeaseClaims::new(
-            registered_credential,
-            login_role.into(),
+        Self::new_registered(
+            secret_key,
+            [(registered_credential, login_role.into())],
             worker.clone(),
             assignment_generation,
-            now,
-            now.saturating_add(lease_ttl_seconds),
-            vec![
-                ApplicationProtocol::Pgwire,
-                ApplicationProtocol::Cancellation,
-            ],
+            lease_ttl_seconds,
         )
-        .context("invalid bootstrap lease configuration")
-        .map(|claims| Self {
+    }
+
+    pub fn new_registered(
+        secret_key: SecretKey,
+        registrations: impl IntoIterator<Item = (PublicKey, String)>,
+        worker: EndpointAddr,
+        assignment_generation: u64,
+        lease_ttl_seconds: u64,
+    ) -> Result<Self> {
+        let now = unix_seconds()?;
+        let mut validated = HashMap::new();
+        for (credential, login_role) in registrations {
+            let claims = AccessLeaseClaims::new(
+                credential,
+                login_role,
+                worker.clone(),
+                assignment_generation,
+                now,
+                now.saturating_add(lease_ttl_seconds),
+                vec![
+                    ApplicationProtocol::Pgwire,
+                    ApplicationProtocol::Cancellation,
+                ],
+            )
+            .context("invalid bootstrap lease registration")?;
+            if validated.insert(credential, claims.login_role).is_some() {
+                bail!("bootstrap lease registrations contain a duplicate credential");
+            }
+            if validated.len() > crate::MAX_BOOTSTRAP_REGISTRATIONS {
+                bail!(
+                    "bootstrap lease registrations exceed the {}-entry limit",
+                    crate::MAX_BOOTSTRAP_REGISTRATIONS
+                );
+            }
+        }
+        if validated.is_empty() {
+            bail!("bootstrap lease registrations cannot be empty");
+        }
+        Ok(Self {
             secret_key,
-            registered_credential,
-            login_role: claims.login_role,
+            registrations: Arc::new(validated),
             worker,
             assignment_generation,
             lease_ttl_seconds,
@@ -130,9 +159,10 @@ impl BootstrapAuthority {
         request
             .verify(self.secret_key.public(), remote_transport)
             .context("lease request proof failed")?;
-        if request.credential != self.registered_credential {
-            bail!("credential is not registered");
-        }
+        let login_role = self
+            .registrations
+            .get(&request.credential)
+            .ok_or_else(|| anyhow!("credential is not registered"))?;
         self.seen_nonces
             .lock()
             .map_err(|_| anyhow!("lease nonce cache is unavailable"))?
@@ -140,7 +170,7 @@ impl BootstrapAuthority {
         let now = unix_seconds()?;
         let claims = AccessLeaseClaims::new(
             request.credential,
-            self.login_role.clone(),
+            login_role.clone(),
             self.worker.clone(),
             self.assignment_generation,
             now,
@@ -1152,5 +1182,62 @@ mod tests {
         }
         assert!(cache.order.len() <= NONCE_CACHE_CAPACITY);
         assert!(cache.values.len() <= NONCE_CACHE_CAPACITY);
+    }
+
+    #[test]
+    fn bootstrap_registration_selects_role_only_from_proven_credential() {
+        let bootstrap = SecretKey::from_bytes(&[41; 32]);
+        let postgres = SecretKey::from_bytes(&[42; 32]);
+        let authenticator = SecretKey::from_bytes(&[43; 32]);
+        let unknown = SecretKey::from_bytes(&[44; 32]);
+        let transport = SecretKey::from_bytes(&[45; 32]).public();
+        let worker = EndpointAddr::new(SecretKey::from_bytes(&[46; 32]).public());
+        let authority = BootstrapAuthority::new_registered(
+            bootstrap.clone(),
+            [
+                (postgres.public(), "postgres".to_owned()),
+                (authenticator.public(), "authenticator".to_owned()),
+            ],
+            worker,
+            1,
+            60,
+        )
+        .expect("plural bootstrap authority");
+        let postgres_request =
+            LeaseRequest::sign(&postgres, transport, bootstrap.public(), [1; 32]).unwrap();
+        let authenticator_request =
+            LeaseRequest::sign(&authenticator, transport, bootstrap.public(), [2; 32]).unwrap();
+        assert_eq!(
+            authority
+                .issue(&postgres_request, transport)
+                .unwrap()
+                .claims
+                .login_role,
+            "postgres"
+        );
+        assert_eq!(
+            authority
+                .issue(&authenticator_request, transport)
+                .unwrap()
+                .claims
+                .login_role,
+            "authenticator"
+        );
+        let unknown_request =
+            LeaseRequest::sign(&unknown, transport, bootstrap.public(), [3; 32]).unwrap();
+        assert!(authority.issue(&unknown_request, transport).is_err());
+        assert!(
+            BootstrapAuthority::new_registered(
+                bootstrap,
+                [
+                    (postgres.public(), "postgres".to_owned()),
+                    (postgres.public(), "authenticator".to_owned()),
+                ],
+                EndpointAddr::new(SecretKey::from_bytes(&[46; 32]).public()),
+                1,
+                60,
+            )
+            .is_err()
+        );
     }
 }

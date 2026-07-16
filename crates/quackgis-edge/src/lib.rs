@@ -18,6 +18,7 @@ pub const MAX_CONTROL_MESSAGE_BYTES: usize = 16 * 1024;
 pub const MAX_LEASE_TTL_SECONDS: u64 = 5 * 60;
 pub const MAX_CLOCK_SKEW_SECONDS: u64 = 30;
 pub const MAX_LOGIN_ROLE_BYTES: usize = 63;
+pub const MAX_BOOTSTRAP_REGISTRATIONS: usize = 64;
 
 const LEASE_DOMAIN: &[u8] = b"quackgis/access-lease/1\0";
 const LEASE_REQUEST_DOMAIN: &[u8] = b"quackgis/lease-request/1\0";
