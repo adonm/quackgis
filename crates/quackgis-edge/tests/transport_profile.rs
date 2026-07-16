@@ -105,10 +105,11 @@ struct ModeEvidence {
 struct ShapeEvidence {
     name: &'static str,
     payload_bytes: usize,
-    connection_millis: f64,
-    first_byte_millis: f64,
-    transfer_millis: f64,
-    throughput_mib_per_second: f64,
+    connection_millis: Vec<f64>,
+    first_byte_millis: Vec<f64>,
+    transfer_millis: Vec<f64>,
+    throughput_mib_per_second: Vec<f64>,
+    throughput_p50_mib_per_second: f64,
     codec: Option<CodecDelta>,
 }
 
@@ -465,7 +466,10 @@ async fn run_mode(
     let mut shapes = Vec::new();
     for payload in payloads {
         let before = tunnel.map(Tunnel::codec_snapshot);
-        let transfer = echo_round_trip(address, &payload.bytes).await?;
+        let mut transfers = Vec::with_capacity(3);
+        for _ in 0..3 {
+            transfers.push(echo_round_trip(address, &payload.bytes).await?);
+        }
         let codec = tunnel.map(|tunnel| {
             tunnel
                 .codec_snapshot()
@@ -474,10 +478,28 @@ async fn run_mode(
         shapes.push(ShapeEvidence {
             name: payload.name,
             payload_bytes: payload.bytes.len(),
-            connection_millis: transfer.connection_millis,
-            first_byte_millis: transfer.first_byte_millis,
-            transfer_millis: transfer.transfer_millis,
-            throughput_mib_per_second: transfer.throughput_mib_per_second,
+            connection_millis: transfers
+                .iter()
+                .map(|sample| sample.connection_millis)
+                .collect(),
+            first_byte_millis: transfers
+                .iter()
+                .map(|sample| sample.first_byte_millis)
+                .collect(),
+            transfer_millis: transfers
+                .iter()
+                .map(|sample| sample.transfer_millis)
+                .collect(),
+            throughput_mib_per_second: transfers
+                .iter()
+                .map(|sample| sample.throughput_mib_per_second)
+                .collect(),
+            throughput_p50_mib_per_second: median(
+                &transfers
+                    .iter()
+                    .map(|sample| sample.throughput_mib_per_second)
+                    .collect::<Vec<_>>(),
+            ),
             codec,
         });
     }
@@ -745,10 +767,18 @@ fn enforce_budgets(modes: &[ModeEvidence]) -> Result<()> {
             bail!("{} cancellation exceeds its budget", mode.name);
         }
         for shape in &mode.shapes {
-            if shape.connection_millis > MAX_CONNECTION_MILLIS {
+            if shape
+                .connection_millis
+                .iter()
+                .any(|sample| *sample > MAX_CONNECTION_MILLIS)
+            {
                 bail!("{} {} connection exceeds its budget", mode.name, shape.name);
             }
-            if shape.first_byte_millis > MAX_FIRST_BYTE_MILLIS {
+            if shape
+                .first_byte_millis
+                .iter()
+                .any(|sample| *sample > MAX_FIRST_BYTE_MILLIS)
+            {
                 bail!("{} {} first byte exceeds its budget", mode.name, shape.name);
             }
             if shape
@@ -764,13 +794,13 @@ fn enforce_budgets(modes: &[ModeEvidence]) -> Result<()> {
     let direct_raw = mode(modes, "iroh_direct_raw")?;
     let relay_raw = mode(modes, "iroh_relay_raw")?;
     for shape_name in ["compressible", "incompressible", "wkb", "copy", "result"] {
-        let tcp_throughput = shape(tcp, shape_name)?.throughput_mib_per_second;
-        if shape(direct_raw, shape_name)?.throughput_mib_per_second / tcp_throughput
+        let tcp_throughput = shape(tcp, shape_name)?.throughput_p50_mib_per_second;
+        if shape(direct_raw, shape_name)?.throughput_p50_mib_per_second / tcp_throughput
             < MIN_DIRECT_IROH_TCP_THROUGHPUT_RATIO
         {
             bail!("direct iroh {shape_name} throughput ratio is below budget");
         }
-        if shape(relay_raw, shape_name)?.throughput_mib_per_second / tcp_throughput
+        if shape(relay_raw, shape_name)?.throughput_p50_mib_per_second / tcp_throughput
             < MIN_RELAY_TCP_THROUGHPUT_RATIO
         {
             bail!("relay iroh {shape_name} throughput ratio is below budget");
@@ -799,8 +829,8 @@ fn enforce_budgets(modes: &[ModeEvidence]) -> Result<()> {
                 "iroh_relay_raw"
             },
         )?;
-        if shape(auto, "incompressible")?.throughput_mib_per_second
-            / shape(raw, "incompressible")?.throughput_mib_per_second
+        if shape(auto, "incompressible")?.throughput_p50_mib_per_second
+            / shape(raw, "incompressible")?.throughput_p50_mib_per_second
             < MIN_INCOMPRESSIBLE_AUTO_RAW_THROUGHPUT_RATIO
         {
             bail!("{name} incompressible overhead exceeds its budget");
@@ -832,6 +862,12 @@ fn codec(shape: &ShapeEvidence) -> Result<&CodecDelta> {
 
 fn difference(after: u64, before: u64) -> u64 {
     after.saturating_sub(before)
+}
+
+fn median(samples: &[f64]) -> f64 {
+    let mut samples = samples.to_vec();
+    samples.sort_by(f64::total_cmp);
+    samples[samples.len() / 2]
 }
 
 fn millis(duration: Duration) -> f64 {
