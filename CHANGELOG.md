@@ -7,6 +7,12 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 
 ### Added
 
+- REST database credentials now come from a bounded owner-only non-symlink file,
+  never the pgwire URL. Atomic replacement invalidates the old connection;
+  readiness fails while REST and database credentials disagree, then REST
+  reconnects with the new password after a same-state database restart without a
+  REST restart. Actual pgwire evidence proves committed-state preservation,
+  transaction-local cleanup, and old-password denial.
 - Bounded read-only PostgreSQL SQL cursors now support simple and extended
   transaction/`DECLARE`/metadata-only and forward `FETCH`/`CLOSE` workflows with
   session/fetch ceilings, role and catalog-epoch validation, text/binary format

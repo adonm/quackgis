@@ -758,10 +758,12 @@ REST-exposed catalog before SQL generation. Actual pgwire proves a live column
 change replaces the cache and an intentionally stale over-broad role cache is
 repaired, while database authorization independently denies that stale cache.
 The same smoke atomically replaces the bounded HS256 key file, accepts a new-key
-token, rejects the old key, and fails readiness for malformed key material.
-Shared monotonic epochs, tiny-client routing, immutable multi-replica packaging,
-authenticator/database rotation, and balancing remain open before the H1 gate
-closes.
+token, rejects the old key, and fails readiness for malformed key material. It
+also rotates an owner-only authenticator-password file, fails readiness while the
+file and database disagree, restarts the database on the same state, reconnects
+without restarting REST, and denies the old password. Shared monotonic epochs,
+tiny-client routing, immutable multi-replica packaging, packaged database/JWT
+rotation, and balancing remain open before the H1 gate closes.
 
 ### C7 — add relationships and broader PostgreSQL structure
 

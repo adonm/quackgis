@@ -33,10 +33,16 @@ lease, policy, admission, epochs, and audit identity. See
   token/claim size, and the configured `role` allowlist are validated before
   database work. Invalid tokens and unavailable key material receive the same
   generic API error.
-- The pgwire URL carries one privileged authenticator identity. Every discovery
-  and read transaction assumes only the validated, statically configured role and
-  binds normalized claims to transaction-local `request.jwt.claims`. Database
-  grants remain authoritative; claims do not implement RLS.
+- The pgwire URL carries one privileged authenticator identity but must not carry
+  its password. The password is read from a bounded, owner-only, non-symlink
+  regular file. REST validates that file before each database operation and uses
+  it only while opening a connection. A file revision change discards the prior
+  connection and reconnects with the replacement credential; invalid or
+  database-mismatched material makes `/ready` and database work fail closed.
+  Every discovery and read transaction assumes only the validated, statically
+  configured role and binds normalized claims to transaction-local
+  `request.jwt.claims`. Database grants remain authoritative; claims do not
+  implement RLS.
 - The HTTP listener defaults to `127.0.0.1`. Terminate public TLS and enforce
   request/rate limits at the load balancer before binding it more broadly.
 - A CA file forces TLS and enables hostname-verified rustls for the pgwire
@@ -142,10 +148,12 @@ python3 - <<'PY'
 from pathlib import Path
 import secrets
 Path('.tmp/rest/jwt-secret').write_text(secrets.token_urlsafe(48), encoding='utf-8')
+Path('.tmp/rest/database-password').write_text(secrets.token_urlsafe(32), encoding='utf-8')
 PY
-chmod 600 .tmp/rest/jwt-secret
+chmod 600 .tmp/rest/jwt-secret .tmp/rest/database-password
 
-export QUACKGIS_REST_DATABASE_URL='postgres://authenticator:password@127.0.0.1:5434/quackgis'
+export QUACKGIS_REST_DATABASE_URL='postgres://authenticator@127.0.0.1:5434/quackgis'
+export QUACKGIS_REST_DATABASE_PASSWORD_FILE="$PWD/.tmp/rest/database-password"
 export QUACKGIS_REST_JWT_SECRET_FILE="$PWD/.tmp/rest/jwt-secret"
 export QUACKGIS_REST_JWT_ISSUER='https://issuer.example'
 export QUACKGIS_REST_JWT_AUDIENCE='quackgis-rest'
@@ -201,6 +209,14 @@ PY
 curl --fail-with-body http://127.0.0.1:3000/ready
 ```
 
+Rotate the authenticator credential as an ordered database restart operation.
+Stage and atomically replace `QUACKGIS_REST_DATABASE_PASSWORD_FILE`; readiness
+must fail while the file and database disagree. Restart QuackGIS against the same
+DuckLake state with the matching authenticator password. REST reopens pgwire with
+the new credential without restarting, readiness and committed reads recover,
+and the old password must be denied. There is no old/new password overlap in the
+REST process.
+
 ## Compatibility gates
 
 ```sh
@@ -214,9 +230,11 @@ role/claim cleanup, grant-backed PostgreSQL catalog discovery, role-specific
 OpenAPI/direct denial, database denial even with an intentionally stale/wide
 cache, automatic repair of that stale role cache, and live-column revision
 invalidation, plus atomic JWT key replacement, new-key acceptance, old-key
-denial, invalid-key readiness failure, projection, typed filtering, ordering,
-pagination, missing-resource behavior, mutation denial, and escaped WKB
-transport. These cases seed the QuackGIS extension of the
+denial, invalid-key readiness failure, owner-only database-password validation,
+credential-mismatch readiness failure, same-state database restart, automatic
+new-password reconnect without a REST restart, old-password denial, projection,
+typed filtering, ordering, pagination, missing-resource behavior, mutation
+denial, and escaped WKB transport. These cases seed the QuackGIS extension of the
 PostgREST contract. Each additional PostgREST behavior must enter this executable
 suite before being listed as supported.
 
