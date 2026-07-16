@@ -131,8 +131,13 @@ else:
 PY
 }
 
-pods=$(kubectl -n quackgis get pods -l app.kubernetes.io/name=quackgis-rest \
-  --field-selector=status.phase=Running -o name | sort)
+pods=$(kubectl -n quackgis get pods -l app.kubernetes.io/name=quackgis-rest -o json | python3 -c '
+import json, sys
+value=json.load(sys.stdin)
+for item in sorted(value["items"], key=lambda item: item["metadata"]["name"]):
+    ready=any(condition.get("type") == "Ready" and condition.get("status") == "True" for condition in item.get("status", {}).get("conditions", []))
+    if item["metadata"].get("deletionTimestamp") is None and ready:
+        print("pod/" + item["metadata"]["name"])')
 pod_count=$(printf '%s\n' "$pods" | sed '/^$/d' | wc -l)
 if [ "$pod_count" -ne 2 ]; then
   printf 'expected two running REST Pods, got %s\n' "$pod_count" >&2

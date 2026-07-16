@@ -181,44 +181,25 @@ spec:
           volumeMounts:
             - {name: old-secret, mountPath: /source, readOnly: true}
             - {name: keys, mountPath: /keys}
-        - name: old-rest-edge
-          restartPolicy: Always
-          image: "$runtime_image"
-          imagePullPolicy: IfNotPresent
-          command: ["/usr/local/bin/quackgis-client"]
-          args: ["--config", "/config/client.json"]
-          securityContext: *old_rest_security
-          volumeMounts:
-            - {name: config, mountPath: /config, readOnly: true}
-            - {name: keys, mountPath: /var/run/quackgis-old-rest-edge, readOnly: true}
       containers:
         - name: denial
-          image: "$client_image"
+          image: "$runtime_image"
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "-ceu"]
           args:
             - >-
-              python3 -c 'import socket,time
-              for attempt in range(50):
-                  try:
-                      socket.create_connection(("127.0.0.1",5432),1).close(); break
-                  except OSError:
-                      time.sleep(.1)
-              else: raise SystemExit("old credential bridge did not listen")';
-              if PGCONNECT_TIMEOUT=5 psql -h 127.0.0.1 -p 5432
-              -U authenticator -d quackgis -c 'SELECT 1'; then
+              set +e;
+              timeout 15 /usr/local/bin/quackgis-client --config /config/client.json;
+              outcome=\$?;
+              set -e;
+              if [ "\$outcome" -eq 0 ] || [ "\$outcome" -eq 124 ]; then
                 echo 'old REST credential unexpectedly obtained a lease' >&2; exit 1;
               fi;
               echo old_rest_credential_denied
-          securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop: ["ALL"]
-            runAsNonRoot: true
-            runAsUser: 65532
-            runAsGroup: 65532
-            seccompProfile:
-              type: RuntimeDefault
+          securityContext: *old_rest_security
+          volumeMounts:
+            - {name: config, mountPath: /config, readOnly: true}
+            - {name: keys, mountPath: /var/run/quackgis-old-rest-edge, readOnly: true}
       volumes:
         - name: old-secret
           secret:
