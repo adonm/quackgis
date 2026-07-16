@@ -414,6 +414,21 @@ duckdb-copy-profile level="smoke" rows="10000" out=".tmp/duckdb-copy/manifest.js
 duckdb-copy-smoke:
     just duckdb-copy-profile level=smoke rows=10000 out=.tmp/duckdb-copy/smoke-r10k.json
 
+# Compare maintained WKB/bbox pruning with native GEOMETRY statistics and exact rechecks.
+duckdb-spatial-scan-profile level="smoke" rows="100000" out=".tmp/duckdb-spatial-scan/manifest.json" environment="host_process" driver=duckdb_adbc_driver:
+    @set -eu; level_arg='{{level}}'; rows_arg='{{rows}}'; out_arg='{{out}}'; environment_arg='{{environment}}'; driver_arg='{{driver}}'; \
+    level_arg="${level_arg#level=}"; rows_arg="${rows_arg#rows=}"; out_arg="${out_arg#out=}"; environment_arg="${environment_arg#environment=}"; driver_arg="${driver_arg#driver=}"; \
+    if [ ! -f "$driver_arg" ]; then echo 'DuckDB ADBC driver is missing; run `mise run duckdb-bootstrap`' >&2; exit 2; fi; \
+    driver_arg="$(realpath "$driver_arg")"; duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; out_arg="$(realpath -m "$out_arg")"; \
+    HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" QUACKGIS_PROFILE_OUT="$out_arg" \
+      QUACKGIS_EVIDENCE_LEVEL="$level_arg" QUACKGIS_EXECUTION_ENVIRONMENT="$environment_arg" QUACKGIS_PROFILE_ROWS="$rows_arg" \
+      cargo test -p quackgis-server --release --test roadmap_profiles spatial_scan_profile -- --ignored --exact --nocapture --test-threads=1; \
+    python3 scripts/evidence_manifest_check.py "$out_arg"
+
+# Required fast native spatial pruning and exact-result evidence.
+duckdb-spatial-scan-smoke:
+    just duckdb-spatial-scan-profile level=smoke rows=100000 out=.tmp/duckdb-spatial-scan/smoke-r100k.json
+
 # Create an offline, exact-path local DuckLake backup with a checksum manifest.
 duckdb-local-backup catalog=catalog data=data out=".tmp/duckdb-backup":
     python3 scripts/duckdb_local_backup.py backup --catalog "{{catalog}}" --data-root "{{data}}" --destination "{{out}}"
@@ -448,7 +463,7 @@ check: fmt-check clippy test
 check-fast: fmt-check clippy test-fast
 
 # Run the same gate used by GitHub Actions CI.
-ci: check-fast project-contract-check duckdb-adbc-compile-check duckdb-adbc-storage-test duckdb-pgwire-workflow-test iroh-duckdb-smoke iroh-duckdb-relay-smoke iroh-transport-profile rest-postgrest-smoke duckdb-catalog-contract-test duckdb-catalog-identity-test duckdb-result-stream-smoke duckdb-wide-result-smoke duckdb-cancellation-smoke duckdb-mixed-concurrency-smoke duckdb-termination-smoke duckdb-tls-rotation-smoke duckdb-copy-smoke evidence-manifest-check probe-static-check runtime-static-check kind-static-check
+ci: check-fast project-contract-check duckdb-adbc-compile-check duckdb-adbc-storage-test duckdb-pgwire-workflow-test iroh-duckdb-smoke iroh-duckdb-relay-smoke iroh-transport-profile rest-postgrest-smoke duckdb-catalog-contract-test duckdb-catalog-identity-test duckdb-result-stream-smoke duckdb-wide-result-smoke duckdb-cancellation-smoke duckdb-mixed-concurrency-smoke duckdb-termination-smoke duckdb-tls-rotation-smoke duckdb-copy-smoke duckdb-spatial-scan-smoke evidence-manifest-check probe-static-check runtime-static-check kind-static-check
 
 # Run the dev QuackGIS server on QUACKGIS_HOST/QUACKGIS_PORT.
 server:

@@ -4,7 +4,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use arrow_array::{BinaryArray, Int64Array, RecordBatch, RecordBatchReader, StringArray};
+use adbc_core::options::IngestMode;
+use arrow_array::builder::BinaryBuilder;
+use arrow_array::{
+    ArrayRef, BinaryArray, Float64Array, Int64Array, RecordBatch, RecordBatchReader, StringArray,
+};
 use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
@@ -1265,6 +1269,200 @@ async fn copy_ingest_profile() {
     );
 }
 
+#[tokio::test]
+#[ignore = "requires the pinned DuckDB ADBC runtime"]
+async fn spatial_scan_profile() {
+    let profile = SpatialScanProfile::from_environment();
+    let output_path = std::env::var_os("QUACKGIS_PROFILE_OUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| ".tmp/duckdb-spatial-scan/manifest.json".into());
+    let runtime = TestRuntime::start(ServerOptions::new().with_max_connections(4)).await;
+    runtime
+        .storage()
+        .execute_update(
+            "CREATE TABLE quackgis.main.bbox_scan_profile(\
+             id BIGINT, geom_wkb BLOB, _qg_minx DOUBLE, _qg_miny DOUBLE, \
+             _qg_maxx DOUBLE, _qg_maxy DOUBLE); \
+             CREATE TABLE quackgis.main.native_scan_profile(\
+             id BIGINT, geom GEOMETRY)",
+        )
+        .expect("create spatial scan tables");
+
+    let rows_per_file = profile.rows / profile.files;
+    assert_eq!(rows_per_file * profile.files, profile.rows);
+    let load_started = Instant::now();
+    for file in 0..profile.files {
+        let start = file * rows_per_file;
+        let end = start + rows_per_file;
+        runtime
+            .storage()
+            .ingest(
+                "main",
+                "bbox_scan_profile",
+                vec![spatial_layout_batch(start, end)],
+                IngestMode::Append,
+            )
+            .unwrap_or_else(|error| panic!("ingest bbox profile file {file}: {error}"));
+        runtime
+            .storage()
+            .execute_update(&format!(
+                "INSERT INTO quackgis.main.native_scan_profile \
+                 SELECT i, ST_Point(i::DOUBLE, i::DOUBLE)::GEOMETRY \
+                 FROM range({start}, {end}) AS profile_points(i)"
+            ))
+            .unwrap_or_else(|error| panic!("ingest native profile file {file}: {error}"));
+    }
+    let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
+
+    let (client, connection) = runtime.connect().await;
+    let probe_max = rows_per_file.min(100).saturating_sub(1);
+    let expected_count = probe_max + 1;
+    let probe = format!("ST_MakeEnvelope(0, 0, {probe_max}, {probe_max})");
+    let bbox_exact = format!("ST_Intersects(ST_GeomFromWKB(geom_wkb), {probe})");
+    let bbox_query = format!(
+        "SELECT count(*)::BIGINT FROM quackgis.main.bbox_scan_profile \
+         WHERE {bbox_exact}"
+    );
+    let bbox_unpruned_query = format!(
+        "SELECT count(*)::BIGINT FROM quackgis.main.bbox_scan_profile \
+         WHERE ({bbox_exact}) IS TRUE"
+    );
+    let native_exact = format!("ST_Intersects(geom, {probe})");
+    let native_query = format!(
+        "SELECT count(*)::BIGINT FROM quackgis.main.native_scan_profile \
+         WHERE ST_Intersects_Extent(geom, {probe}) AND {native_exact}"
+    );
+    let native_unpruned_query = format!(
+        "SELECT count(*)::BIGINT FROM quackgis.main.native_scan_profile \
+         WHERE ({native_exact}) IS TRUE"
+    );
+    for (label, query) in [
+        ("bbox injected", bbox_query.as_str()),
+        ("bbox exact", bbox_unpruned_query.as_str()),
+        ("native stats", native_query.as_str()),
+        ("native exact", native_unpruned_query.as_str()),
+    ] {
+        let count = client
+            .query_one(query, &[])
+            .await
+            .unwrap_or_else(|error| panic!("{label} count: {error:?}"))
+            .get::<_, i64>(0);
+        assert_eq!(count, expected_count as i64, "{label} exact count");
+    }
+
+    runtime
+        .storage()
+        .execute_update(
+            "CALL enable_profiling(\
+             format := 'json', \
+             metrics := ['EXTRA_INFO', 'OPERATOR_ROW_GROUPS_SCANNED', \
+                         'OPERATOR_TOTAL_ROW_GROUPS_TO_SCAN'])",
+        )
+        .expect("enable spatial scan profiling metrics");
+    let bbox_unpruned_plan = analyze_query(runtime.storage(), &bbox_unpruned_query);
+    let bbox_plan = analyze_query(runtime.storage(), &bbox_query);
+    let native_unpruned_plan = analyze_query(runtime.storage(), &native_unpruned_query);
+    let native_plan = analyze_query(runtime.storage(), &native_query);
+    runtime
+        .storage()
+        .execute_update("PRAGMA disable_profiling")
+        .expect("disable spatial scan profiling");
+
+    let bbox_unpruned = scan_metrics(&bbox_unpruned_plan);
+    let bbox = scan_metrics(&bbox_plan);
+    let native_unpruned = scan_metrics(&native_unpruned_plan);
+    let native = scan_metrics(&native_plan);
+    let bbox_plan_text = serde_json::to_string(&bbox_plan)
+        .expect("serialize bbox plan")
+        .to_ascii_lowercase();
+    let native_plan_text = serde_json::to_string(&native_plan)
+        .expect("serialize native plan")
+        .to_ascii_lowercase();
+    assert!(
+        bbox_plan_text.contains("_qg_minx"),
+        "bbox plan omitted candidate: {bbox_plan_text}"
+    );
+    assert!(bbox_plan_text.contains("st_intersects"));
+    assert!(
+        native_plan_text.contains("st_intersects_extent"),
+        "native plan omitted extent candidate: {native_plan_text}"
+    );
+    assert!(native_plan_text.contains("st_intersects"));
+    assert_scan_budget("maintained bbox", bbox, bbox_unpruned);
+    assert_scan_budget("native geometry", native, native_unpruned);
+
+    drop(client);
+    connection.abort();
+    let bbox_ratio = bbox.scanned as f64 / bbox_unpruned.total as f64;
+    let native_ratio = native.scanned as f64 / native_unpruned.total as f64;
+    let bbox_improvement = bbox_unpruned.scanned as f64 / bbox.scanned as f64;
+    let native_improvement = native_unpruned.scanned as f64 / native.scanned as f64;
+    let evidence = EvidenceEnvelope::collect(
+        EvidenceProfile::new(
+            format!(
+                "duckdb-spatial-scan-{}-r{}-v1",
+                profile.level.as_str(),
+                profile.rows
+            ),
+            profile.level,
+            profile.environment,
+            "ordered point data in official DuckLake Parquet files; exact counts run through pgwire while DuckDB 1.5.4 row-group metrics compare exact-only scans with maintained WKB/bbox and native GEOMETRY candidates",
+        ),
+        json!({
+            "rows_per_layout": profile.rows,
+            "files_per_layout": profile.files,
+            "rows_per_file": rows_per_file,
+            "probe_max_coordinate": probe_max,
+            "bbox_row_groups": bbox_unpruned.total,
+            "native_row_groups": native_unpruned.total,
+        }),
+        json!({
+            "expected_count": expected_count,
+            "bbox_injected_count": expected_count,
+            "bbox_exact_count": expected_count,
+            "native_stats_count": expected_count,
+            "native_exact_count": expected_count,
+            "bbox_plan_has_candidate": true,
+            "bbox_plan_has_exact_recheck": true,
+            "native_plan_has_candidate": true,
+            "native_plan_has_exact_recheck": true,
+        }),
+        json!({
+            "load_ms": load_ms,
+            "bbox_row_groups_scanned": bbox.scanned,
+            "bbox_row_groups_dispatched": bbox.total,
+            "bbox_total_row_groups": bbox_unpruned.total,
+            "bbox_scan_ratio": bbox_ratio,
+            "bbox_row_group_improvement": bbox_improvement,
+            "native_row_groups_scanned": native.scanned,
+            "native_row_groups_dispatched": native.total,
+            "native_total_row_groups": native_unpruned.total,
+            "native_scan_ratio": native_ratio,
+            "native_row_group_improvement": native_improvement,
+        }),
+        json!({
+            "scan_ratio_max": 0.05,
+            "row_group_improvement_min": 20.0,
+            "exact_recheck_required": true,
+            "reference_rows": 10_000_000,
+            "reference_runs_before_100m": 2,
+        }),
+    )
+    .expect("collect spatial scan evidence");
+    evidence
+        .write(&output_path)
+        .expect("write spatial scan evidence");
+    println!(
+        "duckdb_spatial_scan_profile_ok rows={} bbox={}/{} native={}/{} out={}",
+        profile.rows,
+        bbox.scanned,
+        bbox_unpruned.total,
+        native.scanned,
+        native_unpruned.total,
+        output_path.display()
+    );
+}
+
 struct ResultStreamProfile {
     level: EvidenceLevel,
     environment: ExecutionEnvironment,
@@ -1400,6 +1598,63 @@ struct TerminationProfile {
 struct TlsRotationProfile {
     level: EvidenceLevel,
     environment: ExecutionEnvironment,
+}
+
+struct SpatialScanProfile {
+    level: EvidenceLevel,
+    environment: ExecutionEnvironment,
+    rows: u64,
+    files: u64,
+}
+
+impl SpatialScanProfile {
+    fn from_environment() -> Self {
+        let level = EvidenceLevel::parse(
+            &std::env::var("QUACKGIS_EVIDENCE_LEVEL").unwrap_or_else(|_| "smoke".to_owned()),
+        )
+        .expect("valid evidence level");
+        assert_ne!(
+            level,
+            EvidenceLevel::External,
+            "external evidence is not local"
+        );
+        let environment = ExecutionEnvironment::parse(
+            &std::env::var("QUACKGIS_EXECUTION_ENVIRONMENT")
+                .unwrap_or_else(|_| "host_process".to_owned()),
+        )
+        .expect("valid execution environment");
+        let default_rows = match level {
+            EvidenceLevel::Smoke => 100_000,
+            EvidenceLevel::Local => 1_000_000,
+            EvidenceLevel::Reference => 10_000_000,
+            EvidenceLevel::External => unreachable!("external rejected above"),
+        };
+        let rows = std::env::var("QUACKGIS_PROFILE_ROWS")
+            .map(|value| value.parse::<u64>().expect("integer profile rows"))
+            .unwrap_or(default_rows);
+        assert!(
+            (100_000..=10_000_000).contains(&rows),
+            "spatial scan rows must be between 100k and 10M"
+        );
+        if level == EvidenceLevel::Reference {
+            assert_eq!(
+                rows, 10_000_000,
+                "reference spatial scan profile requires 10M rows"
+            );
+        }
+        let files = 25;
+        assert_eq!(
+            rows % files,
+            0,
+            "spatial scan rows must divide into 25 files"
+        );
+        Self {
+            level,
+            environment,
+            rows,
+            files,
+        }
+    }
 }
 
 impl TlsRotationProfile {
@@ -1676,6 +1931,126 @@ fn generated_copy_schema() -> SchemaRef {
         Field::new("name", DataType::Utf8, false),
         Field::new("geom_wkb", DataType::Binary, false),
     ]))
+}
+
+fn spatial_layout_batch(start: u64, end: u64) -> RecordBatch {
+    let rows = usize::try_from(end - start).expect("spatial profile batch row count");
+    let ids = Arc::new(Int64Array::from_iter_values(
+        (start..end).map(|id| id as i64),
+    )) as ArrayRef;
+    let coordinates = Arc::new(Float64Array::from_iter_values(
+        (start..end).map(|id| id as f64),
+    )) as ArrayRef;
+    let mut geometries = BinaryBuilder::with_capacity(rows, rows * 21);
+    for id in start..end {
+        geometries.append_value(profile_point_wkb(id as f64));
+    }
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("geom_wkb", DataType::Binary, false),
+            Field::new("_qg_minx", DataType::Float64, false),
+            Field::new("_qg_miny", DataType::Float64, false),
+            Field::new("_qg_maxx", DataType::Float64, false),
+            Field::new("_qg_maxy", DataType::Float64, false),
+        ])),
+        vec![
+            ids,
+            Arc::new(geometries.finish()),
+            Arc::clone(&coordinates),
+            Arc::clone(&coordinates),
+            Arc::clone(&coordinates),
+            coordinates,
+        ],
+    )
+    .expect("spatial layout profile batch")
+}
+
+fn profile_point_wkb(coordinate: f64) -> [u8; 21] {
+    let mut wkb = [0_u8; 21];
+    wkb[0] = 1;
+    wkb[1..5].copy_from_slice(&1_u32.to_le_bytes());
+    wkb[5..13].copy_from_slice(&coordinate.to_le_bytes());
+    wkb[13..21].copy_from_slice(&coordinate.to_le_bytes());
+    wkb
+}
+
+fn analyze_query(
+    storage: &quackgis_server::duckdb_adbc_storage::DuckDbAdbcStorage,
+    query: &str,
+) -> serde_json::Value {
+    let batches = storage
+        .query(&format!("EXPLAIN (ANALYZE, FORMAT JSON) {query}"))
+        .unwrap_or_else(|error| panic!("analyze spatial query {query}: {error:?}"));
+    let values = batches
+        .first()
+        .expect("DuckDB analyzed plan batch")
+        .column(1)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("DuckDB analyzed plan JSON text");
+    serde_json::from_str(values.value(0)).expect("DuckDB JSON analyzed plan")
+}
+
+#[derive(Clone, Copy)]
+struct ScanMetrics {
+    scanned: u64,
+    total: u64,
+}
+
+fn scan_metrics(plan: &serde_json::Value) -> ScanMetrics {
+    fn collect(value: &serde_json::Value, metrics: &mut ScanMetrics) {
+        if let Some(object) = value.as_object() {
+            let total = object
+                .get("operator_total_row_groups_to_scan")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            if total > 0 {
+                metrics.total += total;
+                metrics.scanned += object
+                    .get("operator_row_groups_scanned")
+                    .and_then(serde_json::Value::as_u64)
+                    .expect("row-group scan metric paired with total");
+            }
+        }
+        if let Some(children) = value.get("children").and_then(serde_json::Value::as_array) {
+            for child in children {
+                collect(child, metrics);
+            }
+        }
+    }
+
+    let mut metrics = ScanMetrics {
+        scanned: 0,
+        total: 0,
+    };
+    collect(plan, &mut metrics);
+    assert!(metrics.total > 0, "analyzed plan omitted row-group totals");
+    assert!(metrics.scanned > 0, "selective query scanned no row groups");
+    assert!(metrics.scanned <= metrics.total);
+    metrics
+}
+
+fn assert_scan_budget(label: &str, selective: ScanMetrics, unpruned: ScanMetrics) {
+    assert_eq!(
+        unpruned.scanned, unpruned.total,
+        "{label} exact-only oracle unexpectedly pruned row groups"
+    );
+    assert!(
+        selective.total <= unpruned.total,
+        "{label} selective plan dispatched more row groups than the exact-only plan"
+    );
+    let ratio = selective.scanned as f64 / unpruned.total as f64;
+    let improvement = unpruned.scanned as f64 / selective.scanned as f64;
+    assert!(
+        ratio <= 0.05,
+        "{label} scanned {:.2}% of row groups, above 5%",
+        ratio * 100.0
+    );
+    assert!(
+        improvement >= 20.0,
+        "{label} row-group scan improvement {improvement:.2}x is below 20x"
+    );
 }
 
 fn copy_text_chunk(start: u64, rows: u64, max_bytes: usize) -> (String, u64) {
