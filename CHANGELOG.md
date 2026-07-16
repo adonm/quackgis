@@ -7,6 +7,11 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 
 ### Added
 
+- REST schema/OpenAPI caches now validate a bounded SHA-256 revision of the exact
+  role-filtered, REST-exposed PostgreSQL catalog before every authenticated API
+  request. Live column changes and stale over-broad role caches invalidate
+  automatically; catalog validation failure returns `503`, while database grants
+  remain authoritative across the validation/execution race.
 - Local readiness now verifies readable DuckLake snapshots, a synced/removable
   4 KiB data-root write, and mandatory rollback of unique internal DuckLake DDL;
   native evidence requires zero table, file, or snapshot residue.

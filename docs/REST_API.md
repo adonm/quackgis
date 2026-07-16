@@ -47,6 +47,12 @@ lease, policy, admission, epochs, and audit identity. See
   policy and effective role's grants are independent authorization ceilings.
 - Query execution has a fail-closed timeout. Native errors are bounded before
   entering the HTTP response.
+- Before OpenAPI or request SQL is generated, the sidecar re-reads the maintained
+  role-filtered catalog and compares a length-framed SHA-256 revision over only
+  REST-exposed columns, types, nullability, and defaults. An unchanged revision
+  reuses the immutable cache; a changed revision replaces it. Validation failure
+  returns `503`. Database authorization remains authoritative if state changes
+  between validation and execution.
 
 ## Current PostgREST subset
 
@@ -57,7 +63,8 @@ Supported now:
   using the pinned upstream parser/query engine;
 - JSON array responses generated in DuckDB;
 - authenticated role-aware OpenAPI 3 discovery at `/`;
-- explicit authenticated schema refresh at `POST /reload`; and
+- automatic role-filtered schema revision validation before API/OpenAPI requests;
+- explicit authenticated schema validation at `POST /reload`; and
 - `/live` and database-backed `/ready`.
 
 QuackGIS-specific coverage includes maintained WKB columns, which are emitted as
@@ -94,8 +101,9 @@ M3/M5 gates in [../ROADMAP.md](../ROADMAP.md):
 2. JWT verification, one authenticator identity, bounded role mapping,
    transaction-local role/context, and role-aware OpenAPI — complete at the
    direct-pgwire preview boundary;
-3. consume schema/security epochs, then package multiple immutable stateless
-   replicas and prove denial, readiness, load balancing, automatic invalidation,
+3. automatic role-filtered schema/security revision invalidation — complete at
+   the direct-pgwire boundary; next consume shared monotonic epochs and package
+   multiple immutable stateless replicas with denial, readiness, load balancing,
    and credential rotation; then
 4. add relationships and mutations only after common key metadata, object
    privileges, cancellation/transaction outcomes, and maintained bbox invariants
@@ -107,8 +115,12 @@ structural policy model, matching `pg_policy` behavior, and an adversarial bypas
 suite across every maintained read/write shape.
 
 The current role-specific cache key is `effective role + REST exposure
-configuration`; explicit `POST /reload` refreshes one role. Local 1.0 must add the
-catalog/security epoch before caches can invalidate automatically.
+configuration + role-filtered catalog revision`. Every authenticated API/OpenAPI
+request validates that revision in a transaction under the effective role, so a
+schema or visibility change replaces the immutable cache before SQL generation.
+`POST /reload` remains an explicit validation endpoint, not a correctness
+requirement. Local 1.0 should replace per-request catalog reads with the shared
+monotonic schema/security epochs once that packaged control contract exists.
 
 An operation omitted by OpenAPI must also be denied when requested directly. An
 operation allowed by database grants can still be hidden by the REST exposure
@@ -177,10 +189,11 @@ mise exec -- just rest-postgrest-smoke
 The native smoke starts an actual DuckDB/DuckLake pgwire server and REST router,
 then proves HS256 validation/denial, one SCRAM authenticator, transaction-local
 role/claim cleanup, grant-backed PostgreSQL catalog discovery, role-specific
-OpenAPI/direct denial, and database denial even with an intentionally stale/wide
-cache, plus projection, typed filtering, ordering, pagination, missing-resource
-behavior, mutation denial, and escaped WKB transport. These cases seed the
-QuackGIS extension of the
+OpenAPI/direct denial, database denial even with an intentionally stale/wide
+cache, automatic repair of that stale role cache, and live-column revision
+invalidation, plus projection, typed filtering, ordering, pagination,
+missing-resource behavior, mutation denial, and escaped WKB transport. These
+cases seed the QuackGIS extension of the
 PostgREST contract. Each additional PostgREST behavior must enter this executable
 suite before being listed as supported.
 

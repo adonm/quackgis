@@ -21,6 +21,7 @@ use pg_query_engine::{
 use pg_schema_cache_types::{Column, QualifiedName, SchemaCache, Table};
 use ring::hmac;
 use rustls::RootCertStore;
+use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock};
 use tokio_postgres::config::SslMode;
@@ -65,10 +66,21 @@ struct Cli {
 
 struct AppState {
     client: Mutex<Client>,
-    caches: RwLock<HashMap<String, Arc<SchemaCache>>>,
+    caches: RwLock<HashMap<String, SchemaCacheEntry>>,
     jwt: JwtVerifier,
     exposed_tables: HashSet<String>,
     statement_timeout: Duration,
+}
+
+#[derive(Clone)]
+struct SchemaCacheEntry {
+    schema: Arc<SchemaCache>,
+    revision: [u8; 32],
+}
+
+struct DiscoveredSchema {
+    schema: SchemaCache,
+    revision: [u8; 32],
 }
 
 #[derive(Clone)]
@@ -103,9 +115,15 @@ async fn main() -> Result<()> {
     let mut roles = jwt.roles.iter().collect::<Vec<_>>();
     roles.sort_unstable();
     for role in roles {
-        let cache = discover_schema(&mut client, &exposed_tables, role).await?;
-        discovered_tables.extend(cache.tables.keys().map(|table| table.name.clone()));
-        caches.insert(role.clone(), Arc::new(cache));
+        let discovered = discover_schema(&mut client, &exposed_tables, role).await?;
+        discovered_tables.extend(
+            discovered
+                .schema
+                .tables
+                .keys()
+                .map(|table| table.name.clone()),
+        );
+        caches.insert(role.clone(), discovered.into());
     }
     let mut missing = exposed_tables
         .difference(&discovered_tables)
@@ -192,7 +210,7 @@ async fn discover_schema(
     client: &mut Client,
     exposed_tables: &HashSet<String>,
     role: &str,
-) -> Result<SchemaCache> {
+) -> Result<DiscoveredSchema> {
     const SQL: &str = "SELECT table_name::VARCHAR, column_name::VARCHAR, \
         udt_name::VARCHAR, is_nullable::VARCHAR, column_default::VARCHAR \
         FROM information_schema.columns WHERE table_schema = 'public' \
@@ -203,6 +221,7 @@ async fn discover_schema(
         .await?;
     let rows = transaction.query(SQL, &[]).await?;
     let mut tables: HashMap<QualifiedName, Table> = HashMap::new();
+    let mut revision = Sha256::new();
     for row in rows {
         let table_name: String = row.get(0);
         if !exposed_tables.contains(&table_name) {
@@ -212,6 +231,11 @@ async fn discover_schema(
         let pg_type: String = row.get(2);
         let nullable: String = row.get(3);
         let default_expr: Option<String> = row.get(4);
+        update_schema_revision(&mut revision, Some(&table_name));
+        update_schema_revision(&mut revision, Some(&column_name));
+        update_schema_revision(&mut revision, Some(&pg_type));
+        update_schema_revision(&mut revision, Some(&nullable));
+        update_schema_revision(&mut revision, default_expr.as_deref());
         let key = QualifiedName::new("public", table_name);
         let table = tables.entry(key.clone()).or_insert_with(|| Table {
             name: key,
@@ -241,11 +265,54 @@ async fn discover_schema(
         table.rebuild_column_index();
     }
     transaction.commit().await?;
-    Ok(SchemaCache {
-        tables,
-        relationships: Vec::new(),
-        functions: HashMap::new(),
+    Ok(DiscoveredSchema {
+        schema: SchemaCache {
+            tables,
+            relationships: Vec::new(),
+            functions: HashMap::new(),
+        },
+        revision: revision.finalize().into(),
     })
+}
+
+fn update_schema_revision(revision: &mut Sha256, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            revision.update((value.len() as u64).to_be_bytes());
+            revision.update(value.as_bytes());
+        }
+        None => revision.update(u64::MAX.to_be_bytes()),
+    }
+}
+
+impl From<DiscoveredSchema> for SchemaCacheEntry {
+    fn from(discovered: DiscoveredSchema) -> Self {
+        Self {
+            schema: Arc::new(discovered.schema),
+            revision: discovered.revision,
+        }
+    }
+}
+
+async fn role_schema(state: &AppState, role: &str) -> Result<Arc<SchemaCache>, ()> {
+    let discovered = tokio::time::timeout(state.statement_timeout, async {
+        let mut client = state.client.lock().await;
+        discover_schema(&mut client, &state.exposed_tables, role).await
+    })
+    .await
+    .map_err(|_| ())?
+    .map_err(|_| ())?;
+
+    let mut caches = state.caches.write().await;
+    if let Some(cached) = caches.get(role)
+        && cached.revision == discovered.revision
+    {
+        return Ok(Arc::clone(&cached.schema));
+    }
+    let entry = SchemaCacheEntry::from(discovered);
+    let schema = Arc::clone(&entry.schema);
+    caches.insert(role.to_owned(), entry);
+    Ok(schema)
 }
 
 async fn live() -> impl IntoResponse {
@@ -273,10 +340,16 @@ async fn openapi(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Resp
         Ok(identity) => identity,
         Err(()) => return unauthorized(),
     };
-    let caches = state.caches.read().await;
-    let cache = caches
-        .get(&identity.role)
-        .expect("validated JWT role has a schema cache");
+    let cache = match role_schema(&state, &identity.role).await {
+        Ok(cache) => cache,
+        Err(()) => {
+            return api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "QGRST503",
+                "schema validation failed",
+            );
+        }
+    };
     let paths = cache
         .tables
         .keys()
@@ -298,21 +371,9 @@ async fn reload(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Respo
         Ok(identity) => identity,
         Err(()) => return unauthorized(),
     };
-    let result = tokio::time::timeout(state.statement_timeout, async {
-        let mut client = state.client.lock().await;
-        discover_schema(&mut client, &state.exposed_tables, &identity.role).await
-    })
-    .await;
-    match result {
-        Ok(Ok(cache)) => {
-            state
-                .caches
-                .write()
-                .await
-                .insert(identity.role, Arc::new(cache));
-            StatusCode::NO_CONTENT.into_response()
-        }
-        Ok(Err(_)) | Err(_) => api_error(
+    match role_schema(&state, &identity.role).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(()) => api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "QGRST503",
             "schema reload failed",
@@ -353,13 +414,16 @@ async fn read_table_response(
         Ok(request) => request,
         Err(message) => return api_error(StatusCode::BAD_REQUEST, "PGRST100", &message),
     };
-    let cache = state
-        .caches
-        .read()
-        .await
-        .get(&identity.role)
-        .expect("validated JWT role has a schema cache")
-        .clone();
+    let cache = match role_schema(&state, &identity.role).await {
+        Ok(cache) => cache,
+        Err(()) => {
+            return api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "QGRST503",
+                "schema validation failed",
+            );
+        }
+    };
     let output = match build_sql(&cache, &ApiRequest::Read(request), &["public".to_owned()]) {
         Ok(output) => output,
         Err(error) => return api_error(StatusCode::NOT_FOUND, "PGRST205", &error.to_string()),
@@ -884,10 +948,12 @@ mod tests {
             .expect("REST schema");
         assert!(
             cache
+                .schema
                 .find_table("rest_points", &["public".to_owned()])
                 .is_some()
         );
         let rest_points = cache
+            .schema
             .find_table("rest_points", &["public".to_owned()])
             .expect("REST table");
         assert_eq!(rest_points.columns[0].pg_type, "int4");
@@ -896,14 +962,15 @@ mod tests {
         let denied_cache = discover_schema(&mut client, &exposed_tables, "denied_reader")
             .await
             .expect("denied REST schema");
-        assert!(denied_cache.tables.is_empty());
+        assert!(denied_cache.schema.tables.is_empty());
         let jwt = test_verifier(&["rest_reader", "denied_reader"]);
         let reader_jwt = test_jwt("rest_reader", unix_time() + 300);
         let denied_jwt = test_jwt("denied_reader", unix_time() + 300);
-        let reader_cache = Arc::new(cache);
+        let reader_entry = SchemaCacheEntry::from(cache);
+        let reader_cache = Arc::clone(&reader_entry.schema);
         let caches = HashMap::from([
-            ("rest_reader".to_owned(), Arc::clone(&reader_cache)),
-            ("denied_reader".to_owned(), Arc::new(denied_cache)),
+            ("rest_reader".to_owned(), reader_entry.clone()),
+            ("denied_reader".to_owned(), denied_cache.into()),
         ]);
         let state = Arc::new(AppState {
             client: Mutex::new(client),
@@ -956,18 +1023,72 @@ mod tests {
             denied_read.starts_with("HTTP/1.1 404 Not Found"),
             "{denied_read}"
         );
+
+        let denied_request = parse_read_request("rest_points", "select=id").unwrap();
+        let denied_sql = build_sql(
+            &reader_cache,
+            &ApiRequest::Read(denied_request),
+            &["public".to_owned()],
+        )
+        .expect("stale schema SQL");
+        let denied_sql = adapt_quackgis_sql(&denied_sql.sql);
+        let denied_identity = RequestIdentity {
+            role: "denied_reader".to_owned(),
+            claims: "{}".to_owned(),
+        };
+        let database_denied = execute_read(&state, &denied_identity, &denied_sql, &[], &[])
+            .await
+            .expect_err("database must deny stale wide cache");
+        assert!(
+            bounded_error(&database_denied).contains("lacks SELECT privilege"),
+            "{database_denied}"
+        );
+
         state
             .caches
             .write()
             .await
-            .insert("denied_reader".to_owned(), Arc::clone(&reader_cache));
-        let database_denied =
-            http_request(rest_port, "GET", "/rest_points", Some(&denied_jwt)).await;
+            .insert("denied_reader".to_owned(), reader_entry.clone());
+        let invalidated = http_request(rest_port, "GET", "/rest_points", Some(&denied_jwt)).await;
         assert!(
-            database_denied.starts_with("HTTP/1.1 400 Bad Request")
-                && database_denied.contains("lacks SELECT privilege"),
-            "{database_denied}"
+            invalidated.starts_with("HTTP/1.1 404 Not Found"),
+            "{invalidated}"
         );
+
+        let initial_revision = state
+            .caches
+            .read()
+            .await
+            .get("rest_reader")
+            .expect("reader cache")
+            .revision;
+        storage
+            .execute_update("ALTER TABLE quackgis.main.rest_points ADD COLUMN category VARCHAR")
+            .expect("add REST-visible column");
+        storage
+            .execute_update("UPDATE quackgis.main.rest_points SET category = 'new' WHERE id = 1")
+            .expect("populate REST-visible column");
+        let changed_schema = http_request(
+            rest_port,
+            "GET",
+            "/rest_points?select=id,category&id=eq.1",
+            Some(&reader_jwt),
+        )
+        .await;
+        assert!(
+            changed_schema.starts_with("HTTP/1.1 200 OK")
+                && changed_schema.contains(r#"[{"id":1,"category":"new"}]"#),
+            "{changed_schema}"
+        );
+        let changed_revision = state
+            .caches
+            .read()
+            .await
+            .get("rest_reader")
+            .expect("updated reader cache")
+            .revision;
+        assert_ne!(initial_revision, changed_revision);
+
         let missing = http_request(rest_port, "GET", "/missing_table", Some(&reader_jwt)).await;
         assert!(missing.starts_with("HTTP/1.1 404 Not Found"), "{missing}");
         let mutation = http_request(rest_port, "POST", "/rest_points", Some(&reader_jwt)).await;

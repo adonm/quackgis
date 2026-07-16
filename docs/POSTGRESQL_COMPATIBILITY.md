@@ -76,8 +76,9 @@ The checksum-pinned development identity lane additionally provides stable
 user-object relation/attribute identity and RowDescription origins. That lane is
 not release-supported until the upstream identity API ships in a signed bundle.
 Authoritative spatial metadata and key/index semantics remain incomplete.
-Role-aware REST/OpenAPI now passes at the direct-pgwire preview boundary, while
-automatic epoch invalidation and packaged replicas remain incomplete.
+Role-aware REST/OpenAPI and automatic role-filtered catalog revision invalidation
+now pass at the direct-pgwire preview boundary. Shared monotonic epoch consumption
+and packaged replicas remain incomplete.
 The development lane covers defaults/comments and DuckLake's only supported
 constraint (`NOT NULL`), while publishing an empty index catalog rather than
 inventing primary/unique identity; this is not a broad PostgreSQL catalog claim.
@@ -727,10 +728,13 @@ One SCRAM authenticator wraps discovery and reads in `SET LOCAL ROLE` transactio
 and binds normalized claims to `request.jwt.claims`. Role-filtered maintained
 `information_schema` drives per-role schema/OpenAPI caches, and actual pgwire
 proves a SELECT role can read while an assumable ungranted role sees no path and
-cannot call it directly; successful role/context cleanup also passes. Cache
-invalidation is still explicit rather than schema/security-epoch driven, and
-tiny-client routing, immutable multi-replica packaging, rotation, and balancing
-remain open before the H1 gate closes.
+cannot call it directly; successful role/context cleanup also passes. Every
+API/OpenAPI request now validates a bounded digest of the exact role-filtered,
+REST-exposed catalog before SQL generation. Actual pgwire proves a live column
+change replaces the cache and an intentionally stale over-broad role cache is
+repaired, while database authorization independently denies that stale cache.
+Shared monotonic epochs, tiny-client routing, immutable multi-replica packaging,
+rotation, and balancing remain open before the H1 gate closes.
 
 ### C7 — add relationships and broader PostgreSQL structure
 
