@@ -111,10 +111,12 @@ M3/M5 gates in [../ROADMAP.md](../ROADMAP.md):
 2. JWT verification, one authenticator identity, bounded role mapping,
    transaction-local role/context, and role-aware OpenAPI — complete at the
    direct-pgwire preview boundary;
-3. automatic role-filtered schema/security revision invalidation — complete at
-   the direct-pgwire boundary; next consume shared monotonic epochs and package
-   multiple immutable stateless replicas with denial, readiness, load balancing,
-   and credential rotation; then
+3. automatic role-filtered schema/security invalidation — complete at the
+   direct-pgwire boundary. REST consumes shared monotonic epochs in the
+   checksum-pinned identity lane and retains exact revision validation when the
+   signed runtime reports that capability unavailable; next package multiple
+   immutable stateless replicas with denial, readiness, load balancing, and
+   credential rotation; then
 4. add relationships and mutations only after common key metadata, object
    privileges, cancellation/transaction outcomes, and maintained bbox invariants
    pass through direct pgwire.
@@ -124,13 +126,17 @@ not RLS. RLS-protected reads or writes remain blocked until QuackGIS has a
 structural policy model, matching `pg_policy` behavior, and an adversarial bypass
 suite across every maintained read/write shape.
 
-The current role-specific cache key is `effective role + REST exposure
-configuration + role-filtered catalog revision`. Every authenticated API/OpenAPI
-request validates that revision in a transaction under the effective role, so a
-schema or visibility change replaces the immutable cache before SQL generation.
-`POST /reload` remains an explicit validation endpoint, not a correctness
-requirement. Local 1.0 should replace per-request catalog reads with the shared
-monotonic schema/security epochs once that packaged control contract exists.
+Where durable catalog identity is available, the cache key is `effective role +
+REST exposure configuration + schema epoch + security epoch + database
+connection generation`. REST reads the pair through
+`pg_catalog.quackgis_schema_epoch()` and
+`pg_catalog.quackgis_security_epoch()` and brackets a refresh with the same pair.
+A reconnect invalidates caches even when a restored backend reports equal epoch
+values. The signed load-only runtime currently returns `0A000` for those
+functions, so REST caches that capability result per connection and retains the
+exact role-filtered revision transaction before every request. Database grants
+remain the final non-widening decision in both modes. `POST /reload` always
+performs full discovery rather than accepting an unchanged epoch.
 
 An operation omitted by OpenAPI must also be denied when requested directly. An
 operation allowed by database grants can still be hidden by the REST exposure

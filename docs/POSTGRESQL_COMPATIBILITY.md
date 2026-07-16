@@ -229,13 +229,19 @@ upstream schema-level API before that surface can be claimed.
 - A pooled or reused native connection never inherits another pgwire session's
   role or request context.
 
-The development registry maintains the schema half of the first invariant: a
-committed identity fingerprint advances one durable epoch for create, rename,
-add, drop, and recreate, while rollback and restart without change do not.
-Extended-protocol reads pin that epoch at parse time and reject execution after a
-change; direct-column origins are resolved from the same guarded registry
-snapshot. REST and other catalog caches do not consume it yet, and the security
-epoch remains future C4 work.
+The development registry maintains both halves of the first invariant. A
+committed identity fingerprint advances the durable schema epoch for create,
+rename, add, drop, recreate, default, and comment changes, while rollback and
+restart without change do not. A canonical, credential-free projection of the
+immutable role/grant catalogs and outer table ceilings advances the security
+epoch only when authorization semantics change. The pair is exposed as
+zero-argument `BIGINT` functions and unsupported runtimes fail with `0A000`.
+Extended-protocol reads pin the schema epoch at parse time and reject execution
+after a change; direct-column origins are resolved from the same guarded registry
+snapshot. REST keys caches by role, both epochs, and connection generation,
+brackets refreshes with equal epoch reads, and uses exact role-filtered revisions
+when the capability is absent. The signed official bundle remains the gate for
+making this the packaged cache path.
 
 Read-only PostgreSQL SQL cursors now share that prepared-statement and epoch
 boundary. Simple and extended protocol accept plain transaction control plus one
@@ -761,9 +767,10 @@ The same smoke atomically replaces the bounded HS256 key file, accepts a new-key
 token, rejects the old key, and fails readiness for malformed key material. It
 also rotates an owner-only authenticator-password file, fails readiness while the
 file and database disagree, restarts the database on the same state, reconnects
-without restarting REST, and denies the old password. Shared monotonic epochs,
-tiny-client routing, immutable multi-replica packaging, packaged database/JWT
-rotation, and balancing remain open before the H1 gate closes.
+without restarting REST, and denies the old password. Shared monotonic epochs
+also drive REST invalidation in the checksum-pinned identity lane; the signed
+bundle, tiny-client routing, immutable multi-replica packaging, packaged
+database/JWT rotation, and balancing remain open before the H1 gate closes.
 
 ### C7 — add relationships and broader PostgreSQL structure
 

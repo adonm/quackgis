@@ -253,12 +253,13 @@ Security requirements:
   policy only after the independent RLS milestone.
 - Context and role reset is tested on success, database error, failed transaction,
   timeout, cancellation, disconnect, and connection reuse.
-- OpenAPI/schema caches are keyed by effective role, REST exposure, and a bounded
-  SHA-256 revision of the exact role-filtered catalog. Every API/OpenAPI request
-  validates that revision before SQL generation; changed visibility replaces the
-  immutable cache and validation failure returns `503`. Database authorization
-  remains the final non-widening decision. Shared monotonic epoch consumption is
-  still required before packaged replicas avoid per-request catalog reads.
+- In the durable identity lane, OpenAPI/schema caches are keyed by effective
+  role, REST exposure, shared schema/security epochs, and connection generation.
+  Refreshes observe an equal pair before and after discovery. The signed runtime
+  reports that capability unavailable, so REST retains a bounded SHA-256 revision
+  of the exact role-filtered catalog and validates it before SQL generation.
+  Changed visibility replaces the immutable cache, validation failure returns
+  `503`, and database authorization remains the final non-widening decision.
 
 Possession of the authenticator database credential permits forged request
 context. It therefore receives the same secret handling, rotation, audit, and

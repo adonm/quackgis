@@ -21,9 +21,11 @@ The product direction makes PostgreSQL 18 catalog, role, privilege, and session
 semantics first-class QuackGIS capabilities. The REST preview now validates
 bounded HS256 JWTs, maps a configured role claim, and uses one authenticator
 pgwire identity with transaction-local role/context for reads and role-aware
-OpenAPI. Role-filtered catalog revisions now invalidate REST caches automatically
-before requests. Routing that authenticator through the packaged tiny iroh
-bridge, shared monotonic epochs, and multiple packaged replicas remain planned.
+OpenAPI. REST consumes durable monotonic schema/security epochs in the
+checksum-pinned identity lane and otherwise validates exact role-filtered catalog
+revisions before requests. Routing that authenticator through the packaged tiny
+iroh bridge, shipping the epochs in the signed runtime, and multiple packaged
+replicas remain planned.
 
 There is no PostgreSQL, DataFusion, or Sedona query engine. DuckDB is the sole
 planner/executor and official DuckLake is the sole writer for new storage.

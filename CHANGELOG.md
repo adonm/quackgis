@@ -7,6 +7,11 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 
 ### Added
 
+- The checksum-pinned catalog identity lane now persists and exposes shared
+  monotonic schema/security epochs as bounded `BIGINT` pgwire functions. REST
+  keys role caches by the pair plus connection generation, refreshes atomically
+  when either changes, and retains exact per-request role-filtered revision
+  validation when the signed runtime reports the capability unavailable.
 - REST database credentials now come from a bounded owner-only non-symlink file,
   never the pgwire URL. Atomic replacement invalidates the old connection;
   readiness fails while REST and database credentials disagree, then REST
