@@ -7,8 +7,8 @@ and schema model from `joshburgess/pg-rest-server` at immutable revision
 HTTP replicas independently load-balanceable and ensures its compatibility tests
 also exercise QuackGIS pgwire behavior.
 
-This is an intentionally read-only first slice. It is not yet a claim of complete
-PostgREST compatibility or of upstream's 1,013-case PostgreSQL result.
+This is an intentionally read-only, role-aware slice. It is not yet a claim of
+complete PostgREST compatibility or of upstream's 1,013-case PostgreSQL result.
 
 The durable target is not a REST-specific security/catalog implementation.
 QuackGIS will own PostgreSQL 18 roles, privileges, session identity, catalog
@@ -22,14 +22,17 @@ lease, policy, admission, epochs, and audit identity. See
 ## Trust boundaries
 
 - `/live` and `/ready` are unauthenticated operational endpoints.
-- Every API, OpenAPI, and reload request requires
+- Every API, OpenAPI, and reload request requires a signed JWT in
   `Authorization: Bearer <token>`.
-- The token is loaded from a file, must contain at least 32 non-whitespace bytes,
-  and is compared in constant time. It is never accepted on the command line.
-- The pgwire URL carries the database identity. Use a configured QuackGIS
-  read-only identity; PostgreSQL-facing schema discovery and query execution are
-  filtered by that identity's common schema/table grants. The REST process does
-  not yet switch roles or emulate RLS.
+- The current profile accepts HS256 only. Its operator-provisioned secret is read
+  from a file, must contain 32–4096 non-whitespace bytes, and is never accepted on
+  the command line. Signature, exact issuer/audience, expiry, optional
+  not-before, token/claim size, and the configured `role` allowlist are validated
+  before database work. Invalid tokens receive one generic error.
+- The pgwire URL carries one privileged authenticator identity. Every discovery
+  and read transaction assumes only the validated, statically configured role and
+  binds normalized claims to transaction-local `request.jwt.claims`. Database
+  grants remain authoritative; claims do not implement RLS.
 - The HTTP listener defaults to `127.0.0.1`. Terminate public TLS and enforce
   request/rate limits at the load balancer before binding it more broadly.
 - A CA file forces TLS and enables hostname-verified rustls for the pgwire
@@ -37,11 +40,11 @@ lease, policy, admission, epochs, and audit identity. See
   both selects plaintext and is suitable only for a same-host/private-loopback
   development connection.
 - `QUACKGIS_REST_TABLES` is a required explicit comma-separated table allowlist.
-  Startup and reload fail if an entry is absent from the pgwire identity's
-  role-filtered PostgreSQL `public` schema. User filter values remain text bind
-  parameters; table and column names must resolve through this bounded in-memory
-  schema cache. The pgwire user's read policy is a second independent
-  authorization boundary.
+  Startup fails if an entry is absent from every configured JWT role's filtered
+  PostgreSQL `public` schema. A role may see a strict subset. User filter values
+  and claims remain bind parameters; table and column names must resolve through
+  that role's bounded in-memory schema cache. The authenticator's legacy read
+  policy and effective role's grants are independent authorization ceilings.
 - Query execution has a fail-closed timeout. Native errors are bounded before
   entering the HTTP response.
 
@@ -53,21 +56,19 @@ Supported now:
 - `select`, scalar filters, grouped `and`/`or`, `order`, `limit`, and `offset`
   using the pinned upstream parser/query engine;
 - JSON array responses generated in DuckDB;
-- authenticated OpenAPI 3 discovery at `/`;
+- authenticated role-aware OpenAPI 3 discovery at `/`;
 - explicit authenticated schema refresh at `POST /reload`; and
 - `/live` and database-backed `/ready`.
 
 QuackGIS-specific coverage includes maintained WKB columns, which are emitted as
 DuckDB's escaped binary JSON string. GeoJSON projection, geometry/SRID metadata,
-relationships/embedding, count preferences, CSV, singular media types, RPC, JWT
-roles, and all mutations remain open. Unsupported HTTP methods fail closed with
-`405`; missing schema-cache resources return `404`.
+relationships/embedding, count preferences, CSV, singular media types, RPC, and
+all mutations remain open. Unsupported HTTP methods fail closed with `405`;
+resources absent from the JWT role's cache return `404`.
 
 ## Target role-aware architecture
 
-The current bearer token and per-process role-filtered
-`information_schema.columns` cache are bootstrap controls. The target request
-path is:
+The implemented request path is:
 
 ```text
 JWT request
@@ -88,13 +89,14 @@ DuckDB + official DuckLake
 Delivery is intentionally staged as an implementation decomposition of the
 M3/M5 gates in [../ROADMAP.md](../ROADMAP.md):
 
-1. ~~replace direct DuckDB schema assumptions with maintained PostgreSQL catalog
-   discovery while retaining the explicit REST exposure ceiling;~~ complete;
-2. add JWT verification, one authenticator identity, bounded role mapping,
-   transaction-local role/context, and role-aware OpenAPI cached by role and
-   schema/security epoch;
-3. package multiple immutable stateless replicas and prove denial, readiness,
-   load balancing, cache invalidation, and credential rotation; then
+1. catalog-backed PostgreSQL discovery plus the explicit REST exposure ceiling —
+   complete;
+2. JWT verification, one authenticator identity, bounded role mapping,
+   transaction-local role/context, and role-aware OpenAPI — complete at the
+   direct-pgwire preview boundary;
+3. consume schema/security epochs, then package multiple immutable stateless
+   replicas and prove denial, readiness, load balancing, automatic invalidation,
+   and credential rotation; then
 4. add relationships and mutations only after common key metadata, object
    privileges, cancellation/transaction outcomes, and maintained bbox invariants
    pass through direct pgwire.
@@ -104,11 +106,9 @@ not RLS. RLS-protected reads or writes remain blocked until QuackGIS has a
 structural policy model, matching `pg_policy` behavior, and an adversarial bypass
 suite across every maintained read/write shape.
 
-The role-specific OpenAPI cache key is:
-
-```text
-effective role + catalog/security epoch + REST exposure configuration
-```
+The current role-specific cache key is `effective role + REST exposure
+configuration`; explicit `POST /reload` refreshes one role. Local 1.0 must add the
+catalog/security epoch before caches can invalidate automatically.
 
 An operation omitted by OpenAPI must also be denied when requested directly. An
 operation allowed by database grants can still be hidden by the REST exposure
@@ -116,20 +116,24 @@ ceiling, but REST can never widen a database grant.
 
 ## Run locally
 
-Start QuackGIS first, create a token without printing it, and use a read-only
-pgwire identity:
+Start QuackGIS with an immutable role graph containing LOGIN role
+`authenticator`, an assumable `api_reader`, and the intended grants. Then create
+an HS256 key without printing it and configure the REST process:
 
 ```sh
 mkdir -p .tmp/rest
 python3 - <<'PY'
 from pathlib import Path
 import secrets
-Path('.tmp/rest/token').write_text(secrets.token_urlsafe(32), encoding='utf-8')
+Path('.tmp/rest/jwt-secret').write_text(secrets.token_urlsafe(48), encoding='utf-8')
 PY
-chmod 600 .tmp/rest/token
+chmod 600 .tmp/rest/jwt-secret
 
-export QUACKGIS_REST_DATABASE_URL='postgres://reader:password@127.0.0.1:5434/quackgis'
-export QUACKGIS_REST_BEARER_TOKEN_FILE="$PWD/.tmp/rest/token"
+export QUACKGIS_REST_DATABASE_URL='postgres://authenticator:password@127.0.0.1:5434/quackgis'
+export QUACKGIS_REST_JWT_SECRET_FILE="$PWD/.tmp/rest/jwt-secret"
+export QUACKGIS_REST_JWT_ISSUER='https://issuer.example'
+export QUACKGIS_REST_JWT_AUDIENCE='quackgis-rest'
+export QUACKGIS_REST_JWT_ROLES='api_reader'
 export QUACKGIS_REST_TABLES='points,roads'
 mise exec -- just rest-server
 ```
@@ -140,12 +144,27 @@ For TLS pgwire, add:
 export QUACKGIS_REST_DATABASE_CA="$PWD/path/to/ca.crt"
 ```
 
-Then query with the token loaded without echoing it:
+Create a five-minute test token and query without exposing the signing key:
 
 ```sh
+export QUACKGIS_REST_TOKEN="$(python3 - <<'PY'
+import base64, hashlib, hmac, json, os, time
+enc = lambda value: base64.urlsafe_b64encode(value).rstrip(b'=').decode()
+header = enc(json.dumps({'alg': 'HS256', 'typ': 'JWT'}, separators=(',', ':')).encode())
+claims = enc(json.dumps({
+    'iss': os.environ['QUACKGIS_REST_JWT_ISSUER'],
+    'aud': os.environ['QUACKGIS_REST_JWT_AUDIENCE'],
+    'sub': 'local-test', 'role': 'api_reader', 'exp': int(time.time()) + 300,
+}, separators=(',', ':')).encode())
+body = f'{header}.{claims}'
+key = open(os.environ['QUACKGIS_REST_JWT_SECRET_FILE'], 'rb').read().strip()
+print(f'{body}.{enc(hmac.new(key, body.encode(), hashlib.sha256).digest())}')
+PY
+)"
 curl --fail-with-body \
-  -H "Authorization: Bearer $(cat .tmp/rest/token)" \
+  -H "Authorization: Bearer $QUACKGIS_REST_TOKEN" \
   'http://127.0.0.1:3000/points?select=id,name&id=gte.2&order=id.desc&limit=10'
+unset QUACKGIS_REST_TOKEN
 ```
 
 ## Compatibility gates
@@ -156,10 +175,12 @@ mise exec -- just rest-postgrest-smoke
 ```
 
 The native smoke starts an actual DuckDB/DuckLake pgwire server and REST router,
-then proves SCRAM plus role-grant-backed PostgreSQL catalog discovery,
-authentication denial, OpenAPI discovery, projection, typed filtering, ordering,
-pagination, missing-resource behavior, mutation denial, and escaped WKB
-transport. These cases seed the QuackGIS extension of the
+then proves HS256 validation/denial, one SCRAM authenticator, transaction-local
+role/claim cleanup, grant-backed PostgreSQL catalog discovery, role-specific
+OpenAPI/direct denial, and database denial even with an intentionally stale/wide
+cache, plus projection, typed filtering, ordering, pagination, missing-resource
+behavior, mutation denial, and escaped WKB transport. These cases seed the
+QuackGIS extension of the
 PostgREST contract. Each additional PostgREST behavior must enter this executable
 suite before being listed as supported.
 

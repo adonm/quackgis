@@ -75,13 +75,15 @@ loads only signed extensions. See [DEVELOPMENT_DUCKLAKE.md](DEVELOPMENT_DUCKLAKE
 for its isolated development workflow and deletion plan.
 
 The optional `quackgis-rest` process has a separate configuration and failure
-domain. It requires `QUACKGIS_REST_DATABASE_URL`,
-`QUACKGIS_REST_BEARER_TOKEN_FILE`, and the explicit comma-separated
-`QUACKGIS_REST_TABLES` allowlist. `QUACKGIS_REST_DATABASE_CA` enables
+domain. It requires an authenticator `QUACKGIS_REST_DATABASE_URL`,
+`QUACKGIS_REST_JWT_SECRET_FILE`, exact `QUACKGIS_REST_JWT_ISSUER` and
+`QUACKGIS_REST_JWT_AUDIENCE`, comma-separated `QUACKGIS_REST_JWT_ROLES`, and the
+explicit `QUACKGIS_REST_TABLES` ceiling. `QUACKGIS_REST_DATABASE_CA` enables
 hostname-verified pgwire TLS; `QUACKGIS_REST_HOST`, `QUACKGIS_REST_PORT`, and
 `QUACKGIS_REST_STATEMENT_TIMEOUT_MS` default to `127.0.0.1`, `3000`, and `30000`.
-See [REST_API.md](REST_API.md) for the read-only contract and load-balancer trust
-boundary.
+The authenticator must have configured set-option membership in every listed API
+role. See [REST_API.md](REST_API.md) for the read-only contract and load-balancer
+trust boundary.
 
 The pgwire socket is bound and the configured local DuckLake snapshot surface is
 queried before `/readyz` can return `200 ready`. The endpoint returns `503

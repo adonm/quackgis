@@ -7,6 +7,10 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 
 ### Added
 
+- The REST edge now validates bounded HS256 JWT signature, issuer, audience,
+  expiry/not-before, and a static role allowlist, then uses one SCRAM
+  authenticator with transaction-local role/claims. Per-role PostgreSQL catalog
+  caches drive matching OpenAPI visibility and direct read denial.
 - REST schema discovery now consumes the role-filtered PostgreSQL `public`
   information schema instead of DuckDB-internal `main` names and type
   translation, with actual SCRAM/grant-backed pgwire evidence.

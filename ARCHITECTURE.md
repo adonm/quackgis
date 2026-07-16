@@ -307,12 +307,14 @@ parameters, credentials, and object paths.
 reuses an immutable revision of `pg-rest-server`'s URL parser/query engine but reaches data
 only through the maintained QuackGIS pgwire boundary. It does not link ADBC,
 publish DuckLake state, or become a second catalog/security authority. The
-current bearer identity and independently reloadable `information_schema` cache
-are bootstrap behavior. Local 1.0 uses JWT validation, one authenticator pgwire
-identity, transaction-local role/context, role-aware catalog/OpenAPI discovery,
-and caches keyed by role plus schema/security epoch. Shared 1.x moves HTTP to the
-same assigned complete worker as pgwire over the measured iroh edge. Unsupported
-PostgREST behavior fails closed until a maintained compatibility case exists.
+current preview validates bounded HS256 JWT signature/issuer/audience/time/role,
+uses one authenticator pgwire identity, and wraps each read in transaction-local
+role/context. Role-filtered PostgreSQL catalog results drive per-role schema and
+OpenAPI caches. Explicit reload exists; automatic schema/security-epoch
+invalidation and tiny-client/multi-replica packaging remain Local 1.0 work.
+Shared 1.x moves HTTP to the same assigned complete worker as pgwire over the
+measured iroh edge. Unsupported PostgREST behavior fails closed until a maintained
+compatibility case exists.
 
 ## Deployment model
 

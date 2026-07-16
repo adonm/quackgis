@@ -61,11 +61,12 @@ infrastructure, and production failure drills remain open.
    registered native smoke reaches the DuckDB/DuckLake server for the maintained
    differential oracle; role-catalog preauthentication, packaged resource
    budgets, and hosted-relay qualification remain open.
-2. **HTTP client → REST:** the current bearer token is a preview control. The
-   Local 1.0 target validates JWT signature, issuer, audience, time bounds, and a
-   bounded role claim before opening a database transaction. Shared 1.x uses the
-   paired client credential and assigned iroh worker for both HTTP and pgwire.
-   HTTP authentication does not itself authorize a database object.
+2. **HTTP client → REST:** the current direct-pgwire preview accepts HS256 only
+   and validates its operator-file signature key, exact issuer/audience, time and
+   size bounds, and a statically allowed role before opening a database
+   transaction. Shared 1.x uses the paired client credential and assigned iroh
+   worker for both HTTP and pgwire. HTTP authentication does not itself authorize
+   a database object.
 3. **REST → tiny client → worker:** the Local 1.0 sidecar reaches pgwire only
    through its local tiny client. The registered service credential is privileged
    because its holder can obtain an access lease, assume configured API roles, and
@@ -223,7 +224,7 @@ published PostgreSQL divergence—not an accidental consequence of table denial.
 
 ## REST authenticator and request context
 
-The target REST flow is:
+The direct-pgwire REST preview implements:
 
 ```sql
 BEGIN;
@@ -235,8 +236,8 @@ COMMIT;
 
 Security requirements:
 
-- JWT algorithms and keys are operator-configured; token-provided algorithms are
-  not trusted.
+- HS256 and its key are operator-configured; the token-provided algorithm is
+  required to match and cannot select another family.
 - Issuer, audience, expiry, not-before, size, and role mapping are validated.
 - A claim can select only a statically configured role that the authenticator may
   assume.
@@ -248,8 +249,8 @@ Security requirements:
   policy only after the independent RLS milestone.
 - Context and role reset is tested on success, database error, failed transaction,
   timeout, cancellation, disconnect, and connection reuse.
-- OpenAPI caches are keyed by effective role, catalog/security epoch, and REST
-  exposure configuration.
+- OpenAPI/schema caches are currently keyed by effective role and REST exposure;
+  explicit reload is required until catalog/security epoch consumption lands.
 
 Possession of the authenticator database credential permits forged request
 context. It therefore receives the same secret handling, rotation, audit, and

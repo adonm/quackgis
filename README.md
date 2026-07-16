@@ -18,10 +18,11 @@ extends a pinned `pg-rest-server` query contract and exposes a load-balanceable
 PostgREST-style HTTP read interface through the same pgwire boundary.
 
 The product direction makes PostgreSQL 18 catalog, role, privilege, and session
-semantics first-class QuackGIS capabilities. The REST edge will become a normal
-authenticator/role-switching pgwire client of the packaged tiny iroh bridge and
-generate role-aware OpenAPI from that common contract; this target is planned,
-not part of the current preview.
+semantics first-class QuackGIS capabilities. The REST preview now validates
+bounded HS256 JWTs, maps a configured role claim, and uses one authenticator
+pgwire identity with transaction-local role/context for reads and role-aware
+OpenAPI. Routing that authenticator through the packaged tiny iroh bridge,
+epoch-driven cache invalidation, and multiple packaged replicas remain planned.
 
 There is no PostgreSQL, DataFusion, or Sedona query engine. DuckDB is the sole
 planner/executor and official DuckLake is the sole writer for new storage.
@@ -69,9 +70,9 @@ Important limits:
   `pg_auth_members` project stable identities/options without credentials, and
   bounded `pg_has_role`/schema/table/column inquiry uses the same role decisions;
   role-filtered `information_schema` schema/table/column and portable table/column
-  grant views use those decisions and PostgreSQL 18 wire types; role-aware OpenAPI
-  remains open; bounded transaction-local `request.jwt.claims` context is
-  implemented for the future authenticator flow; and
+  grant views use those decisions and PostgreSQL 18 wire types; the REST preview
+  consumes them for per-role discovery/OpenAPI and direct request denial; bounded
+  transaction-local `request.jwt.claims` context carries validated JWT claims; and
 - remote/shared catalog and object-storage profiles fail closed.
 
 The first I0 transport slice is executable: a config-backed bootstrap issues a

@@ -11,16 +11,18 @@ use axum::extract::{Path as AxumPath, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use clap::Parser;
 use pg_query_engine::{
     ApiRequest, CountOption, FilterNode, ReadRequest, SelectItem, build_sql, parse_filter,
     parse_logic_filter, parse_order, parse_select,
 };
 use pg_schema_cache_types::{Column, QualifiedName, SchemaCache, Table};
+use ring::hmac;
 use rustls::RootCertStore;
-use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio_postgres::config::SslMode;
 use tokio_postgres::types::{ToSql, Type};
 use tokio_postgres::{Client, Config, NoTls};
@@ -28,6 +30,9 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 
 const UPSTREAM_REVISION: &str = "b7915d3c3361f0fee45de6e292e62f6f6186375f";
 const RESERVED_PARAMS: &[&str] = &["select", "order", "limit", "offset"];
+const MAX_JWT_BYTES: usize = 24_576;
+const MAX_JWT_CLAIMS_BYTES: usize = 16_384;
+const JWT_CLOCK_SKEW_SECONDS: u64 = 30;
 
 #[derive(Debug, Parser)]
 #[command(name = "quackgis-rest")]
@@ -40,8 +45,14 @@ struct Cli {
     database_url: String,
     #[arg(long, env = "QUACKGIS_REST_DATABASE_CA")]
     database_ca: Option<PathBuf>,
-    #[arg(long, env = "QUACKGIS_REST_BEARER_TOKEN_FILE")]
-    bearer_token_file: PathBuf,
+    #[arg(long, env = "QUACKGIS_REST_JWT_SECRET_FILE")]
+    jwt_secret_file: PathBuf,
+    #[arg(long, env = "QUACKGIS_REST_JWT_ISSUER")]
+    jwt_issuer: String,
+    #[arg(long, env = "QUACKGIS_REST_JWT_AUDIENCE")]
+    jwt_audience: String,
+    #[arg(long, env = "QUACKGIS_REST_JWT_ROLES")]
+    jwt_roles: String,
     #[arg(long, env = "QUACKGIS_REST_TABLES")]
     tables: String,
     #[arg(
@@ -53,11 +64,24 @@ struct Cli {
 }
 
 struct AppState {
-    client: Client,
-    cache: RwLock<Arc<SchemaCache>>,
-    bearer_token: Vec<u8>,
+    client: Mutex<Client>,
+    caches: RwLock<HashMap<String, Arc<SchemaCache>>>,
+    jwt: JwtVerifier,
     exposed_tables: HashSet<String>,
     statement_timeout: Duration,
+}
+
+#[derive(Clone)]
+struct JwtVerifier {
+    secret: Vec<u8>,
+    issuer: String,
+    audience: String,
+    roles: HashSet<String>,
+}
+
+struct RequestIdentity {
+    role: String,
+    claims: String,
 }
 
 #[tokio::main]
@@ -66,20 +90,38 @@ async fn main() -> Result<()> {
     if cli.statement_timeout_ms == 0 {
         bail!("--statement-timeout-ms must be positive");
     }
-    let token = std::fs::read(&cli.bearer_token_file)
-        .with_context(|| format!("read bearer token file {}", cli.bearer_token_file.display()))?;
-    let token = trim_ascii(&token);
-    if token.len() < 32 || token.iter().any(u8::is_ascii_whitespace) {
-        bail!("REST bearer token must contain at least 32 non-whitespace bytes");
-    }
-
+    let jwt = JwtVerifier::from_file(
+        &cli.jwt_secret_file,
+        cli.jwt_issuer,
+        cli.jwt_audience,
+        parse_roles(&cli.jwt_roles)?,
+    )?;
     let exposed_tables = parse_tables(&cli.tables)?;
-    let client = connect_database(&cli.database_url, cli.database_ca.as_deref()).await?;
-    let cache = discover_schema(&client, &exposed_tables).await?;
+    let mut client = connect_database(&cli.database_url, cli.database_ca.as_deref()).await?;
+    let mut caches = HashMap::new();
+    let mut discovered_tables = HashSet::new();
+    let mut roles = jwt.roles.iter().collect::<Vec<_>>();
+    roles.sort_unstable();
+    for role in roles {
+        let cache = discover_schema(&mut client, &exposed_tables, role).await?;
+        discovered_tables.extend(cache.tables.keys().map(|table| table.name.clone()));
+        caches.insert(role.clone(), Arc::new(cache));
+    }
+    let mut missing = exposed_tables
+        .difference(&discovered_tables)
+        .cloned()
+        .collect::<Vec<_>>();
+    missing.sort_unstable();
+    if !missing.is_empty() {
+        bail!(
+            "configured REST tables were not visible to any JWT role: {}",
+            missing.join(",")
+        );
+    }
     let state = Arc::new(AppState {
-        client,
-        cache: RwLock::new(Arc::new(cache)),
-        bearer_token: token.to_vec(),
+        client: Mutex::new(client),
+        caches: RwLock::new(caches),
+        jwt,
         exposed_tables,
         statement_timeout: Duration::from_millis(cli.statement_timeout_ms),
     });
@@ -146,12 +188,20 @@ async fn connect_database(database_url: &str, ca: Option<&Path>) -> Result<Clien
     }
 }
 
-async fn discover_schema(client: &Client, exposed_tables: &HashSet<String>) -> Result<SchemaCache> {
+async fn discover_schema(
+    client: &mut Client,
+    exposed_tables: &HashSet<String>,
+    role: &str,
+) -> Result<SchemaCache> {
     const SQL: &str = "SELECT table_name::VARCHAR, column_name::VARCHAR, \
         udt_name::VARCHAR, is_nullable::VARCHAR, column_default::VARCHAR \
         FROM information_schema.columns WHERE table_schema = 'public' \
         ORDER BY table_name, ordinal_position";
-    let rows = client.query(SQL, &[]).await?;
+    let transaction = client.transaction().await?;
+    transaction
+        .batch_execute(&format!("SET LOCAL ROLE {role}"))
+        .await?;
+    let rows = transaction.query(SQL, &[]).await?;
     let mut tables: HashMap<QualifiedName, Table> = HashMap::new();
     for row in rows {
         let table_name: String = row.get(0);
@@ -190,17 +240,7 @@ async fn discover_schema(client: &Client, exposed_tables: &HashSet<String>) -> R
     for table in tables.values_mut() {
         table.rebuild_column_index();
     }
-    let missing = exposed_tables
-        .iter()
-        .filter(|table| !tables.keys().any(|key| &key.name == *table))
-        .cloned()
-        .collect::<Vec<_>>();
-    if !missing.is_empty() {
-        bail!(
-            "configured REST tables were not found: {}",
-            missing.join(",")
-        );
-    }
+    transaction.commit().await?;
     Ok(SchemaCache {
         tables,
         relationships: Vec::new(),
@@ -213,10 +253,10 @@ async fn live() -> impl IntoResponse {
 }
 
 async fn ready(State(state): State<Arc<AppState>>) -> Response {
-    match tokio::time::timeout(
-        state.statement_timeout,
-        state.client.simple_query("SELECT 1"),
-    )
+    match tokio::time::timeout(state.statement_timeout, async {
+        let client = state.client.lock().await;
+        client.simple_query("SELECT 1").await
+    })
     .await
     {
         Ok(Ok(_)) => (StatusCode::OK, "ready").into_response(),
@@ -229,10 +269,14 @@ async fn ready(State(state): State<Arc<AppState>>) -> Response {
 }
 
 async fn openapi(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if !authorized(&headers, &state.bearer_token) {
-        return unauthorized();
-    }
-    let cache = state.cache.read().await;
+    let identity = match state.jwt.identity(&headers) {
+        Ok(identity) => identity,
+        Err(()) => return unauthorized(),
+    };
+    let caches = state.caches.read().await;
+    let cache = caches
+        .get(&identity.role)
+        .expect("validated JWT role has a schema cache");
     let paths = cache
         .tables
         .keys()
@@ -243,21 +287,32 @@ async fn openapi(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Resp
         "info": {"title": "QuackGIS REST", "version": env!("CARGO_PKG_VERSION")},
         "paths": paths,
         "x-quackgis-mode": "read-only",
+        "x-quackgis-role": identity.role,
         "x-pg-rest-server-upstream": UPSTREAM_REVISION,
     }))
     .into_response()
 }
 
 async fn reload(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if !authorized(&headers, &state.bearer_token) {
-        return unauthorized();
-    }
-    match discover_schema(&state.client, &state.exposed_tables).await {
-        Ok(cache) => {
-            *state.cache.write().await = Arc::new(cache);
+    let identity = match state.jwt.identity(&headers) {
+        Ok(identity) => identity,
+        Err(()) => return unauthorized(),
+    };
+    let result = tokio::time::timeout(state.statement_timeout, async {
+        let mut client = state.client.lock().await;
+        discover_schema(&mut client, &state.exposed_tables, &identity.role).await
+    })
+    .await;
+    match result {
+        Ok(Ok(cache)) => {
+            state
+                .caches
+                .write()
+                .await
+                .insert(identity.role, Arc::new(cache));
             StatusCode::NO_CONTENT.into_response()
         }
-        Err(_) => api_error(
+        Ok(Err(_)) | Err(_) => api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "QGRST503",
             "schema reload failed",
@@ -290,14 +345,21 @@ async fn read_table_response(
     headers: HeaderMap,
     head: bool,
 ) -> Response {
-    if !authorized(&headers, &state.bearer_token) {
-        return unauthorized();
-    }
+    let identity = match state.jwt.identity(&headers) {
+        Ok(identity) => identity,
+        Err(()) => return unauthorized(),
+    };
     let request = match parse_read_request(&table, query.as_deref().unwrap_or("")) {
         Ok(request) => request,
         Err(message) => return api_error(StatusCode::BAD_REQUEST, "PGRST100", &message),
     };
-    let cache = state.cache.read().await.clone();
+    let cache = state
+        .caches
+        .read()
+        .await
+        .get(&identity.role)
+        .expect("validated JWT role has a schema cache")
+        .clone();
     let output = match build_sql(&cache, &ApiRequest::Read(request), &["public".to_owned()]) {
         Ok(output) => output,
         Err(error) => return api_error(StatusCode::NOT_FOUND, "PGRST205", &error.to_string()),
@@ -309,19 +371,18 @@ async fn read_table_response(
         .map(|value| value as &(dyn ToSql + Sync))
         .collect::<Vec<_>>();
     let parameter_types = vec![Type::TEXT; parameters.len()];
-    let result = tokio::time::timeout(state.statement_timeout, async {
-        let statement = state.client.prepare_typed(&sql, &parameter_types).await?;
-        state.client.query_one(&statement, &parameters).await
-    })
+    let result = tokio::time::timeout(
+        state.statement_timeout,
+        execute_read(&state, &identity, &sql, &parameter_types, &parameters),
+    )
     .await;
-    let row = match result {
-        Ok(Ok(row)) => row,
+    let body = match result {
+        Ok(Ok(body)) => body,
         Ok(Err(error)) => {
             return api_error(StatusCode::BAD_REQUEST, "QGRST400", &bounded_error(&error));
         }
         Err(_) => return api_error(StatusCode::GATEWAY_TIMEOUT, "QGRST504", "query timed out"),
     };
-    let body: String = row.get(0);
     let mut response = if head {
         StatusCode::OK.into_response()
     } else {
@@ -399,22 +460,45 @@ fn parse_tables(value: &str) -> Result<HashSet<String>> {
     Ok(tables)
 }
 
+fn parse_roles(value: &str) -> Result<HashSet<String>> {
+    let roles = value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect::<HashSet<_>>();
+    if roles.is_empty() {
+        bail!("--jwt-roles must contain at least one role");
+    }
+    if let Some(invalid) = roles.iter().find(|role| {
+        !valid_identifier(role)
+            || matches!(
+                role.as_str(),
+                "public" | "none" | "current_user" | "session_user"
+            )
+    }) {
+        bail!("invalid JWT database role: {invalid}");
+    }
+    Ok(roles)
+}
+
+fn valid_identifier(value: &str) -> bool {
+    value.len() <= 63
+        && value
+            .chars()
+            .next()
+            .is_some_and(|character| character == '_' || character.is_ascii_lowercase())
+        && value.chars().all(|character| {
+            character == '_'
+                || character == '$'
+                || character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+        })
+}
+
 fn adapt_quackgis_sql(sql: &str) -> String {
     sql.replace("json_agg(", "json_group_array(")
         .replace("to_jsonb(", "to_json(")
-}
-
-fn authorized(headers: &HeaderMap, expected: &[u8]) -> bool {
-    let Some(value) = headers.get(header::AUTHORIZATION) else {
-        return false;
-    };
-    let Ok(value) = value.to_str() else {
-        return false;
-    };
-    let Some(token) = value.strip_prefix("Bearer ") else {
-        return false;
-    };
-    token.as_bytes().ct_eq(expected).into()
 }
 
 fn trim_ascii(value: &[u8]) -> &[u8] {
@@ -427,6 +511,158 @@ fn trim_ascii(value: &[u8]) -> &[u8] {
         .rposition(|byte| !byte.is_ascii_whitespace())
         .map_or(start, |index| index + 1);
     &value[start..end]
+}
+
+impl JwtVerifier {
+    fn from_file(
+        path: &Path,
+        issuer: String,
+        audience: String,
+        roles: HashSet<String>,
+    ) -> Result<Self> {
+        let secret = std::fs::read(path)
+            .with_context(|| format!("read JWT secret file {}", path.display()))?;
+        let secret = trim_ascii(&secret);
+        if secret.len() < 32 || secret.len() > 4096 || secret.iter().any(u8::is_ascii_whitespace) {
+            bail!("REST JWT secret must contain 32 to 4096 non-whitespace bytes");
+        }
+        if !valid_jwt_label(&issuer) || !valid_jwt_label(&audience) {
+            bail!("REST JWT issuer and audience must be 1 to 256 printable bytes");
+        }
+        Ok(Self {
+            secret: secret.to_vec(),
+            issuer,
+            audience,
+            roles,
+        })
+    }
+
+    fn identity(&self, headers: &HeaderMap) -> Result<RequestIdentity, ()> {
+        let value = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .ok_or(())?;
+        self.verify(value)
+    }
+
+    fn verify(&self, token: &str) -> Result<RequestIdentity, ()> {
+        if token.is_empty() || token.len() > MAX_JWT_BYTES {
+            return Err(());
+        }
+        let parts = token.split('.').collect::<Vec<_>>();
+        let [encoded_header, encoded_claims, encoded_signature] = parts.as_slice() else {
+            return Err(());
+        };
+        let header = decode_json_segment(encoded_header, 1024)?;
+        let header = header.as_object().ok_or(())?;
+        if header.get("alg").and_then(serde_json::Value::as_str) != Some("HS256")
+            || header
+                .get("typ")
+                .is_some_and(|value| value.as_str() != Some("JWT"))
+            || header.contains_key("crit")
+            || header.contains_key("b64")
+        {
+            return Err(());
+        }
+        let signature = URL_SAFE_NO_PAD.decode(encoded_signature).map_err(|_| ())?;
+        let key = hmac::Key::new(hmac::HMAC_SHA256, &self.secret);
+        hmac::verify(
+            &key,
+            format!("{encoded_header}.{encoded_claims}").as_bytes(),
+            &signature,
+        )
+        .map_err(|_| ())?;
+
+        let claims = decode_json_segment(encoded_claims, MAX_JWT_CLAIMS_BYTES)?;
+        let claims = claims.as_object().ok_or(())?;
+        if claims.get("iss").and_then(serde_json::Value::as_str) != Some(&self.issuer)
+            || !valid_audience(claims.get("aud"), &self.audience)
+        {
+            return Err(());
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| ())?
+            .as_secs();
+        let expires = claims
+            .get("exp")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or(())?;
+        if now > expires.saturating_add(JWT_CLOCK_SKEW_SECONDS) {
+            return Err(());
+        }
+        if let Some(not_before) = claims.get("nbf") {
+            let not_before = not_before.as_u64().ok_or(())?;
+            if now.saturating_add(JWT_CLOCK_SKEW_SECONDS) < not_before {
+                return Err(());
+            }
+        }
+        let role = claims
+            .get("role")
+            .and_then(serde_json::Value::as_str)
+            .filter(|role| self.roles.contains(*role))
+            .ok_or(())?
+            .to_owned();
+        let claims = serde_json::to_string(claims).map_err(|_| ())?;
+        if claims.len() > MAX_JWT_CLAIMS_BYTES {
+            return Err(());
+        }
+        Ok(RequestIdentity { role, claims })
+    }
+}
+
+fn decode_json_segment(value: &str, max_bytes: usize) -> Result<serde_json::Value, ()> {
+    if value.len() > max_bytes.saturating_mul(2) {
+        return Err(());
+    }
+    let bytes = URL_SAFE_NO_PAD.decode(value).map_err(|_| ())?;
+    if bytes.len() > max_bytes {
+        return Err(());
+    }
+    serde_json::from_slice(&bytes).map_err(|_| ())
+}
+
+fn valid_audience(value: Option<&serde_json::Value>, expected: &str) -> bool {
+    value.is_some_and(|value| {
+        value.as_str() == Some(expected)
+            || value
+                .as_array()
+                .is_some_and(|values| values.iter().any(|value| value.as_str() == Some(expected)))
+    })
+}
+
+fn valid_jwt_label(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && !byte.is_ascii_control())
+}
+
+async fn execute_read(
+    state: &AppState,
+    identity: &RequestIdentity,
+    sql: &str,
+    parameter_types: &[Type],
+    parameters: &[&(dyn ToSql + Sync)],
+) -> Result<String, tokio_postgres::Error> {
+    let mut client = state.client.lock().await;
+    let transaction = client.transaction().await?;
+    transaction
+        .batch_execute(&format!("SET LOCAL ROLE {}", identity.role))
+        .await?;
+    transaction
+        .query_one(
+            "SELECT set_config('request.jwt.claims', $1, true)",
+            &[&identity.claims],
+        )
+        .await?;
+    let statement = transaction.prepare_typed(sql, parameter_types).await?;
+    let row = transaction.query_one(&statement, parameters).await?;
+    let body = row.get(0);
+    transaction.commit().await?;
+    Ok(body)
 }
 
 fn bounded_error(error: &tokio_postgres::Error) -> String {
@@ -442,7 +678,7 @@ fn bounded_error(error: &tokio_postgres::Error) -> String {
 }
 
 fn unauthorized() -> Response {
-    api_error(StatusCode::UNAUTHORIZED, "PGRST301", "invalid bearer token")
+    api_error(StatusCode::UNAUTHORIZED, "PGRST301", "invalid JWT")
 }
 
 fn api_error(status: StatusCode, code: &str, message: &str) -> Response {
@@ -500,15 +736,69 @@ mod tests {
     }
 
     #[test]
-    fn tokens_are_trimmed_and_compared_exactly() {
+    fn jwt_validation_is_bounded_and_role_allowlisted() {
         assert_eq!(trim_ascii(b"  secret\n"), b"secret");
+        let verifier = test_verifier(&["rest_reader"]);
+        let token = test_jwt("rest_reader", unix_time() + 300);
         let mut headers = HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, "Bearer secret".parse().unwrap());
-        assert!(authorized(&headers, b"secret"));
-        assert!(!authorized(&headers, b"Secret"));
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        let identity = verifier.identity(&headers).expect("valid JWT");
+        assert_eq!(identity.role, "rest_reader");
+        assert!(identity.claims.contains(r#""sub":"test-user""#));
+        assert!(
+            verifier
+                .verify(&test_jwt("rest_reader", unix_time().saturating_sub(60)))
+                .is_err()
+        );
+        assert!(test_verifier(&["other_role"]).verify(&token).is_err());
+        let mut wrong_audience = test_verifier(&["rest_reader"]);
+        wrong_audience.audience = "other-audience".to_owned();
+        assert!(wrong_audience.verify(&token).is_err());
+        let mut future_claims = test_claims("rest_reader", unix_time() + 300);
+        future_claims["nbf"] = serde_json::json!(unix_time() + 60);
+        assert!(
+            verifier
+                .verify(&sign_test_jwt(
+                    serde_json::json!({"alg": "HS256", "typ": "JWT"}),
+                    future_claims,
+                ))
+                .is_err()
+        );
+        let mut malformed_claims = test_claims("rest_reader", unix_time() + 300);
+        malformed_claims["nbf"] = serde_json::json!("later");
+        assert!(
+            verifier
+                .verify(&sign_test_jwt(
+                    serde_json::json!({"alg": "HS256", "typ": "JWT"}),
+                    malformed_claims,
+                ))
+                .is_err()
+        );
+        assert!(
+            verifier
+                .verify(&sign_test_jwt(
+                    serde_json::json!({"alg": "HS512", "typ": "JWT"}),
+                    test_claims("rest_reader", unix_time() + 300),
+                ))
+                .is_err()
+        );
+        assert!(verifier.verify(&"a".repeat(MAX_JWT_BYTES + 1)).is_err());
+        let mut tampered = token.into_bytes();
+        let last = tampered.last_mut().expect("JWT signature");
+        *last = if *last == b'a' { b'b' } else { b'a' };
+        assert!(
+            verifier
+                .verify(std::str::from_utf8(&tampered).unwrap())
+                .is_err()
+        );
         assert_eq!(parse_tables("points, roads").unwrap().len(), 2);
         assert!(parse_tables("").is_err());
         assert!(parse_tables("points;drop").is_err());
+        assert_eq!(parse_roles("rest_reader,other_role").unwrap().len(), 2);
+        assert!(parse_roles("UpperCase").is_err());
     }
 
     #[tokio::test]
@@ -551,9 +841,17 @@ mod tests {
             .with_port(pg_port);
         let roles = RoleCatalog::from_json(
             r#"{
-              "roles": [{"oid": 100001, "name": "rest_reader", "login": true}],
+              "roles": [
+                {"oid": 100001, "name": "authenticator", "login": true},
+                {"oid": 100002, "name": "rest_reader"},
+                {"oid": 100003, "name": "denied_reader"}
+              ],
+              "memberships": [
+                {"oid": 200001, "role": "rest_reader", "member": "authenticator", "set_option": true},
+                {"oid": 200002, "role": "denied_reader", "member": "authenticator", "set_option": true}
+              ],
               "schema_grants": [
-                {"schema": "public", "role": "rest_reader", "privileges": ["USAGE"]}
+                {"schema": "public", "role": "PUBLIC", "privileges": ["USAGE"]}
               ],
               "table_grants": [
                 {"table": "rest_points", "role": "rest_reader", "privileges": ["SELECT"]}
@@ -561,23 +859,27 @@ mod tests {
             }"#,
         )
         .expect("REST role catalog");
-        let auth = AuthConfig::password("rest_reader", "reader-secret", None::<(&str, &str)>)
-            .expect("REST password auth")
-            .with_role_catalog(roles)
-            .expect("REST role auth");
+        let auth = AuthConfig::password(
+            "authenticator",
+            "authenticator-secret",
+            None::<(&str, &str)>,
+        )
+        .expect("REST password auth")
+        .with_role_catalog(roles)
+        .expect("REST role auth");
         let server_storage = Arc::clone(&storage);
         let pg_task = tokio::spawn(async move {
             let _ = serve_duckdb_on_listener(server_storage, pg_listener, &pg_options, auth).await;
         });
 
-        let client = connect_database(
-            &format!("postgres://rest_reader:reader-secret@127.0.0.1:{pg_port}/quackgis"),
+        let mut client = connect_database(
+            &format!("postgres://authenticator:authenticator-secret@127.0.0.1:{pg_port}/quackgis"),
             None,
         )
         .await
         .expect("REST pgwire connection");
         let exposed_tables = parse_tables("rest_points").unwrap();
-        let cache = discover_schema(&client, &exposed_tables)
+        let cache = discover_schema(&mut client, &exposed_tables, "rest_reader")
             .await
             .expect("REST schema");
         assert!(
@@ -591,17 +893,30 @@ mod tests {
         assert_eq!(rest_points.columns[0].pg_type, "int4");
         assert_eq!(rest_points.columns[1].pg_type, "text");
         assert_eq!(rest_points.columns[2].pg_type, "geometry");
+        let denied_cache = discover_schema(&mut client, &exposed_tables, "denied_reader")
+            .await
+            .expect("denied REST schema");
+        assert!(denied_cache.tables.is_empty());
+        let jwt = test_verifier(&["rest_reader", "denied_reader"]);
+        let reader_jwt = test_jwt("rest_reader", unix_time() + 300);
+        let denied_jwt = test_jwt("denied_reader", unix_time() + 300);
+        let reader_cache = Arc::new(cache);
+        let caches = HashMap::from([
+            ("rest_reader".to_owned(), Arc::clone(&reader_cache)),
+            ("denied_reader".to_owned(), Arc::new(denied_cache)),
+        ]);
         let state = Arc::new(AppState {
-            client,
-            cache: RwLock::new(Arc::new(cache)),
-            bearer_token: b"0123456789abcdef0123456789abcdef".to_vec(),
+            client: Mutex::new(client),
+            caches: RwLock::new(caches),
+            jwt,
             exposed_tables,
             statement_timeout: Duration::from_secs(5),
         });
         let rest_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let rest_port = rest_listener.local_addr().unwrap().port();
+        let router_state = Arc::clone(&state);
         let rest_task = tokio::spawn(async move {
-            axum::serve(rest_listener, build_router(state))
+            axum::serve(rest_listener, build_router(router_state))
                 .await
                 .unwrap();
         });
@@ -610,7 +925,7 @@ mod tests {
             rest_port,
             "GET",
             "/rest_points?select=id,name&id=gte.2&order=id.desc",
-            Some("0123456789abcdef0123456789abcdef"),
+            Some(&reader_jwt),
         )
         .await;
         assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
@@ -619,7 +934,7 @@ mod tests {
             rest_port,
             "GET",
             "/rest_points?select=id&order=id.asc&limit=1&offset=1",
-            Some("0123456789abcdef0123456789abcdef"),
+            Some(&reader_jwt),
         )
         .await;
         assert!(paged.contains(r#"[{"id":2}]"#), "{paged}");
@@ -627,33 +942,35 @@ mod tests {
             rest_port,
             "GET",
             "/rest_points?select=id,geom_wkb&id=eq.1",
-            Some("0123456789abcdef0123456789abcdef"),
+            Some(&reader_jwt),
         )
         .await;
         assert!(spatial.contains(r#""geom_wkb":"\\x01\\x01"#), "{spatial}");
-        let openapi = http_request(
-            rest_port,
-            "GET",
-            "/",
-            Some("0123456789abcdef0123456789abcdef"),
-        )
-        .await;
+        let openapi = http_request(rest_port, "GET", "/", Some(&reader_jwt)).await;
         assert!(openapi.contains(r#""/rest_points":{"get":{}}"#));
-        let missing = http_request(
-            rest_port,
-            "GET",
-            "/missing_table",
-            Some("0123456789abcdef0123456789abcdef"),
-        )
-        .await;
+        assert!(openapi.contains(r#""x-quackgis-role":"rest_reader""#));
+        let denied_openapi = http_request(rest_port, "GET", "/", Some(&denied_jwt)).await;
+        assert!(!denied_openapi.contains("/rest_points"), "{denied_openapi}");
+        let denied_read = http_request(rest_port, "GET", "/rest_points", Some(&denied_jwt)).await;
+        assert!(
+            denied_read.starts_with("HTTP/1.1 404 Not Found"),
+            "{denied_read}"
+        );
+        state
+            .caches
+            .write()
+            .await
+            .insert("denied_reader".to_owned(), Arc::clone(&reader_cache));
+        let database_denied =
+            http_request(rest_port, "GET", "/rest_points", Some(&denied_jwt)).await;
+        assert!(
+            database_denied.starts_with("HTTP/1.1 400 Bad Request")
+                && database_denied.contains("lacks SELECT privilege"),
+            "{database_denied}"
+        );
+        let missing = http_request(rest_port, "GET", "/missing_table", Some(&reader_jwt)).await;
         assert!(missing.starts_with("HTTP/1.1 404 Not Found"), "{missing}");
-        let mutation = http_request(
-            rest_port,
-            "POST",
-            "/rest_points",
-            Some("0123456789abcdef0123456789abcdef"),
-        )
-        .await;
+        let mutation = http_request(rest_port, "POST", "/rest_points", Some(&reader_jwt)).await;
         assert!(
             mutation.starts_with("HTTP/1.1 405 Method Not Allowed"),
             "{mutation}"
@@ -663,9 +980,64 @@ mod tests {
             unauthorized.starts_with("HTTP/1.1 401 Unauthorized"),
             "{unauthorized}"
         );
+        let client = state.client.lock().await;
+        let identity = client
+            .query_one(
+                "SELECT current_user, current_setting('request.jwt.claims', true)",
+                &[],
+            )
+            .await
+            .expect("REST transaction-local context cleanup");
+        assert_eq!(identity.get::<_, String>(0), "authenticator");
+        assert_eq!(identity.get::<_, Option<String>>(1), None);
 
         rest_task.abort();
         pg_task.abort();
+    }
+
+    fn test_verifier(roles: &[&str]) -> JwtVerifier {
+        JwtVerifier {
+            secret: b"0123456789abcdef0123456789abcdef".to_vec(),
+            issuer: "https://issuer.test".to_owned(),
+            audience: "quackgis-rest".to_owned(),
+            roles: roles.iter().map(|role| (*role).to_owned()).collect(),
+        }
+    }
+
+    fn test_jwt(role: &str, expires: u64) -> String {
+        sign_test_jwt(
+            serde_json::json!({"alg": "HS256", "typ": "JWT"}),
+            test_claims(role, expires),
+        )
+    }
+
+    fn test_claims(role: &str, expires: u64) -> serde_json::Value {
+        serde_json::json!({
+            "iss": "https://issuer.test",
+            "aud": "quackgis-rest",
+            "sub": "test-user",
+            "exp": expires,
+            "role": role,
+        })
+    }
+
+    fn sign_test_jwt(header: serde_json::Value, claims: serde_json::Value) -> String {
+        let header = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
+        let claims = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+        let signing_input = format!("{header}.{claims}");
+        let key = hmac::Key::new(hmac::HMAC_SHA256, b"0123456789abcdef0123456789abcdef");
+        let signature = hmac::sign(&key, signing_input.as_bytes());
+        format!(
+            "{signing_input}.{}",
+            URL_SAFE_NO_PAD.encode(signature.as_ref())
+        )
+    }
+
+    fn unix_time() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
     }
 
     async fn http_request(port: u16, method: &str, path: &str, token: Option<&str>) -> String {

@@ -718,6 +718,18 @@ Deliver:
 Gate: two REST replicas produce the same role-specific API, cannot exceed the REST
 exposure ceiling or database grants, and continue to exercise only pgwire.
 
+Current progress: the direct-pgwire implementation now closes the first three
+functional slices. It validates bounded HS256 JWT signature, exact issuer and
+audience, expiry and optional not-before, and a statically allowed role claim.
+One SCRAM authenticator wraps discovery and reads in `SET LOCAL ROLE` transactions
+and binds normalized claims to `request.jwt.claims`. Role-filtered maintained
+`information_schema` drives per-role schema/OpenAPI caches, and actual pgwire
+proves a SELECT role can read while an assumable ungranted role sees no path and
+cannot call it directly; successful role/context cleanup also passes. Cache
+invalidation is still explicit rather than schema/security-epoch driven, and
+tiny-client routing, immutable multi-replica packaging, rotation, and balancing
+remain open before the H1 gate closes.
+
 ### C7 — add relationships and broader PostgreSQL structure
 
 Deliver only surfaces justified by the next HTTP/client behavior:
