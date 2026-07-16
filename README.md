@@ -79,7 +79,11 @@ opt-in public-default-relay gates prove leased startup-role enforcement, nested-
 TLS/backend-password denial, and differential DuckDB result/type/error, portal,
 transaction, COPY, cancellation/quarantine, concurrent-session, and reconnect
 behavior. Mandatory raw plus optional bounded adaptive LZ4 passes clean
-smoke/local/reference transport-resource budgets. Packaging and hosted-relay
+smoke/local/reference transport-resource budgets. K0 now packages the local
+direct path as one ordered Kind Pod: the DuckDB server remains loopback-only,
+the sole Service ingress is a mutual-TLS tiny client, pinned psql/psycopg/OGR
+smokes pass, direct/plaintext/certificate-free access fails, and replacement plus
+edge/mTLS rotation reconnect cleanly. Packaged resource and hosted-relay
 qualification remain open.
 
 TLS remains optional for local development. Set `QUACKGIS_TLS_MODE=required` with

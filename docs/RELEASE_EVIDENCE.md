@@ -26,7 +26,7 @@ one exact DuckDB/extension bundle.
 | `just duckdb-copy-profile` | direct ADBC versus pgwire COPY RSS, throughput, publication metrics, and exact WKB/count/sum oracle |
 | `just kind-static-check` | minimal DuckDB-only topology shape, immutable image input, secret rendering, and client-job contract |
 | `just doctor` / `just doctor-kind` | installed/missing project tools, selected container engine, and local Kind prerequisites |
-| `just kind-up-local` / `just kind-client-gates` | rootless Podman-or-Docker Kind execution with node-local digest-addressed runtime and psql/psycopg/OGR images |
+| `just kind-up-local` / `just kind-client-gates` / `just kind-restart-gate` / `just kind-secret-rotation-gate` | rootless Podman-or-Docker execution of the node-local digest-addressed server/bootstrap/worker/client package; pinned psql/psycopg/OGR pass through mTLS, direct/plaintext/certificate-free paths fail, ordered replacement reconnects, and rotated old client credentials fail |
 | `just rest-check` | pinned pg-rest-server parser/query contract and REST trust-boundary unit tests |
 | `just rest-postgrest-smoke` | authenticated read-only PostgREST subset plus WKB extension through an actual DuckDB/DuckLake pgwire server |
 | `.tmp/duckdb/manifest.json` | native library/extension paths and SHA-256 values |

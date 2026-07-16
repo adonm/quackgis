@@ -50,13 +50,17 @@ infrastructure, and production failure drills remain open.
    and rejects insecure startup before auth. The I0 ingress is authenticated and
    end-to-end encrypted, so it satisfies the secure-channel boundary without
    nesting pgwire TLS. The config-backed bootstrap, signed one-worker lease,
-   challenged key proof, loopback tiny client, and worker startup-role validation
-   are implemented. The worker answers SSL/GSS requests without nesting
+   challenged key proof, loopback or mutual-TLS tiny client, and worker startup-role validation
+   are implemented. K0 packages one mTLS bridge as the only Service ingress;
+   separate owner-only volumes expose only the bootstrap key to bootstrap, worker
+   key to worker, and credential/transport keys to the client. Plaintext,
+   missing-certificate, rotated-old-certificate, and direct worker TCP access are
+   denied. The worker answers SSL/GSS requests without nesting
    encryption and refuses a backend unless its first frame is
    `AuthenticationOk`, before a client can send password/SASL material. The
-   registered native smoke reaches the DuckDB/DuckLake server for a bounded
-   query/COPY/cancellation slice; owner-protected packaged local boundaries,
-   role-catalog preauthentication, and broad oracle parity remain open.
+   registered native smoke reaches the DuckDB/DuckLake server for the maintained
+   differential oracle; role-catalog preauthentication, packaged resource
+   budgets, and hosted-relay qualification remain open.
 2. **HTTP client → REST:** the current bearer token is a preview control. The
    Local 1.0 target validates JWT signature, issuer, audience, time bounds, and a
    bounded role claim before opening a database transaction. Shared 1.x uses the

@@ -199,10 +199,15 @@ Rotate local credentials as one restart operation:
 4. restart, wait for `/readyz`, and verify the new trust/password; then
 5. verify both the old certificate trust and old password are rejected.
 
-For the minimal Kind topology, update both Secrets and run
-`kubectl rollout restart statefulset/quackgis -n quackgis`; changing a Secret alone
-does not reload the process. The smoke profile proves host-process behavior, not a
-completed Kind rotation drill, mTLS, or certificate revocation infrastructure.
+The K0 Kind topology uses mutual TLS at the tiny-client Service and separate iroh
+keys for bootstrap, worker, credential, and client transport. `just
+kind-secret-rotation-gate` stages a new development CA/certificate set and new
+edge keys, renders a content hash into the Pod template, performs ordered
+replacement, rejects the old client certificate, and reruns every packaged client
+and denial Job. A failed rollout retains previous owner-only material under
+`.tmp/kind/` for explicit recovery. This is a completed local package rotation
+drill, not JWT/authenticator/database-password rotation, online revocation, or a
+production PKI procedure.
 
 ## Shutdown, backup, and recovery
 

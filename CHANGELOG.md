@@ -44,6 +44,14 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   passes the +64 MiB transport allowance and committed raw/auto budgets; automatic
   LZ4 saves 99.57% on the maintained compressible profile while incompressible
   blocks stay raw.
+- The K0 runtime image now packages bootstrap, worker, tiny-client, and keygen
+  binaries beside the complete DuckDB server. One ordered rootless-Podman Kind
+  Pod keeps backend pgwire loopback/trust-only and exposes only a mutual-TLS tiny
+  client; fixed direct iroh routes require no outbound relay. Pinned psql 18.3,
+  psycopg 3.2.13, and OGR 3.11.5 pass through the bridge, while direct worker TCP,
+  plaintext, and certificate-free Jobs fail. Ordered replacement reconnects in
+  4.01 seconds, and packaged mTLS/edge-key rotation denies the old client
+  certificate before all current gates reconnect.
 - Local-first smoke/local/reference/external roadmap levels with explicit host
   performance, minimal-Kind topology, and managed-service claim boundaries.
 - A common profile evidence envelope with source dirty hashes, checksum-only native
@@ -93,9 +101,9 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   client tools through `just doctor`, auto-selects usable Podman before Docker
   unless explicitly overridden, and provides a pinned rootless local Kind flow
   that builds and loads digest-addressed runtime and psql/psycopg/OGR images.
-- Real rootless-Podman Kind execution now imports local images through portable
+- The initial direct-worker rootless-Podman baseline imported local images through portable
   archives, aliases their containerd manifest digests, recreates stale named
-  clusters, binds packaged pgwire beyond loopback, and passes TLS/SCRAM smoke
+  clusters, bound pgwire beyond loopback, and passed TLS/SCRAM smoke
   Jobs with psql 18.3, psycopg 3.2.13, and GDAL/OGR 3.11.5. The pgwire adapter
   handles those clients' bounded encoding and string-mode SET/SHOW probes without
   executing PostgreSQL session syntax in DuckDB.
@@ -104,7 +112,7 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   engine, supports PostgREST-style projection/filter/order/pagination, OpenAPI and
   schema reload, uses typed text parameters and bounded errors/timeouts, and has
   an actual DuckDB/DuckLake pgwire suite covering auth, reads, denials, and WKB.
-- The initial minimal DuckDB-only Kind topology: one TLS-required StatefulSet,
+- The initial direct-worker Kind topology: one TLS-required StatefulSet,
   retained node-local PV/PVC, generated TLS/auth Secrets, health probes, and
   opt-in psql/psycopg/OGR Jobs that reject mutable image references at render time.
 - Owned Rust pgwire/TLS/SCRAM edge over DuckDB ADBC.

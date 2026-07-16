@@ -1,7 +1,7 @@
 # DuckDB roadmap alignment
 
 This note turns upstream roadmap signals into conditional QuackGIS adoption
-choices. It was reviewed on 2026-07-14 against:
+choices. It was reviewed on 2026-07-16 against:
 
 - the official [DuckDB development roadmap](https://duckdb.org/roadmap), last
   updated June 2026;
@@ -21,6 +21,11 @@ article identifies itself as unaffiliated and labels its v2 feature list as
 speculation. QuackGIS may align its boundaries and defer overlapping work based
 on those signals, but it may claim or depend on a feature only after a released,
 pinned artifact passes an executable gate.
+
+As of that review, 1.5.5 and 2.0.0 remain future entries rather than released
+artifacts. M5's required post-release evaluation and supported-bundle decision
+therefore cannot close before those inputs exist; local package work may advance
+without fabricating that release evidence.
 
 ## Decisions
 

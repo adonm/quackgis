@@ -15,7 +15,7 @@ Disposition:
 | Capability | Owner/disposition | Current evidence | Next gate |
 |---|---|---|---|
 | simple/extended pgwire | Rust edge | native workflow; maintained SET/SHOW; AST `public` mapping; quoted COPY targets | wider parameters and catalog-backed client discovery |
-| TLS/SCRAM/startup | Rust edge | actual-process encrypted client, hostname/trust verification, SCRAM, plaintext denial, and restart-based certificate/password rotation profile | packaged Kind rotation and production failure drill |
+| TLS/SCRAM/startup | Rust edge | actual-process encrypted client, hostname/trust verification, SCRAM, plaintext denial, and restart-based certificate/password rotation; packaged Kind mTLS ingress plus edge-key rotation denies plaintext, missing/old certificates, and direct worker TCP | JWT/database rotation and production revocation/failure drills |
 | parsed read/write policy | Rust edge | unit + denied real-client cases | common role/membership/grant engine shared by privilege inquiry, catalogs, execution, and OpenAPI |
 | portals/fetch paging | Rust edge | live ADBC stream plus three-page native workflow; native partial-drop quarantine proof | realistic fetch sizes and memory profile |
 | query/write cancellation | native + Rust edge | query `57014`, explicit quarantine/fresh reuse, clean 100-cancel reference at 1.51 ms p95, autocommit-write rollback/reuse, and explicit-transaction write rollback/quarantine | commit is non-cancellable; response-loss reconciliation remains operational work |

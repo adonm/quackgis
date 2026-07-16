@@ -81,8 +81,11 @@ one differential DuckDB/DuckLake result/type/error/transaction/COPY/cancellation
 oracle. Mandatory `none` plus optional bounded adaptive LZ4 starts only after
 `AuthenticationOk`; each stream direction has independent 64 KiB blocks and no
 shared dictionary. Clean 8/32/64 MiB host profiles commit direct/relay latency,
-CPU, RSS, throughput, cancellation, byte-saving, and codec budgets. An owner-
-protected packaged local boundary and hosted-relay reruns remain open.
+CPU, RSS, throughput, cancellation, byte-saving, and codec budgets. K0 packages
+the direct path in one ordered Pod: backend pgwire stays loopback-only, the
+readiness-gated application Service exposes only a mutual-TLS tiny client, and
+per-process key volumes plus denial/rotation Jobs protect the local boundary.
+Packaged resource budgets and hosted-relay reruns remain open.
 
 The release application path always enters through the tiny client. Bootstrap
 registers the client-generated credential public key, selects one worker, and

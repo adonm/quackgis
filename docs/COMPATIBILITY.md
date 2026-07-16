@@ -19,7 +19,7 @@ The shared `quackgis-edge` crate implements the cryptographic I0 protocol and an
 executable local-direct seam: bounded bootstrap-signed one-worker leases,
 registered credential-key proofs bound to the current iroh endpoint, fresh worker
 challenges, typed streams, mandatory uncompressed plus optional adaptive LZ4
-negotiation, fail-closed relay selection, a loopback tiny client, and a worker
+negotiation, fail-closed relay selection, a loopback or mutual-TLS tiny client, and a worker
 bridge that binds pgwire startup to the leased role without carrying SCRAM. `just iroh-protocol-test` proves the
 pure contract; `just iroh-direct-smoke` uses real local iroh endpoints and a fake
 trust-mode pgwire backend. `just iroh-duckdb-smoke` additionally proves typed and
@@ -29,8 +29,9 @@ cancellation/quarantine, concurrent-session, and fresh-reconnect outcomes agains
 the current DuckDB/DuckLake worker. The same differential oracle passes a forced
 custom relay and the opt-in public relay preset. Clean 8/32/64 MiB transport
 profiles publish and enforce direct/relay CPU, RSS, latency, throughput,
-cancellation, stream, byte, codec, and decode budgets; these are pre-packaging
-host measurements, not WAN or hosted-relay SLOs.
+cancellation, stream, byte, codec, and decode budgets. K0 packages the direct
+path with one mTLS bridge and loopback-only worker; the resource measurements
+remain host evidence, not packaged WAN or hosted-relay SLOs.
 
 The exact OGR 3.11.5 client image also has a credential-free normalized
 copied-point trace against digest-pinned PostgreSQL 18.4/PostGIS. Its 21 query
@@ -146,7 +147,7 @@ mise exec -- just ci
 | psycopg | 3.2.13 TLS/SCRAM scalar smoke passes in Kind; copied-data workflow remains open |
 | SQLAlchemy, GeoPandas, pg_featureserv | target; named dependency workflows remain open |
 | `pg_dump`, logical replication, PL/pgSQL, triggers, LISTEN/NOTIFY | unsupported/non-goals |
-| Tiny iroh client bridge | executable direct, forced-custom-relay, and opt-in public-default-relay seams differentially match direct TCP for maintained result/type/error, simple/extended parameter/portal, spatial, transaction/disconnect, COPY atomicity, cancellation/quarantine, concurrent-session, and reconnect behavior. Adaptive LZ4 and committed pre-package resource budgets pass; packaged/hosted-relay qualification remains open |
+| Tiny iroh client bridge | executable direct, forced-custom-relay, and opt-in public-default-relay seams differentially match direct TCP for maintained result/type/error, simple/extended parameter/portal, spatial, transaction/disconnect, COPY atomicity, cancellation/quarantine, concurrent-session, and reconnect behavior. The packaged direct Kind path passes pinned psql/psycopg/OGR, direct/plaintext/certificate-free denial, ordered reconnect, and mTLS/edge-key rotation with old-certificate denial. Adaptive LZ4 host budgets pass; packaged resource and hosted-relay qualification remain open |
 
 ## Spatial contract
 
@@ -173,13 +174,16 @@ unless a focused test says otherwise.
 ## Deliberate runtime limits
 
 - Local official DuckLake catalog and local data paths only.
-- The I0 tiny client and worker bridge are not release ingress yet. They require
-  loopback listeners, a trust-mode backend that immediately returns
+- The I0 tiny client and worker bridge package the K0 local direct ingress but are
+  not yet a published/hosted-relay release. The backend remains loopback-only and
+  trust-mode, immediately returns
   `AuthenticationOk`, and the exact leased startup role; nested TLS/GSS and
   password/SASL challenges are rejected. Direct, custom-relay, and opt-in public-
   relay native gates prove the maintained differential DuckDB oracle. The
-  transport profile isolates framing/codec cost with an echo backend, so its
-  pre-package host budgets do not claim packaged, hosted-relay, or WAN behavior.
+  K0 exposes only a mutual-TLS tiny-client Service and denies direct worker TCP,
+  plaintext, missing-certificate, and rotated-old-certificate access. The
+  transport profile isolates framing/codec cost with an echo backend, so its host
+  budgets do not claim packaged resource, hosted-relay, or WAN behavior.
 - Maintenance is disabled unless `QUACKGIS_MAINTENANCE_USER` names the caller;
   it remains constrained by the write table allowlist and cannot run inside an
   explicit transaction.

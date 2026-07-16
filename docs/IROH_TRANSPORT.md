@@ -29,7 +29,8 @@ three independently evolving wire formats.
   and streams, validates the leased role from the PostgreSQL startup packet,
   handles SSL/GSS negotiation with `N` so TLS is not nested inside iroh, and
   forwards pgwire/cancellation to one loopback complete-worker boundary.
-- `quackgis-client` exposes a bounded loopback pgwire listener, obtains and
+- `quackgis-client` exposes a bounded loopback pgwire listener by default, or a
+  mutual-TLS listener when explicitly configured beyond loopback, obtains and
   refreshes one lease, and multiplexes local sessions onto typed worker streams.
   It recognizes only the initial pgwire packet needed to distinguish cancellation
   and does not parse SQL.
@@ -41,7 +42,19 @@ three independently evolving wire formats.
   client can send credential material across the cluster leg.
 - Secret keys are loaded only from bounded, non-symlink files with no group/other
   permissions. `quackgis-keygen` creates a new owner-only file without replacing
-  an existing path.
+  an existing path; `--public-from` derives its public identity without exposing
+  the private value.
+
+The K0 package puts the server, worker, bootstrap, and one tiny client in one
+ordered StatefulSet Pod. The server remains trust-mode loopback-only, while the
+tiny client is the sole Service pgwire endpoint and requires a CA-verified client
+certificate. Fixed UDP binds and DNS-resolved direct routes make this package
+independent of outbound relay access. Pinned psql, psycopg, and OGR Jobs enter
+through that boundary. Denial Jobs prove the Pod address cannot reach the
+worker's loopback pgwire port, plaintext is refused, and a client certificate is
+required. `just kind-restart-gate` proves ordered reconnect, while
+`just kind-secret-rotation-gate` rotates mTLS and edge keys and denies the prior
+client certificate. Host profiles remain authoritative for I0 resource budgets.
 
 Run the pure protocol evidence with `just iroh-protocol-test`. Run the executable
 local-direct seam with `just iroh-direct-smoke`; it creates real bootstrap,
@@ -215,9 +228,34 @@ defaults to `off`. Both sides must allow automatic negotiation for LZ4 to be
 selected. Bootstrap has no compression setting because it never carries
 application bytes.
 
-The direct TCP backend is an I0 development seam. It must stay loopback-only and
-is not release ingress; packaging it behind an owner-protected same-pod/process
-boundary and refusing direct application access remain K0/M5 work.
+`bind` optionally fixes the local UDP socket used by each iroh endpoint.
+`direct_hosts` complements literal `direct_addresses` with bounded DNS
+`host:port` routes resolved at startup; this is used for stable Kubernetes Service
+names. The local Kind profile sets `disable_relays: true` on all three endpoints
+to make the package an outbound-independent direct-path gate. That setting cannot
+be combined with `relays`; ordinary operator configuration still treats omitted
+relay configuration as the public preset and accepts only explicit non-empty
+custom lists.
+
+A tiny-client `listen` address outside loopback fails configuration unless
+`local_tls` supplies a server certificate, private key, and client CA:
+
+```json
+"local_tls": {
+  "certificate_path": "/run/secrets/tls.crt",
+  "private_key_path": "/run/secrets/tls.key",
+  "client_ca_path": "/run/secrets/client-ca.crt"
+}
+```
+
+That mode requires the PostgreSQL SSL request and a CA-verified client
+certificate before startup or cancellation reaches iroh. TLS terminates at the
+local application boundary; it is not nested on the authenticated iroh leg.
+
+The direct TCP backend is an I0 development seam. It stays loopback-only and is
+not packaged release ingress. K0 places it behind the same-Pod worker boundary;
+the Service exposes only the mutual-TLS tiny client and the direct-denial Job
+verifies refusal.
 
 ## Security boundary
 
