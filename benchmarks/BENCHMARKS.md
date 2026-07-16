@@ -187,6 +187,9 @@ Parquet files for two layouts: maintained WKB plus four bbox columns, and DuckDB
 oracles, requires every count to agree through pgwire, inspects JSON plans for a
 candidate plus the original `ST_Intersects`, and enforces DuckDB's
 `OPERATOR_ROW_GROUPS_SCANNED` metrics against both a 5% ceiling and 20x reduction.
+It also reads Parquet metadata, uses the largest N compressed row groups as a
+conservative upper bound for N reported scans, and requires DuckLake compaction
+to at least halve 25 fragmented files without changing exact results.
 
 ```sh
 mise exec -- just duckdb-spatial-scan-profile \
@@ -194,14 +197,22 @@ mise exec -- just duckdb-spatial-scan-profile \
   out=.tmp/duckdb-spatial-scan/local-r1m.json
 ```
 
-The clean 100k smoke on source `26156bd` uses 4,000 ordered points per file. All
-four queries return the same 100 rows. Maintained bbox pruning dispatches and
-scans one of 25 row groups; native geometry dispatches all 25 row groups to the
-Parquet reader, whose geometry statistics scan one. Both therefore pass at 4%
-and 25x. This establishes the plan/row-group oracle but does not claim compressed
-bytes or representative scale. Reference mode requires exactly 10M rows and a
-clean source with storage metadata; two passing 10M runs are required before a
-100M profile is introduced.
+Clean 100k and 1M runs on source `ba658ba` scan 1/25 row groups for both layouts,
+stay near 4% of compressed row-group bytes, and compact 25 files to one. Two
+consecutive clean 10M references on the same source and the recorded Ryzen 7
+7700X/64 GiB/HP FX700 NVMe host also pass:
+
+| Run/layout | Row groups scanned | Compressed-byte upper bound | Data-file bytes | Files after compaction |
+|---|---:|---:|---:|---:|
+| 1 / bbox | 1 / 144 | 1.176% | 294,600,805 | 1 |
+| 1 / native | 1 / 100 | 1.272% | 143,541,707 | 1 |
+| 2 / bbox | 1 / 146 | 0.939% | 294,603,778 | 1 |
+| 2 / native | 1 / 100 | 1.272% | 143,541,707 | 1 |
+
+All four query variants return the same 100 rows through pgwire before and after
+compaction. Native geometry uses about 51% fewer file bytes for this point-only
+fixture, but that is not yet a representation decision: non-point shapes,
+mutation/client implications, query latency, RSS/spill, and 100M remain open.
 
 ## Termination and restart profile
 
@@ -224,7 +235,7 @@ interruption behavior.
 ## Next profiles
 
 E1's result, cancellation, transport, mixed-class, and COPY reference budgets now
-pass. The first selective scan/plan/row-group smoke now passes. Later profiles add
-compressed bytes, grouped aggregates, bounded spatial joins, fragmented-file
-compaction, spill, and configured-concurrency evidence. The exact M4 10M profile
-must pass twice before introducing 100M.
+pass. The selective point scan/byte/compaction oracle now passes twice at 10M.
+Later profiles add representative non-point shapes, grouped aggregates, bounded
+spatial joins, query-latency/RSS/spill budgets, configured-concurrency evidence,
+and then 100M.

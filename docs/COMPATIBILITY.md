@@ -251,11 +251,12 @@ unless a focused test says otherwise.
   pgwire covers the literal path. OR/NOT placement, joins, subqueries, multiple
   matching predicates, and arbitrary or oversized probe expressions are
   deliberately left unoptimized; malformed/ambiguous reserved layouts fail
-  closed. A clean registered 100k profile additionally compares 25 ordered
-  official-DuckLake files for this layout and native `GEOMETRY`: exact pgwire
-  counts agree, each selective plan scans 1/25 row groups, and each plan keeps
-  its exact `ST_Intersects` recheck. This is row-group scan-volume evidence, not
-  compressed scan-byte or scale evidence.
+  closed. Clean registered 100k, 1M, and consecutive 10M point profiles compare
+  25 ordered official-DuckLake files for this layout and native `GEOMETRY`.
+  Exact pgwire counts agree, each plan keeps its exact `ST_Intersects` recheck,
+  and conservative compressed scan-byte upper bounds stay below 5%. Both 10M
+  layouts compact from 25 files to one without result changes. This does not yet
+  qualify non-point shapes, broad analytical workloads, or 100M scale.
 - `pg_catalog`, unmaintained `information_schema`, broad spatial discovery, and
   GIS client-specific metadata are incomplete. A client-neutral executable
   fixture structurally maps explicit and implicit namespace/database/type/range/collation/owner-role

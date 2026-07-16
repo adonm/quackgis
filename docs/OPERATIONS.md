@@ -299,9 +299,12 @@ Every edge case compares the injected result to a deliberately unoptimized exact
 oracle; the pgwire workflow executes the literal form without client-written bbox
 SQL. OR/NOT placement, joins, subqueries, multiple matching predicates, and
 arbitrary or oversized geometry expressions are not optimized; malformed or
-ambiguous reserved layouts fail closed. Automatic DDL, general geometry-expression
-maintenance, compaction refresh, scan-byte evidence, and scale profiles remain
-roadmap work.
+ambiguous reserved layouts fail closed. The registered point profile now records
+row groups plus conservative compressed-byte bounds and proves both maintained
+bbox and native geometry tables compact from 25 files to one without changing
+exact results through 10M rows. Automatic DDL, general geometry-expression
+maintenance, representative non-point compaction, and broader scale/workload
+profiles remain roadmap work.
 
 ## Maintained checks
 

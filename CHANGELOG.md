@@ -60,6 +60,11 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 - A parameterized smoke/local/reference transport entrypoint that runs one
   deterministic DuckDB/ADBC/pgwire scenario and exact-result oracle from 100k
   through the configured row count; the first dirty-tree 1M local run passes.
+- A registered M4 spatial scan profile compares maintained WKB/bbox with native
+  `GEOMETRY` over ordered official-DuckLake files using exact pgwire results,
+  visible exact rechecks, DuckDB row-group metrics, conservative compressed-byte
+  bounds, and fragmented-file compaction. Clean 100k/1M and two 10M runs pass;
+  both 10M layouts compact 25 files to one without result changes.
 - Warm, interleaved ADBC/pgwire transport sampling with an exact-result oracle and
   fail-closed reference enforcement of the one-second eligibility and 15% p50
   overhead limits.
