@@ -221,7 +221,26 @@ sampled DuckDB memory grows by 10.10 MiB in each run, and temporary storage stay
 at zero. Native geometry files are about 45% smaller, but maintained WKB/bbox is
 the Local 1.0 storage decision because only that path currently has the required
 COPY, mutation, pgwire, and catalog contract. Native geometry remains the deletion
-candidate when it passes those lifecycle gates and the 100M profiles.
+candidate when it passes those lifecycle gates.
+
+The same v4 profile admits only exact 10M or 100M row counts in reference mode.
+Two consecutive clean 100M references on source `bd4f0ab` pass on the same host;
+each layout contains 33,333,334 points, 33,333,333 lines, and 33,333,333 polygons:
+
+| Run/layout | Row groups scanned | Compressed-byte upper bound | pgwire p50 / p95 / p99 | Data-file bytes | Files after compaction |
+|---|---:|---:|---:|---:|---:|
+| 1 / bbox | 1 / 825 | 0.1284% | 19.90 / 20.25 / 20.25 ms | 3,516,175,451 | 7 |
+| 1 / native | 1 / 825 | 0.1294% | 19.34 / 19.88 / 19.88 ms | 1,919,798,008 | 4 |
+| 2 / bbox | 1 / 825 | 0.1284% | 18.31 / 20.32 / 20.32 ms | 3,516,176,060 | 7 |
+| 2 / native | 1 / 825 | 0.1294% | 17.59 / 19.40 / 19.40 ms | 1,919,798,008 | 4 |
+
+Loading both layouts takes 23.92 and 23.83 seconds against the 120-second
+reference budget. The timed query interval grows process RSS by 15.44 MiB and
+4.64 MiB, sampled DuckDB memory by 13.20 MiB and 12.19 MiB, and temporary storage
+by zero. Every query still returns the same 100 exact rows through pgwire before
+and after compaction. This closes the two-run 100M selective scan/resource gate;
+it does not qualify grouped aggregates, bounded spatial joins, or wide
+projections.
 
 ## Termination and restart profile
 
@@ -245,6 +264,6 @@ interruption behavior.
 
 E1's result, cancellation, transport, mixed-class, and COPY reference budgets now
 pass. The selective mixed-shape scan/byte/latency/resource/compaction oracle passes
-twice at 10M. Next profiles add grouped aggregates, bounded spatial joins, wide
-projections, broader mutation and configured-concurrency evidence, then two 100M
-runs.
+twice at both 10M and 100M. Next profiles add grouped aggregates, bounded spatial
+joins, wide projections, and broader mutation and configured-concurrency
+evidence.

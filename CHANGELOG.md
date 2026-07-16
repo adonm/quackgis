@@ -65,7 +65,9 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   visible exact rechecks, DuckDB row-group metrics, conservative compressed-byte
   bounds, timed queries, process RSS, DuckDB memory/spill, and fragmented-file
   compaction. Two clean 10M mixed point/line/polygon runs on source `365c769`
-  pass every committed budget and compact both layouts from 25 files to one.
+  pass every committed budget and compact both layouts from 25 files to one. Two
+  clean 100M runs on source `bd4f0ab` also pass load, p50/p95/p99, RSS, memory,
+  zero-spill, scan-byte, exact-result, plan, and compaction budgets.
 - Warm, interleaved ADBC/pgwire transport sampling with an exact-result oracle and
   fail-closed reference enforcement of the one-second eligibility and 15% p50
   overhead limits.

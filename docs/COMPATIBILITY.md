@@ -260,7 +260,10 @@ unless a focused test says otherwise.
   budgets. Both layouts compact from 25 files to one without result changes.
   Local 1.0 retains maintained WKB/bbox storage because native geometry does not
   yet have the same COPY, mutation, pgwire, and catalog contract. Broad
-  analytical workloads and 100M scale remain unqualified.
+  analytical workloads remain unqualified. Two clean 100M references on source
+  `bd4f0ab` preserve the same exact/plan contract, scan 1/825 row groups and at
+  most 0.129% compressed bytes, pass the committed load/latency/RSS/memory/spill
+  budgets, and compact 25 files to 7 bbox/4 native files.
 - `pg_catalog`, unmaintained `information_schema`, broad spatial discovery, and
   GIS client-specific metadata are incomplete. A client-neutral executable
   fixture structurally maps explicit and implicit namespace/database/type/range/collation/owner-role

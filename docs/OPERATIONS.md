@@ -306,8 +306,10 @@ cover mixed points, lines, and polygons; pass the 500 ms p95, +128 MiB RSS,
 +256 MiB DuckDB-memory, zero-spill, 5% scan-byte, and 20x row-group budgets; and
 prove both maintained bbox and native geometry tables compact from 25 files to
 one without changing exact results. Local 1.0 retains maintained WKB/bbox storage.
-Automatic DDL, general geometry-expression maintenance, broader workloads, and
-100M profiles remain roadmap work.
+Two clean 100M runs pass the same exact, plan, scan-byte, load, latency, RSS,
+DuckDB-memory, spill, and compaction gates; they reduce 25 files to 7 bbox/4
+native files. Automatic DDL, general geometry-expression maintenance, grouped
+aggregates, bounded joins, and wide projections remain roadmap work.
 
 ## Maintained checks
 

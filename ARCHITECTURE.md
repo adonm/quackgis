@@ -258,7 +258,8 @@ partitioning, and geometry representation are preferred when measurements pass.
 For Local 1.0, WKB plus the opt-in maintained bbox columns remains the stored
 contract: the 10M mixed-shape profile proves its scan/resource behavior and its
 write/client lifecycle, while native `GEOMETRY` is a smaller measured candidate
-that has not yet passed the same lifecycle contract.
+that also passes the 100M scan/resource gate but has not yet passed the same
+lifecycle contract.
 
 ## PostgreSQL compatibility
 
