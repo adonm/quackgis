@@ -1294,6 +1294,7 @@ async fn spatial_scan_profile() {
 
     let rows_per_file = profile.rows / profile.files;
     assert_eq!(rows_per_file * profile.files, profile.rows);
+    let load_rss_sampler = RssSampler::start();
     let load_started = Instant::now();
     for file in 0..profile.files {
         let start = file * rows_per_file;
@@ -1325,6 +1326,18 @@ async fn spatial_scan_profile() {
             .unwrap_or_else(|error| panic!("ingest native profile file {file}: {error}"));
     }
     let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
+    let load_rss = load_rss_sampler.finish().await;
+    assert!(
+        load_ms <= profile.load_duration_budget_ms,
+        "spatial load {load_ms:.2} ms exceeded {:.2} ms",
+        profile.load_duration_budget_ms
+    );
+    assert!(
+        load_rss.delta <= profile.load_rss_budget_bytes,
+        "spatial load RSS delta {} MiB exceeded {} MiB",
+        load_rss.delta / MIB,
+        profile.load_rss_budget_bytes / MIB
+    );
     let bbox_files_before = table_files(runtime.storage(), "bbox_scan_profile");
     let native_files_before = table_files(runtime.storage(), "native_scan_profile");
     assert_eq!(bbox_files_before.len() as u64, profile.files);
@@ -1431,18 +1444,8 @@ async fn spatial_scan_profile() {
     .await;
     let resources = resource_sampler.finish().await;
     let query_rss = rss_sampler.finish().await;
-    assert!(
-        bbox_latency.p95_ms <= profile.query_p95_budget_ms,
-        "bbox p95 {:.2} ms exceeded {:.2} ms",
-        bbox_latency.p95_ms,
-        profile.query_p95_budget_ms
-    );
-    assert!(
-        native_latency.p95_ms <= profile.query_p95_budget_ms,
-        "native p95 {:.2} ms exceeded {:.2} ms",
-        native_latency.p95_ms,
-        profile.query_p95_budget_ms
-    );
+    assert_latency_budget("bbox", &bbox_latency, &profile);
+    assert_latency_budget("native", &native_latency, &profile);
     assert!(
         query_rss.delta <= profile.query_rss_budget_bytes,
         "spatial query RSS delta {} MiB exceeded {} MiB",
@@ -1506,7 +1509,7 @@ async fn spatial_scan_profile() {
     let evidence = EvidenceEnvelope::collect(
         EvidenceProfile::new(
             format!(
-                "duckdb-spatial-scan-{}-r{}-v3",
+                "duckdb-spatial-scan-{}-r{}-v4",
                 profile.level.as_str(),
                 profile.rows
             ),
@@ -1542,47 +1545,64 @@ async fn spatial_scan_profile() {
             "native_compacted_count": expected_count,
         }),
         json!({
-            "load_ms": load_ms,
-            "bbox_row_groups_scanned": bbox.scanned,
-            "bbox_row_groups_dispatched": bbox.total,
-            "bbox_total_row_groups": bbox_unpruned.total,
-            "bbox_scan_ratio": bbox_ratio,
-            "bbox_row_group_improvement": bbox_improvement,
-            "bbox_compressed_row_group_bytes": bbox_bytes.total,
-            "bbox_scanned_bytes_upper_bound": bbox_bytes.scanned_upper_bound,
-            "bbox_scan_byte_ratio_upper_bound": bbox_bytes.ratio_upper_bound,
-            "native_row_groups_scanned": native.scanned,
-            "native_row_groups_dispatched": native.total,
-            "native_total_row_groups": native_unpruned.total,
-            "native_scan_ratio": native_ratio,
-            "native_row_group_improvement": native_improvement,
-            "native_compressed_row_group_bytes": native_bytes.total,
-            "native_scanned_bytes_upper_bound": native_bytes.scanned_upper_bound,
-            "native_scan_byte_ratio_upper_bound": native_bytes.ratio_upper_bound,
+            "load": {
+                "duration_ms": load_ms,
+                "idle_rss_bytes": load_rss.idle,
+                "peak_rss_bytes": load_rss.peak,
+                "rss_delta_bytes": load_rss.delta,
+            },
+            "bbox_scan": {
+                "row_groups_scanned": bbox.scanned,
+                "row_groups_dispatched": bbox.total,
+                "total_row_groups": bbox_unpruned.total,
+                "scan_ratio": bbox_ratio,
+                "row_group_improvement": bbox_improvement,
+                "compressed_row_group_bytes": bbox_bytes.total,
+                "scanned_bytes_upper_bound": bbox_bytes.scanned_upper_bound,
+                "scan_byte_ratio_upper_bound": bbox_bytes.ratio_upper_bound,
+            },
+            "native_scan": {
+                "row_groups_scanned": native.scanned,
+                "row_groups_dispatched": native.total,
+                "total_row_groups": native_unpruned.total,
+                "scan_ratio": native_ratio,
+                "row_group_improvement": native_improvement,
+                "compressed_row_group_bytes": native_bytes.total,
+                "scanned_bytes_upper_bound": native_bytes.scanned_upper_bound,
+                "scan_byte_ratio_upper_bound": native_bytes.ratio_upper_bound,
+            },
             "query_samples_per_layout": SPATIAL_QUERY_SAMPLES,
-            "bbox_query_latency_min_ms": bbox_latency.min_ms,
-            "bbox_query_latency_p50_ms": bbox_latency.p50_ms,
-            "bbox_query_latency_p95_ms": bbox_latency.p95_ms,
-            "bbox_query_latency_p99_ms": bbox_latency.p99_ms,
-            "bbox_query_latency_max_ms": bbox_latency.max_ms,
-            "native_query_latency_min_ms": native_latency.min_ms,
-            "native_query_latency_p50_ms": native_latency.p50_ms,
-            "native_query_latency_p95_ms": native_latency.p95_ms,
-            "native_query_latency_p99_ms": native_latency.p99_ms,
-            "native_query_latency_max_ms": native_latency.max_ms,
-            "query_idle_rss_bytes": query_rss.idle,
-            "query_peak_rss_bytes": query_rss.peak,
-            "query_rss_delta_bytes": query_rss.delta,
-            "duckdb_memory_initial_bytes": resources.memory_initial,
-            "duckdb_memory_peak_bytes": resources.memory_peak,
-            "duckdb_memory_delta_bytes": resources.memory_delta,
-            "duckdb_temporary_storage_peak_bytes": resources.temporary_storage_peak,
-            "duckdb_resource_samples": resources.samples,
-            "duckdb_resource_sample_failures": resources.failures,
-            "bbox_files_before_compaction": profile.files,
-            "bbox_files_after_compaction": bbox_files_after,
-            "native_files_before_compaction": profile.files,
-            "native_files_after_compaction": native_files_after,
+            "bbox_query_latency_ms": {
+                "min": bbox_latency.min_ms,
+                "p50": bbox_latency.p50_ms,
+                "p95": bbox_latency.p95_ms,
+                "p99": bbox_latency.p99_ms,
+                "max": bbox_latency.max_ms,
+            },
+            "native_query_latency_ms": {
+                "min": native_latency.min_ms,
+                "p50": native_latency.p50_ms,
+                "p95": native_latency.p95_ms,
+                "p99": native_latency.p99_ms,
+                "max": native_latency.max_ms,
+            },
+            "query_resources": {
+                "idle_rss_bytes": query_rss.idle,
+                "peak_rss_bytes": query_rss.peak,
+                "rss_delta_bytes": query_rss.delta,
+                "duckdb_memory_initial_bytes": resources.memory_initial,
+                "duckdb_memory_peak_bytes": resources.memory_peak,
+                "duckdb_memory_delta_bytes": resources.memory_delta,
+                "duckdb_temporary_storage_peak_bytes": resources.temporary_storage_peak,
+                "duckdb_samples": resources.samples,
+                "duckdb_sample_failures": resources.failures,
+            },
+            "compaction": {
+                "bbox_files_before": profile.files,
+                "bbox_files_after": bbox_files_after,
+                "native_files_before": profile.files,
+                "native_files_after": native_files_after,
+            },
         }),
         json!({
             "scan_ratio_max": 0.05,
@@ -1590,13 +1610,17 @@ async fn spatial_scan_profile() {
             "row_group_improvement_min": 20.0,
             "compaction_file_reduction_min": 2.0,
             "exact_recheck_required": true,
+            "load_duration_max_ms": profile.load_duration_budget_ms,
+            "load_rss_delta_max_bytes": profile.load_rss_budget_bytes,
             "query_samples_per_layout": SPATIAL_QUERY_SAMPLES,
+            "query_latency_p50_max_ms": profile.query_p50_budget_ms,
             "query_latency_p95_max_ms": profile.query_p95_budget_ms,
+            "query_latency_p99_max_ms": profile.query_p99_budget_ms,
             "query_rss_delta_max_bytes": profile.query_rss_budget_bytes,
             "duckdb_memory_delta_max_bytes": profile.duckdb_memory_budget_bytes,
             "duckdb_temporary_storage_max_bytes": profile.spill_budget_bytes,
-            "reference_rows": 10_000_000,
-            "reference_runs_before_100m": 2,
+            "reference_rows": [10_000_000_u64, 100_000_000_u64],
+            "required_consecutive_runs": 2,
         }),
     )
     .expect("collect spatial scan evidence");
@@ -1759,7 +1783,11 @@ struct SpatialScanProfile {
     environment: ExecutionEnvironment,
     rows: u64,
     files: u64,
+    load_duration_budget_ms: f64,
+    load_rss_budget_bytes: u64,
+    query_p50_budget_ms: f64,
     query_p95_budget_ms: f64,
+    query_p99_budget_ms: f64,
     query_rss_budget_bytes: u64,
     duckdb_memory_budget_bytes: u64,
     spill_budget_bytes: u64,
@@ -1791,13 +1819,13 @@ impl SpatialScanProfile {
             .map(|value| value.parse::<u64>().expect("integer profile rows"))
             .unwrap_or(default_rows);
         assert!(
-            (100_000..=10_000_000).contains(&rows),
-            "spatial scan rows must be between 100k and 10M"
+            (100_000..=100_000_000).contains(&rows),
+            "spatial scan rows must be between 100k and 100M"
         );
         if level == EvidenceLevel::Reference {
-            assert_eq!(
-                rows, 10_000_000,
-                "reference spatial scan profile requires 10M rows"
+            assert!(
+                matches!(rows, 10_000_000 | 100_000_000),
+                "reference spatial scan profile requires 10M or 100M rows"
             );
         }
         let files = 25;
@@ -1811,12 +1839,21 @@ impl SpatialScanProfile {
             environment,
             rows,
             files,
-            query_p95_budget_ms: match level {
-                EvidenceLevel::Smoke => 2_000.0,
-                EvidenceLevel::Local => 1_000.0,
-                EvidenceLevel::Reference => 500.0,
+            load_duration_budget_ms: match level {
+                EvidenceLevel::Smoke => 30_000.0,
+                EvidenceLevel::Local => 60_000.0,
+                EvidenceLevel::Reference => 120_000.0,
                 EvidenceLevel::External => unreachable!("external rejected above"),
             },
+            load_rss_budget_bytes: match level {
+                EvidenceLevel::Smoke => 512 * MIB,
+                EvidenceLevel::Local => 768 * MIB,
+                EvidenceLevel::Reference => 1_024 * MIB,
+                EvidenceLevel::External => unreachable!("external rejected above"),
+            },
+            query_p50_budget_ms: 250.0,
+            query_p95_budget_ms: 500.0,
+            query_p99_budget_ms: 750.0,
             query_rss_budget_bytes: 128 * MIB,
             duckdb_memory_budget_bytes: 256 * MIB,
             spill_budget_bytes: 0,
@@ -2509,6 +2546,19 @@ async fn pgwire_count_latency(
         );
     }
     latency_summary(&latencies)
+}
+
+fn assert_latency_budget(label: &str, latency: &LatencySummary, profile: &SpatialScanProfile) {
+    for (percentile, actual, budget) in [
+        ("p50", latency.p50_ms, profile.query_p50_budget_ms),
+        ("p95", latency.p95_ms, profile.query_p95_budget_ms),
+        ("p99", latency.p99_ms, profile.query_p99_budget_ms),
+    ] {
+        assert!(
+            actual <= budget,
+            "{label} {percentile} {actual:.2} ms exceeded {budget:.2} ms"
+        );
+    }
 }
 
 fn copy_text_chunk(start: u64, rows: u64, max_bytes: usize) -> (String, u64) {
