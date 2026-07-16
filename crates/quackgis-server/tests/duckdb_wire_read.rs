@@ -52,6 +52,30 @@ fn point_wkb(x: f64, y: f64) -> Vec<u8> {
     bytes
 }
 
+fn linestring_wkb(start: f64, end: f64) -> Vec<u8> {
+    let mut bytes = vec![1, 2, 0, 0, 0, 2, 0, 0, 0];
+    bytes.extend_from_slice(&start.to_le_bytes());
+    bytes.extend_from_slice(&start.to_le_bytes());
+    bytes.extend_from_slice(&end.to_le_bytes());
+    bytes.extend_from_slice(&start.to_le_bytes());
+    bytes
+}
+
+fn polygon_wkb(minimum: f64, maximum: f64) -> Vec<u8> {
+    let mut bytes = vec![1, 3, 0, 0, 0, 1, 0, 0, 0, 5, 0, 0, 0];
+    for (x, y) in [
+        (minimum, minimum),
+        (minimum, maximum),
+        (maximum, maximum),
+        (maximum, minimum),
+        (minimum, minimum),
+    ] {
+        bytes.extend_from_slice(&x.to_le_bytes());
+        bytes.extend_from_slice(&y.to_le_bytes());
+    }
+    bytes
+}
+
 fn flushed_copy_rows(count: usize) -> Bytes {
     let mut rows = String::new();
     for id in 0..count {
@@ -1430,6 +1454,58 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
     for (column, expected) in [7.0, 8.0, 7.0, 8.0].into_iter().enumerate() {
         assert_eq!(refreshed_layout.get::<_, f64>(column + 1), expected);
     }
+    for (label, geometry, expected_bounds, probe) in [
+        (
+            "linestring",
+            linestring_wkb(20.0, 20.25),
+            [20.0, 20.0, 20.25, 20.0],
+            "ST_MakeEnvelope(20.1, 19.9, 20.2, 20.1)",
+        ),
+        (
+            "polygon",
+            polygon_wkb(30.0, 30.25),
+            [30.0, 30.0, 30.25, 30.25],
+            "ST_MakeEnvelope(30.1, 30.1, 30.2, 30.2)",
+        ),
+    ] {
+        assert_eq!(
+            client
+                .execute(&geometry_layout_update, &[&&geometry[..], &10_i32])
+                .await
+                .unwrap_or_else(|error| panic!("update maintained {label}: {error}")),
+            1
+        );
+        let bounds = client
+            .query_one(
+                "SELECT _qg_minx, _qg_miny, _qg_maxx, _qg_maxy \
+                 FROM public.layout_copy WHERE id = 10",
+                &[],
+            )
+            .await
+            .unwrap_or_else(|error| panic!("query maintained {label} bounds: {error}"));
+        for (column, expected) in expected_bounds.into_iter().enumerate() {
+            assert_eq!(
+                bounds.get::<_, f64>(column),
+                expected,
+                "maintained {label} bound {column}"
+            );
+        }
+        let exact = client
+            .query_one(
+                &format!(
+                    "SELECT count(*)::BIGINT FROM public.layout_copy \
+                     WHERE ST_Intersects(ST_GeomFromWKB(geom_wkb), {probe})"
+                ),
+                &[],
+            )
+            .await
+            .unwrap_or_else(|error| panic!("query maintained {label}: {error}"));
+        assert_eq!(exact.get::<_, i64>(0), 1, "maintained {label} exact result");
+    }
+    client
+        .execute(&geometry_layout_update, &[&&point_7_8[..], &10_i32])
+        .await
+        .expect("restore maintained point after non-point mutations");
     let malformed_geometry = [1_u8, 2, 3];
     client
         .execute(

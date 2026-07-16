@@ -1288,7 +1288,24 @@ async fn spatial_scan_profile() {
              id BIGINT, geom_wkb BLOB, _qg_minx DOUBLE, _qg_miny DOUBLE, \
              _qg_maxx DOUBLE, _qg_maxy DOUBLE); \
              CREATE TABLE quackgis.main.native_scan_profile(\
-             id BIGINT, geom GEOMETRY)",
+             id BIGINT, geom GEOMETRY); \
+             CREATE TABLE quackgis.main.spatial_join_probes(\
+             bucket BIGINT, min_id BIGINT, max_id BIGINT, \
+             minx DOUBLE, miny DOUBLE, maxx DOUBLE, maxy DOUBLE, \
+             geom_wkb BLOB, geom GEOMETRY); \
+             INSERT INTO quackgis.main.spatial_join_probes \
+             SELECT bucket, bucket * 25, bucket * 25 + 24, \
+                    (bucket * 25)::DOUBLE, (bucket * 25)::DOUBLE, \
+                    (bucket * 25 + 24)::DOUBLE + 0.25, \
+                    (bucket * 25 + 24)::DOUBLE + 0.25, \
+                    ST_AsWKB(probe), probe \
+             FROM (\
+               SELECT bucket, ST_MakeEnvelope(\
+                 (bucket * 25)::DOUBLE, (bucket * 25)::DOUBLE, \
+                 (bucket * 25 + 24)::DOUBLE + 0.25, \
+                 (bucket * 25 + 24)::DOUBLE + 0.25) AS probe \
+               FROM range(4) AS probes(bucket)\
+             )",
         )
         .expect("create spatial scan tables");
 
@@ -1367,6 +1384,51 @@ async fn spatial_scan_profile() {
         "SELECT count(*)::BIGINT FROM quackgis.main.native_scan_profile \
          WHERE ({native_exact}) IS TRUE"
     );
+    let bbox_grouped_query = format!(
+        "SELECT (id % 8)::BIGINT AS bucket, count(*)::BIGINT, \
+                min(id)::BIGINT, max(id)::BIGINT, sum(id)::BIGINT \
+         FROM quackgis.main.bbox_scan_profile WHERE {bbox_exact} \
+         GROUP BY bucket ORDER BY bucket"
+    );
+    let native_grouped_query = format!(
+        "SELECT (id % 8)::BIGINT AS bucket, count(*)::BIGINT, \
+                min(id)::BIGINT, max(id)::BIGINT, sum(id)::BIGINT \
+         FROM quackgis.main.native_scan_profile \
+         WHERE ST_Intersects_Extent(geom, {probe}) AND {native_exact} \
+         GROUP BY bucket ORDER BY bucket"
+    );
+    let bbox_join_query = "SELECT p.bucket::BIGINT, count(*)::BIGINT, min(d.id)::BIGINT, \
+                max(d.id)::BIGINT, sum(d.id)::BIGINT \
+         FROM quackgis.main.bbox_scan_profile AS d \
+         JOIN quackgis.main.spatial_join_probes AS p \
+           ON d.id BETWEEN p.min_id AND p.max_id \
+          AND d._qg_maxx >= p.minx AND d._qg_minx <= p.maxx \
+          AND d._qg_maxy >= p.miny AND d._qg_miny <= p.maxy \
+          AND ST_Intersects(ST_GeomFromWKB(d.geom_wkb), ST_GeomFromWKB(p.geom_wkb)) \
+         WHERE d.id BETWEEN 0 AND 99 \
+         GROUP BY p.bucket ORDER BY p.bucket";
+    let native_join_query = "SELECT p.bucket::BIGINT, count(*)::BIGINT, min(d.id)::BIGINT, \
+                max(d.id)::BIGINT, sum(d.id)::BIGINT \
+         FROM quackgis.main.native_scan_profile AS d \
+         JOIN quackgis.main.spatial_join_probes AS p \
+           ON d.id BETWEEN p.min_id AND p.max_id \
+          AND ST_Intersects_Extent(d.geom, p.geom) \
+          AND ST_Intersects(d.geom, p.geom) \
+         WHERE d.id BETWEEN 0 AND 99 \
+         GROUP BY p.bucket ORDER BY p.bucket";
+    let bbox_wide_query = format!(
+        "SELECT id, (id % 8)::BIGINT, id::DOUBLE * 0.5, repeat('x', 1024), \
+                geom_wkb AS shape_bytes, _qg_minx, _qg_miny, _qg_maxx, _qg_maxy \
+         FROM quackgis.main.bbox_scan_profile WHERE {bbox_exact} ORDER BY id"
+    );
+    let native_wide_query = format!(
+        "SELECT id, (id % 8)::BIGINT, id::DOUBLE * 0.5, repeat('x', 1024), \
+                ST_AsWKB(geom) AS shape_bytes, id::DOUBLE, id::DOUBLE, \
+                CASE WHEN id % 3 = 0 THEN id::DOUBLE ELSE id::DOUBLE + 0.25 END, \
+                CASE WHEN id % 3 = 0 THEN id::DOUBLE ELSE id::DOUBLE + 0.25 END \
+         FROM quackgis.main.native_scan_profile \
+         WHERE ST_Intersects_Extent(geom, {probe}) AND {native_exact} ORDER BY id"
+    );
     for (label, query) in [
         ("bbox injected", bbox_query.as_str()),
         ("bbox exact", bbox_unpruned_query.as_str()),
@@ -1394,6 +1456,12 @@ async fn spatial_scan_profile() {
     let bbox_plan = analyze_query(runtime.storage(), &bbox_query);
     let native_unpruned_plan = analyze_query(runtime.storage(), &native_unpruned_query);
     let native_plan = analyze_query(runtime.storage(), &native_query);
+    let bbox_grouped_plan = analyze_query(runtime.storage(), &bbox_grouped_query);
+    let native_grouped_plan = analyze_query(runtime.storage(), &native_grouped_query);
+    let bbox_join_plan = analyze_query(runtime.storage(), bbox_join_query);
+    let native_join_plan = analyze_query(runtime.storage(), native_join_query);
+    let bbox_wide_plan = analyze_query(runtime.storage(), &bbox_wide_query);
+    let native_wide_plan = analyze_query(runtime.storage(), &native_wide_query);
     runtime
         .storage()
         .execute_update("PRAGMA disable_profiling")
@@ -1419,17 +1487,109 @@ async fn spatial_scan_profile() {
         "native plan omitted extent candidate: {native_plan_text}"
     );
     assert!(native_plan_text.contains("st_intersects"));
+    assert_plan_terms(
+        "bbox grouped",
+        &bbox_grouped_plan,
+        &["_qg_minx", "st_intersects", "group"],
+    );
+    assert_plan_terms(
+        "native grouped",
+        &native_grouped_plan,
+        &["st_intersects_extent", "st_intersects", "group"],
+    );
+    assert_plan_terms(
+        "bbox join",
+        &bbox_join_plan,
+        &["_qg_minx", "st_intersects", "join"],
+    );
+    assert_plan_terms(
+        "native join",
+        &native_join_plan,
+        &["st_intersects_extent", "st_intersects", "join"],
+    );
+    assert_plan_terms(
+        "bbox wide projection",
+        &bbox_wide_plan,
+        &["_qg_minx", "st_intersects", "order"],
+    );
+    assert_plan_terms(
+        "native wide projection",
+        &native_wide_plan,
+        &["st_intersects_extent", "st_intersects", "order"],
+    );
     assert_scan_budget("maintained bbox", bbox, bbox_unpruned);
     assert_scan_budget("native geometry", native, native_unpruned);
+    let bbox_grouped_scan = scan_metrics(&bbox_grouped_plan);
+    let native_grouped_scan = scan_metrics(&native_grouped_plan);
+    let bbox_wide_scan = scan_metrics(&bbox_wide_plan);
+    let native_wide_scan = scan_metrics(&native_wide_plan);
+    assert_scan_budget("bbox grouped", bbox_grouped_scan, bbox_unpruned);
+    assert_scan_budget("native grouped", native_grouped_scan, native_unpruned);
+    assert_scan_budget("bbox wide projection", bbox_wide_scan, bbox_unpruned);
+    assert_scan_budget("native wide projection", native_wide_scan, native_unpruned);
     let bbox_bytes = scan_byte_metrics(&bbox_row_group_bytes, bbox, bbox_unpruned);
     let native_bytes = scan_byte_metrics(&native_row_group_bytes, native, native_unpruned);
+    if profile.rows == 100_000_000 {
+        assert_row_group_sizing("bbox", profile.rows, bbox_unpruned.total);
+        assert_row_group_sizing("native", profile.rows, native_unpruned.total);
+    }
 
     let rss_sampler = RssSampler::start();
     let resource_sampler = ResourceSampler::start(Arc::clone(runtime.storage()));
+    let grouped_oracle = modulo_aggregate_oracle(expected_count, 8);
+    let join_oracle = ranged_aggregate_oracle(4, 25);
     let bbox_latency = pgwire_count_latency(
         &client,
         "bbox selective latency",
         &bbox_query,
+        expected_count,
+        SPATIAL_QUERY_SAMPLES,
+    )
+    .await;
+    let bbox_grouped_latency = pgwire_aggregate_latency(
+        &client,
+        "bbox grouped latency",
+        &bbox_grouped_query,
+        &grouped_oracle,
+        SPATIAL_QUERY_SAMPLES,
+    )
+    .await;
+    let native_grouped_latency = pgwire_aggregate_latency(
+        &client,
+        "native grouped latency",
+        &native_grouped_query,
+        &grouped_oracle,
+        SPATIAL_QUERY_SAMPLES,
+    )
+    .await;
+    let bbox_join_latency = pgwire_aggregate_latency(
+        &client,
+        "bbox join latency",
+        bbox_join_query,
+        &join_oracle,
+        SPATIAL_QUERY_SAMPLES,
+    )
+    .await;
+    let native_join_latency = pgwire_aggregate_latency(
+        &client,
+        "native join latency",
+        native_join_query,
+        &join_oracle,
+        SPATIAL_QUERY_SAMPLES,
+    )
+    .await;
+    let bbox_wide_latency = pgwire_wide_projection_latency(
+        &client,
+        "bbox wide projection latency",
+        &bbox_wide_query,
+        expected_count,
+        SPATIAL_QUERY_SAMPLES,
+    )
+    .await;
+    let native_wide_latency = pgwire_wide_projection_latency(
+        &client,
+        "native wide projection latency",
+        &native_wide_query,
         expected_count,
         SPATIAL_QUERY_SAMPLES,
     )
@@ -1446,6 +1606,18 @@ async fn spatial_scan_profile() {
     let query_rss = rss_sampler.finish().await;
     assert_latency_budget("bbox", &bbox_latency, &profile);
     assert_latency_budget("native", &native_latency, &profile);
+    for (label, latency) in [
+        ("bbox grouped", &bbox_grouped_latency),
+        ("native grouped", &native_grouped_latency),
+        ("bbox join", &bbox_join_latency),
+        ("native join", &native_join_latency),
+        ("bbox wide first row", &bbox_wide_latency.first_row),
+        ("bbox wide completion", &bbox_wide_latency.completion),
+        ("native wide first row", &native_wide_latency.first_row),
+        ("native wide completion", &native_wide_latency.completion),
+    ] {
+        assert_latency_budget(label, latency, &profile);
+    }
     assert!(
         query_rss.delta <= profile.query_rss_budget_bytes,
         "spatial query RSS delta {} MiB exceeded {} MiB",
@@ -1478,8 +1650,10 @@ async fn spatial_scan_profile() {
             })
             .unwrap_or_else(|error| panic!("compact {table}: {error}"));
     }
-    let bbox_files_after = table_files(runtime.storage(), "bbox_scan_profile").len() as u64;
-    let native_files_after = table_files(runtime.storage(), "native_scan_profile").len() as u64;
+    let bbox_compacted_files = table_files(runtime.storage(), "bbox_scan_profile");
+    let native_compacted_files = table_files(runtime.storage(), "native_scan_profile");
+    let bbox_files_after = bbox_compacted_files.len() as u64;
+    let native_files_after = native_compacted_files.len() as u64;
     assert!(
         bbox_files_after * 2 <= profile.files,
         "bbox compaction did not halve file count"
@@ -1487,6 +1661,24 @@ async fn spatial_scan_profile() {
     assert!(
         native_files_after * 2 <= profile.files,
         "native compaction did not halve file count"
+    );
+    let bbox_compacted_max_bytes = bbox_compacted_files
+        .iter()
+        .map(|file| file.bytes)
+        .max()
+        .expect("compacted bbox file");
+    let native_compacted_max_bytes = native_compacted_files
+        .iter()
+        .map(|file| file.bytes)
+        .max()
+        .expect("compacted native file");
+    assert!(
+        bbox_compacted_max_bytes <= profile.compaction_max_file_bytes,
+        "compacted bbox file exceeds sizing policy"
+    );
+    assert!(
+        native_compacted_max_bytes <= profile.compaction_max_file_bytes,
+        "compacted native file exceeds sizing policy"
     );
     for (label, query) in [
         ("compacted bbox", bbox_query.as_str()),
@@ -1499,6 +1691,46 @@ async fn spatial_scan_profile() {
             .get::<_, i64>(0);
         assert_eq!(count, expected_count as i64, "{label} exact count");
     }
+    for (label, query, oracle) in [
+        (
+            "compacted bbox grouped",
+            bbox_grouped_query.as_str(),
+            grouped_oracle.as_slice(),
+        ),
+        (
+            "compacted native grouped",
+            native_grouped_query.as_str(),
+            grouped_oracle.as_slice(),
+        ),
+        (
+            "compacted bbox join",
+            bbox_join_query,
+            join_oracle.as_slice(),
+        ),
+        (
+            "compacted native join",
+            native_join_query,
+            join_oracle.as_slice(),
+        ),
+    ] {
+        pgwire_aggregate_latency(&client, label, query, oracle, 1).await;
+    }
+    pgwire_wide_projection_latency(
+        &client,
+        "compacted bbox wide projection",
+        &bbox_wide_query,
+        expected_count,
+        1,
+    )
+    .await;
+    pgwire_wide_projection_latency(
+        &client,
+        "compacted native wide projection",
+        &native_wide_query,
+        expected_count,
+        1,
+    )
+    .await;
 
     drop(client);
     connection.abort();
@@ -1509,13 +1741,13 @@ async fn spatial_scan_profile() {
     let evidence = EvidenceEnvelope::collect(
         EvidenceProfile::new(
             format!(
-                "duckdb-spatial-scan-{}-r{}-v4",
+                "duckdb-spatial-scan-{}-r{}-v5",
                 profile.level.as_str(),
                 profile.rows
             ),
             profile.level,
             profile.environment,
-            "ordered point, linestring, and polygon data in official DuckLake Parquet files; exact counts and timed selective samples run through pgwire while DuckDB row-group metrics compare exact-only scans with maintained WKB/bbox and native GEOMETRY candidates",
+            "ordered point, linestring, and polygon data in official DuckLake Parquet files; selective counts, grouped aggregates, bounded spatial joins, and wide projections run through pgwire while DuckDB plans and row-group metrics compare maintained WKB/bbox with native GEOMETRY",
         ),
         json!({
             "rows_per_layout": profile.rows,
@@ -1541,8 +1773,16 @@ async fn spatial_scan_profile() {
             "bbox_plan_has_exact_recheck": true,
             "native_plan_has_candidate": true,
             "native_plan_has_exact_recheck": true,
+            "grouped_aggregate_groups": grouped_oracle.len(),
+            "bounded_join_groups": join_oracle.len(),
+            "wide_projection_rows": expected_count,
+            "wide_projection_columns": 9,
+            "wide_projection_payload_bytes_per_row": 1_024,
+            "wide_projection_first_row_before_completion": true,
+            "all_workload_plans_have_candidate_and_exact_recheck": true,
             "bbox_compacted_count": expected_count,
             "native_compacted_count": expected_count,
+            "all_workload_results_survive_compaction": true,
         }),
         json!({
             "load": {
@@ -1586,6 +1826,26 @@ async fn spatial_scan_profile() {
                 "p99": native_latency.p99_ms,
                 "max": native_latency.max_ms,
             },
+            "grouped_aggregate_latency_ms": {
+                "bbox": latency_json(&bbox_grouped_latency),
+                "native": latency_json(&native_grouped_latency),
+            },
+            "bounded_join_latency_ms": {
+                "bbox": latency_json(&bbox_join_latency),
+                "native": latency_json(&native_join_latency),
+            },
+            "wide_projection_latency_ms": {
+                "bbox_first_row": latency_json(&bbox_wide_latency.first_row),
+                "bbox_completion": latency_json(&bbox_wide_latency.completion),
+                "native_first_row": latency_json(&native_wide_latency.first_row),
+                "native_completion": latency_json(&native_wide_latency.completion),
+            },
+            "workload_scan_row_groups": {
+                "bbox_grouped": bbox_grouped_scan.scanned,
+                "native_grouped": native_grouped_scan.scanned,
+                "bbox_wide": bbox_wide_scan.scanned,
+                "native_wide": native_wide_scan.scanned,
+            },
             "query_resources": {
                 "idle_rss_bytes": query_rss.idle,
                 "peak_rss_bytes": query_rss.peak,
@@ -1602,6 +1862,8 @@ async fn spatial_scan_profile() {
                 "bbox_files_after": bbox_files_after,
                 "native_files_before": profile.files,
                 "native_files_after": native_files_after,
+                "bbox_max_file_bytes": bbox_compacted_max_bytes,
+                "native_max_file_bytes": native_compacted_max_bytes,
             },
         }),
         json!({
@@ -1609,7 +1871,17 @@ async fn spatial_scan_profile() {
             "scan_byte_ratio_upper_bound_max": 0.05,
             "row_group_improvement_min": 20.0,
             "compaction_file_reduction_min": 2.0,
+            "compaction_max_file_bytes": profile.compaction_max_file_bytes,
+            "reference_row_group_rows_min": 100_000,
+            "reference_row_group_rows_max": 150_000,
             "exact_recheck_required": true,
+            "required_workloads": [
+                "selective_scan",
+                "grouped_aggregate",
+                "bounded_spatial_join",
+                "wide_projection",
+                "fragmented_file_compaction",
+            ],
             "load_duration_max_ms": profile.load_duration_budget_ms,
             "load_rss_delta_max_bytes": profile.load_rss_budget_bytes,
             "query_samples_per_layout": SPATIAL_QUERY_SAMPLES,
@@ -1791,6 +2063,7 @@ struct SpatialScanProfile {
     query_rss_budget_bytes: u64,
     duckdb_memory_budget_bytes: u64,
     spill_budget_bytes: u64,
+    compaction_max_file_bytes: u64,
 }
 
 impl SpatialScanProfile {
@@ -1857,6 +2130,7 @@ impl SpatialScanProfile {
             query_rss_budget_bytes: 128 * MIB,
             duckdb_memory_budget_bytes: 256 * MIB,
             spill_budget_bytes: 0,
+            compaction_max_file_bytes: 1_073_741_824,
         }
     }
 }
@@ -2029,6 +2303,20 @@ struct LatencySummary {
     p95_ms: f64,
     p99_ms: f64,
     max_ms: f64,
+}
+
+struct WideProjectionLatency {
+    first_row: LatencySummary,
+    completion: LatencySummary,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AggregateOracleRow {
+    bucket: i64,
+    count: i64,
+    minimum: i64,
+    maximum: i64,
+    sum: i64,
 }
 
 fn latency_summary(samples: &[f64]) -> LatencySummary {
@@ -2546,6 +2834,205 @@ async fn pgwire_count_latency(
         );
     }
     latency_summary(&latencies)
+}
+
+async fn pgwire_aggregate_latency(
+    client: &tokio_postgres::Client,
+    label: &str,
+    query: &str,
+    expected: &[AggregateOracleRow],
+    samples: usize,
+) -> LatencySummary {
+    let mut latencies = Vec::with_capacity(samples);
+    for sample in 0..samples {
+        let started = Instant::now();
+        let rows = client
+            .query(query, &[])
+            .await
+            .unwrap_or_else(|error| panic!("{label} sample {sample}: {error:?}"));
+        latencies.push(started.elapsed().as_secs_f64() * 1000.0);
+        let actual = rows
+            .iter()
+            .map(|row| AggregateOracleRow {
+                bucket: row.get(0),
+                count: row.get(1),
+                minimum: row.get(2),
+                maximum: row.get(3),
+                sum: row.get(4),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "{label} sample {sample} exact rows");
+    }
+    latency_summary(&latencies)
+}
+
+async fn pgwire_wide_projection_latency(
+    client: &tokio_postgres::Client,
+    label: &str,
+    query: &str,
+    expected_rows: u64,
+    samples: usize,
+) -> WideProjectionLatency {
+    let mut first_row_latencies = Vec::with_capacity(samples);
+    let mut completion_latencies = Vec::with_capacity(samples);
+    for sample in 0..samples {
+        let started = Instant::now();
+        let rows = client
+            .query_raw(query, std::iter::empty::<&i32>())
+            .await
+            .unwrap_or_else(|error| panic!("{label} sample {sample}: {error:?}"));
+        futures::pin_mut!(rows);
+        let first = rows
+            .next()
+            .await
+            .unwrap_or_else(|| panic!("{label} sample {sample} first row"))
+            .unwrap_or_else(|error| panic!("{label} sample {sample} first row: {error:?}"));
+        let first_row_ms = started.elapsed().as_secs_f64() * 1000.0;
+        first_row_latencies.push(first_row_ms);
+        assert_wide_projection_row(&first, 0, label, sample);
+        let mut count = 1_u64;
+        while let Some(row) = rows.next().await {
+            let row = row.unwrap_or_else(|error| panic!("{label} sample {sample}: {error:?}"));
+            assert_wide_projection_row(&row, count, label, sample);
+            count += 1;
+        }
+        let completion_ms = started.elapsed().as_secs_f64() * 1000.0;
+        assert!(
+            first_row_ms < completion_ms,
+            "{label} sample {sample} first row must precede completion"
+        );
+        completion_latencies.push(completion_ms);
+        assert_eq!(count, expected_rows, "{label} sample {sample} row count");
+    }
+    WideProjectionLatency {
+        first_row: latency_summary(&first_row_latencies),
+        completion: latency_summary(&completion_latencies),
+    }
+}
+
+fn assert_wide_projection_row(
+    row: &tokio_postgres::Row,
+    expected_id: u64,
+    label: &str,
+    sample: usize,
+) {
+    let id = i64::try_from(expected_id).expect("wide projection id");
+    assert_eq!(row.get::<_, i64>(0), id, "{label} sample {sample} id");
+    assert_eq!(
+        row.get::<_, i64>(1),
+        id % 8,
+        "{label} sample {sample} bucket"
+    );
+    assert_eq!(
+        row.get::<_, f64>(2),
+        id as f64 * 0.5,
+        "{label} sample {sample} measure"
+    );
+    assert_eq!(
+        row.get::<_, String>(3),
+        "x".repeat(1_024),
+        "{label} sample {sample} payload"
+    );
+    assert_eq!(
+        row.get::<_, Vec<u8>>(4),
+        profile_geometry_wkb(expected_id),
+        "{label} sample {sample} WKB"
+    );
+    let maximum = if expected_id.is_multiple_of(3) {
+        expected_id as f64
+    } else {
+        expected_id as f64 + 0.25
+    };
+    for (column, expected) in [
+        (5, expected_id as f64),
+        (6, expected_id as f64),
+        (7, maximum),
+        (8, maximum),
+    ] {
+        assert_eq!(
+            row.get::<_, f64>(column),
+            expected,
+            "{label} sample {sample} bound column {column}"
+        );
+    }
+}
+
+fn modulo_aggregate_oracle(rows: u64, buckets: u64) -> Vec<AggregateOracleRow> {
+    (0..buckets)
+        .filter_map(|bucket| {
+            let count = profile_shape_count_with_stride(rows, bucket, buckets);
+            (count > 0).then(|| {
+                let maximum = bucket + (count - 1) * buckets;
+                AggregateOracleRow {
+                    bucket: bucket as i64,
+                    count: count as i64,
+                    minimum: bucket as i64,
+                    maximum: maximum as i64,
+                    sum: (count * (bucket + maximum) / 2) as i64,
+                }
+            })
+        })
+        .collect()
+}
+
+fn ranged_aggregate_oracle(buckets: u64, rows_per_bucket: u64) -> Vec<AggregateOracleRow> {
+    (0..buckets)
+        .map(|bucket| {
+            let minimum = bucket * rows_per_bucket;
+            let maximum = minimum + rows_per_bucket - 1;
+            AggregateOracleRow {
+                bucket: bucket as i64,
+                count: rows_per_bucket as i64,
+                minimum: minimum as i64,
+                maximum: maximum as i64,
+                sum: (rows_per_bucket * (minimum + maximum) / 2) as i64,
+            }
+        })
+        .collect()
+}
+
+fn profile_shape_count_with_stride(rows: u64, start: u64, stride: u64) -> u64 {
+    if rows <= start {
+        0
+    } else {
+        (rows - 1 - start) / stride + 1
+    }
+}
+
+fn profile_geometry_wkb(id: u64) -> Vec<u8> {
+    match id % 3 {
+        0 => profile_point_wkb(id as f64).to_vec(),
+        1 => profile_linestring_wkb(id as f64).to_vec(),
+        2 => profile_polygon_wkb(id as f64).to_vec(),
+        _ => unreachable!("remainder modulo three"),
+    }
+}
+
+fn assert_plan_terms(label: &str, plan: &serde_json::Value, terms: &[&str]) {
+    let text = serde_json::to_string(plan)
+        .unwrap_or_else(|error| panic!("serialize {label} plan: {error}"))
+        .to_ascii_lowercase();
+    for term in terms {
+        assert!(text.contains(term), "{label} plan omitted {term}: {text}");
+    }
+}
+
+fn assert_row_group_sizing(label: &str, rows: u64, row_groups: u64) {
+    let rows_per_group = rows as f64 / row_groups as f64;
+    assert!(
+        (100_000.0..=150_000.0).contains(&rows_per_group),
+        "{label} average rows per row group {rows_per_group:.2} outside sizing policy"
+    );
+}
+
+fn latency_json(latency: &LatencySummary) -> serde_json::Value {
+    json!({
+        "min": latency.min_ms,
+        "p50": latency.p50_ms,
+        "p95": latency.p95_ms,
+        "p99": latency.p99_ms,
+        "max": latency.max_ms,
+    })
 }
 
 fn assert_latency_budget(label: &str, latency: &LatencySummary, profile: &SpatialScanProfile) {
