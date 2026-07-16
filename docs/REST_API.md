@@ -119,9 +119,9 @@ M3/M5 gates in [../ROADMAP.md](../ROADMAP.md):
    transaction-local role/context, and role-aware OpenAPI — complete at the
    direct-pgwire preview boundary;
 3. automatic role-filtered schema/security invalidation — complete at the
-   direct-pgwire boundary. REST consumes shared monotonic epochs in the
-   checksum-pinned identity lane and retains exact revision validation when the
-   signed runtime reports that capability unavailable. Two immutable packaged
+   direct-pgwire boundary. REST consumes shared monotonic epochs with the
+   supported pinned identity artifact and retains exact revision validation when
+   signed-only startup reports that capability unavailable. Two immutable packaged
    replicas now pass role denial, readiness, balancing, one-Pod failover, core
    reconnect, service-credential rotation, and replacement JWT rotation; then
 4. add relationships and mutations only after common key metadata, object

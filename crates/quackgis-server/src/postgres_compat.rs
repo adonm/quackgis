@@ -1172,7 +1172,7 @@ fn identity_catalog_macros_sql() -> &'static str {
 
 /// Replace the baseline catalog views with registry-backed user-object views.
 ///
-/// This SQL is executed only after the checksum-pinned development DuckLake
+/// This SQL is executed only after the supported pinned DuckLake
 /// identity function and registry have both been validated. `_current_columns`
 /// fails closed if a reader lands between the user commit and the separately
 /// serialized registry reconciliation transaction.

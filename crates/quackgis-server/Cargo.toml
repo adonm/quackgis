@@ -28,8 +28,8 @@ name = "duckdb_adbc_storage"
 path = "tests/duckdb_adbc_storage.rs"
 
 [[test]]
-name = "development_ducklake"
-path = "tests/development_ducklake.rs"
+name = "pinned_ducklake"
+path = "tests/pinned_ducklake.rs"
 
 [[test]]
 name = "duckdb_wire_read"

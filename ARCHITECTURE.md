@@ -310,8 +310,8 @@ publish DuckLake state, or become a second catalog/security authority. The
 current preview validates bounded HS256 JWT signature/issuer/audience/time/role,
 uses one authenticator pgwire identity, and wraps each read in transaction-local
 role/context. Role-filtered PostgreSQL catalog results drive per-role schema and
-OpenAPI caches; shared epochs are consumed where durable identity exists and the
-signed runtime uses exact revision fallback. K0 packages two replicas. Each uses
+OpenAPI caches; shared epochs are consumed with the pinned identity artifact and
+signed-only startup uses exact revision fallback. K0 packages two replicas. Each uses
 a passwordless loopback tiny client whose separately proven credential is mapped
 to an exact `authenticator` lease; the core loopback listener validates the role
 catalog before `AuthenticationOk`. Replica readiness, denial, failover, reconnect,
@@ -323,8 +323,9 @@ compatibility case exists.
 ## Deployment model
 
 The only maintained runtime image is the verified DuckDB image containing the
-server, REST and edge binaries, exact `libduckdb.so`, signed extensions, and
-isolated DuckDB home. A bare
+server, REST and edge binaries, exact `libduckdb.so`, signed Spatial, the exact
+source/artifact-pinned read-only DuckLake identity patch, and an isolated DuckDB
+home. A bare
 Rust binary is not a complete runtime distribution.
 
 The current supported profile is one process over local official DuckLake. Shared

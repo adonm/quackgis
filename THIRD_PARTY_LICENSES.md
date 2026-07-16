@@ -6,7 +6,7 @@ The QuackGIS runtime bundle contains the following DuckDB artifacts:
 |---|---|---|
 | DuckDB CLI and shared library | <https://github.com/duckdb/duckdb> | MIT |
 | DuckDB Spatial extension | <https://github.com/duckdb/duckdb-spatial> | MIT |
-| DuckLake extension | <https://github.com/duckdb/ducklake> | MIT |
+| DuckLake extension plus QuackGIS read-only identity patch | <https://github.com/duckdb/ducklake> and `patches/ducklake` | MIT |
 
 Exact versions and SHA-256 values are recorded in `artifact-manifest.json`.
 

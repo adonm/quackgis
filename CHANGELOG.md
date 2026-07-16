@@ -7,6 +7,13 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 
 ### Added
 
+- Local 1.0 now owns a tracked, read-only DuckLake identity patch. Exact upstream,
+  DuckDB, patch, vcpkg, tool, platform, and accepted artifact pins drive a
+  reproducible build gate. The server accepts only its compile-time SHA-256 at an
+  absolute non-symlink path; the immutable runtime image packages that artifact,
+  keeps client `LOAD`/`INSTALL` denied, and passes network-disabled extension and
+  server-start smokes. `quackgis-rest --version` is now available to the runtime
+  artifact gate.
 - K0 now packages two role-aware REST replicas. Bootstrap maps separate proven
   credentials to exact `postgres` and `authenticator` leases without changing the
   edge protocol; the core server accepts only configured `LOGIN` roles on a
@@ -22,7 +29,7 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   monotonic schema/security epochs as bounded `BIGINT` pgwire functions. REST
   keys role caches by the pair plus connection generation, refreshes atomically
   when either changes, and retains exact per-request role-filtered revision
-  validation when the signed runtime reports the capability unavailable.
+  validation when signed-only startup reports the capability unavailable.
 - REST database credentials now come from a bounded owner-only non-symlink file,
   never the pgwire URL. Atomic replacement invalidates the old connection;
   readiness fails while REST and database credentials disagree, then REST

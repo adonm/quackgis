@@ -25,9 +25,9 @@ async fn main() -> anyhow::Result<()> {
     if cli.tls_cert.is_some() != cli.tls_key.is_some() {
         anyhow::bail!("--tls-cert and --tls-key must be specified together");
     }
-    if cli.dev_ducklake_extension.is_some() != cli.dev_ducklake_extension_sha256.is_some() {
+    if cli.ducklake_extension.is_some() != cli.ducklake_extension_sha256.is_some() {
         anyhow::bail!(
-            "--dev-ducklake-extension and --dev-ducklake-extension-sha256 must be specified together"
+            "--ducklake-extension and --ducklake-extension-sha256 must be specified together"
         );
     }
     if cli.tls_mode == CliTlsMode::Required && cli.tls_cert.is_none() {
@@ -133,23 +133,20 @@ async fn main() -> anyhow::Result<()> {
         )
     })?;
     let extension_policy = match (
-        cli.dev_ducklake_extension.clone(),
-        cli.dev_ducklake_extension_sha256.clone(),
+        cli.ducklake_extension.clone(),
+        cli.ducklake_extension_sha256.clone(),
     ) {
         (Some(path), Some(sha256)) => {
-            log::warn!(
-                "using checksum-pinned unsigned development DuckLake extension {}; this configuration is not release-supported",
+            log::info!(
+                "using supported checksum-pinned DuckLake identity extension {}",
                 path.display()
             );
-            ExtensionPolicy::DevelopmentDuckLake { path, sha256 }
+            ExtensionPolicy::PinnedDuckLake { path, sha256 }
         }
         (None, None) => ExtensionPolicy::LoadOnly,
-        _ => unreachable!("development extension arguments were validated as a pair"),
+        _ => unreachable!("pinned extension arguments were validated as a pair"),
     };
-    let development_ducklake = matches!(
-        extension_policy,
-        ExtensionPolicy::DevelopmentDuckLake { .. }
-    );
+    let pinned_ducklake = matches!(extension_policy, ExtensionPolicy::PinnedDuckLake { .. });
     let config = DuckDbAdbcConfig {
         driver_path,
         database_uri: cli.duckdb_database_uri.clone(),
@@ -252,8 +249,8 @@ async fn main() -> anyhow::Result<()> {
             AuthMode::Password => "SCRAM password auth",
             AuthMode::EdgePreauthenticated => "loopback edge-preauthenticated auth",
         },
-        if development_ducklake {
-            "checksum-pinned-development-DuckLake"
+        if pinned_ducklake {
+            "checksum-pinned-DuckLake-identity"
         } else {
             "official-DuckLake"
         },

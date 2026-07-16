@@ -29,6 +29,19 @@ class DuckDbRuntimeStaticCheckTests(unittest.TestCase):
             path.write_text(original + "\nRUN duckdb -c 'INSTALL spatial'\n", encoding="utf-8")
             self.assertTrue(any("online-install" in error for error in CHECK.validate(path)))
 
+    def test_pinned_ducklake_digest_drift_is_rejected(self) -> None:
+        original = (ROOT / "deploy/Containerfile.duckdb-runtime").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "Containerfile"
+            path.write_text(
+                original.replace(
+                    CHECK.PINNED_DUCKLAKE_SHA256,
+                    "0" * 64,
+                ),
+                encoding="utf-8",
+            )
+            self.assertTrue(any("SHA256" in error for error in CHECK.validate(path)))
+
 
 if __name__ == "__main__":
     unittest.main()

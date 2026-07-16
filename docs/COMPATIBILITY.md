@@ -146,7 +146,7 @@ mise exec -- just ci
 | QGIS | exact offscreen 3.44.11 connects through current mutual TLS and retries direct, no-FID, and copied-SQL layers. All remain invalid: the first provider probes require durable OID privilege inquiry; `pg_is_in_recovery` and failed-transaction COMMIT/ROLLBACK behavior are additional concrete gaps. Full copied-layer qualification remains blocked |
 | GeoServer, Martin | target; client traces and QuackGIS qualification remain open |
 | psycopg | pinned 3.2.13 passes a mutual-TLS tiny-client copied-data workflow in Kind: create/reuse, delete, text COPY with exact WKB/NULL values, close/reconnect, and exact spatial readback |
-| `quackgis-rest` | signed-HS256-JWT read-only preview maps a bounded role claim and uses transaction-local role/claims. Direct SCRAM rotation, shared epoch invalidation in the identity lane, and exact signed-runtime fallback pass. K0 packages two replicas behind separately registered authenticator tiny clients with no database password; role-aware data/OpenAPI, two endpoints, one-Pod failover, core reconnect, and old authenticator/JWT denial pass. Signed packaged epochs, multi-key overlap, public HTTP policy, and full PostgREST remain open |
+| `quackgis-rest` | signed-HS256-JWT read-only preview maps a bounded role claim and uses transaction-local role/claims. Direct SCRAM rotation, shared epoch invalidation with pinned identity, and exact signed-only fallback pass. K0 packages two replicas behind separately registered authenticator tiny clients with no database password; role-aware data/OpenAPI, two endpoints, one-Pod failover, core reconnect, and old authenticator/JWT denial pass. Pinned-epoch package rerun, multi-key overlap, public HTTP policy, and full PostgREST remain open |
 | SQLAlchemy, GeoPandas, pg_featureserv | target; named dependency workflows remain open |
 | `pg_dump`, logical replication, PL/pgSQL, triggers, LISTEN/NOTIFY | unsupported/non-goals |
 | Tiny iroh client bridge | executable direct, forced-custom-relay, and opt-in public-default-relay seams differentially match direct TCP. Bootstrap now maps a bounded set of proven credentials to exact signed roles. The packaged path passes a mutual-TLS `postgres` ingress and two loopback authenticator REST sidecars, stale-worker recovery through a stable UDP Service, copied-data clients, role-aware REST/failover, and old certificate/authenticator denial. Adaptive LZ4 host budgets pass; packaged resource and hosted-relay qualification remain open |
@@ -278,16 +278,16 @@ unless a focused test says otherwise.
   unimplemented/private catalog routing and unsupported wildcard/nested/set/
   derived/implicit-join/CTE/cross-database shapes fail closed. The structurally
   lossy `TABLE` form is rejected globally. This does not claim named-client
-  execution against QuackGIS. An opt-in
-  checksum-pinned DuckLake 1.5.4 development extension now proves the selected
-  public column-identity lifecycle contract through ADBC. That lane also proves
+  execution against QuackGIS. The supported source/artifact-pinned DuckLake 1.5.4
+  identity extension proves the selected public column-identity lifecycle
+  contract through ADBC. That lane also proves
   durable namespace/relation/row-type OID and per-table attribute-number
   allocation plus commit/rollback/reopen/drop-recreate schema epochs in protected
   DuckLake control tables. Concurrent server sessions serialize commit plus
-  reconciliation; all public development create paths pass the gate, and direct
+  reconciliation; all public create paths pass the gate, and direct
   or dynamically indirect pgwire access to registry tables is denied. Empty
   schemas remain unsupported because the selected API emits no durable identity
-  for them. The development lane now exposes current base tables through guarded,
+  for them. The pinned lane exposes current base tables through guarded,
   registry-backed `pg_namespace`, `pg_class`, `pg_attribute`, and composite
   `pg_type` rows. Actual pgwire joins prove stable rename/reopen identity,
   attribute tombstones, drop/recreate, non-public schemas, scalar/spatial type
@@ -303,8 +303,9 @@ unless a focused test says otherwise.
   the first shared traced structural slice. It also exposes stable NOT-NULL
   constraint identity and a truthfully empty index catalog; QuackGIS does not
   infer primary/unique keys from data or non-null columns. Baseline startup still
-  rejects those user-object catalogs explicitly. This lane is not loaded by default, packaged,
-  or release-supported.
+  rejects those user-object catalogs explicitly. Runtime assembly packages the
+  pinned artifact and configures its exact path/digest; the complete Kind
+  named-client rerun remains open.
 - Binary columns named `geom_wkb` use the same geometry sentinel OID as the
   maintained COPY bbox layout. RowDescription plus text hex-WKB, binary WKB, and
   NULL transport are tested through pgwire for geometry and the maintained

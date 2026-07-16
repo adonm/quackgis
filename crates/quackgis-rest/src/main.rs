@@ -45,7 +45,7 @@ const CATALOG_EPOCH_SQL: &str = "SELECT pg_catalog.quackgis_schema_epoch(), \
 const JWT_CLOCK_SKEW_SECONDS: u64 = 30;
 
 #[derive(Debug, Parser)]
-#[command(name = "quackgis-rest")]
+#[command(name = "quackgis-rest", version)]
 struct Cli {
     #[arg(long, env = "QUACKGIS_REST_HOST", default_value = "127.0.0.1")]
     host: String,
@@ -1407,14 +1407,14 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires the checksum-pinned development DuckLake extension"]
+    #[ignore = "requires the supported pinned DuckLake extension"]
     async fn shared_catalog_epochs_invalidate_rest_caches() {
-        let extension = std::env::var_os("QUACKGIS_DEV_DUCKLAKE_EXTENSION")
-            .expect("set QUACKGIS_DEV_DUCKLAKE_EXTENSION");
-        let sha256 = std::env::var("QUACKGIS_DEV_DUCKLAKE_EXTENSION_SHA256")
-            .expect("set QUACKGIS_DEV_DUCKLAKE_EXTENSION_SHA256");
+        let extension = std::env::var_os("QUACKGIS_DUCKLAKE_EXTENSION")
+            .expect("set QUACKGIS_DUCKLAKE_EXTENSION");
+        let sha256 = std::env::var("QUACKGIS_DUCKLAKE_EXTENSION_SHA256")
+            .expect("set QUACKGIS_DUCKLAKE_EXTENSION_SHA256");
         actual_postgrest_compat_with_policy(
-            ExtensionPolicy::DevelopmentDuckLake {
+            ExtensionPolicy::PinnedDuckLake {
                 path: extension.into(),
                 sha256,
             },

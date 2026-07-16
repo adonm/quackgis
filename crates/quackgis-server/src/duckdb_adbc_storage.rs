@@ -44,6 +44,8 @@ const DUCKDB_ADBC_ENTRYPOINT: &[u8] = b"duckdb_adbc_init";
 const SUPPORTED_DUCKDB_VERSION: &str = "v1.5.4";
 const SUPPORTED_LIBDUCKDB_SHA256: &str =
     "d7f30ef2ef4b813edb94ce82906329cc689672624a4161617ea33431040ce174";
+pub const SUPPORTED_DUCKLAKE_EXTENSION_SHA256: &str =
+    "046e73c864b4403e73beddc39addc72a370dfbe633e2287181a1c0cdd37b5b94";
 const FALLBACK_DUCKDB_THREADS: usize = 4;
 const FALLBACK_DUCKDB_MEMORY_LIMIT_BYTES: u64 = 1_073_741_824;
 const MIN_DUCKDB_MAX_TEMP_DIRECTORY_BYTES: u64 = 10_737_418_240;
@@ -84,19 +86,19 @@ pub struct CatalogEpochs {
     pub security: u64,
 }
 
-/// Whether DuckDB may download the DuckLake extension during initialization.
+/// Which preselected DuckLake artifact DuckDB may load during initialization.
 ///
-/// `LoadOnly` is the production-safe default: image construction must install
-/// and pin the extension in advance. `InstallAndLoad` is intended only for local
+/// `LoadOnly` is the signed-only default: image construction must install and
+/// pin the extension in advance. `InstallAndLoad` is intended only for local
 /// evaluation where network access and extension provenance are explicit.
-/// `DevelopmentDuckLake` permits one exact unsigned native artifact after local
+/// `PinnedDuckLake` permits one exact unsigned native artifact after local
 /// path and digest validation; it must never be selected from client input.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum ExtensionPolicy {
     #[default]
     LoadOnly,
     InstallAndLoad,
-    DevelopmentDuckLake {
+    PinnedDuckLake {
         path: PathBuf,
         sha256: String,
     },
@@ -283,8 +285,8 @@ impl DuckDbAdbcConfig {
                 bail!("DuckDB ADBC {label} must not contain NUL bytes");
             }
         }
-        if let ExtensionPolicy::DevelopmentDuckLake { path, sha256 } = &self.extension_policy {
-            validate_development_extension(path, sha256)?;
+        if let ExtensionPolicy::PinnedDuckLake { path, sha256 } = &self.extension_policy {
+            validate_pinned_extension(path, sha256)?;
         }
         Ok(())
     }
@@ -295,12 +297,12 @@ impl DuckDbAdbcConfig {
             ExtensionPolicy::InstallAndLoad => {
                 "INSTALL ducklake;\nINSTALL spatial;\nLOAD ducklake;\nLOAD spatial;"
             }
-            ExtensionPolicy::DevelopmentDuckLake { path, .. } => {
+            ExtensionPolicy::PinnedDuckLake { path, .. } => {
                 return self.bootstrap_sql_with_extensions(&format!(
                     "LOAD {};\nLOAD spatial;",
                     quote_literal(
                         path.to_str()
-                            .expect("development extension path validated as UTF-8"),
+                            .expect("pinned extension path validated as UTF-8"),
                     )
                 ));
             }
@@ -323,10 +325,10 @@ impl DuckDbAdbcConfig {
         )
     }
 
-    fn allows_unsigned_extensions(&self) -> bool {
+    fn uses_pinned_ducklake(&self) -> bool {
         matches!(
             self.extension_policy,
-            ExtensionPolicy::DevelopmentDuckLake { .. }
+            ExtensionPolicy::PinnedDuckLake { .. }
         )
     }
 }
@@ -493,7 +495,7 @@ impl DuckDbAdbcStorage {
                 config.driver_path.display()
             )
         })?;
-        let catalog_identity_enabled = config.allows_unsigned_extensions();
+        let catalog_identity_enabled = config.uses_pinned_ducklake();
         let database = if catalog_identity_enabled {
             driver.new_database_with_opts([
                 (OptionDatabase::Uri, config.database_uri.clone().into()),
@@ -523,7 +525,7 @@ impl DuckDbAdbcStorage {
             .context("claiming local DuckDB official-DuckLake data root")?;
         let bootstrap_sql = config.bootstrap_sql();
         execute_update_on(&mut connection, &bootstrap_sql)
-            .context("loading and attaching the official DuckLake extension")?;
+            .context("loading the selected DuckLake extension and attaching the catalog")?;
         if catalog_identity_enabled {
             initialize_catalog_identity_registry_on(&mut connection, &config.catalog_name)
                 .context("initializing transactional PostgreSQL catalog identity")?;
@@ -2981,36 +2983,41 @@ fn verify_driver_digest(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-fn validate_development_extension(path: &Path, expected_sha256: &str) -> Result<()> {
+fn validate_pinned_extension(path: &Path, expected_sha256: &str) -> Result<()> {
     if !path.is_absolute() {
-        bail!("development DuckLake extension path must be absolute");
+        bail!("pinned DuckLake extension path must be absolute");
     }
     if path.to_str().is_none() {
-        bail!("development DuckLake extension path must be valid UTF-8");
+        bail!("pinned DuckLake extension path must be valid UTF-8");
     }
     if expected_sha256.len() != 64
         || !expected_sha256
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
-        bail!("development DuckLake extension SHA-256 must be 64 lowercase hexadecimal characters");
+        bail!("pinned DuckLake extension SHA-256 must be 64 lowercase hexadecimal characters");
+    }
+    if expected_sha256 != SUPPORTED_DUCKLAKE_EXTENSION_SHA256 {
+        bail!(
+            "unsupported DuckLake extension SHA-256 {expected_sha256}; expected {SUPPORTED_DUCKLAKE_EXTENSION_SHA256}"
+        );
     }
     let metadata = path.symlink_metadata().with_context(|| {
         format!(
-            "reading development DuckLake extension metadata at {}",
+            "reading pinned DuckLake extension metadata at {}",
             path.display()
         )
     })?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         bail!(
-            "development DuckLake extension must be a non-symlink regular file: {}",
+            "pinned DuckLake extension must be a non-symlink regular file: {}",
             path.display()
         );
     }
     let actual = file_sha256(path)?;
     if actual != expected_sha256 {
         bail!(
-            "development DuckLake extension checksum mismatch: expected {expected_sha256}, got {actual}"
+            "pinned DuckLake extension checksum mismatch: expected {expected_sha256}, got {actual}"
         );
     }
     Ok(())
@@ -3055,6 +3062,17 @@ fn verify_runtime_version(connection: &mut ManagedConnection) -> Result<()> {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn supported_ducklake_digest_matches_the_tracked_artifact_pin() {
+        let pin: serde_json::Value =
+            serde_json::from_str(include_str!("../../../patches/ducklake/pin.json"))
+                .expect("tracked DuckLake pin");
+        assert_eq!(
+            pin["artifact_sha256"].as_str(),
+            Some(SUPPORTED_DUCKLAKE_EXTENSION_SHA256)
+        );
+    }
 
     #[test]
     fn bootstrap_uses_official_ducklake_and_disables_inlining() {
@@ -3102,47 +3120,57 @@ mod tests {
     }
 
     #[test]
-    fn development_extension_requires_an_exact_regular_file_digest() {
+    fn pinned_extension_accepts_only_the_supported_digest_and_safe_path_shape() {
         let temp = tempfile::tempdir().expect("tempdir");
         let extension = temp.path().join("ducklake.duckdb_extension");
-        std::fs::write(&extension, b"development ducklake").expect("extension fixture");
+        std::fs::write(&extension, b"unaccepted ducklake").expect("extension fixture");
         let extension = extension.canonicalize().expect("absolute extension path");
-        let digest = file_sha256(&extension).expect("extension digest");
+        let fixture_digest = file_sha256(&extension).expect("extension digest");
         let config = DuckDbAdbcConfig {
             driver_path: Path::new("/opt/quackgis/libduckdb.so").to_path_buf(),
             database_uri: ":memory:".to_owned(),
             ducklake_uri: "ducklake:metadata.ducklake".to_owned(),
             catalog_name: "quackgis".to_owned(),
             data_path: "/data".to_owned(),
-            extension_policy: ExtensionPolicy::DevelopmentDuckLake {
+            extension_policy: ExtensionPolicy::PinnedDuckLake {
                 path: extension.clone(),
-                sha256: digest.clone(),
+                sha256: SUPPORTED_DUCKLAKE_EXTENSION_SHA256.to_owned(),
             },
         };
 
-        validate_development_extension(&extension, &digest).expect("valid override");
         let sql = config.bootstrap_sql();
         assert!(sql.starts_with(&format!(
             "LOAD {};\nLOAD spatial;",
             quote_literal(&extension.display().to_string())
         )));
         assert!(!sql.contains("INSTALL ducklake"));
-        assert!(config.allows_unsigned_extensions());
-
-        let replacement = if digest.starts_with('0') { "1" } else { "0" };
-        let wrong_digest = format!("{replacement}{}", &digest[1..]);
-        assert!(validate_development_extension(&extension, &wrong_digest).is_err());
-        assert!(validate_development_extension(&extension, "ABC").is_err());
+        assert!(config.uses_pinned_ducklake());
         assert!(
-            validate_development_extension(Path::new("relative.duckdb_extension"), &digest)
-                .is_err()
+            validate_pinned_extension(&extension, SUPPORTED_DUCKLAKE_EXTENSION_SHA256)
+                .unwrap_err()
+                .to_string()
+                .contains("checksum mismatch")
+        );
+        assert!(
+            validate_pinned_extension(&extension, &fixture_digest)
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported DuckLake extension SHA-256")
+        );
+        assert!(validate_pinned_extension(&extension, "ABC").is_err());
+        assert!(
+            validate_pinned_extension(
+                Path::new("relative.duckdb_extension"),
+                SUPPORTED_DUCKLAKE_EXTENSION_SHA256,
+            )
+            .is_err()
         );
 
         #[cfg(unix)]
         {
             let link = temp.path().join("linked.duckdb_extension");
             std::os::unix::fs::symlink(&extension, &link).expect("extension symlink");
-            assert!(validate_development_extension(&link, &digest).is_err());
+            assert!(validate_pinned_extension(&link, SUPPORTED_DUCKLAKE_EXTENSION_SHA256).is_err());
         }
     }
 

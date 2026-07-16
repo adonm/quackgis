@@ -29,10 +29,10 @@ pub struct Cli {
     pub duckdb_driver: Option<std::path::PathBuf>,
     #[arg(long, env = "QUACKGIS_DUCKDB_DATABASE_URI", default_value = ":memory:")]
     pub duckdb_database_uri: String,
-    #[arg(long, env = "QUACKGIS_DEV_DUCKLAKE_EXTENSION")]
-    pub dev_ducklake_extension: Option<std::path::PathBuf>,
-    #[arg(long, env = "QUACKGIS_DEV_DUCKLAKE_EXTENSION_SHA256")]
-    pub dev_ducklake_extension_sha256: Option<String>,
+    #[arg(long, env = "QUACKGIS_DUCKLAKE_EXTENSION")]
+    pub ducklake_extension: Option<std::path::PathBuf>,
+    #[arg(long, env = "QUACKGIS_DUCKLAKE_EXTENSION_SHA256")]
+    pub ducklake_extension_sha256: Option<String>,
     #[arg(long, env = "QUACKGIS_DUCKDB_THREADS")]
     pub duckdb_threads: Option<usize>,
     #[arg(long, env = "QUACKGIS_DUCKDB_MEMORY_LIMIT_BYTES")]
@@ -157,5 +157,25 @@ mod tests {
         let cli = Cli::try_parse_from(["quackgis-server", "--pgwire-max-frame-bytes=1048576"])
             .expect("pgwire frame limit CLI");
         assert_eq!(cli.pgwire_max_frame_bytes, 1_048_576);
+    }
+
+    #[test]
+    fn parses_pinned_ducklake_pair() {
+        let cli = Cli::try_parse_from([
+            "quackgis-server",
+            "--ducklake-extension=/opt/quackgis/ducklake.duckdb_extension",
+            "--ducklake-extension-sha256=046e73c864b4403e73beddc39addc72a370dfbe633e2287181a1c0cdd37b5b94",
+        ])
+        .expect("pinned DuckLake CLI");
+        assert_eq!(
+            cli.ducklake_extension.as_deref(),
+            Some(std::path::Path::new(
+                "/opt/quackgis/ducklake.duckdb_extension"
+            ))
+        );
+        assert_eq!(
+            cli.ducklake_extension_sha256.as_deref(),
+            Some("046e73c864b4403e73beddc39addc72a370dfbe633e2287181a1c0cdd37b5b94")
+        );
     }
 }

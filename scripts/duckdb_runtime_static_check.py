@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 import pathlib
 import re
 import sys
@@ -22,6 +23,10 @@ EXPECTED_COPIES = {
     "COPY artifact-manifest.json /opt/quackgis/artifact-manifest.json",
     "COPY licenses /opt/quackgis/licenses",
 }
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+PINNED_DUCKLAKE_SHA256 = json.loads(
+    (ROOT / "patches/ducklake/pin.json").read_text(encoding="utf-8")
+)["artifact_sha256"]
 FORBIDDEN = ("install ", "curl", "wget", "dnf", "apt-get", "apk ", "ADD ")
 
 
@@ -39,6 +44,8 @@ def validate(path: pathlib.Path) -> list[str]:
     for expected in (
         "ENV HOME=/opt/quackgis/duckdb",
         "ENV QUACKGIS_DUCKDB_ADBC_DRIVER=/opt/quackgis/lib/libduckdb.so",
+        "ENV QUACKGIS_DUCKLAKE_EXTENSION=/opt/quackgis/duckdb/.duckdb/extensions/v1.5.4/linux_amd64/ducklake.duckdb_extension",
+        f"ENV QUACKGIS_DUCKLAKE_EXTENSION_SHA256={PINNED_DUCKLAKE_SHA256}",
         "ENV LD_LIBRARY_PATH=/opt/quackgis/lib",
         "USER 999:999",
         'ENTRYPOINT ["/usr/local/bin/quackgis-server"]',

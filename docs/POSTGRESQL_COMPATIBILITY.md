@@ -72,16 +72,15 @@ The current runtime has a bounded compatibility contract:
   use one authorization decision; and
 - broad unmaintained `pg_catalog`/`information_schema` access fails closed.
 
-The checksum-pinned development identity lane additionally provides stable
-user-object relation/attribute identity and RowDescription origins. That lane is
-not release-supported until the upstream identity API ships in a signed bundle.
-Authoritative spatial metadata and key/index semantics remain incomplete.
-Role-aware REST/OpenAPI passes directly and in two packaged replicas. The
-development lane consumes shared monotonic epochs; the signed packaged lane uses
-exact role-filtered revision fallback until the official identity bundle ships.
-The development lane covers defaults/comments and DuckLake's only supported
-constraint (`NOT NULL`), while publishing an empty index catalog rather than
-inventing primary/unique identity; this is not a broad PostgreSQL catalog claim.
+The supported source/artifact-pinned identity lane additionally provides stable
+user-object relation/attribute identity and RowDescription origins. Authoritative
+spatial metadata and key/index semantics remain incomplete. Role-aware
+REST/OpenAPI passes directly and in two packaged replicas. The pinned lane
+provides shared monotonic epochs; signed-only startup uses exact role-filtered
+revision fallback. The pinned lane covers defaults/comments and DuckLake's only
+supported constraint (`NOT NULL`), while publishing an empty index catalog rather
+than inventing primary/unique identity; this is not a broad PostgreSQL catalog
+claim.
 
 The first target contract is frozen in
 `tests/fixtures/postgresql18_compatibility_profile.json`. Its normalized result
@@ -182,21 +181,20 @@ pinned committed DuckLake snapshot. Views, nested child fields, and uncommitted
 DDL are excluded; committed empty/new columns are included. Numeric IDs remain
 DuckLake `BIGINT` identities, and a column key is scoped by its table identity.
 
-A reference implementation based on upstream DuckLake commit
-`d4a23e83cab5ff81d239a40c7891141c19c611cb` passes its focused lifecycle,
+The tracked patch against DuckLake commit
+`84ef2d14a0161f6f6197d6c8d2b4dbc45bf40375` passes focused lifecycle,
 transaction, nesting, view, and exact-schema tests plus the complete upstream
-function-test group. A development-only port pinned to the DuckDB 1.5.4 ABI also
+function-test group. Its accepted artifact is pinned to the DuckDB 1.5.4 ABI and
 passes QuackGIS's exact-schema, transaction, rename, reopen, add, and
-drop/recreate contract through ADBC. Exact source/artifact pins and the unsigned
-native-code boundary are recorded in `PINNED_DUCKLAKE.md`.
+drop/recreate contract through ADBC. Exact source/patch/artifact pins and the
+unsigned native-code boundary are recorded in `PINNED_DUCKLAKE.md`.
 
-C2/C3 development may consume that function only through the explicit
-checksum-pinned override. Release support remains blocked until the public
-contract is accepted upstream and a version-pinned signed official extension
-reproduces the tests. Private attachment names must not leak into client SQL.
+The explicit paired path/digest policy is supported for Local 1.0 and packaged in
+the runtime image. Private attachment names do not leak into client SQL; upstream
+acceptance remains the preferred deletion path rather than a release blocker.
 
-The development lane now implements the first mapping slice in protected
-DuckLake tables under `_quackgis`. `main` maps to namespace OID 2200; other
+The pinned lane implements the first mapping slice in protected DuckLake tables
+under `_quackgis`. `main` maps to namespace OID 2200; other
 namespace, relation, and reserved relation-row-type OIDs allocate from 100000
 above maintained reservations;
 attribute numbers allocate monotonically per durable table UUID. Mappings survive
@@ -207,7 +205,7 @@ success is returned. A process-wide lock serializes that commit pair across all
 sessions, and startup reconciliation covers a process-crash gap. A failed
 post-commit reconciliation is reported as a committed change, quarantines the
 session, and fatally closes an explicit pgwire transaction. All public
-development write/create APIs use the same hook. Uniqueness/reference/coverage
+write/create APIs use the same hook. Uniqueness/reference/coverage
 invariants are explicitly validated because DuckLake 1.5 has no primary-key or
 unique constraints. Direct pgwire relation references to the private schema,
 dynamic query indirection, and direct identity-function calls are denied.
@@ -229,7 +227,7 @@ upstream schema-level API before that surface can be claimed.
 - A pooled or reused native connection never inherits another pgwire session's
   role or request context.
 
-The development registry maintains both halves of the first invariant. A
+The pinned registry maintains both halves of the first invariant. A
 committed identity fingerprint advances the durable schema epoch for create,
 rename, add, drop, recreate, default, and comment changes, while rollback and
 restart without change do not. A canonical, credential-free projection of the
@@ -240,8 +238,8 @@ Extended-protocol reads pin the schema epoch at parse time and reject execution
 after a change; direct-column origins are resolved from the same guarded registry
 snapshot. REST keys caches by role, both epochs, and connection generation,
 brackets refreshes with equal epoch reads, and uses exact role-filtered revisions
-when the capability is absent. The signed official bundle remains the gate for
-making this the packaged cache path.
+when the capability is absent. The pinned runtime artifact makes this the packaged cache path; the complete
+Kind cache/client rerun remains open.
 
 Read-only PostgreSQL SQL cursors now share that prepared-statement and epoch
 boundary. Simple and extended protocol accept plain transaction control plus one
@@ -291,7 +289,7 @@ semantics, including safe handling of unqualified catalog functions and relation
 | `pg_table_is_visible`, `pg_relation_is_updatable` | search-path and mutation capability queries |
 | `geometry_columns`, `spatial_ref_sys` | bounded PostGIS-compatible geometry/CRS discovery |
 
-The development identity lane implements the table/column subset of
+The pinned identity lane implements the table/column subset of
 `pg_attrdef` and `pg_description` plus `pg_get_expr`, `col_description`, and
 `obj_description`. DuckDB/DuckLake remains authoritative for values; durable
 relation/attribute mappings supply PostgreSQL identity; `adbin` advertises OID
@@ -536,13 +534,12 @@ publishes no catalog change, and every nonzero reference selected by the profile
 resolves.
 
 Current progress: durable table/column identity and name-reuse behavior pass in
-independent DuckDB 1.5.4 processes. The registry and lower-maintenance extraction
-decisions are closed, and the upstream public-function proposal passes against
-DuckLake main. The checksum-pinned 1.5.4 lane now closes the C2 implementation
+independent DuckDB 1.5.4 processes. The registry and extraction decisions are
+closed. The tracked, source/artifact-pinned 1.5.4 lane closes the C2 implementation
 gate with transactional OID/attribute mapping, guarded committed snapshots,
 commit/rollback epoch behavior, rename/reopen stability, collision checks, and
-atomic prepared-read invalidation. Upstream acceptance and a signed matching
-bundle remain release gates rather than missing implementation.
+atomic prepared-read invalidation. QuackGIS owns this patch and its bundle gates;
+upstream acceptance is now a deletion opportunity rather than a release gate.
 
 ### C3 — implement core catalogs and wire identity
 
@@ -561,8 +558,8 @@ Deliver:
 Gate: client-neutral differential fixtures and actual pgwire tests pass for
 scalar, geometry, and geography columns, including restart and rename.
 
-Current progress: the C3 implementation gate is complete in the checksum-pinned
-development identity lane. Exact whole-query interception is removed. Explicit and implicit
+Current progress: the C3 implementation gate is complete in the supported pinned
+identity lane. Exact whole-query interception is removed. Explicit and implicit
 `pg_catalog` namespace/database/type/range/collation/owner-role references map
 structurally to protected process-local views. The stable single logical-database
 row and structurally rewritten `current_database`, `current_schema`, and
@@ -580,7 +577,7 @@ instead of falling through to DuckDB/user objects. CTE shadowing, wildcard,
 nested/set/derived type-preserving expressions, `USING`/`NATURAL` catalog joins,
 and three-part qualification fail closed until their provenance can be represented.
 Direct private-schema access and the structurally lossy `TABLE` query form are
-rejected. In the checksum-pinned development identity lane, current DuckLake base
+rejected. In the supported pinned identity lane, current DuckLake base
 tables now add registry-backed namespace, `pg_class`, `pg_attribute`, and
 composite row-type rows. Pgwire joins prove PostgreSQL OID/`name`/internal-`char`
 types, scalar/spatial type references, nullability, rename/reopen, retained
@@ -593,9 +590,8 @@ quoted/unquoted, qualified/unqualified `regclass`, `regtype`, `regnamespace`, an
 typmods, and `format_type` have explicit pgwire types and lifecycle tests. Actual
 descriptions for every foundation catalog are checked against the client-neutral
 `pg18-column-core-v1` fixture. Unsupported column types, malformed/private
-functions, complex provenance outside the maintained shape, and baseline startup
-without identity fail closed. This remains development-only until upstream
-acceptance and a signed official bundle. The later bounded C5 structural slices
+functions, complex provenance outside the maintained shape, and signed-only
+startup without identity fail closed. The later bounded C5 structural slices
 are described below; authoritative spatial typemod/CRS metadata, broader
 privilege-aware structure, and expression provenance remain later M3 work, while
 key/index semantics require
@@ -740,8 +736,9 @@ therefore still downstream. Exact offscreen QGIS 3.44.11 retries direct, no-FID,
 and copied-SQL layers. It first reaches OID/expression privilege inquiry, which
 correctly requires durable identity, and additionally exposes missing
 `pg_is_in_recovery` plus failed-transaction COMMIT/ROLLBACK cleanup behavior. No
-client-name branch or catalog bypass was added. The official identity bundle and
-those generic PostgreSQL gaps remain the C6 blockers.
+client-name branch or catalog bypass was added. The artifact blocker is removed;
+those generic PostgreSQL/query-shape gaps and the pinned package rerun remain the
+C6 blockers.
 
 ### H1 — migrate and package role-aware REST
 

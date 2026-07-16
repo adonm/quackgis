@@ -254,7 +254,7 @@ Security requirements:
   timeout, cancellation, disconnect, and connection reuse.
 - In the durable identity lane, OpenAPI/schema caches are keyed by effective
   role, REST exposure, shared schema/security epochs, and connection generation.
-  Refreshes observe an equal pair before and after discovery. The signed runtime
+  Refreshes observe an equal pair before and after discovery. Signed-only startup
   reports that capability unavailable, so REST retains a bounded SHA-256 revision
   of the exact role-filtered catalog and validates it before SQL generation.
   Changed visibility replaces the immutable cache, validation failure returns

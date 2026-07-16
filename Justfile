@@ -12,8 +12,6 @@ duckdb_bin := env_var_or_default("DUCKDB_BIN", "duckdb")
 duckdb_version := env_var_or_default("DUCKDB_VERSION", "1.5.4")
 duckdb_home := env_var_or_default("DUCKDB_HOME", ".tmp/duckdb/home")
 duckdb_adbc_driver := env_var_or_default("QUACKGIS_DUCKDB_ADBC_DRIVER", ".tmp/duckdb/v" + duckdb_version + "/lib/libduckdb.so")
-dev_ducklake_extension := env_var_or_default("QUACKGIS_DEV_DUCKLAKE_EXTENSION", "")
-dev_ducklake_extension_sha256 := env_var_or_default("QUACKGIS_DEV_DUCKLAKE_EXTENSION_SHA256", "")
 pinned_ducklake_extension := env_var_or_default("QUACKGIS_DUCKLAKE_EXTENSION", ".tmp/ref/quackgis-ducklake/build/release/extension/ducklake/ducklake.duckdb_extension")
 pinned_ducklake_extension_sha256 := env_var_or_default("QUACKGIS_DUCKLAKE_EXTENSION_SHA256", "046e73c864b4403e73beddc39addc72a370dfbe633e2287181a1c0cdd37b5b94")
 ref_qgis_url := env_var_or_default("REF_QGIS_URL", "https://github.com/qgis/QGIS")
@@ -272,17 +270,6 @@ duckdb-adbc-storage-test driver=duckdb_adbc_driver:
     duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; \
     HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" cargo test -p quackgis-server --test duckdb_adbc_storage -- --ignored --nocapture
 
-# Run the opt-in checksum-pinned development DuckLake identity contract.
-duckdb-development-ducklake-test extension=dev_ducklake_extension sha256=dev_ducklake_extension_sha256 driver=duckdb_adbc_driver:
-    @set -eu; \
-    extension_arg='{{extension}}'; sha256_arg='{{sha256}}'; driver_arg='{{driver}}'; \
-    extension_arg="${extension_arg#extension=}"; sha256_arg="${sha256_arg#sha256=}"; driver_arg="${driver_arg#driver=}"; \
-    if [ ! -f "$extension_arg" ] || [ -L "$extension_arg" ]; then echo 'Development DuckLake extension must be a non-symlink file; see docs/DEVELOPMENT_DUCKLAKE.md' >&2; exit 2; fi; \
-    if [ ! -f "$driver_arg" ]; then echo 'DuckDB ADBC driver is missing; run `mise run duckdb-bootstrap`' >&2; exit 2; fi; \
-    extension_arg="$(realpath "$extension_arg")"; driver_arg="$(realpath "$driver_arg")"; duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; \
-    HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" QUACKGIS_DEV_DUCKLAKE_EXTENSION="$extension_arg" QUACKGIS_DEV_DUCKLAKE_EXTENSION_SHA256="$sha256_arg" \
-      cargo test -p quackgis-server --test development_ducklake development_ducklake_column_identity_contract -- --ignored --exact --nocapture
-
 # Run the supported pinned DuckLake identity and PostgreSQL catalog lifecycle contract.
 duckdb-pinned-ducklake-test extension=pinned_ducklake_extension sha256=pinned_ducklake_extension_sha256 driver=duckdb_adbc_driver:
     @set -eu; \
@@ -291,8 +278,8 @@ duckdb-pinned-ducklake-test extension=pinned_ducklake_extension sha256=pinned_du
     if [ ! -f "$extension_arg" ] || [ -L "$extension_arg" ]; then echo 'Pinned DuckLake extension must be a non-symlink file; see docs/PINNED_DUCKLAKE.md' >&2; exit 2; fi; \
     if [ ! -f "$driver_arg" ]; then echo 'DuckDB ADBC driver is missing; run `mise run duckdb-bootstrap`' >&2; exit 2; fi; \
     extension_arg="$(realpath "$extension_arg")"; driver_arg="$(realpath "$driver_arg")"; duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; \
-    HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" QUACKGIS_DEV_DUCKLAKE_EXTENSION="$extension_arg" QUACKGIS_DEV_DUCKLAKE_EXTENSION_SHA256="$sha256_arg" \
-      cargo test -p quackgis-server --test development_ducklake development_ducklake_column_identity_contract -- --ignored --exact --nocapture
+    HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" QUACKGIS_DUCKLAKE_EXTENSION="$extension_arg" QUACKGIS_DUCKLAKE_EXTENSION_SHA256="$sha256_arg" \
+      cargo test -p quackgis-server --test pinned_ducklake pinned_ducklake_column_identity_contract -- --ignored --exact --nocapture
 
 # Run the bounded local DuckDB pgwire create/COPY/query/mutation/transaction workflow.
 duckdb-pgwire-workflow-test driver=duckdb_adbc_driver:
@@ -515,14 +502,14 @@ rest-edge-preauth-smoke driver=duckdb_adbc_driver:
     HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" \
       cargo test -p quackgis-rest tests::edge_preauthenticated_rest_connector_uses_no_database_password -- --ignored --exact
 
-# Exercise REST cache invalidation through shared development catalog/security epochs.
-rest-shared-epoch-smoke extension=dev_ducklake_extension sha256=dev_ducklake_extension_sha256 driver=duckdb_adbc_driver:
+# Exercise REST cache invalidation through pinned catalog/security epochs.
+rest-shared-epoch-smoke extension=pinned_ducklake_extension sha256=pinned_ducklake_extension_sha256 driver=duckdb_adbc_driver:
     @set -eu; driver_arg='{{driver}}'; driver_arg="${driver_arg#driver=}"; extension_arg='{{extension}}'; extension_arg="${extension_arg#extension=}"; sha_arg='{{sha256}}'; sha_arg="${sha_arg#sha256=}"; \
     if [ ! -f "$driver_arg" ]; then echo 'DuckDB ADBC driver is missing; run `mise run duckdb-bootstrap`' >&2; exit 2; fi; \
-    if [ ! -f "$extension_arg" ] || [ -z "$sha_arg" ]; then echo 'checksum-pinned development DuckLake extension is required' >&2; exit 2; fi; \
+    if [ ! -f "$extension_arg" ] || [ -z "$sha_arg" ]; then echo 'supported pinned DuckLake extension is required' >&2; exit 2; fi; \
     driver_arg="$(realpath "$driver_arg")"; extension_arg="$(realpath "$extension_arg")"; duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; \
     HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" \
-      QUACKGIS_DEV_DUCKLAKE_EXTENSION="$extension_arg" QUACKGIS_DEV_DUCKLAKE_EXTENSION_SHA256="$sha_arg" \
+      QUACKGIS_DUCKLAKE_EXTENSION="$extension_arg" QUACKGIS_DUCKLAKE_EXTENSION_SHA256="$sha_arg" \
       cargo test -p quackgis-rest tests::shared_catalog_epochs_invalidate_rest_caches -- --ignored --exact
 
 # Connect with psql to a running dev server.
@@ -639,7 +626,7 @@ duckdb-runtime-context:
     cargo build -p quackgis-edge --release --bins
     @duckdb_path="$(mise exec -- which duckdb)"; dirty_flag=""; \
     if [ "${QUACKGIS_ALLOW_DIRTY_RUNTIME:-0}" = 1 ]; then dirty_flag="--allow-dirty"; fi; \
-    python3 scripts/prepare_duckdb_runtime.py $dirty_flag --server target/release/quackgis-server --rest target/release/quackgis-rest --edge-bin-dir target/release --duckdb-bin "$duckdb_path"
+    python3 scripts/prepare_duckdb_runtime.py $dirty_flag --server target/release/quackgis-server --rest target/release/quackgis-rest --edge-bin-dir target/release --duckdb-bin "$duckdb_path" --ducklake-extension '{{pinned_ducklake_extension}}'
 
 # Build the immutable local DuckDB evaluation runtime image.
 duckdb-runtime-image: duckdb-runtime-static-check duckdb-runtime-context
@@ -653,7 +640,7 @@ duckdb-runtime-offline-smoke: duckdb-runtime-image
     for binary in quackgis-rest quackgis-bootstrap quackgis-worker-edge quackgis-client quackgis-keygen; do \
       "$engine" run --rm --network none --entrypoint "/usr/local/bin/$binary" {{duckdb_runtime_image}} --version; \
     done; \
-    "$engine" run --rm --network none --entrypoint /usr/local/bin/duckdb {{duckdb_runtime_image}} -csv -noheader :memory: -c "LOAD spatial; LOAD ducklake; SELECT ST_AsText(ST_Point(1, 2));"; \
+    "$engine" run --rm --network none --entrypoint /usr/local/bin/duckdb {{duckdb_runtime_image}} -unsigned -csv -noheader :memory: -c "LOAD spatial; LOAD ducklake; SELECT ST_AsText(ST_Point(1, 2));"; \
     container_id="$("$engine" run -d --network none {{duckdb_runtime_image}})"; \
     trap '"$engine" rm -f "$container_id" >/dev/null 2>&1 || true' EXIT; \
     sleep 3; \

@@ -13,8 +13,9 @@ one exact DuckDB/extension bundle.
 | `just duckdb-pgwire-workflow-test` | real server protocol, auth, policy, COPY, transaction, spatial, restart behavior |
 | `just duckdb-catalog-contract-test` | client-neutral DuckDB-derived metadata plus bounded geometry type/transport contract |
 | `just duckdb-catalog-identity-test` | independent-process DuckLake table/column identity across rename, reopen, and drop/recreate plus the PostgreSQL OID-registry decision |
+| `just ducklake-pinned-source-check` / `just duckdb-pinned-ducklake-test` | tracked DuckLake source/patch/tool/artifact authority plus durable PostgreSQL identity/epoch lifecycle through the accepted binary |
 | `just duckdb-spatial-compat-probe` | maintained spatial disposition/result classification |
-| `just duckdb-runtime-static-check` | immutable load-only runtime-image contract |
+| `just duckdb-runtime-static-check` / `just duckdb-runtime-offline-smoke` | immutable no-install runtime contract plus network-disabled pinned-extension load and server startup |
 | `just evidence-manifest-check` | common evidence envelope, source/runtime/host metadata, and claim-level validation |
 | `just duckdb-transport-profile` | parameterized smoke/local/reference scalar transport scenario using one correctness oracle |
 | `just duckdb-result-stream-profile` | parameterized result RSS/first-row/cardinality profile; 1M/10M reference runs close the M1 scale gate |
@@ -55,7 +56,8 @@ performance evidence. PostgreSQL/MinIO in Kind is M6 rehearsal only.
 
 The release packet must include:
 
-- source SHA, version, Rust lockfile, DuckDB/extension versions and digests;
+- source SHA, version, Rust lockfile, DuckDB/extension versions and digests,
+  DuckLake upstream/patch/build pins, and patch checksum;
 - server binary checksum and runtime image digest;
 - all M1–M4 and I0 test/client/performance reports;
 - the declared PostgreSQL 18 compatibility manifest and normalized differential

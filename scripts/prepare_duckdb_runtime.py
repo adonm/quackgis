@@ -15,12 +15,14 @@ from pathlib import Path
 
 
 VERSION = "1.5.4"
-DUCKLAKE_REVISION = "d318a545"
 SPATIAL_REVISION = "28db190"
 REPO_ROOT = Path(__file__).resolve().parent.parent
+DUCKLAKE_PIN = json.loads(
+    (REPO_ROOT / "patches/ducklake/pin.json").read_text(encoding="utf-8")
+)
 EXPECTED = {
     "libduckdb.so": "d7f30ef2ef4b813edb94ce82906329cc689672624a4161617ea33431040ce174",
-    "ducklake.duckdb_extension": "00f72402c9c5d1f69c3329f38837f4abd100cddb7c69e76650f46bf35a17babe",
+    "ducklake.duckdb_extension": DUCKLAKE_PIN["artifact_sha256"],
     "spatial.duckdb_extension": "819a0fa94d2e8257371bb4d97f32c47586b42c85e24bab1bcbf8712a88b8ccfa",
 }
 
@@ -46,6 +48,7 @@ def prepare(
     rest: Path,
     edge_bin_dir: Path,
     duckdb_bin: Path,
+    ducklake_extension: Path,
     duckdb_root: Path,
     out: Path,
     *,
@@ -77,13 +80,16 @@ def prepare(
     extension_dir = (
         duckdb_root / "home" / ".duckdb" / "extensions" / f"v{VERSION}" / "linux_amd64"
     )
-    extensions = [
-        extension_dir / "ducklake.duckdb_extension",
-        extension_dir / "spatial.duckdb_extension",
-    ]
+    spatial_extension = extension_dir / "spatial.duckdb_extension"
     require_hash(library, EXPECTED[library.name])
-    for extension in extensions:
-        require_hash(extension, EXPECTED[extension.name])
+    if ducklake_extension.is_symlink():
+        raise ValueError("pinned DuckLake extension must not be a symlink")
+    require_hash(
+        REPO_ROOT / str(DUCKLAKE_PIN["patch"]),
+        str(DUCKLAKE_PIN["patch_sha256"]),
+    )
+    require_hash(ducklake_extension, EXPECTED["ducklake.duckdb_extension"])
+    require_hash(spatial_extension, EXPECTED[spatial_extension.name])
 
     source = git_source()
     if source["dirty"] and not allow_dirty:
@@ -101,8 +107,8 @@ def prepare(
         shutil.copy2(binary, out / binary.name)
     shutil.copy2(duckdb_bin, out / "duckdb")
     shutil.copy2(library, out / "libduckdb.so")
-    for extension in extensions:
-        shutil.copy2(extension, target_extensions / extension.name)
+    shutil.copy2(ducklake_extension, target_extensions / "ducklake.duckdb_extension")
+    shutil.copy2(spatial_extension, target_extensions / spatial_extension.name)
     licenses = out / "licenses"
     licenses.mkdir()
     for name in ("LICENSE", "NOTICE", "THIRD_PARTY_LICENSES.md"):
@@ -115,8 +121,10 @@ def prepare(
         "source": source,
         "extensions": {
             "ducklake": {
-                "revision": DUCKLAKE_REVISION,
-                "source": f"https://github.com/duckdb/ducklake/tree/{DUCKLAKE_REVISION}",
+                "revision": DUCKLAKE_PIN["upstream_commit"],
+                "source": f"https://github.com/duckdb/ducklake/tree/{DUCKLAKE_PIN['upstream_commit']}",
+                "patch": DUCKLAKE_PIN["patch"],
+                "patch_sha256": DUCKLAKE_PIN["patch_sha256"],
                 "license": "MIT",
             },
             "spatial": {
@@ -243,6 +251,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rest", type=Path, required=True)
     parser.add_argument("--edge-bin-dir", type=Path, required=True)
     parser.add_argument("--duckdb-bin", type=Path, required=True)
+    parser.add_argument("--ducklake-extension", type=Path, required=True)
     parser.add_argument("--duckdb-root", type=Path, default=Path(".tmp/duckdb"))
     parser.add_argument("--out", type=Path, default=Path(".tmp/duckdb-runtime"))
     parser.add_argument(
@@ -257,6 +266,7 @@ def main(argv: list[str] | None = None) -> int:
             args.rest.resolve(),
             args.edge_bin_dir.resolve(),
             args.duckdb_bin.resolve(),
+            args.ducklake_extension.resolve(),
             args.duckdb_root.resolve(),
             args.out.resolve(),
             allow_dirty=args.allow_dirty,

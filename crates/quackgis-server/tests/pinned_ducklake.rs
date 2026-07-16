@@ -167,10 +167,10 @@ fn registered_columns(
 async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
-        .expect("development catalog listener");
+        .expect("pinned catalog listener");
     let port = listener
         .local_addr()
-        .expect("development catalog address")
+        .expect("pinned catalog address")
         .port();
     let role_catalog = RoleCatalog::from_json(
         r#"{
@@ -192,15 +192,15 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
           ]
         }"#,
     )
-    .expect("development metadata role catalog");
+    .expect("pinned metadata role catalog");
     let auth = AuthConfig::password("writer", "writer-secret", Some(("reader", "reader-secret")))
-        .expect("development metadata password auth")
+        .expect("pinned metadata password auth")
         .with_read_allowlist(
             parse_read_allowlist("catalog_projection,catalog_projection_renamed")
                 .expect("read allowlist"),
         )
         .with_role_catalog(role_catalog.clone())
-        .expect("development metadata role auth");
+        .expect("pinned metadata role auth");
     let epoch_auth = auth.clone();
     let server_storage = Arc::clone(&storage);
     let server = tokio::spawn(async move {
@@ -222,7 +222,7 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
     let (client, connection) = writer_config
         .connect(tokio_postgres::NoTls)
         .await
-        .expect("development catalog pgwire connection");
+        .expect("pinned catalog pgwire connection");
     let connection = tokio::spawn(connection);
 
     let shared_epochs = client
@@ -243,7 +243,7 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
     let initial_epochs = storage
         .catalog_epochs()
         .expect("storage catalog epochs")
-        .expect("development catalog epochs");
+        .expect("pinned catalog epochs");
     assert_eq!(shared_epochs.get::<_, i64>(0), initial_epochs.schema as i64);
     assert_eq!(
         shared_epochs.get::<_, i64>(1),
@@ -256,7 +256,7 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
         storage
             .catalog_epochs()
             .expect("epochs after unchanged role install")
-            .expect("development catalog epochs")
+            .expect("pinned catalog epochs")
             .security,
         initial_epochs.security
     );
@@ -283,11 +283,11 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
     let epoch_before_comments = storage
         .catalog_schema_epoch()
         .expect("catalog epoch before comments")
-        .expect("development catalog epoch");
+        .expect("pinned catalog epoch");
     let security_before_comments = storage
         .catalog_epochs()
         .expect("catalog epochs before comments")
-        .expect("development catalog epochs")
+        .expect("pinned catalog epochs")
         .security;
     execute_storage_update(
         &storage,
@@ -303,14 +303,14 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
         storage
             .catalog_schema_epoch()
             .expect("catalog epoch after comments")
-            .expect("development catalog epoch"),
+            .expect("pinned catalog epoch"),
         epoch_before_comments + 2
     );
     assert_eq!(
         storage
             .catalog_epochs()
             .expect("catalog epochs after comments")
-            .expect("development catalog epochs")
+            .expect("pinned catalog epochs")
             .security,
         security_before_comments
     );
@@ -737,7 +737,7 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
     let (reader, reader_connection) = reader_config
         .connect(tokio_postgres::NoTls)
         .await
-        .expect("development metadata reader connection");
+        .expect("pinned metadata reader connection");
     let reader_connection = tokio::spawn(reader_connection);
     let reader_descriptions = reader
         .query_one(
@@ -1244,7 +1244,7 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
     let before_security_change = storage
         .catalog_epochs()
         .expect("epochs before security change")
-        .expect("development catalog epochs");
+        .expect("pinned catalog epochs");
     let changed_role_catalog = RoleCatalog::from_json(
         r#"{
           "roles": [
@@ -1265,14 +1265,14 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
           ]
         }"#,
     )
-    .expect("changed development metadata role catalog");
+    .expect("changed pinned metadata role catalog");
     storage
         .install_role_catalog(&changed_role_catalog, &epoch_auth)
         .expect("publish changed security catalogs");
     let after_security_change = storage
         .catalog_epochs()
         .expect("epochs after security change")
-        .expect("development catalog epochs");
+        .expect("pinned catalog epochs");
     assert_eq!(
         after_security_change,
         quackgis_server::duckdb_adbc_storage::CatalogEpochs {
@@ -1305,19 +1305,19 @@ async fn execute_storage_update(storage: &Arc<DuckDbAdbcStorage>, sql: &'static 
     let storage = Arc::clone(storage);
     tokio::task::spawn_blocking(move || storage.execute_update(sql))
         .await
-        .expect("development catalog DDL worker")
-        .unwrap_or_else(|error| panic!("development catalog DDL {sql}: {error}"));
+        .expect("pinned catalog DDL worker")
+        .unwrap_or_else(|error| panic!("pinned catalog DDL {sql}: {error}"));
 }
 
 #[test]
-#[ignore = "requires an explicitly selected checksum-pinned development extension"]
-fn development_ducklake_column_identity_contract() {
+#[ignore = "requires an explicitly selected supported pinned extension"]
+fn pinned_ducklake_column_identity_contract() {
     let driver_path =
         std::env::var_os("QUACKGIS_DUCKDB_ADBC_DRIVER").expect("set QUACKGIS_DUCKDB_ADBC_DRIVER");
-    let extension_path = std::env::var_os("QUACKGIS_DEV_DUCKLAKE_EXTENSION")
-        .expect("set QUACKGIS_DEV_DUCKLAKE_EXTENSION");
-    let extension_sha256 = std::env::var("QUACKGIS_DEV_DUCKLAKE_EXTENSION_SHA256")
-        .expect("set QUACKGIS_DEV_DUCKLAKE_EXTENSION_SHA256");
+    let extension_path =
+        std::env::var_os("QUACKGIS_DUCKLAKE_EXTENSION").expect("set QUACKGIS_DUCKLAKE_EXTENSION");
+    let extension_sha256 = std::env::var("QUACKGIS_DUCKLAKE_EXTENSION_SHA256")
+        .expect("set QUACKGIS_DUCKLAKE_EXTENSION_SHA256");
     let temp = tempfile::tempdir().expect("temporary DuckLake root");
     let data_path = temp.path().join("data");
     std::fs::create_dir(&data_path).expect("DuckLake data directory");
@@ -1330,13 +1330,12 @@ fn development_ducklake_column_identity_contract() {
         ),
         catalog_name: "quackgis".to_owned(),
         data_path: data_path.display().to_string(),
-        extension_policy: ExtensionPolicy::DevelopmentDuckLake {
+        extension_policy: ExtensionPolicy::PinnedDuckLake {
             path: extension_path.into(),
             sha256: extension_sha256,
         },
     };
-    let storage =
-        Arc::new(DuckDbAdbcStorage::open(config.clone()).expect("open development DuckLake"));
+    let storage = Arc::new(DuckDbAdbcStorage::open(config.clone()).expect("open pinned DuckLake"));
 
     let description = storage
         .describe("SELECT * FROM ducklake_column_info('quackgis')")
@@ -1547,7 +1546,7 @@ fn development_ducklake_column_identity_contract() {
     drop(storage);
 
     let reopened =
-        Arc::new(DuckDbAdbcStorage::open(config.clone()).expect("reopen development DuckLake"));
+        Arc::new(DuckDbAdbcStorage::open(config.clone()).expect("reopen pinned DuckLake"));
     assert_eq!(
         identity_rows(
             &reopened
@@ -1716,7 +1715,7 @@ fn development_ducklake_column_identity_contract() {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .expect("development catalog Tokio runtime")
+        .expect("pinned catalog Tokio runtime")
         .block_on(prove_registry_catalog_pgwire(Arc::clone(&reopened)));
 
     let corruption = reopened.transaction(|transaction| {

@@ -14,8 +14,10 @@ mise exec -- just ci
 
 The bootstrap writes ignored artifacts below `.tmp/duckdb`, verifies the official
 DuckDB 1.5.4 archive/library digests, and installs version-matched signed
-extensions into an isolated DuckDB home. Runtime startup uses `LOAD` only; it does
-not install extensions over the network.
+extensions into an isolated DuckDB home for baseline tests. The
+`just ducklake-pinned-build` recipe separately builds the accepted read-only
+DuckLake identity patch. Runtime image assembly replaces only DuckLake with that exact artifact;
+startup uses `LOAD` only and never installs extensions over the network.
 
 ## Run locally
 
@@ -35,7 +37,7 @@ DuckDB home. The server defaults to `127.0.0.1:5434`.
 |---|---|---|
 | `QUACKGIS_DUCKDB_ADBC_DRIVER` | unset outside mise | required absolute path to pinned `libduckdb` |
 | `QUACKGIS_DUCKDB_DATABASE_URI` | `:memory:` | DuckDB control database URI |
-| `QUACKGIS_DEV_DUCKLAKE_EXTENSION` / `QUACKGIS_DEV_DUCKLAKE_EXTENSION_SHA256` | unset | paired development-only absolute extension path and exact lowercase SHA-256; never release-supported |
+| `QUACKGIS_DUCKLAKE_EXTENSION` / `QUACKGIS_DUCKLAKE_EXTENSION_SHA256` | unset outside the runtime image | paired absolute path and exact supported SHA-256 for the pinned DuckLake identity extension; the packaged image sets both |
 | `QUACKGIS_HOST` / `QUACKGIS_PORT` | `127.0.0.1` / `5434` | pgwire bind |
 | `QUACKGIS_MAX_CONNECTIONS` | `64` | accepted connection bound |
 | `QUACKGIS_MAX_ACTIVE_QUERIES` / `QUACKGIS_MAX_QUEUED_QUERIES` | `8` / `64` | execution and admission queue bounds |
@@ -69,10 +71,13 @@ DuckDB home. The server defaults to `127.0.0.1:5434`.
 
 `QUACKGIS_CATALOG_URL` and remote/object-store data paths are reserved and fail
 closed. S3 credentials and the retired engine selector are not runtime options.
-The unsigned DuckLake override is opt-in native-code execution and is rejected
-unless both values pass strict path and digest validation. Default startup still
-loads only signed extensions. See [PINNED_DUCKLAKE.md](PINNED_DUCKLAKE.md)
-for its isolated development workflow and deletion plan.
+The pinned DuckLake extension is native code and is rejected unless both values
+are present, the path is absolute/non-symlink, the configured digest equals the
+one compiled into the server, and the file matches it. The runtime image supplies
+that artifact from a root-owned read-only path; client SQL cannot `LOAD` or
+`INSTALL` extensions. Startup without the pair remains signed-only and omits
+durable user-object identity. See [PINNED_DUCKLAKE.md](PINNED_DUCKLAKE.md) for the
+source/build pins, trust boundary, lifecycle gate, and deletion plan.
 
 The optional `quackgis-rest` process has a separate configuration and failure
 domain. It requires an authenticator `QUACKGIS_REST_DATABASE_URL`,

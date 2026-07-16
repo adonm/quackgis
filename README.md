@@ -21,12 +21,13 @@ The product direction makes PostgreSQL 18 catalog, role, privilege, and session
 semantics first-class QuackGIS capabilities. The REST preview now validates
 bounded HS256 JWTs, maps a configured role claim, and uses one authenticator
 pgwire identity with transaction-local role/context for reads and role-aware
-OpenAPI. REST consumes durable monotonic schema/security epochs in the
-checksum-pinned identity lane and otherwise validates exact role-filtered catalog
-revisions before requests. K0 now routes a separately registered `authenticator`
+OpenAPI. REST consumes durable monotonic schema/security epochs when the supported pinned
+DuckLake identity artifact is selected and otherwise validates exact
+role-filtered catalog revisions before requests. K0 now routes a separately registered `authenticator`
 lease through a loopback tiny-client sidecar in each of two REST Pods and proves
 role denial, balancing, failover, core reconnect, and credential replacement.
-Shipping shared epochs in the signed runtime remains planned.
+Runtime assembly now includes the source/digest-pinned identity artifact; rerunning
+the complete Kind client matrix on that artifact remains open.
 
 There is no PostgreSQL, DataFusion, or Sedona query engine. DuckDB is the sole
 planner/executor and official DuckLake is the sole writer for new storage.
@@ -102,9 +103,9 @@ through its extended SQL-result cursor lifecycle and requires exact Point/NULL
 GeoJSON across those same operational gates. Both REST Pods independently pass
 reader/denied OpenAPI and exact data gates; the Service survives one Pod deletion,
 core replacement recovers, and old authenticator/JWT credentials are denied after
-replacement. Direct OGR table discovery/COPY and QGIS copied-layer qualification
-remain blocked by the catalog/identity bundle. Packaged resource and hosted-relay
-qualification remain open.
+replacement. The owned identity artifact removes the catalog-artifact schedule blocker; direct
+psql/OGR/QGIS query-shape closure and a packaged rerun remain. Packaged resource
+and hosted-relay qualification also remain open.
 
 TLS remains optional for local development. Set `QUACKGIS_TLS_MODE=required` with
 `QUACKGIS_TLS_CERT` and `QUACKGIS_TLS_KEY` to fail closed on plaintext startup.
@@ -123,8 +124,8 @@ built-in types, their array partners, collations, and spatial sentinels through
 process-local relational compatibility views. Explicit and implicit `pg_catalog`
 lookup, reference integrity, PostgreSQL result types, and RowDescription text,
 binary, and NULL WKB transport pass. Stable user-object catalogs, origins,
-defaults, comments, NOT-NULL constraints, and an empty index projection pass only
-in the checksum-pinned development identity lane; baseline startup rejects those
+defaults, comments, NOT-NULL constraints, and an empty index projection pass with
+the supported pinned identity artifact; signed-only baseline startup rejects those
 surfaces. This is not yet full QGIS/OGR discovery evidence against QuackGIS.
 
 When `QUACKGIS_METRICS_PORT` is configured, the same loopback HTTP listener serves
