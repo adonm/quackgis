@@ -26,8 +26,8 @@ use pgwire::api::cancel::CancelHandler;
 use pgwire::api::copy::CopyHandler;
 use pgwire::api::portal::{Format, Portal, PortalExecutionState};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler, send_partial_query_response};
-use pgwire::api::results::{CopyResponse, FieldInfo, QueryResponse, Response, Tag};
-use pgwire::api::stmt::QueryParser;
+use pgwire::api::results::{CopyResponse, FieldFormat, FieldInfo, QueryResponse, Response, Tag};
+use pgwire::api::stmt::{QueryParser, StoredStatement};
 use pgwire::api::store::PortalStore;
 use pgwire::api::{
     ClientInfo, ClientPortalStore, ConnectionManager, DEFAULT_NAME, ErrorHandler,
@@ -41,12 +41,12 @@ use pgwire::messages::data::DataRow;
 use pgwire::messages::extendedquery::Execute;
 use pgwire::messages::response::TransactionStatus;
 use sqlparser::ast::{
-    BinaryOperator, ContextModifier, CopySource, CopyTarget as AstCopyTarget, Expr, Function,
-    FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments, GroupByExpr, Ident,
-    JoinConstraint, JoinOperator, ObjectName, ObjectNamePart, Reset, SelectFlavor, SelectItem,
-    SelectItemQualifiedWildcardKind, Set, SetExpr, Statement, TableFactor, Value, VisitMut,
-    VisitorMut, WildcardAdditionalOptions, visit_expressions, visit_expressions_mut,
-    visit_relations_mut,
+    BinaryOperator, CloseCursor, ContextModifier, CopySource, CopyTarget as AstCopyTarget,
+    DeclareType, Expr, FetchDirection, Function, FunctionArg, FunctionArgExpr,
+    FunctionArgumentList, FunctionArguments, GroupByExpr, Ident, JoinConstraint, JoinOperator,
+    ObjectName, ObjectNamePart, Reset, SelectFlavor, SelectItem, SelectItemQualifiedWildcardKind,
+    Set, SetExpr, Statement, TableFactor, Value, VisitMut, VisitorMut, WildcardAdditionalOptions,
+    visit_expressions, visit_expressions_mut, visit_relations_mut,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
@@ -70,6 +70,9 @@ use crate::role::{
     REQUEST_JWT_CLAIMS, RoleCatalog, RolePrivilege, RoleSessionError, RoleSessionErrorKind,
     RoleSessionState, SchemaPrivilege, SessionIdentity, TablePrivilege,
 };
+
+const MAX_SQL_CURSORS_PER_SESSION: usize = 16;
+const MAX_SQL_CURSOR_FETCH_ROWS: usize = 4096;
 
 pub async fn serve_duckdb(
     storage: Arc<DuckDbAdbcStorage>,
@@ -235,6 +238,7 @@ impl PgWireServerHandlers for DuckDbHandlerFactory {
 struct DuckDbStatement {
     sql: String,
     copy_target: Option<CopyTarget>,
+    sql_cursor_command: Option<SqlCursorCommand>,
     kind: StatementKind,
     parameter_schema: SchemaRef,
     result_schema: SchemaRef,
@@ -278,22 +282,51 @@ impl QueryParser for DuckDbParser {
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
-        if client.transaction_status() == TransactionStatus::Error {
-            return Err(failed_transaction_error());
-        }
         let role_session = client_role_session(client, &self.auth)?;
         let identity = role_session.identity().map_err(role_session_error)?;
         if let Some(copy_target) = parse_copy_target(sql)? {
+            if client.transaction_status() == TransactionStatus::Error {
+                return Err(failed_transaction_error());
+            }
             authorize_copy(client, &self.auth, &copy_target)?;
             let empty = Arc::new(Schema::empty());
             return Ok(DuckDbStatement {
                 sql: sql.trim().to_owned(),
                 copy_target: Some(copy_target),
+                sql_cursor_command: None,
                 kind: StatementKind::Copy,
                 parameter_schema: Arc::clone(&empty),
                 result_schema: empty,
                 parameter_types: Vec::new(),
                 result_origins: Vec::new(),
+                catalog_epoch: None,
+                role_command: None,
+                request_command: None,
+                session_epoch: identity.epoch,
+            });
+        }
+        if let Some(command) = parse_sql_cursor_command(sql)? {
+            if client.transaction_status() == TransactionStatus::Error {
+                return Err(failed_transaction_error());
+            }
+            let (result_schema, result_origins) = match &command {
+                SqlCursorCommand::Fetch { name, .. } => {
+                    let metadata = sql_cursor_metadata(client, name)?;
+                    (metadata.result_schema, metadata.result_origins)
+                }
+                SqlCursorCommand::Declare { .. } | SqlCursorCommand::Close { .. } => {
+                    (Arc::new(Schema::empty()), Vec::new())
+                }
+            };
+            return Ok(DuckDbStatement {
+                sql: normalize_sql(sql)?,
+                copy_target: None,
+                sql_cursor_command: Some(command),
+                kind: StatementKind::SqlCursor,
+                parameter_schema: Arc::new(Schema::empty()),
+                result_schema,
+                parameter_types: Vec::new(),
+                result_origins,
                 catalog_epoch: None,
                 role_command: None,
                 request_command: None,
@@ -307,6 +340,14 @@ impl QueryParser for DuckDbParser {
             Some(&identity),
             self.auth.role_catalog().map(Arc::as_ref),
         )?;
+        if client.transaction_status() == TransactionStatus::Error
+            && !matches!(
+                validated.kind,
+                StatementKind::Commit | StatementKind::Rollback
+            )
+        {
+            return Err(failed_transaction_error());
+        }
         let oid_parameters = catalog_oid_parameter_indexes(&validated.ast);
         authorize_statement(client, &self.auth, &validated.ast)?;
         if validated.kind == StatementKind::RequestContext {
@@ -335,6 +376,7 @@ impl QueryParser for DuckDbParser {
             return Ok(DuckDbStatement {
                 sql: validated.sql,
                 copy_target: None,
+                sql_cursor_command: None,
                 kind: validated.kind,
                 parameter_schema,
                 result_schema,
@@ -348,12 +390,17 @@ impl QueryParser for DuckDbParser {
         }
         if matches!(
             validated.kind,
-            StatementKind::SessionSet | StatementKind::Role
+            StatementKind::Begin
+                | StatementKind::Commit
+                | StatementKind::Rollback
+                | StatementKind::SessionSet
+                | StatementKind::Role
         ) {
             let empty = Arc::new(Schema::empty());
             return Ok(DuckDbStatement {
                 sql: validated.sql,
                 copy_target: None,
+                sql_cursor_command: None,
                 kind: validated.kind,
                 parameter_schema: Arc::clone(&empty),
                 result_schema: empty,
@@ -452,6 +499,7 @@ impl QueryParser for DuckDbParser {
         Ok(DuckDbStatement {
             sql: validated.sql,
             copy_target: None,
+            sql_cursor_command: None,
             kind: validated.kind,
             parameter_schema,
             result_schema,
@@ -544,6 +592,14 @@ impl SimpleQueryHandler for DuckDbService {
     {
         let role_session = client_role_session(client, &self.auth)?;
         let identity = role_session.identity().map_err(role_session_error)?;
+        if let Some(command) = parse_sql_cursor_command(query)? {
+            if client.transaction_status() == TransactionStatus::Error {
+                return Err(failed_transaction_error());
+            }
+            return handle_sql_cursor(self, client, command, &Format::UnifiedText)
+                .await
+                .map(|response| vec![response]);
+        }
         let (sql, kind, ast) = validate_simple_sql_with_catalog_identity(
             query,
             self.storage.catalog_identity_enabled(),
@@ -696,6 +752,7 @@ impl SimpleQueryHandler for DuckDbService {
                     .acquire(OperationClass::Writer)
                     .await
                     .map_err(admission_error)?;
+                close_all_sql_cursors(client).await?;
                 client.portal_store().clear_portals();
                 if failed_transaction {
                     self.control
@@ -724,6 +781,7 @@ impl SimpleQueryHandler for DuckDbService {
                     .acquire(OperationClass::Writer)
                     .await
                     .map_err(admission_error)?;
+                close_all_sql_cursors(client).await?;
                 client.portal_store().clear_portals();
                 self.control
                     .blocking_workers
@@ -930,6 +988,13 @@ impl ExtendedQueryHandler for DuckDbService {
             .await?;
             return begin_copy(client, storage, target.clone(), &self.control).await;
         }
+        if let Some(command) = &statement.sql_cursor_command {
+            if portal.parameter_len() != 0 {
+                return Err(user_error("08P01", "unexpected cursor parameters"));
+            }
+            return handle_sql_cursor(self, client, command.clone(), &portal.result_column_format)
+                .await;
+        }
         let parameters = parameter_batch(portal, statement)?;
         let storage = client_session(
             client,
@@ -1056,14 +1121,75 @@ impl ExtendedQueryHandler for DuckDbService {
                     &portal.result_column_format,
                 )?))
             }
-            StatementKind::Copy
-            | StatementKind::Begin
-            | StatementKind::Commit
-            | StatementKind::Rollback
-            | StatementKind::Maintenance => Err(user_error(
-                "0A000",
-                "extended protocol does not support this DuckDB statement shape",
-            )),
+            StatementKind::Begin => {
+                let _permit = self
+                    .control
+                    .admission
+                    .acquire(OperationClass::Writer)
+                    .await
+                    .map_err(admission_error)?;
+                self.control
+                    .blocking_workers
+                    .run_regular(move || storage.begin_transaction())
+                    .await
+                    .map_err(blocking_worker_error)?
+                    .map_err(anyhow_error)?;
+                Ok(Response::TransactionStart(Tag::new("BEGIN")))
+            }
+            StatementKind::Commit => {
+                let failed_transaction = client.transaction_status() == TransactionStatus::Error;
+                let _permit = self
+                    .control
+                    .admission
+                    .acquire(OperationClass::Writer)
+                    .await
+                    .map_err(admission_error)?;
+                close_all_sql_cursors(client).await?;
+                client.portal_store().clear_portals();
+                if failed_transaction {
+                    self.control
+                        .blocking_workers
+                        .run_regular(move || storage.rollback_transaction())
+                        .await
+                        .map_err(blocking_worker_error)?
+                        .map_err(anyhow_error)?;
+                    role_session.end_transaction().map_err(role_session_error)?;
+                    Ok(Response::TransactionEnd(Tag::new("ROLLBACK")))
+                } else {
+                    self.control
+                        .blocking_workers
+                        .run_regular(move || storage.commit_transaction())
+                        .await
+                        .map_err(blocking_worker_error)?
+                        .map_err(fatal_anyhow_error)?;
+                    role_session.end_transaction().map_err(role_session_error)?;
+                    Ok(Response::TransactionEnd(Tag::new("COMMIT")))
+                }
+            }
+            StatementKind::Rollback => {
+                let _permit = self
+                    .control
+                    .admission
+                    .acquire(OperationClass::Writer)
+                    .await
+                    .map_err(admission_error)?;
+                close_all_sql_cursors(client).await?;
+                client.portal_store().clear_portals();
+                self.control
+                    .blocking_workers
+                    .run_regular(move || storage.rollback_transaction())
+                    .await
+                    .map_err(blocking_worker_error)?
+                    .map_err(anyhow_error)?;
+                role_session.end_transaction().map_err(role_session_error)?;
+                Ok(Response::TransactionEnd(Tag::new("ROLLBACK")))
+            }
+            StatementKind::Copy | StatementKind::SqlCursor | StatementKind::Maintenance => {
+                Err(user_error(
+                    "0A000",
+                    "extended protocol does not support this DuckDB statement shape",
+                ))
+            }
         }
     }
 }
@@ -1080,6 +1206,7 @@ enum StatementKind {
     RequestContext,
     Maintenance,
     Copy,
+    SqlCursor,
 }
 
 impl StatementKind {
@@ -1088,9 +1215,12 @@ impl StatementKind {
             Self::Read | Self::SessionSet | Self::Role | Self::RequestContext => {
                 OperationClass::Reader
             }
-            Self::Write(_) | Self::Begin | Self::Commit | Self::Rollback | Self::Copy => {
-                OperationClass::Writer
-            }
+            Self::Write(_)
+            | Self::Begin
+            | Self::Commit
+            | Self::Rollback
+            | Self::Copy
+            | Self::SqlCursor => OperationClass::Writer,
             Self::Maintenance => OperationClass::Maintenance,
         }
     }
@@ -1201,6 +1331,9 @@ fn validate_simple_sql_with_catalog_identity(
                 .ok_or_else(|| user_error("XX000", "validated maintenance call has no command"))?,
         ),
         StatementKind::Copy => unreachable!("COPY is classified before structural parsing"),
+        StatementKind::SqlCursor => {
+            unreachable!("SQL cursors are classified before structural parsing")
+        }
     };
     Ok((validated.sql, kind, Some(validated.ast)))
 }
@@ -1217,6 +1350,419 @@ enum SimpleStatementKind {
     RequestContext(RequestContextCommand),
     Maintenance(MaintenanceCommand),
     Copy(CopyTarget),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SqlCursorCommand {
+    Declare { name: String, query: String },
+    Fetch { name: String, rows: usize },
+    Close { name: Option<String> },
+}
+
+#[derive(Default)]
+struct SqlCursorSessionState {
+    cursors: Mutex<HashMap<String, SqlCursorMetadata>>,
+}
+
+#[derive(Clone)]
+struct SqlCursorMetadata {
+    result_schema: SchemaRef,
+    result_origins: Vec<Option<CatalogColumnOrigin>>,
+    result_formats: Option<Vec<FieldFormat>>,
+    portal: Arc<Portal<DuckDbStatement>>,
+}
+
+fn parse_sql_cursor_command(sql: &str) -> PgWireResult<Option<SqlCursorCommand>> {
+    let normalized = normalize_sql(sql)?;
+    let mut statements = Parser::parse_sql(&PostgreSqlDialect {}, &normalized)
+        .map_err(|error| user_error("42601", &error.to_string()))?;
+    if statements.len() != 1 {
+        return Ok(None);
+    }
+    let statement = statements.pop().expect("one parsed statement");
+    match statement {
+        Statement::Declare { stmts } => {
+            let [declaration] = stmts.as_slice() else {
+                return Err(user_error(
+                    "0A000",
+                    "QuackGIS supports one cursor per DECLARE statement",
+                ));
+            };
+            let [name] = declaration.names.as_slice() else {
+                return Err(user_error(
+                    "0A000",
+                    "QuackGIS cursor declaration requires one name",
+                ));
+            };
+            if declaration.data_type.is_some()
+                || declaration.assignment.is_some()
+                || declaration.declare_type != Some(DeclareType::Cursor)
+                || declaration.binary == Some(true)
+                || declaration.sensitive.is_some()
+                || declaration.scroll == Some(true)
+                || declaration.hold == Some(true)
+            {
+                return Err(user_error(
+                    "0A000",
+                    "unsupported PostgreSQL cursor declaration options",
+                ));
+            }
+            let query = declaration.for_query.as_ref().ok_or_else(|| {
+                user_error("42601", "cursor declaration requires one SELECT query")
+            })?;
+            Ok(Some(SqlCursorCommand::Declare {
+                name: sql_cursor_name(name)?,
+                query: query.to_string(),
+            }))
+        }
+        Statement::Fetch {
+            name,
+            direction,
+            into,
+            ..
+        } => {
+            if into.is_some() {
+                return Err(user_error("0A000", "FETCH INTO is not supported"));
+            }
+            Ok(Some(SqlCursorCommand::Fetch {
+                name: sql_cursor_name(&name)?,
+                rows: sql_cursor_fetch_rows(&direction)?,
+            }))
+        }
+        Statement::Close { cursor } => Ok(Some(SqlCursorCommand::Close {
+            name: match cursor {
+                CloseCursor::All => None,
+                CloseCursor::Specific { name } => Some(sql_cursor_name(&name)?),
+            },
+        })),
+        _ => Ok(None),
+    }
+}
+
+fn sql_cursor_name(name: &Ident) -> PgWireResult<String> {
+    let name = identifier_key(name);
+    if name.is_empty() || name.len() > 63 || name.chars().any(char::is_control) {
+        return Err(user_error(
+            "42601",
+            "cursor name is empty or exceeds 63 bytes",
+        ));
+    }
+    Ok(name)
+}
+
+fn sql_cursor_fetch_rows(direction: &FetchDirection) -> PgWireResult<usize> {
+    let value = match direction {
+        FetchDirection::Next | FetchDirection::Forward { limit: None } => 1,
+        FetchDirection::Count { limit } | FetchDirection::Forward { limit: Some(limit) } => {
+            match &limit.value {
+                Value::Number(value, false) => value.parse::<usize>().ok(),
+                _ => None,
+            }
+            .ok_or_else(|| user_error("22023", "FETCH count must be a non-negative integer"))?
+        }
+        _ => {
+            return Err(user_error(
+                "0A000",
+                "only bounded forward FETCH directions are supported",
+            ));
+        }
+    };
+    if value > MAX_SQL_CURSOR_FETCH_ROWS {
+        return Err(user_error(
+            "54000",
+            &format!("FETCH count exceeds the {MAX_SQL_CURSOR_FETCH_ROWS}-row limit"),
+        ));
+    }
+    Ok(value)
+}
+
+async fn handle_sql_cursor<C>(
+    service: &DuckDbService,
+    client: &mut C,
+    command: SqlCursorCommand,
+    result_format: &Format,
+) -> PgWireResult<Response>
+where
+    C: ClientInfo + ClientPortalStore + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+    C::PortalStore: PortalStore,
+    C::Error: Debug,
+    PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+{
+    let storage = client_session(
+        client,
+        Arc::clone(&service.storage),
+        Arc::clone(&service.control.blocking_workers),
+    )
+    .await?;
+    if storage.transaction_state() != EngineTransactionState::Active {
+        return Err(user_error(
+            "25001",
+            "PostgreSQL cursors require an explicit transaction",
+        ));
+    }
+    let state = client
+        .session_extensions()
+        .get_or_insert_with(SqlCursorSessionState::default);
+    match command {
+        SqlCursorCommand::Declare { name, query } => {
+            {
+                let cursors = state
+                    .cursors
+                    .lock()
+                    .map_err(|_| user_error("XX000", "PostgreSQL cursor state is poisoned"))?;
+                if cursors.contains_key(&name) {
+                    return Err(user_error(
+                        "42P03",
+                        &format!("cursor {name:?} already exists"),
+                    ));
+                }
+                if cursors.len() >= MAX_SQL_CURSORS_PER_SESSION {
+                    return Err(user_error(
+                        "54000",
+                        &format!("session exceeds the {MAX_SQL_CURSORS_PER_SESSION}-cursor limit"),
+                    ));
+                }
+            }
+            let statement = service.parser.parse_sql(client, &query, &[]).await?;
+            if statement.kind != StatementKind::Read || !statement.parameter_types.is_empty() {
+                return Err(user_error(
+                    "0A000",
+                    "DECLARE CURSOR supports parameter-free SELECT queries only",
+                ));
+            }
+            let result_schema = Arc::clone(&statement.result_schema);
+            let result_origins = statement.result_origins.clone();
+            let stored = Arc::new(StoredStatement::new(name.clone(), statement, Vec::new()));
+            let portal = Arc::new(Portal::new_cursor(name.clone(), stored));
+            state
+                .cursors
+                .lock()
+                .map_err(|_| user_error("XX000", "PostgreSQL cursor state is poisoned"))?
+                .insert(
+                    name,
+                    SqlCursorMetadata {
+                        result_schema,
+                        result_origins,
+                        result_formats: None,
+                        portal,
+                    },
+                );
+            Ok(Response::Execution(Tag::new("DECLARE CURSOR")))
+        }
+        SqlCursorCommand::Fetch { name, rows } => {
+            let metadata = sql_cursor_metadata(client, &name)?;
+            if rows == 0 {
+                return empty_sql_cursor_response(&metadata, result_format).map(Response::Query);
+            }
+            let requested_formats =
+                sql_cursor_result_formats(result_format, metadata.result_schema.fields().len())?;
+            if metadata
+                .result_formats
+                .as_ref()
+                .is_some_and(|formats| formats != &requested_formats)
+            {
+                return Err(user_error(
+                    "0A000",
+                    "PostgreSQL cursor result format cannot change between FETCH statements",
+                ));
+            }
+            let portal = Arc::clone(&metadata.portal);
+            if matches!(
+                &*portal.state().lock().await,
+                PortalExecutionState::Finished
+            ) {
+                return empty_sql_cursor_response(&metadata, result_format).map(Response::Query);
+            }
+            if matches!(&*portal.state().lock().await, PortalExecutionState::Initial) {
+                let response = execute_sql_cursor_query(
+                    service,
+                    client,
+                    &portal.statement.statement,
+                    result_format,
+                )
+                .await?;
+                portal.start(response).await;
+                let mut cursors = state
+                    .cursors
+                    .lock()
+                    .map_err(|_| user_error("XX000", "PostgreSQL cursor state is poisoned"))?;
+                let metadata = cursors.get_mut(&name).ok_or_else(|| {
+                    user_error("34000", &format!("cursor {name:?} does not exist"))
+                })?;
+                metadata.result_formats = Some(requested_formats);
+            }
+            let fetched = portal.fetch(rows).await?;
+            let mut response = fetched.response;
+            response.set_command_tag("FETCH");
+            Ok(Response::Query(response))
+        }
+        SqlCursorCommand::Close { name } => {
+            if let Some(name) = name {
+                close_sql_cursor(client, &name).await?;
+            } else {
+                close_all_sql_cursors(client).await?;
+            }
+            Ok(Response::Execution(Tag::new("CLOSE CURSOR")))
+        }
+    }
+}
+
+async fn execute_sql_cursor_query<C>(
+    service: &DuckDbService,
+    client: &C,
+    statement: &DuckDbStatement,
+    result_format: &Format,
+) -> PgWireResult<QueryResponse>
+where
+    C: ClientInfo + Unpin + Send + Sync,
+{
+    let role_session = client_role_session(client, &service.auth)?;
+    if role_session.identity().map_err(role_session_error)?.epoch != statement.session_epoch {
+        return Err(user_error(
+            "0A000",
+            "cached PostgreSQL cursor was invalidated by a role or request-context change",
+        ));
+    }
+    let storage = client_session(
+        client,
+        Arc::clone(&service.storage),
+        Arc::clone(&service.control.blocking_workers),
+    )
+    .await?;
+    let sql = statement.sql.clone();
+    let catalog_epoch = statement.catalog_epoch;
+    let permit = service
+        .control
+        .admission
+        .acquire(OperationClass::Reader)
+        .await
+        .map_err(admission_error)?;
+    let mut result = service
+        .control
+        .blocking_workers
+        .run_regular(move || storage.query_bound_stream_at_catalog_epoch(&sql, None, catalog_epoch))
+        .await
+        .map_err(blocking_worker_error)?
+        .map_err(engine_error)?
+        .with_guard(Box::new(permit));
+    if !result_schema_compatible(statement.result_schema.as_ref(), result.schema.as_ref()) {
+        return Err(user_error(
+            "0A000",
+            "cached PostgreSQL cursor result type changed",
+        ));
+    }
+    if let Some(cancellation) = result.cancellation() {
+        let (pid, secret) = client.pid_and_secret_key();
+        let deadline_cancellation = Arc::clone(&cancellation);
+        let guard =
+            service
+                .control
+                .active_queries
+                .register(pid, secret.to_bytes().to_vec(), cancellation);
+        result = result.with_guard(Box::new(guard));
+        result = result.with_guard(Box::new(OperationDeadline::start(
+            service.control.statement_timeout,
+            deadline_cancellation,
+            Arc::clone(&service.control.blocking_workers),
+        )));
+    }
+    query_response(
+        result,
+        result_format,
+        service.control.result_batch_bytes,
+        Arc::clone(&service.control.blocking_workers),
+        Some(statement.result_schema.as_ref()),
+        &statement.result_origins,
+    )
+}
+
+async fn close_sql_cursor<C>(client: &C, name: &str) -> PgWireResult<()>
+where
+    C: ClientInfo + ?Sized,
+{
+    let metadata = sql_cursor_metadata(client, name)?;
+    let portal = metadata.portal;
+    loop {
+        let portal_state = portal.state();
+        if matches!(
+            &*portal_state.lock().await,
+            PortalExecutionState::Initial | PortalExecutionState::Finished
+        ) {
+            break;
+        }
+        if !portal.fetch(MAX_SQL_CURSOR_FETCH_ROWS).await?.suspended {
+            break;
+        }
+    }
+    client
+        .session_extensions()
+        .get::<SqlCursorSessionState>()
+        .ok_or_else(|| user_error("34000", &format!("cursor {name:?} does not exist")))?
+        .cursors
+        .lock()
+        .map_err(|_| user_error("XX000", "PostgreSQL cursor state is poisoned"))?
+        .remove(name);
+    Ok(())
+}
+
+async fn close_all_sql_cursors<C>(client: &C) -> PgWireResult<()>
+where
+    C: ClientInfo + ?Sized,
+{
+    let Some(state) = client.session_extensions().get::<SqlCursorSessionState>() else {
+        return Ok(());
+    };
+    let names = state
+        .cursors
+        .lock()
+        .map_err(|_| user_error("XX000", "PostgreSQL cursor state is poisoned"))?
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    for name in names {
+        close_sql_cursor(client, &name).await?;
+    }
+    Ok(())
+}
+
+fn empty_sql_cursor_response(
+    metadata: &SqlCursorMetadata,
+    result_format: &Format,
+) -> PgWireResult<QueryResponse> {
+    let fields = Arc::new(result_fields_with_origins(
+        metadata.result_schema.as_ref(),
+        result_format,
+        &metadata.result_origins,
+    )?);
+    let mut response = QueryResponse::new(fields, futures::stream::empty());
+    response.set_command_tag("FETCH");
+    Ok(response)
+}
+
+fn sql_cursor_metadata<C>(client: &C, name: &str) -> PgWireResult<SqlCursorMetadata>
+where
+    C: ClientInfo + ?Sized,
+{
+    client
+        .session_extensions()
+        .get::<SqlCursorSessionState>()
+        .and_then(|state| state.cursors.lock().ok()?.get(name).cloned())
+        .ok_or_else(|| user_error("34000", &format!("cursor {name:?} does not exist")))
+}
+
+fn sql_cursor_result_formats(format: &Format, fields: usize) -> PgWireResult<Vec<FieldFormat>> {
+    match format {
+        Format::UnifiedText => Ok(vec![FieldFormat::Text; fields]),
+        Format::UnifiedBinary => Ok(vec![FieldFormat::Binary; fields]),
+        Format::Individual(formats) if formats.len() == fields => Ok(formats
+            .iter()
+            .map(|format| FieldFormat::from(*format))
+            .collect()),
+        Format::Individual(_) => Err(user_error(
+            "08P01",
+            "cursor result format count does not match its columns",
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -1348,13 +1894,30 @@ fn validate_statement_with_catalog_identity(
         Statement::Insert(_) => StatementKind::Write("INSERT"),
         Statement::Update { .. } => StatementKind::Write("UPDATE"),
         Statement::Delete(_) => StatementKind::Write("DELETE"),
-        Statement::StartTransaction { .. } if matches!(mode, ProtocolMode::Simple) => {
+        Statement::StartTransaction {
+            modes,
+            modifier,
+            statements,
+            exception,
+            has_end_keyword,
+            ..
+        } if modes.is_empty()
+            && modifier.is_none()
+            && statements.is_empty()
+            && exception.is_none()
+            && !has_end_keyword =>
+        {
             StatementKind::Begin
         }
-        Statement::Commit { .. } if matches!(mode, ProtocolMode::Simple) => StatementKind::Commit,
-        Statement::Rollback { .. } if matches!(mode, ProtocolMode::Simple) => {
-            StatementKind::Rollback
-        }
+        Statement::Commit {
+            chain: false,
+            end: false,
+            modifier: None,
+        } => StatementKind::Commit,
+        Statement::Rollback {
+            chain: false,
+            savepoint: None,
+        } => StatementKind::Rollback,
         Statement::Set(set) if supported_session_set(set) => StatementKind::SessionSet,
         Statement::Set(_) | Statement::Reset(_) if role_command.is_some() => StatementKind::Role,
         Statement::ShowVariable { variable } if supported_show_variable(variable).is_some() => {
@@ -5962,7 +6525,52 @@ mod tests {
     fn structural_classifier_rejects_multiple_and_unapproved_statements() {
         assert!(validate_statement("SELECT 1; SELECT 2", ProtocolMode::Simple).is_err());
         assert!(validate_statement("TRUNCATE quackgis.main.points", ProtocolMode::Simple).is_err());
-        assert!(validate_statement("BEGIN", ProtocolMode::Extended).is_err());
+        assert_eq!(
+            validate_statement("BEGIN", ProtocolMode::Extended)
+                .expect("extended transaction start")
+                .kind,
+            StatementKind::Begin
+        );
+        assert!(
+            validate_statement("BEGIN ISOLATION LEVEL SERIALIZABLE", ProtocolMode::Extended)
+                .is_err()
+        );
+        assert!(validate_statement("ROLLBACK TO SAVEPOINT nested", ProtocolMode::Simple).is_err());
+    }
+
+    #[test]
+    fn sql_cursors_are_forward_only_bounded_and_structural() {
+        assert_eq!(
+            parse_sql_cursor_command("DECLARE ogr_reader CURSOR FOR SELECT id FROM points")
+                .expect("cursor declaration"),
+            Some(SqlCursorCommand::Declare {
+                name: "ogr_reader".to_owned(),
+                query: "SELECT id FROM points".to_owned(),
+            })
+        );
+        assert_eq!(
+            parse_sql_cursor_command("FETCH 500 IN ogr_reader").expect("bounded fetch"),
+            Some(SqlCursorCommand::Fetch {
+                name: "ogr_reader".to_owned(),
+                rows: 500,
+            })
+        );
+        assert_eq!(
+            parse_sql_cursor_command("FETCH 0 IN ogr_reader").expect("metadata-only fetch"),
+            Some(SqlCursorCommand::Fetch {
+                name: "ogr_reader".to_owned(),
+                rows: 0,
+            })
+        );
+        assert_eq!(
+            parse_sql_cursor_command("CLOSE ogr_reader").expect("cursor close"),
+            Some(SqlCursorCommand::Close {
+                name: Some("ogr_reader".to_owned()),
+            })
+        );
+        assert!(parse_sql_cursor_command("FETCH ALL IN ogr_reader").is_err());
+        assert!(parse_sql_cursor_command("FETCH 4097 IN ogr_reader").is_err());
+        assert!(parse_sql_cursor_command("DECLARE ogr_reader BINARY CURSOR FOR SELECT 1").is_err());
     }
 
     #[test]

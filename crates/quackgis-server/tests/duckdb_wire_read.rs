@@ -1757,6 +1757,121 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
         .await
         .expect("commit paging transaction");
 
+    let cursor_outside_transaction = client
+        .simple_query("DECLARE outside_cursor CURSOR FOR SELECT 1")
+        .await
+        .expect_err("SQL cursor outside transaction");
+    assert_eq!(
+        cursor_outside_transaction.code(),
+        Some(&tokio_postgres::error::SqlState::ACTIVE_SQL_TRANSACTION)
+    );
+    client
+        .batch_execute("BEGIN")
+        .await
+        .expect("begin SQL cursor transaction");
+    client
+        .simple_query(
+            "DECLARE ogr_reader CURSOR FOR \
+             SELECT id FROM quackgis.main.wire_points ORDER BY id",
+        )
+        .await
+        .expect("declare SQL cursor");
+    let first_cursor_page = client
+        .simple_query("FETCH 2 IN ogr_reader")
+        .await
+        .expect("first SQL cursor page")
+        .into_iter()
+        .filter_map(|message| match message {
+            tokio_postgres::SimpleQueryMessage::Row(row) => Some(
+                row.get(0)
+                    .expect("SQL cursor text value")
+                    .parse::<i32>()
+                    .expect("SQL cursor integer"),
+            ),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let second_cursor_page = client
+        .simple_query("FETCH 2 IN ogr_reader")
+        .await
+        .expect("second SQL cursor page")
+        .into_iter()
+        .filter_map(|message| match message {
+            tokio_postgres::SimpleQueryMessage::Row(row) => Some(
+                row.get(0)
+                    .expect("SQL cursor text value")
+                    .parse::<i32>()
+                    .expect("SQL cursor integer"),
+            ),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(first_cursor_page, vec![1, 2]);
+    assert_eq!(second_cursor_page, vec![3]);
+    assert!(
+        client
+            .simple_query("FETCH 2 IN ogr_reader")
+            .await
+            .expect("SQL cursor EOF")
+            .into_iter()
+            .all(|message| !matches!(message, tokio_postgres::SimpleQueryMessage::Row(_)))
+    );
+    client
+        .simple_query("CLOSE ogr_reader")
+        .await
+        .expect("close SQL cursor");
+    client
+        .batch_execute("COMMIT")
+        .await
+        .expect("commit SQL cursor transaction");
+
+    client
+        .execute("BEGIN", &[])
+        .await
+        .expect("begin extended SQL cursor transaction");
+    client
+        .execute(
+            "DECLARE extended_ogr_reader CURSOR FOR \
+             SELECT id FROM quackgis.main.wire_points ORDER BY id",
+            &[],
+        )
+        .await
+        .expect("declare extended SQL cursor");
+    let extended_cursor_metadata = client
+        .prepare("FETCH 0 IN extended_ogr_reader")
+        .await
+        .expect("prepare metadata-only extended SQL cursor fetch");
+    assert_eq!(
+        extended_cursor_metadata.columns()[0].type_(),
+        &tokio_postgres::types::Type::INT4
+    );
+    assert!(
+        client
+            .query(&extended_cursor_metadata, &[])
+            .await
+            .expect("metadata-only extended SQL cursor fetch")
+            .is_empty()
+    );
+    let extended_cursor_page = client
+        .query("FETCH 2 IN extended_ogr_reader", &[])
+        .await
+        .expect("fetch extended SQL cursor page");
+    assert_eq!(
+        extended_cursor_page
+            .iter()
+            .map(|row| row.get::<_, i32>(0))
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    client
+        .execute("CLOSE extended_ogr_reader", &[])
+        .await
+        .expect("close extended SQL cursor");
+    client
+        .execute("ROLLBACK", &[])
+        .await
+        .expect("rollback extended SQL cursor transaction");
+
     client
         .batch_execute("CREATE TABLE quackgis.main.wire_mutations(id INTEGER, name VARCHAR)")
         .await
