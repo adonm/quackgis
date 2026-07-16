@@ -2,19 +2,26 @@
 //! Executable I0 bootstrap, worker, and tiny-client transport path.
 
 use std::collections::{HashSet, VecDeque};
+use std::fs::File;
 use std::future::Future;
+use std::io::{BufReader, Error as IoError, ErrorKind};
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr, EndpointId, PublicKey, SecretKey, endpoint::presets};
+use rustls_pemfile::{certs, private_key};
+use rustls_pki_types::CertificateDer;
 use serde::{Serialize, de::DeserializeOwned};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
+use tokio_rustls::TlsAcceptor;
+use tokio_rustls::rustls::{RootCertStore, ServerConfig, server::WebPkiClientVerifier};
 
 use crate::{
     AccessLeaseClaims, ApplicationProtocol, CONTROL_ALPN, CompressionCodec, CompressionPolicy,
@@ -30,16 +37,41 @@ const POSTGRESQL_PROTOCOL_3: u32 = 196_608;
 const CANCEL_REQUEST_CODE: u32 = 80_877_102;
 const SSL_REQUEST_CODE: u32 = 80_877_103;
 const GSSENC_REQUEST_CODE: u32 = 80_877_104;
+const LOCAL_NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(10);
+const SERVICE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub async fn bind_endpoint(
     secret_key: SecretKey,
     alpns: Vec<Vec<u8>>,
     relay_policy: &RelayPolicy,
 ) -> Result<Endpoint> {
-    Endpoint::builder(presets::N0)
+    bind_endpoint_at(secret_key, alpns, relay_policy, None).await
+}
+
+pub async fn bind_endpoint_at(
+    secret_key: SecretKey,
+    alpns: Vec<Vec<u8>>,
+    relay_policy: &RelayPolicy,
+    bind: Option<SocketAddr>,
+) -> Result<Endpoint> {
+    let builder = Endpoint::builder(presets::N0)
         .secret_key(secret_key)
         .alpns(alpns)
-        .relay_mode(relay_policy.iroh_mode())
+        .relay_mode(relay_policy.iroh_mode());
+    let builder = if *relay_policy == RelayPolicy::Disabled {
+        builder.clear_address_lookup()
+    } else {
+        builder
+    };
+    let builder = if let Some(bind) = bind {
+        builder
+            .clear_ip_transports()
+            .bind_addr(bind)
+            .map_err(|error| anyhow!("invalid iroh bind address: {error}"))?
+    } else {
+        builder
+    };
+    builder
         .bind()
         .await
         .map_err(|error| anyhow!("cannot bind iroh endpoint: {error}"))
@@ -652,6 +684,57 @@ pub async fn serve_local_client(
     listener: TcpListener,
     connector: ClientConnector,
     max_connections: usize,
+    shutdown: watch::Receiver<bool>,
+) -> Result<()> {
+    serve_local_client_with_tls(listener, connector, None, max_connections, shutdown).await
+}
+
+#[derive(Clone)]
+pub struct LocalClientTls(TlsAcceptor);
+
+impl LocalClientTls {
+    pub fn load(
+        certificate_path: &Path,
+        private_key_path: &Path,
+        client_ca_path: &Path,
+    ) -> Result<Self> {
+        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+        let certificates = certs(&mut BufReader::new(File::open(certificate_path)?))
+            .collect::<Result<Vec<CertificateDer<'static>>, IoError>>()?;
+        if certificates.is_empty() {
+            bail!("local TLS certificate file is empty");
+        }
+        let key =
+            private_key(&mut BufReader::new(File::open(private_key_path)?))?.ok_or_else(|| {
+                IoError::new(ErrorKind::InvalidInput, "local TLS private key is missing")
+            })?;
+        let client_roots = certs(&mut BufReader::new(File::open(client_ca_path)?))
+            .collect::<Result<Vec<CertificateDer<'static>>, IoError>>()?;
+        if client_roots.is_empty() {
+            bail!("local TLS client CA file is empty");
+        }
+        let mut roots = RootCertStore::empty();
+        for certificate in client_roots {
+            roots
+                .add(certificate)
+                .context("invalid local TLS client CA certificate")?;
+        }
+        let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
+            .build()
+            .context("invalid local TLS client verifier")?;
+        let config = ServerConfig::builder()
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(certificates, key)
+            .context("invalid local TLS certificate or private key")?;
+        Ok(Self(TlsAcceptor::from(Arc::new(config))))
+    }
+}
+
+pub async fn serve_local_client_with_tls(
+    listener: TcpListener,
+    connector: ClientConnector,
+    local_tls: Option<LocalClientTls>,
+    max_connections: usize,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let session = Arc::new(tokio::sync::Mutex::new(None::<EdgeSession>));
@@ -673,9 +756,10 @@ pub async fn serve_local_client(
                 };
                 let connector = connector.clone();
                 let session = Arc::clone(&session);
+                let local_tls = local_tls.clone();
                 tasks.spawn(async move {
                     let _permit = permit;
-                    if let Err(error) = forward_local_connection(socket, connector, session).await {
+                    if let Err(error) = forward_local_connection(socket, connector, session, local_tls).await {
                         log::warn!("local pgwire bridge connection failed: {error}");
                     }
                 });
@@ -694,8 +778,73 @@ async fn forward_local_connection(
     mut socket: TcpStream,
     connector: ClientConnector,
     session: Arc<tokio::sync::Mutex<Option<EdgeSession>>>,
+    local_tls: Option<LocalClientTls>,
 ) -> Result<()> {
-    let mut initial = read_pgwire_packet(&mut socket).await?;
+    if let Some(local_tls) = local_tls {
+        let mut request = tokio::time::timeout(
+            LOCAL_NEGOTIATION_TIMEOUT,
+            read_encryption_request(&mut socket),
+        )
+        .await
+        .context("local pgwire encryption negotiation timed out")??;
+        if request == InitialPacketKind::GssEnc {
+            socket.write_all(b"N").await?;
+            request = tokio::time::timeout(
+                LOCAL_NEGOTIATION_TIMEOUT,
+                read_encryption_request(&mut socket),
+            )
+            .await
+            .context("local pgwire encryption negotiation timed out")??;
+        }
+        if request != InitialPacketKind::Ssl {
+            bail!("local pgwire bridge requires mutual TLS");
+        }
+        socket.write_all(b"S").await?;
+        let mut socket =
+            tokio::time::timeout(LOCAL_NEGOTIATION_TIMEOUT, local_tls.0.accept(socket))
+                .await
+                .context("local pgwire mutual TLS handshake timed out")?
+                .context("local pgwire mutual TLS handshake failed")?;
+        let initial =
+            tokio::time::timeout(LOCAL_NEGOTIATION_TIMEOUT, read_pgwire_packet(&mut socket))
+                .await
+                .context("local pgwire startup timed out")??;
+        if matches!(
+            classify_initial_packet(&initial)?,
+            InitialPacketKind::Ssl | InitialPacketKind::GssEnc
+        ) {
+            bail!("nested local encryption request is not permitted");
+        }
+        return forward_local_stream(socket, initial, connector, session).await;
+    }
+    let initial = tokio::time::timeout(LOCAL_NEGOTIATION_TIMEOUT, read_pgwire_packet(&mut socket))
+        .await
+        .context("local pgwire startup timed out")??;
+    forward_local_stream(socket, initial, connector, session).await
+}
+
+async fn read_encryption_request(socket: &mut TcpStream) -> Result<InitialPacketKind> {
+    let mut packet = [0_u8; 8];
+    socket
+        .read_exact(&mut packet)
+        .await
+        .context("cannot read local pgwire encryption request")?;
+    let kind = classify_initial_packet(&packet)?;
+    if !matches!(kind, InitialPacketKind::Ssl | InitialPacketKind::GssEnc) {
+        bail!("local pgwire bridge requires an encryption request");
+    }
+    Ok(kind)
+}
+
+async fn forward_local_stream<S>(
+    mut socket: S,
+    mut initial: Vec<u8>,
+    connector: ClientConnector,
+    session: Arc<tokio::sync::Mutex<Option<EdgeSession>>>,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let protocol = match classify_initial_packet(&initial)? {
         InitialPacketKind::Cancellation => ApplicationProtocol::Cancellation,
         _ => ApplicationProtocol::Pgwire,
@@ -755,7 +904,7 @@ async fn forward_local_connection(
             }
         }
     }
-    let (mut local_read, mut local_write) = socket.into_split();
+    let (mut local_read, mut local_write) = tokio::io::split(socket);
     let upstream_metrics = edge.metrics.clone();
     let upstream = async {
         copy_application(
@@ -926,19 +1075,43 @@ fn unix_seconds() -> Result<u64> {
         .map(|duration| duration.as_secs())
 }
 
-pub async fn run_until_signal<F>(endpoint: Endpoint, service: F) -> Result<()>
+pub async fn run_until_signal<F>(
+    endpoint: Endpoint,
+    shutdown: watch::Sender<bool>,
+    service: F,
+) -> Result<()>
 where
     F: Future<Output = Result<()>>,
 {
     tokio::pin!(service);
     tokio::select! {
         result = &mut service => result,
-        signal = tokio::signal::ctrl_c() => {
-            signal.context("cannot install shutdown signal handler")?;
+        signal = shutdown_signal() => {
+            signal?;
+            let _ = shutdown.send(true);
             endpoint.close().await;
-            service.await
+            tokio::time::timeout(SERVICE_SHUTDOWN_TIMEOUT, service)
+                .await
+                .context("edge service shutdown timed out")?
+        },
+    }
+}
+
+async fn shutdown_signal() -> Result<()> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .context("cannot install termination signal handler")?;
+        tokio::select! {
+            signal = tokio::signal::ctrl_c() => signal.context("cannot install interrupt signal handler"),
+            _ = terminate.recv() => Ok(()),
         }
     }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c()
+        .await
+        .context("cannot install interrupt signal handler")
 }
 
 #[cfg(test)]

@@ -7,7 +7,7 @@ use clap::Parser;
 use quackgis_edge::CONTROL_ALPN;
 use quackgis_edge::config::{BootstrapConfig, endpoint_document};
 use quackgis_edge::runtime::{
-    BootstrapAuthority, bind_endpoint, run_until_signal, serve_bootstrap,
+    BootstrapAuthority, bind_endpoint_at, run_until_signal, serve_bootstrap,
 };
 use tokio::sync::watch;
 
@@ -32,13 +32,22 @@ async fn main() -> Result<()> {
         config.assignment_generation,
         config.lease_ttl_seconds,
     )?;
-    let endpoint =
-        bind_endpoint(secret, vec![CONTROL_ALPN.to_vec()], &config.relay_policy()?).await?;
-    endpoint.online().await;
+    let relay_policy = config.relay_policy()?;
+    let endpoint = bind_endpoint_at(
+        secret,
+        vec![CONTROL_ALPN.to_vec()],
+        &relay_policy,
+        config.bind,
+    )
+    .await?;
+    if relay_policy != quackgis_edge::RelayPolicy::Disabled {
+        tokio::time::timeout(std::time::Duration::from_secs(30), endpoint.online()).await?;
+    }
     println!("{}", endpoint_document(endpoint.id(), &endpoint.addr())?);
-    let (_shutdown_guard, shutdown) = watch::channel(false);
+    let (shutdown_guard, shutdown) = watch::channel(false);
     run_until_signal(
         endpoint.clone(),
+        shutdown_guard,
         serve_bootstrap(endpoint, authority, config.max_connections, shutdown),
     )
     .await

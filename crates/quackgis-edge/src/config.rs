@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Bounded operator configuration for the I0 bootstrap, worker, and client.
 
-use std::net::SocketAddr;
+use std::collections::HashSet;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -14,6 +15,8 @@ use crate::{CompressionPolicy, MAX_LEASE_TTL_SECONDS, RelayPolicy};
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAX_KEY_BYTES: u64 = 256;
 const MAX_CONNECTIONS: usize = 4096;
+const MAX_DIRECT_ROUTES: usize = 16;
+const MAX_DIRECT_HOST_BYTES: usize = 512;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -25,6 +28,9 @@ pub struct BootstrapConfig {
     pub assignment_generation: u64,
     pub lease_ttl_seconds: u64,
     pub relays: Option<Vec<String>>,
+    #[serde(default)]
+    pub disable_relays: bool,
+    pub bind: Option<SocketAddr>,
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
 }
@@ -51,7 +57,7 @@ impl BootstrapConfig {
     }
 
     pub fn relay_policy(&self) -> Result<RelayPolicy> {
-        RelayPolicy::from_config(self.relays.clone()).map_err(Into::into)
+        relay_policy(self.disable_relays, self.relays.clone())
     }
 }
 
@@ -62,6 +68,9 @@ pub struct WorkerConfig {
     pub bootstrap_public_key: String,
     pub backend: SocketAddr,
     pub relays: Option<Vec<String>>,
+    #[serde(default)]
+    pub disable_relays: bool,
+    pub bind: Option<SocketAddr>,
     #[serde(default)]
     pub compression: CompressionPolicy,
     #[serde(default = "default_max_connections")]
@@ -92,7 +101,7 @@ impl WorkerConfig {
     }
 
     pub fn relay_policy(&self) -> Result<RelayPolicy> {
-        RelayPolicy::from_config(self.relays.clone()).map_err(Into::into)
+        relay_policy(self.disable_relays, self.relays.clone())
     }
 }
 
@@ -103,7 +112,11 @@ pub struct ClientConfig {
     pub transport_secret_key_path: PathBuf,
     pub bootstrap: EndpointAddressConfig,
     pub listen: SocketAddr,
+    pub local_tls: Option<LocalTlsConfig>,
     pub relays: Option<Vec<String>>,
+    #[serde(default)]
+    pub disable_relays: bool,
+    pub bind: Option<SocketAddr>,
     #[serde(default)]
     pub compression: CompressionPolicy,
     #[serde(default = "default_max_connections")]
@@ -114,9 +127,7 @@ impl ClientConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let config: Self = load_json(path)?;
         validate_connections(config.max_connections)?;
-        if !config.listen.ip().is_loopback() {
-            bail!("tiny client listener must use a loopback address in the I0 profile");
-        }
+        validate_client_listener(config.listen, config.local_tls.is_some())?;
         config.bootstrap.parse()?;
         config.relay_policy()?;
         Ok(config)
@@ -131,8 +142,16 @@ impl ClientConfig {
     }
 
     pub fn relay_policy(&self) -> Result<RelayPolicy> {
-        RelayPolicy::from_config(self.relays.clone()).map_err(Into::into)
+        relay_policy(self.disable_relays, self.relays.clone())
     }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalTlsConfig {
+    pub certificate_path: PathBuf,
+    pub private_key_path: PathBuf,
+    pub client_ca_path: PathBuf,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -141,21 +160,53 @@ pub struct EndpointAddressConfig {
     pub endpoint_id: String,
     #[serde(default)]
     pub direct_addresses: Vec<SocketAddr>,
+    #[serde(default)]
+    pub direct_hosts: Vec<String>,
     pub relay_url: Option<String>,
 }
 
 impl EndpointAddressConfig {
     pub fn parse(&self) -> Result<EndpointAddr> {
         let endpoint_id = parse_public_key(&self.endpoint_id, "endpoint_id")?;
-        if self.direct_addresses.is_empty() && self.relay_url.is_none() {
+        if self.direct_addresses.len() + self.direct_hosts.len() > MAX_DIRECT_ROUTES {
+            bail!("endpoint address exceeds the {MAX_DIRECT_ROUTES}-route limit");
+        }
+        if self.direct_addresses.is_empty()
+            && self.direct_hosts.is_empty()
+            && self.relay_url.is_none()
+        {
             bail!("endpoint address needs at least one direct address or relay_url");
         }
         let mut address = EndpointAddr::new(endpoint_id);
-        for direct in &self.direct_addresses {
+        let mut direct_addresses = self.direct_addresses.clone();
+        for direct_host in &self.direct_hosts {
+            if direct_host.is_empty()
+                || direct_host.len() > MAX_DIRECT_HOST_BYTES
+                || direct_host.chars().any(char::is_whitespace)
+            {
+                bail!("endpoint direct host is empty, oversized, or contains whitespace");
+            }
+            let resolved = direct_host
+                .to_socket_addrs()
+                .with_context(|| format!("cannot resolve endpoint direct host {direct_host:?}"))?
+                .collect::<Vec<_>>();
+            if resolved.is_empty() {
+                bail!("endpoint direct host {direct_host:?} resolved to no addresses");
+            }
+            direct_addresses.extend(resolved);
+            if direct_addresses.len() > MAX_DIRECT_ROUTES {
+                bail!("resolved endpoint address exceeds the {MAX_DIRECT_ROUTES}-route limit");
+            }
+        }
+        let mut seen = HashSet::new();
+        for direct in direct_addresses {
+            if !seen.insert(direct) {
+                continue;
+            }
             if direct.ip().is_unspecified() {
                 bail!("endpoint direct address cannot be unspecified");
             }
-            address = address.with_ip_addr(*direct);
+            address = address.with_ip_addr(direct);
         }
         if let Some(raw) = &self.relay_url {
             let relay = raw
@@ -170,8 +221,20 @@ impl EndpointAddressConfig {
         Self {
             endpoint_id: address.id.to_string(),
             direct_addresses: address.ip_addrs().copied().collect(),
+            direct_hosts: vec![],
             relay_url: address.relay_urls().next().map(ToString::to_string),
         }
+    }
+}
+
+fn relay_policy(disable_relays: bool, relays: Option<Vec<String>>) -> Result<RelayPolicy> {
+    if disable_relays {
+        if relays.is_some() {
+            bail!("disable_relays cannot be combined with relay configuration");
+        }
+        Ok(RelayPolicy::Disabled)
+    } else {
+        RelayPolicy::from_config(relays).map_err(Into::into)
     }
 }
 
@@ -216,6 +279,13 @@ fn validate_connections(value: usize) -> Result<()> {
     Ok(())
 }
 
+fn validate_client_listener(listen: SocketAddr, has_local_tls: bool) -> Result<()> {
+    if !listen.ip().is_loopback() && !has_local_tls {
+        bail!("a non-loopback tiny client listener requires local_tls");
+    }
+    Ok(())
+}
+
 fn default_max_connections() -> usize {
     64
 }
@@ -243,6 +313,7 @@ mod tests {
         let empty = EndpointAddressConfig {
             endpoint_id: key.public().to_string(),
             direct_addresses: vec![],
+            direct_hosts: vec![],
             relay_url: None,
         };
         assert!(empty.parse().is_err());
@@ -250,14 +321,24 @@ mod tests {
         let direct = EndpointAddressConfig {
             endpoint_id: key.public().to_string(),
             direct_addresses: vec!["127.0.0.1:1234".parse().unwrap()],
+            direct_hosts: vec![],
             relay_url: None,
         };
         assert_eq!(direct.parse().unwrap().id, key.public());
     }
 
     #[test]
-    fn worker_and_client_addresses_must_be_loopback() {
+    fn worker_backend_and_unprotected_client_addresses_must_be_loopback() {
         assert!(!"192.0.2.1".parse::<IpAddr>().unwrap().is_loopback());
         assert!("127.0.0.1".parse::<IpAddr>().unwrap().is_loopback());
+        assert!(validate_client_listener("127.0.0.1:5432".parse().unwrap(), false).is_ok());
+        assert!(validate_client_listener("0.0.0.0:5432".parse().unwrap(), false).is_err());
+        assert!(validate_client_listener("0.0.0.0:5432".parse().unwrap(), true).is_ok());
+    }
+
+    #[test]
+    fn explicit_direct_only_policy_conflicts_with_relay_configuration() {
+        assert_eq!(relay_policy(true, None).unwrap(), RelayPolicy::Disabled);
+        assert!(relay_policy(true, Some(vec!["https://relay.example".into()])).is_err());
     }
 }

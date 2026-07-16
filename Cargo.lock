@@ -3684,10 +3684,13 @@ dependencies = [
  "libc",
  "log",
  "lz4_flex",
+ "rustls-pemfile",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]

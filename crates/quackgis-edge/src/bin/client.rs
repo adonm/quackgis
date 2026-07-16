@@ -7,7 +7,8 @@ use clap::Parser;
 use quackgis_edge::compression::TransportMetrics;
 use quackgis_edge::config::ClientConfig;
 use quackgis_edge::runtime::{
-    ClientConnector, bind_endpoint, run_until_signal, serve_local_client,
+    ClientConnector, LocalClientTls, bind_endpoint_at, run_until_signal,
+    serve_local_client_with_tls,
 };
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -25,22 +26,41 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = ClientConfig::load(&cli.config)?;
     let credential = config.credential_secret_key()?;
-    let endpoint = bind_endpoint(
+    let endpoint = bind_endpoint_at(
         config.transport_secret_key()?,
         vec![],
         &config.relay_policy()?,
+        config.bind,
     )
     .await?;
     let metrics = TransportMetrics::default();
     let connector = ClientConnector::new(endpoint.clone(), credential, config.bootstrap.parse()?)
         .with_compression(config.compression, metrics.clone());
-    connector.connect().await?;
+    tokio::time::timeout(std::time::Duration::from_secs(10), connector.connect()).await??;
     let listener = TcpListener::bind(config.listen).await?;
+    let local_tls = config
+        .local_tls
+        .as_ref()
+        .map(|tls| {
+            LocalClientTls::load(
+                &tls.certificate_path,
+                &tls.private_key_path,
+                &tls.client_ca_path,
+            )
+        })
+        .transpose()?;
     log::info!("tiny pgwire client listening on {}", listener.local_addr()?);
-    let (_shutdown_guard, shutdown) = watch::channel(false);
+    let (shutdown_guard, shutdown) = watch::channel(false);
     let result = run_until_signal(
         endpoint.clone(),
-        serve_local_client(listener, connector, config.max_connections, shutdown),
+        shutdown_guard,
+        serve_local_client_with_tls(
+            listener,
+            connector,
+            local_tls,
+            config.max_connections,
+            shutdown,
+        ),
     )
     .await;
     log::info!(

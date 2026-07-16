@@ -429,6 +429,7 @@ impl StreamPrelude {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RelayPolicy {
+    Disabled,
     PublicDefault,
     Custom(Vec<RelayUrl>),
 }
@@ -457,6 +458,7 @@ impl RelayPolicy {
 
     pub fn iroh_mode(&self) -> iroh::RelayMode {
         match self {
+            Self::Disabled => iroh::RelayMode::Disabled,
             Self::PublicDefault => iroh::RelayMode::Default,
             Self::Custom(relays) => iroh::RelayMode::custom(relays.clone()),
         }
