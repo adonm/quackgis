@@ -71,7 +71,7 @@ DuckDB home. The server defaults to `127.0.0.1:5434`.
 closed. S3 credentials and the retired engine selector are not runtime options.
 The unsigned DuckLake override is opt-in native-code execution and is rejected
 unless both values pass strict path and digest validation. Default startup still
-loads only signed extensions. See [DEVELOPMENT_DUCKLAKE.md](DEVELOPMENT_DUCKLAKE.md)
+loads only signed extensions. See [PINNED_DUCKLAKE.md](PINNED_DUCKLAKE.md)
 for its isolated development workflow and deletion plan.
 
 The optional `quackgis-rest` process has a separate configuration and failure

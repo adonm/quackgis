@@ -188,7 +188,7 @@ transaction, nesting, view, and exact-schema tests plus the complete upstream
 function-test group. A development-only port pinned to the DuckDB 1.5.4 ABI also
 passes QuackGIS's exact-schema, transaction, rename, reopen, add, and
 drop/recreate contract through ADBC. Exact source/artifact pins and the unsigned
-native-code boundary are recorded in `DEVELOPMENT_DUCKLAKE.md`.
+native-code boundary are recorded in `PINNED_DUCKLAKE.md`.
 
 C2/C3 development may consume that function only through the explicit
 checksum-pinned override. Release support remains blocked until the public

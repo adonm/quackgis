@@ -1,0 +1,2 @@
+# Unified diffs contain syntax whitespace that must be preserved verbatim.
+*.patch -whitespace

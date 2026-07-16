@@ -31,23 +31,20 @@ while drop/recreate gets a new table identity. They are suitable keys for a
 PostgreSQL compatibility registry. They cannot be exposed directly as PostgreSQL
 OIDs.
 
-QuackGIS has selected an upstream public identity API instead of a private or
-version-pinned metadata adapter. The proposed `ducklake_column_info(catalog)`
-returns qualified schema/table names, IDs and UUIDs plus top-level logical column
-names and IDs from the pinned committed DuckLake snapshot. This deliberately
-omits views, nested child fields, uncommitted DDL, types, and nullability; existing
-public SQL metadata can provide non-identity attributes. A prototype based on
-upstream commit `d4a23e83cab5ff81d239a40c7891141c19c611cb` passes transaction,
-rename, reopen, empty-column, nested-column, view, drop/recreate, and output-schema
-tests. Its development-only 1.5 port is pinned to DuckDB 1.5.4, passes the
-complete DuckLake function-test group, loads against the official QuackGIS driver
-ABI, and passes a QuackGIS lifecycle gate. `DEVELOPMENT_DUCKLAKE.md` records exact
-source and artifact pins.
+QuackGIS has selected a public identity API instead of a private metadata-table
+adapter. `ducklake_column_info(catalog)` returns qualified schema/table names, IDs
+and UUIDs plus top-level logical column names and IDs from the pinned committed
+DuckLake snapshot. This deliberately omits views, nested child fields, uncommitted
+DDL, types, and nullability; existing public SQL metadata provides non-identity
+attributes. The tracked 1.5 patch is pinned to DuckDB 1.5.4, passes the complete
+DuckLake function-test group, loads against the accepted QuackGIS driver ABI, and
+passes the QuackGIS lifecycle gate. `PINNED_DUCKLAKE.md` records exact source,
+patch, build, artifact, and trust-boundary pins.
 
-This unblocks implementation experiments, not release. Catalog projection in the
-default runtime remains blocked until the contract is accepted upstream and
-available in QuackGIS's pinned signed extension bundle. QuackGIS will not package
-the prototype, use it in production, or depend on hidden attachment names.
+Local 1.0 packages that artifact as an explicit QuackGIS support obligation while
+upstreaming remains the deletion path. The patch is read-only and the official
+DuckLake code remains the only metadata/data writer. QuackGIS does not depend on
+hidden metadata tables or expose the attachment name to clients.
 
 ## Authority and migration
 

@@ -107,6 +107,12 @@ Release-required outcomes:
 - restart, backup, restore, compaction, and upgrade procedures; and
 - reproducible packages with no runtime extension downloads.
 
+Local 1.0 accepts one source-pinned DuckLake divergence: a read-only table
+function exposing durable schema/table/column identity from the committed
+snapshot. QuackGIS owns its tracked patch, exact artifact digest, immutable
+packaging, ABI/lifecycle/upgrade gates, and upstream deletion path. DuckLake's
+official code remains the only metadata and data writer.
+
 Using PostgreSQL as a shared DuckLake metadata catalog and object storage is a
 later storage capability. It is distinct from QuackGIS's PostgreSQL-compatible
 `pg_catalog` surface and must not block a useful local release or be claimed
@@ -209,8 +215,9 @@ local-client secrets.
 ## Ownership rules
 
 - DuckDB is the only query planner and spatial execution engine.
-- Official DuckLake is the only writer of new durable user-schema catalogs and
-  table data. The separate Shared 1.x PostgreSQL control database writes only
+- DuckLake is the only writer of new durable user-schema catalogs and table data.
+  QuackGIS's source patch adds one read-only identity function and does not alter
+  that writer authority. The separate Shared 1.x PostgreSQL control database writes only
   QuackGIS identity, policy, configuration, and operational state.
 - Rust does not implement row-wise spatial kernels or pull arbitrary table rows
   out of DuckDB for fallback execution.

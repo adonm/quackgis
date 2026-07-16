@@ -75,24 +75,26 @@ PostgreSQL execution backends QuackGIS dependencies. Upstream updates require
 reviewing the parser, SQL generator, schema types, license, and compatibility
 cases before changing the pinned revision.
 
-## Development-only reference fork
+## Active source patches
 
-### `adonm/ducklake` column identity
+### DuckLake column identity
 
-The ignored `.tmp/ref/ducklake` checkout temporarily ports the proposed public
-`ducklake_column_info(catalog)` function to DuckLake `v1.5-variegata` and pins its
-DuckDB submodule to exact `v1.5.4`. The function is read-only and exposes current
-top-level base-table schema/table/column identities; it does not change DuckLake
-metadata writes. Exact source commits, build inputs, artifact checksum, tests,
-runtime isolation, and reproduction commands are recorded in
-`docs/DEVELOPMENT_DUCKLAKE.md`.
+QuackGIS applies `patches/ducklake/ducklake-column-info.patch` to an exact
+DuckLake `v1.5-variegata` commit with an exact DuckDB `v1.5.4` submodule. The
+read-only `ducklake_column_info(catalog)` function exposes current top-level
+base-table schema/table/column identities from the committed snapshot; it does
+not change DuckLake metadata or data writes. `patches/ducklake/pin.json` records
+the upstream, patch, DuckDB, vcpkg, build-tool, platform, and accepted artifact
+pins. `scripts/build_pinned_ducklake.py` validates and reproduces the source/build
+gate. Exact behavior, trust boundaries, and lifecycle evidence are documented in
+`docs/PINNED_DUCKLAKE.md`.
 
-This fork is not tracked source, a default runtime dependency, or a production
-storage authority. QuackGIS loads its unsigned binary only when an operator
-provides both the explicit development path and exact SHA-256. Default and
-packaged startup still load the signed official extension. Retire the override
-when the public API ships in a version-matched official bundle; if upstream does
-not accept it, release use requires a separate long-term support decision.
+Local 1.0 packages the accepted unsigned binary and passes its absolute immutable
+path plus exact SHA-256 to the server. This is a long-term support obligation:
+each bundle candidate must rebuild and pass DuckLake function, QuackGIS identity,
+storage, pgwire, packaging, recovery, and rollback gates. Retire the patch and
+unsigned-extension policy when an official version-matched DuckLake exposes the
+same API and passes those gates.
 
 ## Retired forks
 

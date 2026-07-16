@@ -14,6 +14,8 @@ duckdb_home := env_var_or_default("DUCKDB_HOME", ".tmp/duckdb/home")
 duckdb_adbc_driver := env_var_or_default("QUACKGIS_DUCKDB_ADBC_DRIVER", ".tmp/duckdb/v" + duckdb_version + "/lib/libduckdb.so")
 dev_ducklake_extension := env_var_or_default("QUACKGIS_DEV_DUCKLAKE_EXTENSION", "")
 dev_ducklake_extension_sha256 := env_var_or_default("QUACKGIS_DEV_DUCKLAKE_EXTENSION_SHA256", "")
+pinned_ducklake_extension := env_var_or_default("QUACKGIS_DUCKLAKE_EXTENSION", ".tmp/ref/quackgis-ducklake/build/release/extension/ducklake/ducklake.duckdb_extension")
+pinned_ducklake_extension_sha256 := env_var_or_default("QUACKGIS_DUCKLAKE_EXTENSION_SHA256", "046e73c864b4403e73beddc39addc72a370dfbe633e2287181a1c0cdd37b5b94")
 ref_qgis_url := env_var_or_default("REF_QGIS_URL", "https://github.com/qgis/QGIS")
 ref_qgis_branch := env_var_or_default("REF_QGIS_BRANCH", "release-3_44")
 ref_duckdb_url := env_var_or_default("REF_DUCKDB_URL", "https://github.com/duckdb/duckdb")
@@ -203,6 +205,14 @@ duckdb-bootstrap duckdb_bin=duckdb_bin:
     duckdb_arg="${duckdb_arg#duckdb_bin=}"; \
     python3 scripts/bootstrap_duckdb.py --duckdb-bin "$duckdb_arg"
 
+# Validate the tracked source, patch, tool, and accepted artifact pins for DuckLake.
+ducklake-pinned-source-check:
+    python3 scripts/build_pinned_ducklake.py --check
+
+# Build and test the accepted DuckLake identity extension from tracked source pins.
+ducklake-pinned-build:
+    mise x aqua:Kitware/CMake@4.3.3 aqua:ninja-build/ninja@1.13.2 -- python3 scripts/build_pinned_ducklake.py
+
 # Run the out-of-process DuckDB spatial + DuckLake extension engine probe.
 duckdb-engine-probe out=".tmp/duckdb-engine/README.md" attach_sql="" duckdb_bin=duckdb_bin:
     @set -eu; \
@@ -268,6 +278,17 @@ duckdb-development-ducklake-test extension=dev_ducklake_extension sha256=dev_duc
     extension_arg='{{extension}}'; sha256_arg='{{sha256}}'; driver_arg='{{driver}}'; \
     extension_arg="${extension_arg#extension=}"; sha256_arg="${sha256_arg#sha256=}"; driver_arg="${driver_arg#driver=}"; \
     if [ ! -f "$extension_arg" ] || [ -L "$extension_arg" ]; then echo 'Development DuckLake extension must be a non-symlink file; see docs/DEVELOPMENT_DUCKLAKE.md' >&2; exit 2; fi; \
+    if [ ! -f "$driver_arg" ]; then echo 'DuckDB ADBC driver is missing; run `mise run duckdb-bootstrap`' >&2; exit 2; fi; \
+    extension_arg="$(realpath "$extension_arg")"; driver_arg="$(realpath "$driver_arg")"; duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; \
+    HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" QUACKGIS_DEV_DUCKLAKE_EXTENSION="$extension_arg" QUACKGIS_DEV_DUCKLAKE_EXTENSION_SHA256="$sha256_arg" \
+      cargo test -p quackgis-server --test development_ducklake development_ducklake_column_identity_contract -- --ignored --exact --nocapture
+
+# Run the supported pinned DuckLake identity and PostgreSQL catalog lifecycle contract.
+duckdb-pinned-ducklake-test extension=pinned_ducklake_extension sha256=pinned_ducklake_extension_sha256 driver=duckdb_adbc_driver:
+    @set -eu; \
+    extension_arg='{{extension}}'; sha256_arg='{{sha256}}'; driver_arg='{{driver}}'; \
+    extension_arg="${extension_arg#extension=}"; sha256_arg="${sha256_arg#sha256=}"; driver_arg="${driver_arg#driver=}"; \
+    if [ ! -f "$extension_arg" ] || [ -L "$extension_arg" ]; then echo 'Pinned DuckLake extension must be a non-symlink file; see docs/PINNED_DUCKLAKE.md' >&2; exit 2; fi; \
     if [ ! -f "$driver_arg" ]; then echo 'DuckDB ADBC driver is missing; run `mise run duckdb-bootstrap`' >&2; exit 2; fi; \
     extension_arg="$(realpath "$extension_arg")"; driver_arg="$(realpath "$driver_arg")"; duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; \
     HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" QUACKGIS_DEV_DUCKLAKE_EXTENSION="$extension_arg" QUACKGIS_DEV_DUCKLAKE_EXTENSION_SHA256="$sha256_arg" \
@@ -515,7 +536,8 @@ clean-dev:
 # Static validation for maintained helper scripts.
 probe-static-check:
     mkdir -p .tmp/pycache
-    PYTHONPYCACHEPREFIX=.tmp/pycache python3 -m py_compile scripts/*.py deploy/kind/render.py scripts/tests/test_duckdb_authority_probe.py scripts/tests/test_duckdb_catalog_identity_probe.py scripts/tests/test_duckdb_engine_probe.py scripts/tests/test_duckdb_runtime_static_check.py scripts/tests/test_duckdb_spatial_compat_probe.py scripts/tests/test_evidence_manifest_check.py scripts/tests/test_kind_render.py scripts/tests/test_prepare_duckdb_runtime.py
+    PYTHONPYCACHEPREFIX=.tmp/pycache python3 -m py_compile scripts/*.py deploy/kind/render.py scripts/tests/test_build_pinned_ducklake.py scripts/tests/test_duckdb_authority_probe.py scripts/tests/test_duckdb_catalog_identity_probe.py scripts/tests/test_duckdb_engine_probe.py scripts/tests/test_duckdb_runtime_static_check.py scripts/tests/test_duckdb_spatial_compat_probe.py scripts/tests/test_evidence_manifest_check.py scripts/tests/test_kind_render.py scripts/tests/test_prepare_duckdb_runtime.py
+    python3 scripts/tests/test_build_pinned_ducklake.py
     python3 scripts/tests/test_duckdb_authority_probe.py
     python3 scripts/tests/test_duckdb_catalog_identity_probe.py
     python3 scripts/tests/test_duckdb_engine_probe.py

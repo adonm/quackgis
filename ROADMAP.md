@@ -90,15 +90,15 @@ prerequisites.
 
 | Area | Current floor | Important limit |
 |---|---|---|
-| Engine/storage | pinned DuckDB 1.5.4 through ADBC and local official DuckLake | local paths only |
+| Engine/storage | pinned DuckDB 1.5.4 through ADBC and local DuckLake with one tracked read-only identity patch | local paths only; QuackGIS owns patch/ABI/upgrade qualification |
 | Protocol | bounded simple/extended pgwire | narrow statements and parameter types |
 | Results | one driver Arrow batch at a time through pgwire with fail-closed byte ceiling; clean 1M/10M BIGINT and 1M nullable VARCHAR/BLOB reference profiles pass RSS and exact-value gates | maximum native-batch and additional type/shape RSS profiles open |
 | COPY | pre-body bounded pgwire frames, incremental bounded text decoding to one ADBC stream, atomic DuckLake publication, and a clean passing 10M RSS/throughput reference | total COPY remains unbounded while each frame/chunk/row/Arrow batch is bounded; idle clients observe cancellation when they resume or disconnect |
 | Transactions | independent sessions, commit/rollback/isolation, failed-transaction `25P02`, cancellable pre-commit writes, and a non-cancellable indeterminate-failure commit boundary | commit response-loss reconciliation remains a Local 1.0 operations gate |
 | Spatial | 43 native/rewrite/macro cases through pgwire | 9 edge gaps and 5 extension candidates |
 | Security | SCRAM, outer read/write table allowlists, immutable table/operation RBAC, role-filtered maintained metadata, HS256 JWT role mapping with transaction-local claims and atomic direct key-file rotation, owner-only direct authenticator-password rotation, loopback-only role-catalog edge preauthentication, exact credential-to-role leases, role-aware OpenAPI, actual-process required-TLS/restart rotation, and packaged mTLS/edge/authenticator/JWT replacement with old-credential denial | no RLS, mutable administration, zero-downtime multi-key overlap, durable revocation, or production revocation drill |
-| PostgreSQL catalogs/RBAC | relational core catalogs, development-gated stable user-object/default/comment/NOT-NULL identity, truthfully empty index projection, bounded role-aware spatial metadata, immutable roles/sessions/grants/inquiry, role-aware information schema, packaged psycopg copied-data/COPY/reopen, and packaged OGR SQL-result copied-data readback | retried psql/OGR stop at unavailable `pg_class`/`pg_proc`; QGIS additionally exposes durable OID inquiry, `pg_is_in_recovery`, and failed-transaction cleanup gaps. Upstream identity, DuckLake key indexes, authoritative CRS metadata, and direct client closure remain open |
-| REST | signed-JWT read-only PostgREST-style subset through an exact authenticator lease, transaction-local effective role/context, and automatically revalidated per-role catalog/OpenAPI cache; consumes shared monotonic schema/security epochs where durable identity exists with an exact signed-runtime fallback; two packaged replicas pass readiness, role denial, balancing, failover, core reconnect, and old authenticator/JWT denial | signed runtime awaits the official identity/epoch bundle; no full PostgREST parity, public HTTP edge, multi-key overlap, or RLS |
+| PostgreSQL catalogs/RBAC | relational core catalogs, pinned stable user-object/default/comment/NOT-NULL identity, truthfully empty index projection, bounded role-aware spatial metadata, immutable roles/sessions/grants/inquiry, role-aware information schema, packaged psycopg copied-data/COPY/reopen, and packaged OGR SQL-result copied-data readback | runtime packaging and direct psql/OGR/QGIS query-shape closure remain; DuckLake key indexes and authoritative CRS metadata remain upstream gaps |
+| REST | signed-JWT read-only PostgREST-style subset through an exact authenticator lease, transaction-local effective role/context, and automatically revalidated per-role catalog/OpenAPI cache; consumes shared monotonic schema/security epochs where durable identity exists with an exact revision fallback; two packaged replicas pass readiness, role denial, balancing, failover, core reconnect, and old authenticator/JWT denial | package pinned epochs with the owned DuckLake artifact; no full PostgREST parity, public HTTP edge, multi-key overlap, or RLS |
 | Operations | restart/reopen, snapshot inspection, adjacent-file merge, checksummed offline exact-path backup/restore | no online/relocated production recovery or shared profile |
 | Performance | M4-complete mixed-shape selective scan, grouped aggregate, bounded spatial join, wide projection, compaction, and exact 10M/100M profiles | single-node maintained workloads only; no general spatial-index or clustered-performance claim |
 | Metrics/status | policy, classed admission, lifecycle, cancellation, timeout, quarantine, COPY rows/bytes/batches/latency, sampled DuckDB memory/temporary storage, liveness, and local DuckLake read/write-capacity readiness with drain state | write probe is non-publishing and singleton-local; remote dependency SLOs remain open |
@@ -127,8 +127,9 @@ Exit gates:
 - `just ci` and every indexed quick-start command pass from a clean bootstrap;
 - every status claim links to an executable command or says blocked/deferred;
 - supported spatial counts equal cases executed through pgwire;
-- no active claim depends on DataFusion, SedonaDB, fork-owned DuckLake, removed
-  CLI flags, or an unregistered test; and
+- no active claim depends on DataFusion, SedonaDB, a fork-owned DuckLake writer,
+  a private DuckLake metadata layout, removed CLI flags, or an unregistered test;
+  and
 - unsupported shared deployment automation is absent from scheduled workflows.
 
 ## M1 — bounded execution plane
@@ -402,6 +403,8 @@ Deliver:
 
 - immutable runtime artifacts with DuckDB/extension provenance and no online
   extension install;
+- exact source, patch, ABI, artifact, immutable-path, lifecycle, and upgrade
+  evidence for the pinned read-only DuckLake identity extension;
 - health, readiness, graceful shutdown, and transaction drain;
 - backup, restore, compaction, capacity, spill, and incident procedures;
 - supported DuckDB/extension upgrade and reopen tests;

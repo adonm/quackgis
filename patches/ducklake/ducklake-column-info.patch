@@ -1,0 +1,327 @@
+diff --git a/src/ducklake_extension.cpp b/src/ducklake_extension.cpp
+index ffe9826e..036f39df 100644
+--- a/src/ducklake_extension.cpp
++++ b/src/ducklake_extension.cpp
+@@ -52,6 +52,9 @@ static void LoadInternal(ExtensionLoader &loader) {
+ 	DuckLakeTableInfoFunction table_info;
+ 	loader.RegisterFunction(table_info);
+ 
++	DuckLakeColumnInfoFunction column_info;
++	loader.RegisterFunction(column_info);
++
+ 	auto table_insertions = DuckLakeTableInsertionsFunction::GetFunctions();
+ 	loader.RegisterFunction(table_insertions);
+ 
+diff --git a/src/functions/CMakeLists.txt b/src/functions/CMakeLists.txt
+index 18778f49..8a26b1e5 100644
+--- a/src/functions/CMakeLists.txt
++++ b/src/functions/CMakeLists.txt
+@@ -17,6 +17,7 @@ add_library(
+   ducklake_settings.cpp
+   ducklake_table_changes.cpp
+   ducklake_table_info.cpp
++  ducklake_column_info.cpp
+   ducklake_table_insertions.cpp
+   ducklake_murmur3.cpp)
+ set(ALL_OBJECT_FILES
+diff --git a/src/functions/ducklake_column_info.cpp b/src/functions/ducklake_column_info.cpp
+new file mode 100644
+index 00000000..440ca78f
+--- /dev/null
++++ b/src/functions/ducklake_column_info.cpp
+@@ -0,0 +1,51 @@
++#include "functions/ducklake_table_functions.hpp"
++#include "storage/ducklake_catalog.hpp"
++#include "storage/ducklake_schema_entry.hpp"
++#include "storage/ducklake_table_entry.hpp"
++#include "storage/ducklake_transaction.hpp"
++
++namespace duckdb {
++
++static unique_ptr<FunctionData> DuckLakeColumnInfoBind(ClientContext &context, TableFunctionBindInput &input,
++                                                       vector<LogicalType> &return_types, vector<string> &names) {
++	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]).Cast<DuckLakeCatalog>();
++	auto &transaction = DuckLakeTransaction::Get(context, catalog);
++	auto result = make_uniq<MetadataBindData>();
++
++	auto &schemas = catalog.GetSchemaForSnapshot(transaction, transaction.GetSnapshot());
++	for (auto &schema_entry : schemas.GetEntries()) {
++		auto &schema = schema_entry.second->Cast<DuckLakeSchemaEntry>();
++		schema.Scan(CatalogType::TABLE_ENTRY, [&](const CatalogEntry &catalog_entry) {
++			if (catalog_entry.type != CatalogType::TABLE_ENTRY) {
++				return;
++			}
++			auto &table = catalog_entry.Cast<DuckLakeTableEntry>();
++			auto table_info = table.GetTableInfo();
++			auto columns = table.GetTableColumns();
++			for (auto &column : columns) {
++				vector<Value> row_values;
++				row_values.push_back(Value(schema.name));
++				row_values.push_back(Value::BIGINT(NumericCast<int64_t>(schema.GetSchemaId().index)));
++				row_values.push_back(Value::UUID(schema.GetSchemaUUID()));
++				row_values.push_back(Value(table_info.name));
++				row_values.push_back(Value::BIGINT(NumericCast<int64_t>(table_info.id.index)));
++				row_values.push_back(Value::UUID(table_info.uuid));
++				row_values.push_back(Value(column.name));
++				row_values.push_back(Value::BIGINT(NumericCast<int64_t>(column.id.index)));
++				result->rows.push_back(std::move(row_values));
++			}
++		});
++	}
++
++	names = {"schema_name", "schema_id",  "schema_uuid", "table_name",
++	         "table_id",    "table_uuid", "column_name", "column_id"};
++	return_types = {LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::UUID,    LogicalType::VARCHAR,
++	                LogicalType::BIGINT,  LogicalType::UUID,   LogicalType::VARCHAR, LogicalType::BIGINT};
++	return std::move(result);
++}
++
++DuckLakeColumnInfoFunction::DuckLakeColumnInfoFunction()
++    : DuckLakeBaseMetadataFunction("ducklake_column_info", DuckLakeColumnInfoBind) {
++}
++
++} // namespace duckdb
+diff --git a/src/include/functions/ducklake_table_functions.hpp b/src/include/functions/ducklake_table_functions.hpp
+index b09bf400..9315f7d1 100644
+--- a/src/include/functions/ducklake_table_functions.hpp
++++ b/src/include/functions/ducklake_table_functions.hpp
+@@ -54,6 +54,11 @@ public:
+ 	DuckLakeTableInfoFunction();
+ };
+ 
++class DuckLakeColumnInfoFunction : public DuckLakeBaseMetadataFunction {
++public:
++	DuckLakeColumnInfoFunction();
++};
++
+ class DuckLakeTableInsertionsFunction {
+ public:
+ 	static TableFunctionSet GetFunctions();
+diff --git a/src/storage/ducklake_default_functions.cpp b/src/storage/ducklake_default_functions.cpp
+index 10110076..062ac434 100644
+--- a/src/storage/ducklake_default_functions.cpp
++++ b/src/storage/ducklake_default_functions.cpp
+@@ -16,6 +16,7 @@ static const DefaultTableMacro ducklake_table_macros[] = {
+ {DEFAULT_SCHEMA, "last_committed_snapshot", {nullptr}, {{nullptr, nullptr}}, "FROM ducklake_last_committed_snapshot({CATALOG})"},
+ 	{DEFAULT_SCHEMA, "snapshots", {nullptr}, {{nullptr, nullptr}},  "FROM ducklake_snapshots({CATALOG})"},
+ 	{DEFAULT_SCHEMA, "table_info", {nullptr}, {{nullptr, nullptr}},  "FROM ducklake_table_info({CATALOG})"},
++	{DEFAULT_SCHEMA, "column_info", {nullptr}, {{nullptr, nullptr}},  "FROM ducklake_column_info({CATALOG})"},
+ 	{DEFAULT_SCHEMA, "table_changes", {"table_name", "start_snapshot", "end_snapshot", nullptr}, {{nullptr, nullptr}},  "FROM ducklake_table_changes({CATALOG}, {SCHEMA}, table_name, start_snapshot, end_snapshot)"},
+ 	{DEFAULT_SCHEMA, "table_deletions", {"table_name", "start_snapshot", "end_snapshot", nullptr}, {{nullptr, nullptr}},  "FROM ducklake_table_deletions({CATALOG}, {SCHEMA}, table_name, start_snapshot, end_snapshot)"},
+ 	{DEFAULT_SCHEMA, "table_insertions", {"table_name", "start_snapshot", "end_snapshot", nullptr}, {{nullptr, nullptr}},  "FROM ducklake_table_insertions({CATALOG}, {SCHEMA}, table_name, start_snapshot, end_snapshot)"},
+diff --git a/test/sql/functions/ducklake_column_info.test b/test/sql/functions/ducklake_column_info.test
+new file mode 100644
+index 00000000..a9193c3f
+--- /dev/null
++++ b/test/sql/functions/ducklake_column_info.test
+@@ -0,0 +1,210 @@
++# name: test/sql/functions/ducklake_column_info.test
++# group: [functions]
++
++require ducklake
++
++require parquet
++
++test-env DUCKLAKE_CONNECTION {TEST_DIR}/ducklake_column_info.db
++
++test-env DATA_PATH {TEST_DIR}
++
++statement ok
++ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_column_info_files')
++
++query TT
++SELECT column_name, column_type
++FROM (DESCRIBE SELECT * FROM ducklake_column_info('ducklake'))
++----
++schema_name	VARCHAR
++schema_id	BIGINT
++schema_uuid	UUID
++table_name	VARCHAR
++table_id	BIGINT
++table_uuid	UUID
++column_name	VARCHAR
++column_id	BIGINT
++
++statement ok
++CREATE SCHEMA ducklake.identity_schema
++
++statement ok
++CREATE SCHEMA ducklake.other_schema
++
++statement ok
++CREATE TABLE ducklake.identity_schema.before_name(
++    id BIGINT NOT NULL,
++    old_column VARCHAR,
++    nested STRUCT(label VARCHAR, values INTEGER[]),
++    tags VARCHAR[]
++)
++
++statement ok
++CREATE TABLE ducklake.other_schema.before_name(id BIGINT)
++
++statement ok
++CREATE VIEW ducklake.identity_schema.identity_view AS
++SELECT id FROM ducklake.identity_schema.before_name
++
++query I
++SELECT count(*)
++FROM ducklake.identity_schema.column_info()
++WHERE schema_name = 'identity_schema' AND table_name = 'before_name'
++----
++4
++
++query I
++SELECT count(*)
++FROM ducklake_column_info('ducklake')
++WHERE schema_name = 'identity_schema'
++  AND table_name = 'before_name'
++  AND column_name IN ('label', 'values', 'element')
++----
++0
++
++query I
++SELECT count(*)
++FROM ducklake_column_info('ducklake')
++WHERE schema_name = 'identity_schema' AND table_name = 'identity_view'
++----
++0
++
++query I
++SELECT count(DISTINCT schema_id) = 2 AND count(DISTINCT schema_uuid) = 2
++FROM ducklake_column_info('ducklake')
++WHERE table_name = 'before_name'
++----
++true
++
++statement ok
++CREATE TEMP TABLE identity_before AS
++SELECT schema_id, schema_uuid, table_id, table_uuid, column_id
++FROM ducklake_column_info('ducklake')
++WHERE schema_name = 'identity_schema' AND table_name = 'before_name' AND column_name = 'old_column'
++
++statement ok
++BEGIN
++
++statement ok
++CREATE SCHEMA ducklake.staged_schema
++
++statement ok
++CREATE TABLE ducklake.staged_schema.staged_table(id INTEGER)
++
++statement ok
++ALTER TABLE ducklake.identity_schema.before_name ADD COLUMN staged_column INTEGER
++
++query I
++SELECT count(*)
++FROM ducklake_column_info('ducklake')
++WHERE schema_name = 'staged_schema' OR column_name = 'staged_column'
++----
++0
++
++statement ok
++ROLLBACK
++
++statement ok
++BEGIN
++
++statement ok
++CREATE SCHEMA ducklake.committed_schema
++
++statement ok
++CREATE TABLE ducklake.committed_schema.committed_table(id INTEGER)
++
++statement ok
++ALTER TABLE ducklake.identity_schema.before_name ADD COLUMN committed_column INTEGER
++
++statement ok
++COMMIT
++
++query I
++SELECT count(*)
++FROM ducklake_column_info('ducklake')
++WHERE (schema_name = 'committed_schema' AND table_name = 'committed_table')
++   OR (schema_name = 'identity_schema' AND table_name = 'before_name' AND column_name = 'committed_column')
++----
++2
++
++statement ok
++ALTER TABLE ducklake.identity_schema.before_name RENAME TO after_name
++
++statement ok
++ALTER TABLE ducklake.identity_schema.after_name RENAME COLUMN old_column TO new_column
++
++statement ok
++ALTER TABLE ducklake.identity_schema.after_name ADD COLUMN added_empty INTEGER
++
++statement ok
++DETACH ducklake
++
++statement ok
++ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_column_info_files')
++
++query IIIII
++SELECT b.schema_id = a.schema_id,
++       b.schema_uuid = a.schema_uuid,
++       b.table_id = a.table_id,
++       b.table_uuid = a.table_uuid,
++       b.column_id = a.column_id
++FROM identity_before b
++JOIN ducklake_column_info('ducklake') a
++  ON a.schema_name = 'identity_schema'
++ AND a.table_name = 'after_name'
++ AND a.column_name = 'new_column'
++----
++true	true	true	true	true
++
++query I
++SELECT count(*)
++FROM ducklake_column_info('ducklake')
++WHERE schema_name = 'identity_schema'
++  AND table_name = 'after_name'
++  AND column_name = 'added_empty'
++----
++1
++
++statement ok
++CREATE TEMP TABLE added_before AS
++SELECT column_id
++FROM ducklake_column_info('ducklake')
++WHERE schema_name = 'identity_schema' AND table_name = 'after_name' AND column_name = 'added_empty'
++
++statement ok
++ALTER TABLE ducklake.identity_schema.after_name DROP COLUMN added_empty
++
++statement ok
++ALTER TABLE ducklake.identity_schema.after_name ADD COLUMN added_empty INTEGER
++
++query I
++SELECT b.column_id <> a.column_id
++FROM added_before b
++JOIN ducklake_column_info('ducklake') a
++  ON a.schema_name = 'identity_schema'
++ AND a.table_name = 'after_name'
++ AND a.column_name = 'added_empty'
++----
++true
++
++statement ok
++CREATE TEMP TABLE identity_after AS
++SELECT table_id, table_uuid
++FROM ducklake_column_info('ducklake')
++WHERE schema_name = 'identity_schema' AND table_name = 'after_name' AND column_name = 'id'
++
++statement ok
++DROP TABLE ducklake.identity_schema.after_name
++
++statement ok
++CREATE TABLE ducklake.identity_schema.after_name(id BIGINT)
++
++query II
++SELECT b.table_id <> a.table_id, b.table_uuid <> a.table_uuid
++FROM identity_after b
++JOIN ducklake_column_info('ducklake') a
++  ON a.schema_name = 'identity_schema'
++ AND a.table_name = 'after_name'
++ AND a.column_name = 'id'
++----
++true	true

@@ -8,11 +8,12 @@
   pgwire, independent-reopen, runtime-package, and upgrade gates.
 - Runtime artifacts are checksum-pinned and preinstalled; production does not
   download extensions.
-- An unsigned DuckLake artifact may be loaded only by the paired, checksum-pinned
-  development override documented in `DEVELOPMENT_DUCKLAKE.md`. It must use the
-  exact DuckDB ABI, an isolated non-symlink path, and a disposable data root. The
-  override is prohibited in release and deployment profiles; default startup
-  continues to require the signed official extension.
+- Local 1.0 owns the read-only DuckLake identity patch documented in
+  `PINNED_DUCKLAKE.md`. The accepted unsigned artifact must match the exact
+  tracked source/patch/tool/platform pins, DuckDB ABI, absolute non-symlink path,
+  and SHA-256. Release images keep it immutable and client SQL cannot load native
+  extensions. Startup without the paired path/digest remains signed-only and does
+  not publish dynamic object identity.
 - DataFusion, SedonaDB, forked DuckLake writers, and auxiliary engines require a
   new architecture decision and are not acceptable transitive conveniences.
 - Upstream roadmap adoption follows `DUCKDB_ROADMAP_ALIGNMENT.md`: evaluate
@@ -53,12 +54,11 @@ New vendor/fork acceptance requires:
 4. tests and upgrade ownership; and
 5. a deletion/upstream plan.
 
-The temporary DuckLake identity fork satisfies these conditions only as a local
-development input: exact source/submodule commits, build inputs, artifact digest,
-focused tests, trust boundary, and deletion plan are recorded in
-`DEVELOPMENT_DUCKLAKE.md` and `DIVERGENCE.md`. It is not vendored, packaged, or a
-supported writer fork. Upstream acceptance or an explicit long-term fork decision
-is still required before release.
+The DuckLake identity patch satisfies these conditions as a Local 1.0 dependency:
+exact source/submodule commits, tracked patch, build inputs, accepted artifact
+digest, focused tests, trust boundary, upgrade ownership, and deletion plan are
+recorded in `PINNED_DUCKLAKE.md` and `DIVERGENCE.md`. It does not modify or replace
+DuckLake's writer path. Upstream adoption remains the preferred deletion path.
 
 ## Upgrade evidence
 
