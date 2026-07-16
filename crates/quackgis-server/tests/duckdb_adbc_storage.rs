@@ -64,6 +64,13 @@ fn first_string(batch: &RecordBatch, column: usize) -> &str {
         .value(0)
 }
 
+fn snapshot_count(storage: &DuckDbAdbcStorage) -> i64 {
+    let batches = storage
+        .query("SELECT count(*) AS snapshots FROM ducklake_snapshots('quackgis')")
+        .expect("snapshot count");
+    first_i64(&batches[0], 0)
+}
+
 fn point_batch(ids: Vec<i32>, names: Vec<&str>, geometries: Vec<&[u8]>) -> RecordBatch {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int32, false),
@@ -627,6 +634,33 @@ fn query_stream_owns_connection_and_reads_incrementally() {
     storage
         .readiness_probe()
         .expect("empty DuckLake readiness probe");
+    let snapshots_before = snapshot_count(&storage);
+    storage
+        .write_readiness_probe()
+        .expect("empty DuckLake write-capacity probe");
+    assert_eq!(snapshot_count(&storage), snapshots_before);
+    assert!(
+        storage
+            .query(
+                "SELECT table_name FROM information_schema.tables \
+                 WHERE table_catalog = 'quackgis' AND table_schema = '_quackgis' \
+                   AND table_name LIKE '__readiness_%'"
+            )
+            .expect("readiness residue query")
+            .iter()
+            .all(|batch| batch.num_rows() == 0),
+        "write-capacity probe must roll back its DuckLake table"
+    );
+    assert!(
+        std::fs::read_dir(data_path.join("_quackgis"))
+            .expect("authority directory")
+            .all(|entry| !entry
+                .expect("authority entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".readiness-")),
+        "write-capacity probe must remove its local file"
+    );
 
     let mut stream = storage
         .query_stream("SELECT i::BIGINT AS id FROM range(100000) AS rows(i) ORDER BY i")
@@ -686,6 +720,11 @@ fn query_stream_owns_connection_and_reads_incrementally() {
     storage
         .readiness_probe()
         .expect("independent DuckLake readiness after query work");
+    storage.lifecycle().begin_drain();
+    let draining_probe = storage
+        .write_readiness_probe()
+        .expect_err("draining storage rejects a write-capacity probe");
+    assert_eq!(draining_probe.kind, EngineErrorKind::Busy);
 }
 
 #[test]

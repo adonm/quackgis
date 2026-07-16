@@ -85,15 +85,19 @@ The authenticator must have configured set-option membership in every listed API
 role. See [REST_API.md](REST_API.md) for the read-only contract and load-balancer
 trust boundary.
 
-The pgwire socket is bound and the configured local DuckLake snapshot surface is
-queried before `/readyz` can return `200 ready`. The endpoint returns `503
-starting`, `503 storage_unavailable`, or `503 draining` for those explicit states;
-`/healthz` reports process liveness only. When enabled, an independent ADBC
-session repeats the read-only DuckLake probe and samples aggregate
-`duckdb_memory()` memory and temporary-storage gauges every 15 seconds. This
-proves local catalog readability, not future write capacity. Scrapes read atomics
-and never execute native SQL. Keep the listener on loopback or an authenticated
-network boundary because `/metrics` is served on the same socket.
+The pgwire socket is bound and the configured local DuckLake read/write-capacity
+probe passes before `/readyz` can return `200 ready`. The probe reads the snapshot
+surface, creates/syncs/removes one 4 KiB file under the claimed local data root,
+and executes unique internal DuckLake DDL in an ADBC transaction that must roll
+back. Native evidence proves it leaves no table, local probe file, or new DuckLake
+snapshot. The endpoint returns `503 starting`, `503 storage_unavailable`, or `503
+draining` for those explicit states; `/healthz` reports process liveness only.
+When enabled, an independent ADBC session repeats the probe and samples aggregate
+`duckdb_memory()` memory and temporary-storage gauges every 15 seconds, stopping
+when drain begins. This is a non-publishing local-singleton capacity signal, not a
+remote catalog/object-store latency SLO. Scrapes read atomics and never execute
+native SQL. Keep the listener on loopback or an authenticated network boundary
+because `/metrics` is served on the same socket.
 
 By default QuackGIS detects the lower of host RAM and the active cgroup memory
 limit, assigns 60% to DuckDB, and leaves 40% for Arrow, pgwire, other process

@@ -106,7 +106,9 @@ evidence against QuackGIS.
 
 When `QUACKGIS_METRICS_PORT` is configured, the same loopback HTTP listener serves
 `/healthz`, startup/drain-aware readiness at `/readyz`, and Prometheus data at
-`/metrics`.
+`/metrics`. Readiness verifies DuckLake snapshot reads, a synced local data-root
+write/delete, and transactional DuckLake DDL rollback without publishing a table
+or snapshot.
 
 See [docs/ROADMAP_STATUS.md](./docs/ROADMAP_STATUS.md) for exact evidence.
 

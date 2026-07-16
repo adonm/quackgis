@@ -4,7 +4,7 @@
 //! ADBC is the Arrow transport. DuckLake compatibility comes from executing
 //! writes through DuckDB's official `ducklake` extension.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -49,6 +49,7 @@ const FALLBACK_DUCKDB_MEMORY_LIMIT_BYTES: u64 = 1_073_741_824;
 const MIN_DUCKDB_MAX_TEMP_DIRECTORY_BYTES: u64 = 10_737_418_240;
 const CGROUP_UNLIMITED_THRESHOLD: u64 = 1_u64 << 60;
 static COPY_STAGE_ID: AtomicU64 = AtomicU64::new(1);
+static READINESS_PROBE_ID: AtomicU64 = AtomicU64::new(1);
 const MAINTAINED_BBOX_COLUMNS: [&str; 4] = ["_qg_minx", "_qg_miny", "_qg_maxx", "_qg_maxy"];
 const MAX_BBOX_WKT_BYTES: usize = 65_536;
 const MAX_BBOX_NUMERIC_LITERAL_BYTES: usize = 64;
@@ -338,6 +339,7 @@ pub struct DuckDbAdbcStorage {
     // quarantine the connection by leaving the slot empty.
     connection: Mutex<Option<ManagedConnection>>,
     catalog_name: String,
+    data_path: PathBuf,
     catalog_identity_enabled: bool,
     catalog_commit_lock: Arc<Mutex<()>>,
     transaction_state: Mutex<EngineTransactionState>,
@@ -532,6 +534,7 @@ impl DuckDbAdbcStorage {
             _database: database,
             connection: Mutex::new(Some(connection)),
             catalog_name: config.catalog_name,
+            data_path: PathBuf::from(config.data_path),
             catalog_identity_enabled,
             catalog_commit_lock: Arc::new(Mutex::new(())),
             transaction_state: Mutex::new(EngineTransactionState::Idle),
@@ -552,6 +555,7 @@ impl DuckDbAdbcStorage {
             _database: self._database.clone(),
             connection: Mutex::new(Some(connection)),
             catalog_name: self.catalog_name.clone(),
+            data_path: self.data_path.clone(),
             catalog_identity_enabled: self.catalog_identity_enabled,
             catalog_commit_lock: Arc::clone(&self.catalog_commit_lock),
             transaction_state: Mutex::new(EngineTransactionState::Idle),
@@ -815,6 +819,120 @@ impl DuckDbAdbcStorage {
             ));
         }
         Ok(())
+    }
+
+    /// Verify local data-root and transactional DuckLake write capacity without
+    /// publishing a table, row, or snapshot.
+    pub fn write_readiness_probe(&self) -> EngineResult<()> {
+        if !self.lifecycle.is_accepting() {
+            return Err(EngineError::new(
+                EngineErrorKind::Busy,
+                "QuackGIS is draining and cannot start a write-capacity probe",
+            ));
+        }
+        self.local_data_write_probe()?;
+        let probe_id = READINESS_PROBE_ID.fetch_add(1, Ordering::Relaxed);
+        let table = format!("__readiness_{}_{}", std::process::id(), probe_id);
+        let sql = format!(
+            "CREATE SCHEMA IF NOT EXISTS {}.{}; \
+             CREATE TABLE {}.{}.{}(probe INTEGER)",
+            quote_identifier(&self.catalog_name),
+            quote_identifier(crate::postgres_compat::INTERNAL_SCHEMA),
+            quote_identifier(&self.catalog_name),
+            quote_identifier(crate::postgres_compat::INTERNAL_SCHEMA),
+            quote_identifier(&table),
+        );
+        self.rollback_write_probe(&sql)
+    }
+
+    pub fn operational_readiness_probe(&self) -> EngineResult<()> {
+        self.readiness_probe()?;
+        self.write_readiness_probe()
+    }
+
+    fn local_data_write_probe(&self) -> EngineResult<()> {
+        let probe_id = READINESS_PROBE_ID.fetch_add(1, Ordering::Relaxed);
+        let path = self
+            .data_path
+            .join("_quackgis")
+            .join(format!(".readiness-{}-{probe_id}", std::process::id()));
+        let result = (|| -> std::io::Result<()> {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)?;
+            file.write_all(&[0_u8; 4096])?;
+            file.sync_data()?;
+            drop(file);
+            std::fs::remove_file(&path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&path);
+            return Err(EngineError::new(
+                EngineErrorKind::Internal,
+                "local DuckLake data root failed its write-capacity probe",
+            ));
+        }
+        Ok(())
+    }
+
+    fn rollback_write_probe(&self, sql: &str) -> EngineResult<()> {
+        self.require_transaction_state(EngineTransactionState::Idle)
+            .map_err(anyhow_engine_error)?;
+        if !self.lifecycle.try_start_transaction() {
+            return Err(EngineError::new(
+                EngineErrorKind::Busy,
+                "QuackGIS is draining and cannot start a write-capacity probe",
+            ));
+        }
+        let mut connection = match self.take_connection_engine() {
+            Ok(connection) => connection,
+            Err(error) => {
+                self.lifecycle.transaction_finished();
+                return Err(error);
+            }
+        };
+        if let Err(error) = connection.set_option(OptionConnection::AutoCommit, "false".into()) {
+            let _ = self.return_connection(connection);
+            self.lifecycle.transaction_finished();
+            return Err(engine_error(error));
+        }
+        if let Err(error) = self.set_transaction_state(EngineTransactionState::Active) {
+            let _ = connection.rollback();
+            let _ = restore_autocommit(&mut connection);
+            let _ = self.return_connection(connection);
+            self.lifecycle.transaction_finished();
+            return Err(anyhow_engine_error(error));
+        }
+
+        let operation = execute_update_engine_on(&mut connection, sql).map(|_| ());
+        if let Err(error) = connection.rollback() {
+            let _ = self.set_transaction_state(EngineTransactionState::Quarantined);
+            return Err(EngineError::new(
+                EngineErrorKind::Quarantined,
+                format!(
+                    "DuckLake write-capacity rollback failed; the probe session was quarantined: {error}"
+                ),
+            ));
+        }
+        if let Err(error) = restore_autocommit(&mut connection) {
+            let _ = self.set_transaction_state(EngineTransactionState::Quarantined);
+            return Err(EngineError::new(
+                EngineErrorKind::Quarantined,
+                format!(
+                    "DuckLake write-capacity rollback cleanup failed; the probe session was quarantined: {error}"
+                ),
+            ));
+        }
+        if let Err(error) = self.return_connection(connection) {
+            let _ = self.set_transaction_state(EngineTransactionState::Quarantined);
+            return Err(anyhow_engine_error(error));
+        }
+        if let Err(error) = self.set_transaction_state(EngineTransactionState::Idle) {
+            self.lifecycle.transaction_finished();
+            return Err(anyhow_engine_error(error));
+        }
+        operation
     }
 
     pub fn query_stream(self: &Arc<Self>, sql: &str) -> EngineResult<EngineQueryStream> {

@@ -184,7 +184,7 @@ async fn main() -> anyhow::Result<()> {
     let pgwire_listener = TcpListener::bind(format!("{}:{}", cli.host, cli.port)).await?;
     let pgwire_address = pgwire_listener.local_addr()?;
     let readiness_storage = Arc::clone(&storage);
-    tokio::task::spawn_blocking(move || readiness_storage.readiness_probe()).await??;
+    tokio::task::spawn_blocking(move || readiness_storage.operational_readiness_probe()).await??;
     lifecycle.mark_storage_ready();
 
     let (metrics_task, resource_sampler_task) = if let Some(port) = cli.metrics_port {

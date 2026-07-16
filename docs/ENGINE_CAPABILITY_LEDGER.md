@@ -47,7 +47,7 @@ Disposition:
 | GeoServer/Martin/editing/BI | deferred | historical oracles only | reconsider after Local 1.0 surface is stable |
 | runtime packaging | native artifacts + Rust | static verified image contract | clean-room image run, upgrade matrix |
 | query/ingest observability | partial | process/auth/admission/cancel counters, COPY rows/bytes/batches/duration/commit latency, sampled native memory/spill | profile evidence |
-| health/readiness | Rust edge + native probe | process liveness separated from pgwire-bind and read-only DuckLake snapshot readiness; drain/failure states | write-capacity SLO and remote dependency probes |
+| health/readiness | Rust edge + native probe | process liveness separated from pgwire bind and local DuckLake read/write capacity; the probe reads snapshots, syncs/removes a 4 KiB root file, rolls unique internal DuckLake DDL back, and proves zero table/file/snapshot residue; explicit drain/failure states | remote dependency probes and latency SLOs |
 | backup/restore/upgrade | partial | checksummed offline exact-path backup/restore plus restart/reopen | online/relocated production recovery, upgrade/rollback, and release-catalog timing |
 
 ## Maintenance rule

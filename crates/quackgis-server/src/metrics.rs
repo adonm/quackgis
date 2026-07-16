@@ -91,9 +91,12 @@ pub async fn sample_duckdb_resources(
     let mut ticker = tokio::time::interval(interval);
     loop {
         ticker.tick().await;
+        if !lifecycle.is_accepting() {
+            return;
+        }
         let storage = Arc::clone(&storage);
         match tokio::task::spawn_blocking(move || {
-            storage.readiness_probe()?;
+            storage.operational_readiness_probe()?;
             storage.resource_sample()
         })
         .await

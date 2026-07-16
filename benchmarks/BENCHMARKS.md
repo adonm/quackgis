@@ -267,4 +267,4 @@ interruption behavior.
 E1's result, cancellation, transport, mixed-class, and COPY reference budgets now
 pass, and M4's complete mixed-shape analytical workload passes twice at both 10M
 and 100M. Next profiles belong to M5: packaged I0 resources/hosted relay,
-write-capacity readiness, recovery/upgrade, mixed release workload, and soak.
+recovery/upgrade, mixed release workload, and soak.

@@ -7,6 +7,9 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 
 ### Added
 
+- Local readiness now verifies readable DuckLake snapshots, a synced/removable
+  4 KiB data-root write, and mandatory rollback of unique internal DuckLake DDL;
+  native evidence requires zero table, file, or snapshot residue.
 - The REST edge now validates bounded HS256 JWT signature, issuer, audience,
   expiry/not-before, and a static role allowlist, then uses one SCRAM
   authenticator with transaction-local role/claims. Per-role PostgreSQL catalog
