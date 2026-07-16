@@ -180,6 +180,14 @@ iroh-duckdb-relay-smoke driver=duckdb_adbc_driver:
     HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" \
       cargo test -p quackgis-server --test iroh_direct duckdb_pgwire_oracles_pass_through_forced_custom_relay -- --ignored --exact --nocapture --test-threads=1
 
+# Run the native DuckDB differential oracle through iroh's public relay preset (requires outbound network).
+iroh-duckdb-public-relay-smoke driver=duckdb_adbc_driver:
+    @set -eu; driver_arg='{{driver}}'; driver_arg="${driver_arg#driver=}"; \
+    if [ ! -f "$driver_arg" ]; then echo 'DuckDB ADBC driver is missing; run `mise run duckdb-bootstrap`' >&2; exit 2; fi; \
+    driver_arg="$(realpath "$driver_arg")"; duckdb_home_arg="$(realpath -m '{{duckdb_home}}')"; \
+    HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" \
+      cargo test -p quackgis-server --test iroh_direct duckdb_pgwire_oracles_pass_through_public_default_relay -- --ignored --exact --nocapture --test-threads=1
+
 # Measure TCP, direct iroh, and forced-relay off/auto transport behavior and enforce I0 budgets.
 iroh-transport-profile level="smoke" bytes="" out=".tmp/iroh-transport-profile/smoke.json":
     @set -eu; level_arg='{{level}}'; bytes_arg='{{bytes}}'; out_arg='{{out}}'; \

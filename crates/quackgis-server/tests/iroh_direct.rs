@@ -12,7 +12,7 @@ use quackgis_edge::runtime::{
     BootstrapAuthority, ClientConnector, WorkerAuthority, serve_bootstrap, serve_local_client,
     serve_worker,
 };
-use quackgis_edge::{CONTROL_ALPN, CompressionPolicy, EDGE_ALPN};
+use quackgis_edge::{CONTROL_ALPN, CompressionPolicy, EDGE_ALPN, RelayPolicy};
 use quackgis_server::pgwire_server::ServerOptions;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -221,6 +221,98 @@ async fn duckdb_pgwire_oracles_pass_through_forced_custom_relay() -> Result<()> 
     worker_task.await??;
     println!(
         "duckdb_iroh_custom_relay_smoke_ok parity=true rows={} sum={} cancellation={}",
+        relayed.committed_rows, relayed.committed_sum, relayed.cancellation_sqlstate
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the pinned DuckDB ADBC runtime and outbound public-relay access"]
+async fn duckdb_pgwire_oracles_pass_through_public_default_relay() -> Result<()> {
+    let runtime = TestRuntime::start(
+        ServerOptions::new()
+            .with_max_connections(12)
+            .with_max_active_queries(4)
+            .with_max_reader_queries(4)
+            .with_max_blocking_workers(5)
+            .with_statement_timeout(Duration::from_secs(30)),
+    )
+    .await;
+    runtime.storage().readiness_probe()?;
+    let backend_address = format!("127.0.0.1:{}", runtime.port()).parse()?;
+
+    let bootstrap_secret = SecretKey::from_bytes(&[101; 32]);
+    let credential_secret = SecretKey::from_bytes(&[103; 32]);
+    let worker =
+        public_relay_endpoint(SecretKey::from_bytes(&[102; 32]), vec![EDGE_ALPN.to_vec()]).await?;
+    let bootstrap =
+        public_relay_endpoint(bootstrap_secret.clone(), vec![CONTROL_ALPN.to_vec()]).await?;
+    let tiny_client = public_relay_endpoint(SecretKey::from_bytes(&[104; 32]), vec![]).await?;
+    for endpoint in [&worker, &bootstrap, &tiny_client] {
+        assert!(endpoint.addr().ip_addrs().next().is_none());
+        assert!(endpoint.addr().relay_urls().next().is_some());
+    }
+
+    let authority = BootstrapAuthority::new(
+        bootstrap_secret.clone(),
+        credential_secret.public(),
+        "postgres",
+        worker.addr(),
+        1,
+        60,
+    )?;
+    let (bootstrap_shutdown_tx, bootstrap_shutdown) = watch::channel(false);
+    let bootstrap_task = tokio::spawn(serve_bootstrap(
+        bootstrap.clone(),
+        authority,
+        4,
+        bootstrap_shutdown,
+    ));
+    let worker_metrics = TransportMetrics::default();
+    let (worker_shutdown_tx, worker_shutdown) = watch::channel(false);
+    let worker_task = tokio::spawn(serve_worker(
+        worker.clone(),
+        WorkerAuthority::new(bootstrap_secret.public(), backend_address, 8)
+            .with_compression(CompressionPolicy::Auto, worker_metrics.clone()),
+        4,
+        worker_shutdown,
+    ));
+    let client_metrics = TransportMetrics::default();
+    let connector = ClientConnector::new(tiny_client.clone(), credential_secret, bootstrap.addr())
+        .with_compression(CompressionPolicy::Auto, client_metrics.clone());
+    let local_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let local_address = local_listener.local_addr()?;
+    let (client_shutdown_tx, client_shutdown) = watch::channel(false);
+    let client_task = tokio::spawn(serve_local_client(
+        local_listener,
+        connector,
+        8,
+        client_shutdown,
+    ));
+
+    let direct = run_pgwire_oracle(backend_address, "public_direct_oracle").await?;
+    let relayed = run_pgwire_oracle(local_address, "public_tunnel_oracle").await?;
+    assert_eq!(relayed, direct);
+    assert!(client_metrics.snapshot().upstream.compressed_blocks > 0);
+    assert!(worker_metrics.snapshot().downstream.compressed_blocks > 0);
+    let remote = tiny_client
+        .remote_info(worker.id())
+        .await
+        .context("public tiny client has no worker route information")?;
+    assert!(remote.addrs().any(|address| address.addr().is_relay()));
+    assert!(remote.addrs().all(|address| !address.addr().is_ip()));
+
+    client_shutdown_tx.send(true).ok();
+    bootstrap_shutdown_tx.send(true).ok();
+    worker_shutdown_tx.send(true).ok();
+    tiny_client.close().await;
+    bootstrap.close().await;
+    worker.close().await;
+    client_task.await??;
+    bootstrap_task.await??;
+    worker_task.await??;
+    println!(
+        "duckdb_iroh_public_relay_smoke_ok parity=true rows={} sum={} cancellation={}",
         relayed.committed_rows, relayed.committed_sum, relayed.cancellation_sqlstate
     );
     Ok(())
@@ -474,6 +566,21 @@ async fn relay_endpoint(
     tokio::time::timeout(Duration::from_secs(10), endpoint.online())
         .await
         .context("relay-only endpoint did not become online")?;
+    Ok(endpoint)
+}
+
+async fn public_relay_endpoint(secret: SecretKey, alpns: Vec<Vec<u8>>) -> Result<Endpoint> {
+    let endpoint = Endpoint::builder(presets::N0)
+        .secret_key(secret)
+        .alpns(alpns)
+        .relay_mode(RelayPolicy::from_config(None)?.iroh_mode())
+        .clear_ip_transports()
+        .bind()
+        .await
+        .map_err(|error| anyhow!("public-relay endpoint bind failed: {error}"))?;
+    tokio::time::timeout(Duration::from_secs(45), endpoint.online())
+        .await
+        .context("public-relay endpoint did not become online")?;
     Ok(endpoint)
 }
 
