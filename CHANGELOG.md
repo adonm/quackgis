@@ -50,7 +50,7 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   client; fixed direct iroh routes require no outbound relay. Pinned psql 18.3,
   psycopg 3.2.13, and OGR 3.11.5 pass through the bridge, while direct worker TCP,
   plaintext, and certificate-free Jobs fail. Ordered replacement reconnects in
-  4.01 seconds, and packaged mTLS/edge-key rotation denies the old client
+  4.07 seconds, and packaged mTLS/edge-key rotation denies the old client
   certificate before all current gates reconnect.
 - Local-first smoke/local/reference/external roadmap levels with explicit host
   performance, minimal-Kind topology, and managed-service claim boundaries.
