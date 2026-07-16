@@ -74,12 +74,13 @@ Important limits:
 The first I0 transport slice is executable: a config-backed bootstrap issues a
 short-lived signed one-worker lease after registered-key proof, a challenged
 worker accepts typed pgwire/cancellation streams, and a bounded loopback tiny
-client multiplexes local sessions over iroh. The local-direct gates prove leased
-startup-role enforcement and rejection of nested TLS or backend password/SASL
-requests, then run typed and spatial queries, exact COPY publication, rollback,
-cancellation/quarantine, and fresh reconnect against DuckDB/DuckLake. Broad
-protocol parity, public/custom relays, packaging, compression, and transport
-resource budgets remain open.
+client multiplexes local sessions over iroh. Direct, forced-custom-relay, and
+opt-in public-default-relay gates prove leased startup-role enforcement, nested-
+TLS/backend-password denial, and differential DuckDB result/type/error, portal,
+transaction, COPY, cancellation/quarantine, concurrent-session, and reconnect
+behavior. Mandatory raw plus optional bounded adaptive LZ4 passes clean
+smoke/local/reference transport-resource budgets. Packaging and hosted-relay
+qualification remain open.
 
 TLS remains optional for local development. Set `QUACKGIS_TLS_MODE=required` with
 `QUACKGIS_TLS_CERT` and `QUACKGIS_TLS_KEY` to fail closed on plaintext startup.
@@ -141,8 +142,14 @@ mise exec -- just duckdb-current-benchmark
 mise exec -- just duckdb-runtime-static-check
 mise exec -- just iroh-protocol-test
 mise exec -- just iroh-direct-smoke
+mise exec -- just iroh-custom-relay-smoke
 mise exec -- just iroh-duckdb-smoke
+mise exec -- just iroh-duckdb-relay-smoke
+mise exec -- just iroh-transport-profile
 ```
+
+Outbound public-preset evidence is opt-in with `just iroh-public-relay-smoke` and
+`just iroh-duckdb-public-relay-smoke`; it is not a network-dependent CI gate.
 
 Use `just --list` for the complete current command set. Commands are maintained
 only when they target registered tests or the DuckDB-only runtime.

@@ -18,8 +18,9 @@ three independently evolving wire formats.
 - Control messages are bounded at 16 KiB and reject unknown fields. Roles,
   protocol lists, time ranges, assignments, signatures, proofs, and compression
   negotiation fail closed.
-- `none` is the only implemented compression codec and is mandatory. A candidate
-  codec will be added only after the I0 direct/relay measurements select one.
+- `none` remains mandatory. If both endpoints use the `auto` policy, the worker
+  selects the evidence-qualified `lz4_block` capability; otherwise the connection
+  stays raw.
 - Omitted relay configuration selects iroh's public production preset. An
   explicitly empty, malformed, or duplicate custom list is rejected.
 - `quackgis-bootstrap` serves only lease requests and keeps a bounded replay
@@ -32,6 +33,9 @@ three independently evolving wire formats.
   refreshes one lease, and multiplexes local sessions onto typed worker streams.
   It recognizes only the initial pgwire packet needed to distinguish cancellation
   and does not parse SQL.
+- PostgreSQL startup, nested-encryption denial, backend `AuthenticationOk`, all
+  access/control messages, and typed cancellation remain raw. Compression framing
+  starts only for pgwire application bytes after `AuthenticationOk`.
 - The worker requires the loopback pgwire server to begin with PostgreSQL
   `AuthenticationOk`. Any password/SASL challenge is rejected before the local
   client can send credential material across the cluster leg.
@@ -50,9 +54,80 @@ runs unchanged against direct TCP and the tiny-client bridge and requires equal
 result values/types, stable errors, typed parameters, one-row portals, DuckDB
 Spatial, commit/rollback/disconnect behavior, successful and malformed COPY
 atomicity, cancellation/quarantine, and fresh reconnect state. It also opens two
-concurrent tunneled sessions. Public-default and custom relay paths, worker
-restart, and CPU/RSS/throughput/compression profiles remain open and are tracked
-in [ROADMAP_STATUS.md](./ROADMAP_STATUS.md).
+concurrent tunneled sessions. `just iroh-duckdb-relay-smoke` runs that oracle over
+a deterministic forced custom relay. The outbound, opt-in
+`just iroh-duckdb-public-relay-smoke` runs it through iroh's public preset.
+
+`just iroh-custom-relay-smoke` additionally proves adaptive blocks, typed
+cancellation, unusable-direct fallback, same-identity worker restart, credential
+rotation, denial of the old credential's next lease, and replacement-client
+reconnect. `just iroh-public-relay-smoke` is the smaller outbound reconnect seam.
+Neither public-relay command is a required network-dependent CI gate.
+
+## Adaptive block format
+
+Each stream direction owns independent state and retains no dictionary. The
+negotiated LZ4 application stream is a sequence of blocks with a 9-byte header:
+one raw/LZ4 kind byte, a four-byte decompressed length, a four-byte payload
+length, then the payload. Both declared lengths are at most 64 KiB. Raw lengths
+must match; compressed payloads must be smaller than their output and may expand
+by at most 256:1. Unknown kinds, truncation, corruption, zero/oversized lengths,
+length mismatch, and ratio abuse fail before that block reaches pgwire.
+
+Inputs below 1 KiB stay raw. Larger blocks use LZ4 only when they save at least
+64 bytes and 12 percent including the fixed selection policy. After two failed
+probes, the encoder sends eight blocks raw before sampling again; this bounds CPU
+on incompressible streams while allowing a changing stream to enable compression.
+There is no state shared across directions, streams, clients, credentials, or
+sessions. Idle streams retain no codec buffer.
+
+Payload-free snapshots count application input/wire bytes, saved bytes, blocks,
+compressed/small/incompressible/backoff decisions, compression/decompression CPU,
+decode failures, and pgwire/cancellation stream counts. The client and worker log
+their local snapshot at orderly shutdown; metrics contain no SQL, parameters,
+samples, credentials, or paths.
+
+## Committed I0 budgets
+
+`just iroh-transport-profile` compares raw loopback TCP with direct and forced
+custom-relay iroh, each with compression `off` and `auto`. It uses the authenticated
+bridge and a deterministic trust-mode echo backend to isolate transport cost; the
+native DuckDB tests above remain the SQL/COPY correctness oracle. Small,
+compressible, xorshift-incompressible, WKB-like, COPY-like, and pgwire-result-like
+payloads each produce three connection, first-byte, and throughput samples. The
+profile also records process CPU/RSS, cancellation, two concurrent streams, bytes,
+codec CPU, ratio, skip reasons, and decode failures in
+`.tmp/iroh-transport-profile/`.
+
+The pre-packaging budgets are:
+
+- connection at most 5 s, first byte at most 2 s, and cancellation at most 1 s;
+- process RSS growth at most 64 MiB beyond profile idle;
+- raw direct iroh p50 throughput at least 5% of loopback TCP and forced relay at
+  least 2% (these guard regressions against an unusually fast in-process loopback
+  baseline; they are not WAN SLOs);
+- automatic incompressible throughput at least 50% of the same-path raw mode,
+  with zero compressed incompressible blocks; and
+- at least 50% wire-byte savings for the maintained compressible shape, while
+  small blocks remain raw and all decode-failure counters remain zero.
+
+Clean smoke/local/reference runs use 8/32/64 MiB per maintained non-small shape:
+
+```sh
+just iroh-transport-profile level=smoke bytes=8388608 out=.tmp/iroh-transport-profile/smoke.json
+just iroh-transport-profile level=local bytes=33554432 out=.tmp/iroh-transport-profile/local.json
+just iroh-transport-profile level=reference bytes=67108864 out=.tmp/iroh-transport-profile/reference.json
+```
+
+On source `93c68be`, a 16-logical-CPU AMD Ryzen 7 7700X reference run observed a
+17.63 MiB maximum transport RSS delta, 0.38 ms maximum cancellation, 3.41 ms
+maximum connection, and 2.99 ms maximum first-byte sample. At 64 MiB, automatic
+LZ4 saved 99.57% on the compressible shape; direct/relay compressible p50s were
+4715/2380 MiB/s, incompressible p50s were 786/159 MiB/s with zero compressed
+blocks, and compression CPU was about 20 ms per direct or relay round trip set.
+Raw forced-relay compressible p50 was 147 MiB/s. The release decision is to keep
+bounded LZ4 `auto` plus sampling backoff and retain `off`; K0/M5 must rerun these
+same budgets against the package and selected hosted relay.
 
 ## Operator configuration
 
@@ -82,6 +157,7 @@ not request a password:
   "secret_key_path": "worker.key",
   "bootstrap_public_key": "BOOTSTRAP_PUBLIC_KEY",
   "backend": "127.0.0.1:5434",
+  "compression": "auto",
   "max_connections": 64,
   "max_streams_per_connection": 64
 }
@@ -119,6 +195,7 @@ document into the tiny-client configuration:
     "relay_url": "https://example-relay.invalid"
   },
   "listen": "127.0.0.1:5433",
+  "compression": "auto",
   "max_connections": 64
 }
 ```
@@ -133,6 +210,11 @@ non-empty form independently to each process:
 "relays": ["https://relay.example.com"]
 ```
 
+`compression` accepts `off` or `auto` independently on worker and client and
+defaults to `off`. Both sides must allow automatic negotiation for LZ4 to be
+selected. Bootstrap has no compression setting because it never carries
+application bytes.
+
 The direct TCP backend is an I0 development seam. It must stay loopback-only and
 is not release ingress; packaging it behind an owner-protected same-pod/process
 boundary and refusing direct application access remain K0/M5 work.
@@ -144,4 +226,8 @@ signs assignment but never proxies application bytes. A worker must verify the
 bootstrap signature, lease lifetime/assignment, current transport endpoint, and
 fresh credential proof before accepting a typed pgwire, cancellation, or future
 HTTP stream. Neither relay access nor possession of a copied signed lease grants
-a database role.
+a database role. Compression cannot begin until that proof succeeds and never
+covers lease/control traffic, startup authentication, or cancellation. Application
+errors after `AuthenticationOk` are ordinary pgwire application bytes and may be
+inside an independent compressed block; cancellation remains a separate raw typed
+stream so codec work cannot delay its delivery.

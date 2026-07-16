@@ -28,6 +28,22 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   parameters, portals, transaction/disconnect behavior, successful and malformed
   COPY atomicity, cancellation/quarantine, concurrent sessions, and reconnect
   state.
+- Evidence-selected adaptive LZ4 transport framing with mandatory raw fallback,
+  independent 64 KiB per-direction blocks, minimum-savings selection,
+  incompressible sampling backoff, expansion/allocation/corruption bounds, and
+  payload-free byte/block/CPU/failure metrics. Startup/auth/control/cancellation
+  remain raw.
+- Deterministic custom-relay evidence proves relay-only application traffic,
+  unusable-direct fallback, compressed and raw blocks, typed cancellation,
+  same-identity worker restart, credential rotation, old-key denial, and native
+  DuckDB differential parity. Opt-in public-preset gates also pass reconnect and
+  the full native differential oracle.
+- Clean 8/32/64 MiB TCP/direct/forced-relay `off`/`auto` profiles publish
+  three-sample latency/throughput distributions, CPU, RSS, cancellation, stream,
+  byte, ratio, and codec metrics. The source-`93c68be` Ryzen 7 7700X reference
+  passes the +64 MiB transport allowance and committed raw/auto budgets; automatic
+  LZ4 saves 99.57% on the maintained compressible profile while incompressible
+  blocks stay raw.
 - Local-first smoke/local/reference/external roadmap levels with explicit host
   performance, minimal-Kind topology, and managed-service claim boundaries.
 - A common profile evidence envelope with source dirty hashes, checksum-only native

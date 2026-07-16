@@ -75,11 +75,14 @@ registered credential, bootstrap-signed one-worker lease, challenged key proof,
 bounded loopback tiny client, and typed pgwire/cancellation worker streams. The
 worker validates pgwire startup `user` against the lease, answers SSL/GSS requests
 without nested encryption, and accepts only `AuthenticationOk` from the loopback
-backend before forwarding any client authentication traffic. The tiny client
-recognizes initial cancellation framing but never parses SQL. Current direct-path
-evidence reaches the DuckDB/DuckLake server for a bounded query/COPY/rollback/
-cancellation slice; broad parity, relays, resource budgets, and an owner-protected
-packaged local boundary remain open.
+backend before forwarding any client authentication traffic. The tiny client recognizes initial cancellation framing but never parses SQL.
+Current direct, forced-custom-relay, and opt-in public-default-relay evidence runs
+one differential DuckDB/DuckLake result/type/error/transaction/COPY/cancellation
+oracle. Mandatory `none` plus optional bounded adaptive LZ4 starts only after
+`AuthenticationOk`; each stream direction has independent 64 KiB blocks and no
+shared dictionary. Clean 8/32/64 MiB host profiles commit direct/relay latency,
+CPU, RSS, throughput, cancellation, byte-saving, and codec budgets. An owner-
+protected packaged local boundary and hosted-relay reruns remain open.
 
 The release application path always enters through the tiny client. Bootstrap
 registers the client-generated credential public key, selects one worker, and

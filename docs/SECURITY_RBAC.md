@@ -29,7 +29,7 @@ floor from the ordered security work.
 | bounded transaction-local `request.jwt.claims` context | real pgwire workflow + role/parser units |
 | common schema/table privilege enforcement | role/policy units + real pgwire role-denial/grant cases |
 | role-aware schema/table/column/grant/default/comment discovery | real pgwire workflow + development catalog/parser units |
-| signed I0 worker assignment and credential-key proof | edge protocol units + real local-direct iroh endpoints |
+| signed I0 worker assignment and credential-key proof | edge protocol units plus real direct, forced-custom-relay, and public-default-relay iroh endpoints |
 | I0 cluster-leg credential exclusion | leased startup-role check, nested-TLS denial, and backend `AuthenticationOk`-only direct smoke |
 
 The role configuration parser validates stable explicit OIDs, LOGIN/NOLOGIN,
@@ -81,13 +81,16 @@ infrastructure, and production failure drills remain open.
 7. **Metrics/audit:** never include SQL text, parameters, request claims, WKB,
    credentials, signed URIs, or sensitive paths.
 
-The target iroh tunnel negotiates compression only after client/worker
-authentication. Enrollment, SCRAM, grant/access proofs, assignments, cancellation,
-errors, and control messages remain raw. Application compression uses bounded
-independent blocks and separate contexts per stream direction, with no dictionary
-shared across clients, credentials, requests, or sessions. Declared decompressed
-length and expansion-ratio limits are checked before allocation; compression
-metrics contain sizes and decisions, never payload samples.
+The current iroh tunnel negotiates mandatory `none` and optional LZ4 only after
+client/worker authentication. Enrollment, SCRAM, grant/access proofs, assignments,
+pgwire startup/authentication, cancellation, and control messages remain raw.
+Post-authentication pgwire application bytes, including application errors, may
+use bounded independent blocks and separate state per stream direction, with no
+dictionary shared across clients, credentials, requests, or sessions. Declared
+64 KiB compressed/decompressed ceilings and a 256:1 expansion-ratio limit are
+checked before allocation. Corrupt/truncated/oversized blocks fail before block
+delivery; compression metrics contain only sizes, timings, and decisions, never
+payload samples.
 
 ## Current authorization model
 

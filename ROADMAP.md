@@ -51,8 +51,8 @@ run must use the same implementation and oracle as its reference counterpart.
 ## Closure workstreams
 
 The identifiers below preserve the established work-package names. Completed
-foundations remain listed. I0 may proceed immediately and must establish the iroh
-transport/resource baseline before Local 1.0 closes; C0 then H0 remain the
+foundations remain listed. I0 has established the iroh transport/resource
+baseline needed by Local 1.0; C0 then H0 remain the
 compatibility dependency chain, while P0 can proceed after its evidence/layout
 prerequisites.
 
@@ -102,8 +102,8 @@ prerequisites.
 | Operations | restart/reopen, snapshot inspection, adjacent-file merge, checksummed offline exact-path backup/restore | no online/relocated production recovery or shared profile |
 | Performance | fixture-level bbox/exact-recheck oracle | no current scale or layout-maintenance claim |
 | Metrics/status | policy, classed admission, lifecycle, cancellation, timeout, quarantine, COPY rows/bytes/batches/latency, sampled DuckDB memory/temporary storage, liveness, and DuckLake-probed readiness/drain state | probe is local/read-only; no write-capacity SLO |
-| Iroh cluster edge | shared `control/1`/`edge/1` protocol plus executable config-backed bootstrap, one registered credential/worker lease, challenged worker authentication, typed pgwire/cancellation streams, and a bounded loopback tiny client differentially pass direct-TCP/local-iroh result/type/error, simple/extended, parameter, portal, spatial, transaction/disconnect, COPY atomicity, cancellation/quarantine, concurrent-session, and reconnect oracles | public/custom relay and resource evidence, packaged ingress, durable pairing/control state, gossip, worker pools, and serverless client remain open |
-| Transport compression | authenticated capability negotiation requires `none` and the executable path remains raw | no evidence-selected codec, adaptive blocks, decompression bounds, metrics, or direct/relay budgets |
+| Iroh cluster edge | shared `control/1`/`edge/1` protocol plus executable config-backed bootstrap, one registered credential/worker lease, challenged worker authentication, typed pgwire/cancellation streams, and a bounded loopback tiny client differentially pass direct TCP plus direct, forced-custom-relay, and public-default-relay iroh result/type/error, simple/extended, parameter, portal, spatial, transaction/disconnect, COPY atomicity, cancellation/quarantine, concurrent-session, and reconnect oracles. Deterministic custom-relay evidence also covers unusable-direct fallback, worker restart, credential rotation, and old-credential denial | packaged ingress, durable pairing/control state, gossip, worker pools, HTTP transport, hosted-relay operations, and serverless client remain open |
+| Transport compression | authenticated negotiation requires `none` and optionally selects evidence-qualified LZ4; post-`AuthenticationOk` application bytes use independent adaptive blocks with 64 KiB ceilings, ratio/corruption checks, incompressible backoff, and payload-free metrics. Clean 8/32/64 MiB TCP/direct/forced-relay `off`/`auto` profiles pass committed connection, first-byte, cancellation, RSS, throughput, savings, and raw-overhead budgets | packaged/hosted-relay reruns and workload-specific WAN SLOs remain open; no dictionary or cross-stream context is supported |
 
 ## M0 — truthful, focused repository
 
