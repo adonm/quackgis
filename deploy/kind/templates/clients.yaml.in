@@ -104,7 +104,19 @@ items:
               command: ["python3"]
               args:
                 - -c
-                - "import psycopg; c=psycopg.connect(''); assert c.execute('SELECT 1::INTEGER').fetchone() == (1,); c.close()"
+                - |-
+                  import psycopg
+                  table = "public.kind_psycopg_points"
+                  with psycopg.connect("", autocommit=True) as connection:
+                      connection.execute(f"CREATE TABLE IF NOT EXISTS {table}(id INTEGER, name VARCHAR, geom_wkb BLOB)")
+                      connection.execute(f"DELETE FROM {table}")
+                      with connection.cursor().copy(f"COPY {table} (id, name, geom_wkb) FROM STDIN") as copy:
+                          copy.write_row((1, "one", bytes.fromhex("0101000000000000000000f03f0000000000000040")))
+                          copy.write_row((2, None, None))
+                  with psycopg.connect("") as reopened:
+                      rows = reopened.execute(f"SELECT id, name, CASE WHEN geom_wkb IS NULL THEN NULL ELSE ST_AsText(ST_GeomFromWKB(geom_wkb)) END FROM {table} ORDER BY id").fetchall()
+                      assert rows == [(1, "one", "POINT (1 2)"), (2, None, None)], rows
+                  print("psycopg_copied_data_ok rows=2 copy=atomic reopen=true")
               env: *pg_environment
               securityContext: *client_security
               volumeMounts: *tls_mount

@@ -531,7 +531,7 @@ kind-up-local: doctor-kind kind-local-images
     QUACKGIS_CLIENT_LOAD_IMAGE='{{kind_client_image}}' \
     deploy/kind/up.sh
 
-# Run pinned clients through mutual TLS and prove direct worker pgwire is unreachable.
+# Run pinned clients, including psycopg copied data, through mutual TLS and prove direct worker pgwire is unreachable.
 kind-client-gates:
     @set -eu; export KUBECONFIG="${KUBECONFIG:-$PWD/.tmp/kind/kubeconfig}"; \
     kubectl delete -f .tmp/kind/rendered/clients.yaml --ignore-not-found >/dev/null; \

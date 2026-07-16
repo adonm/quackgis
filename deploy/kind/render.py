@@ -73,6 +73,8 @@ def check_templates() -> None:
     for required in [
         "quackgis-psql",
         "quackgis-psycopg",
+        "psycopg_copied_data_ok",
+        "COPY {table} (id, name, geom_wkb) FROM STDIN",
         "quackgis-ogr",
         "quackgis-direct-denied",
         "quackgis-plaintext-denied",

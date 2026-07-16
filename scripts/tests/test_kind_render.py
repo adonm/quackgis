@@ -91,6 +91,8 @@ def main() -> None:
         assert 'args: ["--host", "127.0.0.1", "--port", "5434"]' in rendered
         assert "sslmode=verify-full" in clients
         assert "PGSSLCERT" in clients
+        assert "psycopg_copied_data_ok" in clients
+        assert "kind_psycopg_points" in clients
         assert "quackgis-direct-denied" in clients
         assert "quackgis-plaintext-denied" in clients
         assert "quackgis-uncredentialed-denied" in clients
