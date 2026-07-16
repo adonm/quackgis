@@ -46,7 +46,10 @@ Local divergence is limited to:
 - `process_socket_with_frontend_limit`, which applies the limit before plaintext
   or TLS application-frame body reads;
 - a header-only validator used by the focused no-allocation regression; and
-- no protocol, authentication, handler, or message representation changes.
+- a `NoopStartupHandler` hook returning the concrete default server-parameter
+  provider, allowing trust and edge-preauthenticated QuackGIS sessions to
+  advertise the same PostgreSQL 18 profile as SCRAM without changing
+  authentication messages or decisions.
 
 `QUACKGIS_PGWIRE_MAX_FRAME_BYTES` owns the release setting. The native workflow
 sends only an oversized `CopyData` header, requires immediate connection closure,

@@ -121,7 +121,10 @@ zero-downtime multi-key overlap and durable revocation remain open.
 
 The maintained Rust pgwire client resolves PostgreSQL 18 profile/QGIS-required
 built-in types, their array partners, collations, and spatial sentinels through
-process-local relational compatibility views. Explicit and implicit `pg_catalog`
+process-local relational compatibility views. All auth modes advertise PostgreSQL
+18.4; structural `version()`, `SHOW server_version[_num]`, and
+`pg_is_in_recovery=false` agree, while failed/idle transaction cleanup preserves
+PostgreSQL `25P02` precedence. Explicit and implicit `pg_catalog`
 lookup, reference integrity, PostgreSQL result types, and RowDescription text,
 binary, and NULL WKB transport pass. Stable user-object catalogs, origins,
 defaults, comments, NOT-NULL constraints, and an empty index projection pass with

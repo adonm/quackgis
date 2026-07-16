@@ -1358,6 +1358,48 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
     .expect("pgwire connect");
     let connection_task = tokio::spawn(connection);
 
+    let server_identity = client
+        .query_one(
+            "SELECT pg_is_in_recovery(), version(), current_schema()",
+            &[],
+        )
+        .await
+        .expect("PostgreSQL compatibility server identity");
+    assert!(!server_identity.get::<_, bool>(0));
+    assert_eq!(
+        server_identity.get::<_, String>(1),
+        quackgis_server::postgres_compat::POSTGRESQL_COMPATIBILITY_VERSION_STRING
+    );
+    assert_eq!(server_identity.get::<_, String>(2), "public");
+    assert_eq!(
+        server_identity.columns()[0].type_(),
+        &tokio_postgres::types::Type::BOOL
+    );
+    assert_eq!(
+        server_identity.columns()[1].type_(),
+        &tokio_postgres::types::Type::TEXT
+    );
+    assert_eq!(
+        server_identity.columns()[2].type_(),
+        &tokio_postgres::types::Type::NAME
+    );
+    assert_eq!(
+        client
+            .query_one("SHOW server_version", &[])
+            .await
+            .expect("SHOW server_version")
+            .get::<_, String>(0),
+        quackgis_server::postgres_compat::POSTGRESQL_COMPATIBILITY_VERSION
+    );
+    assert_eq!(
+        client
+            .query_one("SHOW server_version_num", &[])
+            .await
+            .expect("SHOW server_version_num")
+            .get::<_, String>(0),
+        quackgis_server::postgres_compat::POSTGRESQL_COMPATIBILITY_VERSION_NUM
+    );
+
     prove_native_admission_limit(port).await;
 
     let simple = client
@@ -2764,6 +2806,23 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
     assert_eq!(after_commit.get::<_, String>(0), "committed");
 
     client
+        .batch_execute("COMMIT")
+        .await
+        .expect("idle simple COMMIT is a no-op");
+    client
+        .batch_execute("ROLLBACK")
+        .await
+        .expect("idle simple ROLLBACK is a no-op");
+    client
+        .execute("COMMIT", &[])
+        .await
+        .expect("idle extended COMMIT is a no-op");
+    client
+        .execute("ROLLBACK", &[])
+        .await
+        .expect("idle extended ROLLBACK is a no-op");
+
+    client
         .batch_execute("BEGIN")
         .await
         .expect("begin failed-transaction oracle");
@@ -2790,10 +2849,22 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
         aborted_query.code(),
         Some(&tokio_postgres::error::SqlState::IN_FAILED_SQL_TRANSACTION)
     );
+    let aborted_catalog_query = client
+        .query_one("SELECT * FROM pg_catalog.pg_proc", &[])
+        .await
+        .expect_err("failed transaction takes precedence over unsupported catalogs");
+    assert_eq!(
+        aborted_catalog_query.code(),
+        Some(&tokio_postgres::error::SqlState::IN_FAILED_SQL_TRANSACTION)
+    );
     client
         .batch_execute("COMMIT")
         .await
         .expect("COMMIT rolls back a failed transaction");
+    client
+        .batch_execute("ROLLBACK")
+        .await
+        .expect("QGIS-style ROLLBACK after failed COMMIT cleanup is harmless");
     let after_failed_transaction = observer
         .query_one(
             "SELECT count(*)::BIGINT FROM quackgis.main.wire_mutations",
@@ -2809,6 +2880,26 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
         )
         .await
         .expect("session reusable after failed transaction rollback");
+
+    client
+        .batch_execute("BEGIN")
+        .await
+        .expect("begin explicit failed ROLLBACK oracle");
+    client
+        .batch_execute("TRUNCATE quackgis.main.wire_mutations")
+        .await
+        .expect_err("second unsupported statement fails transaction");
+    client
+        .batch_execute("ROLLBACK")
+        .await
+        .expect("explicit ROLLBACK cleans failed transaction");
+    client
+        .query_one(
+            "SELECT count(*)::BIGINT FROM quackgis.main.wire_mutations",
+            &[],
+        )
+        .await
+        .expect("session reusable after explicit failed ROLLBACK");
 
     let unsupported = client
         .batch_execute("TRUNCATE quackgis.main.wire_mutations")

@@ -26,6 +26,7 @@ use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::{self, ServerConfig};
 
 use crate::auth::{AccessRole, AuthConfig};
+use crate::postgres_compat::POSTGRESQL_COMPATIBILITY_VERSION;
 
 mod copy_text;
 mod duckdb;
@@ -410,7 +411,7 @@ impl ServerParameterProvider for QuackGisServerParameterProvider {
     where
         C: ClientInfo,
     {
-        let mut params = DefaultServerParameterProvider::default().server_parameters(client)?;
+        let mut params = postgresql_server_parameter_provider().server_parameters(client)?;
         let role = self.auth.role_for_client(client);
         params.insert("is_superuser".to_string(), "off".to_string());
         params.insert(
@@ -423,6 +424,14 @@ impl ServerParameterProvider for QuackGisServerParameterProvider {
         );
         Some(params)
     }
+}
+
+fn postgresql_server_parameter_provider() -> DefaultServerParameterProvider {
+    let mut provider = DefaultServerParameterProvider::default();
+    provider.server_version = POSTGRESQL_COMPATIBILITY_VERSION.to_owned();
+    provider.in_hot_standby = false;
+    provider.is_superuser = false;
+    provider
 }
 
 struct ScramStartupSession {
@@ -543,6 +552,10 @@ impl NoopStartupHandler for SimpleStartupHandler {
     fn connection_manager(&self) -> Option<Arc<ConnectionManager>> {
         Some(Arc::clone(&self.connection_manager))
     }
+
+    fn server_parameter_provider(&self) -> DefaultServerParameterProvider {
+        postgresql_server_parameter_provider()
+    }
 }
 
 struct LoggingErrorHandler;
@@ -575,6 +588,17 @@ impl ErrorHandler for LoggingErrorHandler {
 mod tests {
     use super::*;
     use bytes::{BufMut, BytesMut};
+
+    #[test]
+    fn startup_parameters_advertise_the_postgresql_18_profile() {
+        let provider = postgresql_server_parameter_provider();
+        assert_eq!(
+            provider.server_version,
+            crate::postgres_compat::POSTGRESQL_COMPATIBILITY_VERSION
+        );
+        assert!(!provider.in_hot_standby);
+        assert!(!provider.is_superuser);
+    }
 
     #[test]
     fn tls_required_mode_fails_without_material() {

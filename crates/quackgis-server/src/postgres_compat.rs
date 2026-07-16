@@ -3,6 +3,13 @@
 
 use arrow_pg::datatypes::{GEOGRAPHY_OID, GEOMETRY_OID};
 
+pub const POSTGRESQL_COMPATIBILITY_VERSION: &str = "18.4";
+pub const POSTGRESQL_COMPATIBILITY_VERSION_NUM: &str = "180004";
+pub const POSTGRESQL_COMPATIBILITY_VERSION_STRING: &str = concat!(
+    "PostgreSQL 18.4 compatible QuackGIS ",
+    env!("CARGO_PKG_VERSION"),
+    " (DuckDB 1.5.4)"
+);
 pub const PG_CATALOG_NAMESPACE_OID: u32 = 11;
 pub const PUBLIC_NAMESPACE_OID: u32 = 2_200;
 pub const BOOTSTRAP_OWNER_OID: u32 = 10;
@@ -283,7 +290,10 @@ pub fn duckdb_catalog_bootstrap_sql() -> String {
          CREATE OR REPLACE MACRO quackgis_current_schema() AS 'public';\n\
          CREATE OR REPLACE MACRO quackgis_current_schemas(include_implicit) AS\n\
            CASE WHEN CAST(include_implicit AS BOOLEAN)\n\
-                THEN ['pg_catalog', 'public'] ELSE ['public'] END;"
+                THEN ['pg_catalog', 'public'] ELSE ['public'] END;\n\
+         CREATE OR REPLACE MACRO quackgis_pg_is_in_recovery() AS false;\n\
+         CREATE OR REPLACE MACRO quackgis_pg_version() AS {version_string};",
+        version_string = quote_literal(POSTGRESQL_COMPATIBILITY_VERSION_STRING),
     )
 }
 
@@ -1719,6 +1729,19 @@ mod tests {
     use super::*;
     use crate::role::RoleCatalog;
     use std::collections::HashSet;
+
+    #[test]
+    fn compatibility_version_matches_the_tracked_profile() {
+        let profile: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/postgresql18_compatibility_profile.json"
+        ))
+        .expect("PostgreSQL compatibility profile");
+        assert_eq!(
+            profile["target"]["postgresql_version"].as_str(),
+            Some(POSTGRESQL_COMPATIBILITY_VERSION)
+        );
+        assert_eq!(POSTGRESQL_COMPATIBILITY_VERSION_NUM, "180004");
+    }
 
     #[test]
     fn bootstrap_contains_consistent_profile_and_qgis_type_identity() {

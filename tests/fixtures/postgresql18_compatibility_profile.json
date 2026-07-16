@@ -3,6 +3,7 @@
   "profile_id": "pg18-column-core-v1",
   "target": {
     "postgresql_major": 18,
+    "postgresql_version": "18.4",
     "postgis_scope": "geometry/geography identity and WKB transport plus bounded generic geometry metadata, SRID helpers, and extents"
   },
   "purpose": "Freeze the first client-neutral PostgreSQL catalog and wire contract that replaces exact pg_type interception and DuckDB-main REST discovery.",

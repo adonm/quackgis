@@ -27,6 +27,10 @@ pub trait NoopStartupHandler: StartupHandler {
         &*DEFAULT_PID_GENERATOR
     }
 
+    fn server_parameter_provider(&self) -> DefaultServerParameterProvider {
+        DefaultServerParameterProvider::default()
+    }
+
     async fn post_startup<C>(
         &self,
         _client: &mut C,
@@ -64,8 +68,8 @@ where
             if let Some(manager) = self.connection_manager() {
                 super::register_connection(client, &manager);
             }
-            super::finish_authentication0(client, &DefaultServerParameterProvider::default())
-                .await?;
+            let parameter_provider = self.server_parameter_provider();
+            super::finish_authentication0(client, &parameter_provider).await?;
 
             self.post_startup(client, message).await?;
 

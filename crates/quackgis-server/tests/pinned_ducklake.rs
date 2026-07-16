@@ -280,6 +280,32 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
         )
         .await
         .expect("insert projected spatial rows");
+    let qgis_privileges = client
+        .query_one(
+            "SELECT has_table_privilege('\"public\".\"catalog_projection\"','SELECT'), \
+                    pg_is_in_recovery(), current_schema(), \
+                    has_any_column_privilege('\"public\".\"catalog_projection\"','INSERT'), \
+                    has_table_privilege('\"public\".\"catalog_projection\"','DELETE'), \
+                    has_any_column_privilege('\"public\".\"catalog_projection\"','UPDATE'), \
+                    has_column_privilege('\"public\".\"catalog_projection\"','geom_wkb','UPDATE')",
+            &[],
+        )
+        .await
+        .expect("QGIS layer privilege and recovery inquiry");
+    assert!(qgis_privileges.get::<_, bool>(0));
+    assert!(!qgis_privileges.get::<_, bool>(1));
+    assert_eq!(qgis_privileges.get::<_, String>(2), "public");
+    for column in 3..7 {
+        assert!(qgis_privileges.get::<_, bool>(column));
+    }
+    assert_eq!(
+        qgis_privileges.columns()[1].type_(),
+        &tokio_postgres::types::Type::BOOL
+    );
+    assert_eq!(
+        qgis_privileges.columns()[2].type_(),
+        &tokio_postgres::types::Type::NAME
+    );
     let epoch_before_comments = storage
         .catalog_schema_epoch()
         .expect("catalog epoch before comments")

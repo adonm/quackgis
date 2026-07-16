@@ -121,6 +121,8 @@ def check_postgresql_profile(errors: list[str]) -> None:
         errors.append("PostgreSQL compatibility profile_id must be pg18-column-core-v1")
     if profile.get("target", {}).get("postgresql_major") != 18:
         errors.append("PostgreSQL compatibility profile must target major version 18")
+    if profile.get("target", {}).get("postgresql_version") != "18.4":
+        errors.append("PostgreSQL compatibility profile must target version 18.4")
     identity = profile.get("identity_policy", {})
     if [
         identity.get("geometry_oid"),

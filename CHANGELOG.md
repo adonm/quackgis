@@ -7,6 +7,13 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 
 ### Added
 
+- Pgwire startup now advertises the frozen PostgreSQL 18.4 profile consistently
+  in trust, SCRAM, and edge-preauthenticated modes. Structural `version()`,
+  `SHOW server_version[_num]`, and PostgreSQL-typed
+  `pg_is_in_recovery=false` agree. Simple/extended idle transaction end,
+  failed-transaction `COMMIT`/`ROLLBACK`, and `25P02` precedence now pass the
+  native workflow and QGIS-shaped pinned-catalog inquiry without client-specific
+  branches.
 - Local 1.0 now owns a tracked, read-only DuckLake identity patch. Exact upstream,
   DuckDB, patch, vcpkg, tool, platform, and accepted artifact pins drive a
   reproducible build gate. The server accepts only its compile-time SHA-256 at an

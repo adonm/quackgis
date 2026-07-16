@@ -38,7 +38,8 @@
 Their divergences are documented in `DIVERGENCE.md`. The encoder may map and
 encode Arrow/PostgreSQL fields and rows; it may not regain DataFusion, catalog,
 planner, or GeoArrow engine responsibilities. The pgwire patch may enforce the
-frontend frame trust boundary but may not add protocol or authentication policy.
+frontend frame trust boundary and expose a concrete no-auth startup-parameter
+provider hook, but may not add protocol or authentication policy.
 
 The REST interface uses two unmodified crates from
 `joshburgess/pg-rest-server` at one full Git revision recorded in

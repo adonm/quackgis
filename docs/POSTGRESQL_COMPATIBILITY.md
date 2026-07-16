@@ -267,6 +267,7 @@ errors have executable coverage.
 | `pg_type` plus the required `pg_range` relation shape | built-in, geometry/geography, and scalar resolution; rows exist only for range types explicitly supported later |
 | `pg_database` | current logical database identity |
 | `current_database`, `current_schema`, `current_schemas` | session discovery and search path |
+| PostgreSQL 18.4 startup parameters, `version`, `pg_is_in_recovery`, `SHOW server_version[_num]` | coherent client version selection and truthful local-primary recovery state |
 | `oid`, `regclass`, `regtype`, `regnamespace`, `regrole` | symbolic object lookup and catalog joins |
 | `format_type`, `to_regclass`, `to_regtype` | client-neutral type and object discovery |
 
@@ -597,6 +598,12 @@ privilege-aware structure, and expression provenance remain later M3 work, while
 key/index semantics require
 upstream DuckLake support or an explicit client limitation policy.
 
+All startup auth modes advertise the frozen PostgreSQL 18.4 profile. Structural
+`version()` identifies QuackGIS/DuckDB without claiming PostgreSQL execution,
+`pg_is_in_recovery()` truthfully returns PostgreSQL `bool` false for the local
+primary, and `SHOW server_version`/`server_version_num` agree. Unsupported
+arguments/window forms fail closed.
+
 The exact QGIS 3.44 four-statement session bootstrap now passes as the only
 multi-statement exception: simple-protocol batches are limited to eight structurally
 parsed, individually allowlisted `SET` statements. `extra_float_digits=3`,
@@ -629,7 +636,10 @@ is independent of configuration order. Per-connection state now exposes
 PostgreSQL `name`-typed `session_user`, `current_user`, `current_role`, and `user`,
 and supports session/local role assumption, `NONE`, and reset with `42704`/`42501`
 errors. Local identity is removed after commit, rollback, and failed-transaction
-rollback; independent connections remain isolated. A role/context epoch rejects
+rollback; independent connections remain isolated. Simple and extended idle
+`COMMIT`/`ROLLBACK` are harmless, failed `COMMIT` reports rollback, a following
+QGIS-style `ROLLBACK` remains harmless, and unsupported work in a failed
+transaction returns `25P02` before compatibility-shape errors. A role/context epoch rejects
 prepared execution after an identity change rather than reusing stale
 authorization. C5 now consumes those declarations for non-widening statement
 authorization, catalog ownership, and privilege inquiry. The exact
@@ -733,12 +743,13 @@ The remaining clients were retried through current mutual TLS. Psql 18.3 `\d+`
 connects but stops at unavailable `pg_class`. OGR direct discovery connects,
 reports the optional `pg_proc` failure, then stops at `pg_class`; COPY/no-FID are
 therefore still downstream. Exact offscreen QGIS 3.44.11 retries direct, no-FID,
-and copied-SQL layers. It first reaches OID/expression privilege inquiry, which
-correctly requires durable identity, and additionally exposes missing
-`pg_is_in_recovery` plus failed-transaction COMMIT/ROLLBACK cleanup behavior. No
-client-name branch or catalog bypass was added. The artifact blocker is removed;
-those generic PostgreSQL/query-shape gaps and the pinned package rerun remain the
-C6 blockers.
+and copied-SQL layers. The pinned lane now executes its full layer privilege
+projection with PostgreSQL `bool` `pg_is_in_recovery=false`, while all startup
+modes advertise PostgreSQL 18.4 and `version()`/`SHOW server_version[_num]` agree.
+Simple and extended idle transaction end, failed `COMMIT`-as-rollback, subsequent
+`ROLLBACK`, explicit failed `ROLLBACK`, and `25P02` precedence pass without a
+client-name branch. Exact QGIS read-only/binary cursor query shapes, broader
+catalog shapes, and the pinned package rerun remain C6 blockers.
 
 ### H1 — migrate and package role-aware REST
 

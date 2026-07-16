@@ -317,10 +317,10 @@ impl QueryParser for DuckDbParser {
     {
         let role_session = client_role_session(client, &self.auth)?;
         let identity = role_session.identity().map_err(role_session_error)?;
+        if client.transaction_status() == TransactionStatus::Error {
+            validate_failed_transaction_command(sql)?;
+        }
         if let Some(copy_target) = parse_copy_target(sql)? {
-            if client.transaction_status() == TransactionStatus::Error {
-                return Err(failed_transaction_error());
-            }
             authorize_copy(client, &self.auth, &copy_target)?;
             let empty = Arc::new(Schema::empty());
             return Ok(DuckDbStatement {
@@ -373,14 +373,6 @@ impl QueryParser for DuckDbParser {
             Some(&identity),
             self.auth.role_catalog().map(Arc::as_ref),
         )?;
-        if client.transaction_status() == TransactionStatus::Error
-            && !matches!(
-                validated.kind,
-                StatementKind::Commit | StatementKind::Rollback
-            )
-        {
-            return Err(failed_transaction_error());
-        }
         let oid_parameters = catalog_oid_parameter_indexes(&validated.ast);
         authorize_statement(client, &self.auth, &validated.ast)?;
         if validated.kind == StatementKind::RequestContext {
@@ -625,10 +617,10 @@ impl SimpleQueryHandler for DuckDbService {
     {
         let role_session = client_role_session(client, &self.auth)?;
         let identity = role_session.identity().map_err(role_session_error)?;
+        if client.transaction_status() == TransactionStatus::Error {
+            validate_failed_transaction_command(query)?;
+        }
         if let Some(command) = parse_sql_cursor_command(query)? {
-            if client.transaction_status() == TransactionStatus::Error {
-                return Err(failed_transaction_error());
-            }
             return handle_sql_cursor(self, client, command, &Format::UnifiedText)
                 .await
                 .map(|response| vec![response]);
@@ -640,14 +632,6 @@ impl SimpleQueryHandler for DuckDbService {
             self.auth.role_catalog().map(Arc::as_ref),
         )?;
         let failed_transaction = client.transaction_status() == TransactionStatus::Error;
-        if failed_transaction
-            && !matches!(
-                &kind,
-                SimpleStatementKind::Commit | SimpleStatementKind::Rollback
-            )
-        {
-            return Err(failed_transaction_error());
-        }
         match (&kind, ast.as_ref()) {
             (SimpleStatementKind::Copy(target), _) => authorize_copy(client, &self.auth, target)?,
             (SimpleStatementKind::Maintenance(command), _) => {
@@ -787,6 +771,23 @@ impl SimpleQueryHandler for DuckDbService {
                     .map_err(admission_error)?;
                 close_all_sql_cursors(client).await?;
                 client.portal_store().clear_portals();
+                match storage.transaction_state() {
+                    EngineTransactionState::Idle if !failed_transaction => {
+                        role_session.end_transaction().map_err(role_session_error)?;
+                        return Ok(vec![Response::TransactionEnd(Tag::new("COMMIT"))]);
+                    }
+                    EngineTransactionState::Idle => {
+                        return Err(fatal_anyhow_error(anyhow::anyhow!(
+                            "pgwire failed-transaction state has no matching DuckDB transaction"
+                        )));
+                    }
+                    EngineTransactionState::Quarantined => {
+                        return Err(fatal_anyhow_error(anyhow::anyhow!(
+                            "DuckDB transaction state is quarantined"
+                        )));
+                    }
+                    EngineTransactionState::Active => {}
+                }
                 if failed_transaction {
                     self.control
                         .blocking_workers
@@ -816,6 +817,18 @@ impl SimpleQueryHandler for DuckDbService {
                     .map_err(admission_error)?;
                 close_all_sql_cursors(client).await?;
                 client.portal_store().clear_portals();
+                match storage.transaction_state() {
+                    EngineTransactionState::Idle => {
+                        role_session.end_transaction().map_err(role_session_error)?;
+                        return Ok(vec![Response::TransactionEnd(Tag::new("ROLLBACK"))]);
+                    }
+                    EngineTransactionState::Quarantined => {
+                        return Err(fatal_anyhow_error(anyhow::anyhow!(
+                            "DuckDB transaction state is quarantined"
+                        )));
+                    }
+                    EngineTransactionState::Active => {}
+                }
                 self.control
                     .blocking_workers
                     .run_regular(move || storage.rollback_transaction())
@@ -1179,6 +1192,23 @@ impl ExtendedQueryHandler for DuckDbService {
                     .map_err(admission_error)?;
                 close_all_sql_cursors(client).await?;
                 client.portal_store().clear_portals();
+                match storage.transaction_state() {
+                    EngineTransactionState::Idle if !failed_transaction => {
+                        role_session.end_transaction().map_err(role_session_error)?;
+                        return Ok(Response::TransactionEnd(Tag::new("COMMIT")));
+                    }
+                    EngineTransactionState::Idle => {
+                        return Err(fatal_anyhow_error(anyhow::anyhow!(
+                            "pgwire failed-transaction state has no matching DuckDB transaction"
+                        )));
+                    }
+                    EngineTransactionState::Quarantined => {
+                        return Err(fatal_anyhow_error(anyhow::anyhow!(
+                            "DuckDB transaction state is quarantined"
+                        )));
+                    }
+                    EngineTransactionState::Active => {}
+                }
                 if failed_transaction {
                     self.control
                         .blocking_workers
@@ -1208,6 +1238,18 @@ impl ExtendedQueryHandler for DuckDbService {
                     .map_err(admission_error)?;
                 close_all_sql_cursors(client).await?;
                 client.portal_store().clear_portals();
+                match storage.transaction_state() {
+                    EngineTransactionState::Idle => {
+                        role_session.end_transaction().map_err(role_session_error)?;
+                        return Ok(Response::TransactionEnd(Tag::new("ROLLBACK")));
+                    }
+                    EngineTransactionState::Quarantined => {
+                        return Err(fatal_anyhow_error(anyhow::anyhow!(
+                            "DuckDB transaction state is quarantined"
+                        )));
+                    }
+                    EngineTransactionState::Active => {}
+                }
                 self.control
                     .blocking_workers
                     .run_regular(move || storage.rollback_transaction())
@@ -1803,6 +1845,32 @@ fn validate_statement(sql: &str, mode: ProtocolMode) -> PgWireResult<ValidatedSt
     validate_statement_with_catalog_identity(sql, mode, false, None, None)
 }
 
+fn validate_failed_transaction_command(sql: &str) -> PgWireResult<()> {
+    let normalized = normalize_sql(sql)?;
+    let mut statements = Parser::parse_sql(&PostgreSqlDialect {}, &normalized)
+        .map_err(|error| user_error("42601", &error.to_string()))?;
+    let transaction_end = if statements.len() == 1 {
+        matches!(
+            statements.pop().expect("one parsed statement"),
+            Statement::Commit {
+                chain: false,
+                end: false,
+                modifier: None,
+            } | Statement::Rollback {
+                chain: false,
+                savepoint: None,
+            }
+        )
+    } else {
+        false
+    };
+    if transaction_end {
+        Ok(())
+    } else {
+        Err(failed_transaction_error())
+    }
+}
+
 fn validate_statement_with_catalog_identity(
     sql: &str,
     mode: ProtocolMode,
@@ -1977,6 +2045,14 @@ fn validate_statement_with_catalog_identity(
             SessionVariable::StandardConformingStrings => {
                 "SELECT 'on'::VARCHAR AS standard_conforming_strings".to_owned()
             }
+            SessionVariable::ServerVersion => format!(
+                "SELECT '{}'::VARCHAR AS server_version",
+                crate::postgres_compat::POSTGRESQL_COMPATIBILITY_VERSION
+            ),
+            SessionVariable::ServerVersionNum => format!(
+                "SELECT '{}'::VARCHAR AS server_version_num",
+                crate::postgres_compat::POSTGRESQL_COMPATIBILITY_VERSION_NUM
+            ),
         }
     } else {
         let mut execution = statement.clone();
@@ -2483,6 +2559,8 @@ enum SessionVariable {
     SearchPath,
     ClientEncoding,
     StandardConformingStrings,
+    ServerVersion,
+    ServerVersionNum,
 }
 
 fn supported_show_variable(variable: &[Ident]) -> Option<SessionVariable> {
@@ -2498,6 +2576,10 @@ fn supported_show_variable(variable: &[Ident]) -> Option<SessionVariable> {
         .eq_ignore_ascii_case("standard_conforming_strings")
     {
         Some(SessionVariable::StandardConformingStrings)
+    } else if name.value.eq_ignore_ascii_case("server_version") {
+        Some(SessionVariable::ServerVersion)
+    } else if name.value.eq_ignore_ascii_case("server_version_num") {
+        Some(SessionVariable::ServerVersionNum)
     } else {
         None
     }
@@ -2717,6 +2799,8 @@ enum MaintainedPgFunction {
     Database,
     Schema,
     Schemas,
+    IsInRecovery,
+    Version,
     SchemaEpoch,
     SecurityEpoch,
     FormatType,
@@ -2741,6 +2825,8 @@ impl MaintainedPgFunction {
             Self::Database => "quackgis_current_database",
             Self::Schema => "quackgis_current_schema",
             Self::Schemas => "quackgis_current_schemas",
+            Self::IsInRecovery => "quackgis_pg_is_in_recovery",
+            Self::Version => "quackgis_pg_version",
             Self::SchemaEpoch => "quackgis_pg_schema_epoch",
             Self::SecurityEpoch => "quackgis_pg_security_epoch",
             Self::FormatType => "quackgis_pg_format_type",
@@ -2764,6 +2850,8 @@ impl MaintainedPgFunction {
         match self {
             Self::Database | Self::Schema => Some(PgTypeHint::Name),
             Self::Schemas => Some(PgTypeHint::NameArray),
+            Self::IsInRecovery => None,
+            Self::Version => Some(PgTypeHint::Text),
             Self::SchemaEpoch | Self::SecurityEpoch => None,
             Self::FormatType
             | Self::GetExpr
@@ -2779,12 +2867,20 @@ impl MaintainedPgFunction {
     }
 
     const fn requires_identity(self) -> bool {
-        !matches!(self, Self::Database | Self::Schema | Self::Schemas)
+        !matches!(
+            self,
+            Self::Database | Self::Schema | Self::Schemas | Self::IsInRecovery | Self::Version
+        )
     }
 
     const fn argument_count(self) -> usize {
         match self {
-            Self::Database | Self::Schema | Self::SchemaEpoch | Self::SecurityEpoch => 0,
+            Self::Database
+            | Self::Schema
+            | Self::IsInRecovery
+            | Self::Version
+            | Self::SchemaEpoch
+            | Self::SecurityEpoch => 0,
             Self::Schemas
             | Self::ToRegclass
             | Self::Regclass
@@ -2845,6 +2941,10 @@ fn maintained_pg_function(name: &ObjectName) -> Option<MaintainedPgFunction> {
         Some(MaintainedPgFunction::Schema)
     } else if pg_identifier_matches(function, "current_schemas") {
         Some(MaintainedPgFunction::Schemas)
+    } else if pg_identifier_matches(function, "pg_is_in_recovery") {
+        Some(MaintainedPgFunction::IsInRecovery)
+    } else if pg_identifier_matches(function, "version") {
+        Some(MaintainedPgFunction::Version)
     } else if pg_identifier_matches(function, "quackgis_schema_epoch") {
         Some(MaintainedPgFunction::SchemaEpoch)
     } else if pg_identifier_matches(function, "quackgis_security_epoch") {
@@ -2889,6 +2989,8 @@ fn private_maintained_pg_function(name: &ObjectName) -> Option<MaintainedPgFunct
     [
         MaintainedPgFunction::SchemaEpoch,
         MaintainedPgFunction::SecurityEpoch,
+        MaintainedPgFunction::IsInRecovery,
+        MaintainedPgFunction::Version,
         MaintainedPgFunction::FormatType,
         MaintainedPgFunction::ToRegclass,
         MaintainedPgFunction::Regclass,
@@ -7474,6 +7576,60 @@ mod tests {
             validate_statement("SELECT quackgis_current_database()", ProtocolMode::Extended,)
                 .is_err()
         );
+
+        let server_identity = validate_statement(
+            "SELECT pg_catalog.pg_is_in_recovery() AS recovery, version() AS version",
+            ProtocolMode::Extended,
+        )
+        .expect("maintained PostgreSQL server identity");
+        assert!(server_identity.sql.contains("quackgis_pg_is_in_recovery()"));
+        assert!(server_identity.sql.contains("quackgis_pg_version()"));
+        let identity_schema = annotate_catalog_result_schema(
+            &server_identity.ast,
+            &Schema::new(vec![
+                Field::new("recovery", DataType::Boolean, false),
+                Field::new("version", DataType::Utf8, false),
+            ]),
+        );
+        assert_eq!(
+            field_into_pg_type(&Arc::new(identity_schema.field(0).clone())).unwrap(),
+            Type::BOOL
+        );
+        assert_eq!(
+            field_into_pg_type(&Arc::new(identity_schema.field(1).clone())).unwrap(),
+            Type::TEXT
+        );
+        assert!(
+            validate_statement("SELECT pg_is_in_recovery(1)", ProtocolMode::Extended,).is_err()
+        );
+        assert!(
+            validate_statement("SELECT pg_is_in_recovery() OVER ()", ProtocolMode::Extended,)
+                .is_err()
+        );
+
+        for (show, expected) in [
+            (
+                "SHOW server_version",
+                crate::postgres_compat::POSTGRESQL_COMPATIBILITY_VERSION,
+            ),
+            (
+                "SHOW server_version_num",
+                crate::postgres_compat::POSTGRESQL_COMPATIBILITY_VERSION_NUM,
+            ),
+        ] {
+            let validated = validate_statement(show, ProtocolMode::Extended)
+                .expect("maintained PostgreSQL SHOW variable");
+            assert!(validated.sql.contains(expected));
+        }
+    }
+
+    #[test]
+    fn failed_transaction_allows_only_exact_transaction_end_commands() {
+        validate_failed_transaction_command("COMMIT").expect("failed COMMIT cleanup");
+        validate_failed_transaction_command("ROLLBACK").expect("failed ROLLBACK cleanup");
+        assert!(validate_failed_transaction_command("SELECT * FROM pg_proc").is_err());
+        assert!(validate_failed_transaction_command("COMMIT; SELECT 1").is_err());
+        assert!(validate_failed_transaction_command("COMMIT AND CHAIN").is_err());
     }
 
     #[test]
