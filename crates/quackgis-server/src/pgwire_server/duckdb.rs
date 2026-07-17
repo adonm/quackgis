@@ -4703,10 +4703,10 @@ const PSQL_PUBLICATIONS_QUERY: &str = "SELECT pubname, NULL, NULL \
 FROM pg_catalog.pg_publication p JOIN pg_catalog.pg_publication_namespace pn \
 ON p.oid = pn.pnpubid JOIN pg_catalog.pg_class pc ON pc.relnamespace = pn.pnnspid \
 WHERE pc.oid = 0 AND pg_catalog.pg_relation_is_publishable(0) UNION \
-SELECT pubname, pg_get_expr(pr.prqual, c.oid), CASE WHEN pr.prattrs IS NOT NULL THEN \
+SELECT pubname, pg_get_expr(pr.prqual, c.oid), (CASE WHEN pr.prattrs IS NOT NULL THEN \
 (SELECT string_agg(attname, ', ') FROM pg_catalog.generate_series(0, \
 pg_catalog.array_upper(pr.prattrs::pg_catalog.int2[], 1)) s, pg_catalog.pg_attribute \
-WHERE attrelid = pr.prrelid AND attnum = prattrs[s]) ELSE NULL END \
+WHERE attrelid = pr.prrelid AND attnum = prattrs[s]) ELSE NULL END) \
 FROM pg_catalog.pg_publication p JOIN pg_catalog.pg_publication_rel pr \
 ON p.oid = pr.prpubid JOIN pg_catalog.pg_class c ON c.oid = pr.prrelid \
 WHERE pr.prrelid = 0 UNION SELECT pubname, NULL, NULL \
