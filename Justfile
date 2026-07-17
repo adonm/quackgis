@@ -282,6 +282,13 @@ duckdb-pinned-ducklake-test extension=pinned_ducklake_extension sha256=pinned_du
     HOME="$duckdb_home_arg" QUACKGIS_DUCKDB_ADBC_DRIVER="$driver_arg" QUACKGIS_DUCKLAKE_EXTENSION="$extension_arg" QUACKGIS_DUCKLAKE_EXTENSION_SHA256="$sha256_arg" \
       cargo test -p quackgis-server --test pinned_ducklake pinned_ducklake_column_identity_contract -- --ignored --exact --nocapture
 
+# Run the pinned PostGIS repeatable-read snapshot through actual QuackGIS COPY and verification.
+postgis-migration-smoke driver=duckdb_adbc_driver:
+    @set -eu; driver_arg='{{driver}}'; driver_arg="${driver_arg#driver=}"; \
+    if [ ! -f "$driver_arg" ]; then echo 'DuckDB ADBC driver is missing; run `mise run duckdb-bootstrap`' >&2; exit 2; fi; \
+    cargo build -p quackgis-server -p quackgis-migrate; \
+    python3 scripts/postgis_migration_smoke.py --driver "$driver_arg"
+
 # Run the bounded local DuckDB pgwire create/COPY/query/mutation/transaction workflow.
 duckdb-pgwire-workflow-test driver=duckdb_adbc_driver:
     @set -eu; driver_arg='{{driver}}'; driver_arg="${driver_arg#driver=}"; \

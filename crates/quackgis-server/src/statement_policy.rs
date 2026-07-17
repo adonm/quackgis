@@ -6,8 +6,8 @@ use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use sqlparser::ast::{
-    Delete, Expr, FromTable, ObjectName, ObjectNamePart, Query, SetExpr, Statement, TableFactor,
-    TableObject, TableWithJoins, visit_expressions,
+    CommentObject, Delete, Expr, FromTable, ObjectName, ObjectNamePart, Query, SetExpr, Statement,
+    TableFactor, TableObject, TableWithJoins, visit_expressions,
 };
 
 use crate::auth::{AccessRole, AuthConfig};
@@ -190,6 +190,7 @@ fn record_denial(user: Option<&str>, kind: &str, target: &str, write: bool) {
 fn statement_kind(statement: &Statement) -> &'static str {
     match statement {
         Statement::CreateTable(_) => "create_table",
+        Statement::Comment { .. } => "comment",
         Statement::Delete(_) => "delete",
         Statement::Insert(_) => "insert",
         Statement::Query(_) => "query",
@@ -228,6 +229,11 @@ fn statement_allowed_for_readonly(statement: &Statement) -> bool {
 fn write_target(statement: &Statement) -> Option<TableKey> {
     let parts = match statement {
         Statement::CreateTable(create) => table_name_parts(&create.name),
+        Statement::Comment {
+            object_type,
+            object_name,
+            ..
+        } => comment_target_parts(*object_type, object_name),
         Statement::Insert(insert) => insert_target_parts(&insert.table),
         Statement::Delete(delete) => delete_target_parts(delete),
         Statement::Update(update) => update_target_parts(&update.table),
@@ -261,6 +267,7 @@ impl TableWritePrivilege {
 fn required_write_privilege(statement: &Statement) -> Option<TableWritePrivilege> {
     match statement {
         Statement::CreateTable(_) => Some(TableWritePrivilege::Create),
+        Statement::Comment { .. } => Some(TableWritePrivilege::Create),
         Statement::Insert(_) => Some(TableWritePrivilege::Table(TablePrivilege::Insert)),
         Statement::Update { .. } => Some(TableWritePrivilege::Table(TablePrivilege::Update)),
         Statement::Delete(_) => Some(TableWritePrivilege::Table(TablePrivilege::Delete)),
@@ -452,6 +459,18 @@ fn table_name_parts(name: &ObjectName) -> Option<(String, String)> {
     }
 }
 
+fn comment_target_parts(object_type: CommentObject, name: &ObjectName) -> Option<(String, String)> {
+    match object_type {
+        CommentObject::Table => table_name_parts(name),
+        CommentObject::Column if name.0.len() >= 2 => {
+            let mut relation = name.clone();
+            relation.0.pop();
+            table_name_parts(&relation)
+        }
+        _ => None,
+    }
+}
+
 fn is_public_schema(schema: &str) -> bool {
     schema.eq_ignore_ascii_case("main") || schema.eq_ignore_ascii_case("public")
 }
@@ -497,6 +516,7 @@ fn object_name_last(name: &ObjectName) -> Option<String> {
 mod tests {
     use super::*;
     use crate::auth::parse_read_allowlist;
+    use crate::role::RoleCatalog;
     use sqlparser::dialect::PostgreSqlDialect;
     use sqlparser::parser::Parser;
 
@@ -533,5 +553,43 @@ mod tests {
                 authorize_statement(&auth, Some("reader"), Some("reader"), &statement).is_err()
             );
         }
+    }
+
+    #[test]
+    fn comments_require_exact_table_ownership() {
+        let catalog = RoleCatalog::from_json(
+            r#"{
+                "roles": [
+                    {"oid": 100001, "name": "owner", "login": true},
+                    {"oid": 100002, "name": "other", "login": true}
+                ],
+                "memberships": [],
+                "schema_grants": [
+                    {"schema": "public", "role": "PUBLIC", "privileges": ["USAGE"]}
+                ],
+                "table_owners": [{"table": "places", "role": "owner"}],
+                "table_grants": []
+            }"#,
+        )
+        .unwrap();
+        let auth = AuthConfig::edge_preauthenticated(catalog).unwrap();
+        for sql in [
+            "COMMENT ON TABLE public.places IS 'table comment'",
+            "COMMENT ON COLUMN public.places.label IS 'column comment'",
+        ] {
+            let statement = Parser::parse_sql(&PostgreSqlDialect {}, sql)
+                .unwrap()
+                .remove(0);
+            authorize_statement(&auth, Some("owner"), Some("owner"), &statement).unwrap();
+            assert!(authorize_statement(&auth, Some("other"), Some("other"), &statement).is_err());
+        }
+
+        let role_comment = Parser::parse_sql(
+            &PostgreSqlDialect {},
+            "COMMENT ON ROLE owner IS 'not table metadata'",
+        )
+        .unwrap()
+        .remove(0);
+        assert!(authorize_statement(&auth, Some("owner"), Some("owner"), &role_comment).is_err());
     }
 }

@@ -9,6 +9,13 @@ use crate::inventory::{
     SourceObject, SourceObjectKind, SourceRole, SourceTable,
 };
 
+const MAX_SOURCE_TABLES: usize = 1024;
+const MAX_COLUMNS_PER_TABLE: usize = 1024;
+const MAX_CONSTRAINTS_PER_TABLE: usize = 1024;
+const MAX_SOURCE_OBJECTS: usize = 16_384;
+const MAX_SOURCE_ROLES: usize = 4096;
+const MAX_SOURCE_GRANTS: usize = 65_536;
+
 pub async fn begin_source_snapshot<'a>(
     client: &'a mut Client,
     config: &MigrationConfig,
@@ -95,11 +102,12 @@ async fn inspect_tables(
              FROM pg_catalog.pg_class c \
              JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
              WHERE n.nspname = ANY($1::TEXT[]) AND c.relkind IN ('r', 'p') \
-             ORDER BY n.nspname, c.relname",
+             ORDER BY n.nspname, c.relname LIMIT 1025",
             &[&config.source_schemas],
         )
         .await
         .context("inventory source tables")?;
+    enforce_limit("source tables", rows.len(), MAX_SOURCE_TABLES)?;
     let mut tables = Vec::with_capacity(rows.len());
     for row in rows {
         let oid = u32::try_from(row.get::<_, i64>(0))?;
@@ -139,7 +147,7 @@ async fn inspect_columns(
     transaction: &Transaction<'_>,
     relation_oid: u32,
 ) -> Result<Vec<SourceColumn>> {
-    transaction
+    let rows = transaction
         .query(
             "SELECT a.attnum::SMALLINT, a.attname, t.typname, \
                     pg_catalog.format_type(a.atttypid, a.atttypmod), a.atttypmod, \
@@ -157,14 +165,17 @@ async fn inspect_columns(
              LEFT JOIN pg_catalog.pg_attrdef d \
                     ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
              WHERE a.attrelid = $1::OID AND a.attnum > 0 AND NOT a.attisdropped \
-             ORDER BY a.attnum",
+             ORDER BY a.attnum LIMIT 1025",
             &[&relation_oid],
         )
         .await
-        .context("inventory source columns")?
-        .into_iter()
-        .map(source_column)
-        .collect()
+        .context("inventory source columns")?;
+    enforce_limit(
+        "columns on one source table",
+        rows.len(),
+        MAX_COLUMNS_PER_TABLE,
+    )?;
+    rows.into_iter().map(source_column).collect()
 }
 
 fn source_column(row: Row) -> Result<SourceColumn> {
@@ -189,15 +200,21 @@ async fn inspect_constraints(
     transaction: &Transaction<'_>,
     relation_oid: u32,
 ) -> Result<Vec<SourceConstraint>> {
-    transaction
+    let rows = transaction
         .query(
             "SELECT conname, contype::TEXT, pg_catalog.pg_get_constraintdef(oid, true) \
-             FROM pg_catalog.pg_constraint WHERE conrelid = $1::OID ORDER BY conname",
+             FROM pg_catalog.pg_constraint WHERE conrelid = $1::OID \
+             ORDER BY conname LIMIT 1025",
             &[&relation_oid],
         )
         .await
-        .context("inventory source constraints")?
-        .into_iter()
+        .context("inventory source constraints")?;
+    enforce_limit(
+        "constraints on one source table",
+        rows.len(),
+        MAX_CONSTRAINTS_PER_TABLE,
+    )?;
+    rows.into_iter()
         .map(|row| {
             let kind = match row.get::<_, String>(1).as_str() {
                 "c" => ConstraintKind::Check,
@@ -227,7 +244,7 @@ async fn inspect_objects(
              FROM pg_catalog.pg_class c \
              JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
              WHERE n.nspname = ANY($1::TEXT[]) AND c.relkind IN ('v','m','S','f','i','I') \
-             ORDER BY n.nspname, c.relname",
+             ORDER BY n.nspname, c.relname LIMIT 16385",
             &[&config.source_schemas],
         )
         .await
@@ -246,11 +263,13 @@ async fn inspect_objects(
             },
         })
         .collect::<Vec<_>>();
+    enforce_limit("source objects", objects.len(), MAX_SOURCE_OBJECTS)?;
     for row in transaction
         .query(
             "SELECT n.nspname, e.extname FROM pg_catalog.pg_extension e \
              JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace \
-             WHERE n.nspname = ANY($1::TEXT[]) ORDER BY n.nspname, e.extname",
+             WHERE n.nspname = ANY($1::TEXT[]) \
+             ORDER BY n.nspname, e.extname LIMIT 16385",
             &[&config.source_schemas],
         )
         .await
@@ -261,6 +280,7 @@ async fn inspect_objects(
             name: row.get(1),
             kind: SourceObjectKind::Extension,
         });
+        enforce_limit("source objects", objects.len(), MAX_SOURCE_OBJECTS)?;
     }
     for row in transaction
         .query(
@@ -271,7 +291,7 @@ async fn inspect_objects(
                AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d \
                                WHERE d.classid = 'pg_proc'::regclass \
                                  AND d.objid = p.oid AND d.deptype = 'e') \
-             ORDER BY n.nspname, p.proname, p.oid",
+             ORDER BY n.nspname, p.proname, p.oid LIMIT 16385",
             &[&config.source_schemas],
         )
         .await
@@ -282,6 +302,7 @@ async fn inspect_objects(
             name: row.get(1),
             kind: SourceObjectKind::Function,
         });
+        enforce_limit("source objects", objects.len(), MAX_SOURCE_OBJECTS)?;
     }
     for row in transaction
         .query(
@@ -290,7 +311,7 @@ async fn inspect_objects(
              JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid \
              JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
              WHERE n.nspname = ANY($1::TEXT[]) AND NOT t.tgisinternal \
-             ORDER BY n.nspname, c.relname, t.tgname",
+             ORDER BY n.nspname, c.relname, t.tgname LIMIT 16385",
             &[&config.source_schemas],
         )
         .await
@@ -301,6 +322,7 @@ async fn inspect_objects(
             name: row.get(1),
             kind: SourceObjectKind::Trigger,
         });
+        enforce_limit("source objects", objects.len(), MAX_SOURCE_OBJECTS)?;
     }
     objects.sort_by(|left, right| {
         (&left.schema, &left.name, format!("{:?}", left.kind)).cmp(&(
@@ -316,25 +338,25 @@ async fn inspect_roles(
     transaction: &Transaction<'_>,
     config: &MigrationConfig,
 ) -> Result<Vec<SourceRole>> {
-    transaction
+    let rows = transaction
         .query(
             "SELECT DISTINCT r.rolname, r.rolcanlogin \
              FROM pg_catalog.pg_roles r \
              JOIN pg_catalog.pg_class c ON c.relowner = r.oid \
              JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-             WHERE n.nspname = ANY($1::TEXT[]) ORDER BY r.rolname",
+             WHERE n.nspname = ANY($1::TEXT[]) ORDER BY r.rolname LIMIT 4097",
             &[&config.source_schemas],
         )
         .await
-        .context("inventory source owner roles")
-        .map(|rows| {
-            rows.into_iter()
-                .map(|row| SourceRole {
-                    name: row.get(0),
-                    login: row.get(1),
-                })
-                .collect()
+        .context("inventory source owner roles")?;
+    enforce_limit("source owner roles", rows.len(), MAX_SOURCE_ROLES)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| SourceRole {
+            name: row.get(0),
+            login: row.get(1),
         })
+        .collect())
 }
 
 async fn inspect_grants(
@@ -346,7 +368,7 @@ async fn inspect_grants(
             "SELECT grantee, table_schema || '.' || table_name, privilege_type \
              FROM information_schema.role_table_grants \
              WHERE table_schema = ANY($1::TEXT[]) \
-             ORDER BY table_schema, table_name, grantee, privilege_type",
+             ORDER BY table_schema, table_name, grantee, privilege_type LIMIT 65537",
             &[&config.source_schemas],
         )
         .await
@@ -358,12 +380,14 @@ async fn inspect_grants(
             privilege: row.get(2),
         })
         .collect::<Vec<_>>();
+    enforce_limit("source grants", grants.len(), MAX_SOURCE_GRANTS)?;
     for row in transaction
         .query(
             "SELECT grantee, table_schema || '.' || table_name || '.' || column_name, privilege_type \
              FROM information_schema.role_column_grants \
              WHERE table_schema = ANY($1::TEXT[]) \
-             ORDER BY table_schema, table_name, column_name, grantee, privilege_type",
+             ORDER BY table_schema, table_name, column_name, grantee, privilege_type \
+             LIMIT 65537",
             &[&config.source_schemas],
         )
         .await
@@ -374,12 +398,20 @@ async fn inspect_grants(
             object_identity: row.get(1),
             privilege: row.get(2),
         });
+        enforce_limit("source grants", grants.len(), MAX_SOURCE_GRANTS)?;
     }
     Ok(grants)
 }
 
 pub fn quote_identifier(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+fn enforce_limit(label: &str, actual: usize, maximum: usize) -> Result<()> {
+    if actual > maximum {
+        bail!("{label} exceeds the {maximum}-item migration inventory limit");
+    }
+    Ok(())
 }
 
 #[cfg(test)]

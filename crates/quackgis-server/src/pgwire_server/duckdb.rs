@@ -2116,6 +2116,11 @@ fn validate_statement_with_catalog_identity(
         Statement::Query(_) if request_command.is_some() => StatementKind::RequestContext,
         Statement::Query(_) => StatementKind::Read,
         Statement::CreateTable(_) => StatementKind::Write("CREATE TABLE"),
+        Statement::Comment {
+            object_type:
+                sqlparser::ast::CommentObject::Table | sqlparser::ast::CommentObject::Column,
+            ..
+        } => StatementKind::Write("COMMENT"),
         Statement::Insert(_) => StatementKind::Write("INSERT"),
         Statement::Update { .. } => StatementKind::Write("UPDATE"),
         Statement::Delete(_) => StatementKind::Write("DELETE"),
