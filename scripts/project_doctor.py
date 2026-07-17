@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -56,6 +57,26 @@ def usable_engine(command: str) -> bool:
     return True
 
 
+def docker_server_backend() -> str | None:
+    if shutil.which("docker") is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["docker", "version", "--format", "json"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        server = json.loads(result.stdout).get("Server", {})
+        components = server.get("Components", [])
+        if any(component.get("Name") == "Podman Engine" for component in components):
+            return "podman"
+        return "docker"
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return "unknown"
+
+
 def select_container_engine() -> str:
     override = os.environ.get("CONTAINER_ENGINE") or os.environ.get(
         "KIND_EXPERIMENTAL_PROVIDER"
@@ -67,6 +88,11 @@ def select_container_engine() -> str:
             )
         if not usable_engine(override):
             raise RuntimeError(f"requested container engine is not usable: {override}")
+        if override == "docker" and docker_server_backend() == "podman":
+            raise RuntimeError(
+                "requested docker CLI is connected to Podman; use "
+                "CONTAINER_ENGINE=podman or select a Docker daemon context"
+            )
         return override
     for candidate in ("podman", "docker"):
         if usable_engine(candidate):
@@ -146,6 +172,9 @@ def report() -> None:
     podman = podman_host_summary()
     if podman:
         print(f"podman_host={podman}")
+    docker_backend = docker_server_backend()
+    if docker_backend:
+        print(f"docker_server_backend={docker_backend}")
     print("host psql/OGR/QGIS are optional when their digest-pinned Kind client images are used")
 
 

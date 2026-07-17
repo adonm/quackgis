@@ -523,7 +523,7 @@ clean-dev:
 # Static validation for maintained helper scripts.
 probe-static-check:
     mkdir -p .tmp/pycache
-    PYTHONPYCACHEPREFIX=.tmp/pycache python3 -m py_compile scripts/*.py deploy/kind/render.py scripts/tests/test_build_pinned_ducklake.py scripts/tests/test_duckdb_authority_probe.py scripts/tests/test_duckdb_catalog_identity_probe.py scripts/tests/test_duckdb_engine_probe.py scripts/tests/test_duckdb_runtime_static_check.py scripts/tests/test_duckdb_spatial_compat_probe.py scripts/tests/test_evidence_manifest_check.py scripts/tests/test_kind_render.py scripts/tests/test_prepare_duckdb_runtime.py
+    PYTHONPYCACHEPREFIX=.tmp/pycache python3 -m py_compile scripts/*.py deploy/kind/render.py scripts/tests/test_build_pinned_ducklake.py scripts/tests/test_duckdb_authority_probe.py scripts/tests/test_duckdb_catalog_identity_probe.py scripts/tests/test_duckdb_engine_probe.py scripts/tests/test_duckdb_runtime_static_check.py scripts/tests/test_duckdb_spatial_compat_probe.py scripts/tests/test_evidence_manifest_check.py scripts/tests/test_kind_render.py scripts/tests/test_prepare_duckdb_runtime.py scripts/tests/test_project_doctor.py
     python3 scripts/tests/test_build_pinned_ducklake.py
     python3 scripts/tests/test_duckdb_authority_probe.py
     python3 scripts/tests/test_duckdb_catalog_identity_probe.py
@@ -533,11 +533,13 @@ probe-static-check:
     python3 scripts/tests/test_prepare_duckdb_runtime.py
     python3 scripts/tests/test_duckdb_local_backup.py
     python3 scripts/tests/test_evidence_manifest_check.py
+    python3 scripts/tests/test_project_doctor.py
 
 # Validate digest pinning, generated secrets, and the DuckDB-only Kind shape.
 kind-static-check:
     python3 deploy/kind/render.py --check
     python3 scripts/tests/test_kind_render.py
+    python3 scripts/tests/test_project_doctor.py
     sh -n deploy/kind/up.sh deploy/kind/down.sh deploy/kind/rotate.sh deploy/kind/rotate-rest-jwt.sh deploy/kind/rest-gates.sh
 
 # Build the non-root psql/psycopg/OGR qualification image with the selected engine.
