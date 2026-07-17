@@ -509,6 +509,18 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
     assert_eq!(geometry_metadata.get::<_, i32>(4), 2);
     assert_eq!(geometry_metadata.get::<_, i32>(5), 0);
     assert_eq!(geometry_metadata.get::<_, String>(6), "GEOMETRY");
+
+    let simple_type_kind = client
+        .simple_query("SELECT typtype FROM pg_type WHERE oid = 90001")
+        .await
+        .expect("simple-protocol PostgreSQL char output")
+        .into_iter()
+        .find_map(|message| match message {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::to_owned),
+            _ => None,
+        })
+        .expect("simple-protocol PostgreSQL char row");
+    assert_eq!(simple_type_kind, "b");
     for column_name in ["geom_wkb", "native_geom"] {
         let information_schema_geometry = client
             .query_one(

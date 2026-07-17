@@ -126,6 +126,46 @@ fn pg_char_from_str(value: Option<&str>) -> Option<i8> {
     value.map(|value| value.as_bytes().first().copied().unwrap_or_default() as i8)
 }
 
+#[derive(Debug)]
+struct PgChar(Option<i8>);
+
+impl ToSql for PgChar {
+    fn to_sql(
+        &self,
+        _ty: &Type,
+        out: &mut BytesMut,
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        let Some(value) = self.0 else {
+            return Ok(IsNull::Yes);
+        };
+        out.extend_from_slice(&[value as u8]);
+        Ok(IsNull::No)
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        *ty == Type::CHAR
+    }
+
+    postgres_types::to_sql_checked!();
+}
+
+impl ToSqlText for PgChar {
+    fn to_sql_text(
+        &self,
+        _ty: &Type,
+        out: &mut BytesMut,
+        _format_options: &FormatOptions,
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        let Some(value) = self.0 else {
+            return Ok(IsNull::Yes);
+        };
+        if value != 0 {
+            out.extend_from_slice(&[value as u8]);
+        }
+        Ok(IsNull::No)
+    }
+}
+
 pub trait Encoder {
     type Item;
 
@@ -466,18 +506,20 @@ pub fn encode_value<T: Encoder>(
         DataType::Decimal128(_, s) => {
             encoder.encode_field(&get_numeric_128_value(arr, idx, *s as u32)?, pg_field)?
         }
-        DataType::Utf8 if *pg_field.datatype() == Type::CHAR => {
-            encoder.encode_field(&pg_char_from_str(get_utf8_value(arr, idx)), pg_field)?
-        }
+        DataType::Utf8 if *pg_field.datatype() == Type::CHAR => encoder.encode_field(
+            &PgChar(pg_char_from_str(get_utf8_value(arr, idx))),
+            pg_field,
+        )?,
         DataType::Utf8
             if *pg_field.datatype() == Type::JSONB || *pg_field.datatype() == Type::JSON =>
         {
             encoder.encode_field(&parse_json_value(get_utf8_value(arr, idx))?, pg_field)?
         }
         DataType::Utf8 => encoder.encode_field(&get_utf8_value(arr, idx), pg_field)?,
-        DataType::Utf8View if *pg_field.datatype() == Type::CHAR => {
-            encoder.encode_field(&pg_char_from_str(get_utf8_view_value(arr, idx)), pg_field)?
-        }
+        DataType::Utf8View if *pg_field.datatype() == Type::CHAR => encoder.encode_field(
+            &PgChar(pg_char_from_str(get_utf8_view_value(arr, idx))),
+            pg_field,
+        )?,
         DataType::Utf8View
             if *pg_field.datatype() == Type::JSONB || *pg_field.datatype() == Type::JSON =>
         {
@@ -898,6 +940,24 @@ mod tests {
         assert_eq!(pg_char_from_str(None), None);
         assert_eq!(pg_char_from_str(Some("")), Some(0));
         assert_eq!(pg_char_from_str(Some("p")), Some(b'p' as i8));
+
+        let mut text = BytesMut::new();
+        assert!(matches!(
+            PgChar(Some(b'b' as i8))
+                .to_sql_text(&Type::CHAR, &mut text, &FormatOptions::default())
+                .expect("PostgreSQL char text"),
+            IsNull::No
+        ));
+        assert_eq!(text.as_ref(), b"b");
+
+        let mut empty = BytesMut::new();
+        assert!(matches!(
+            PgChar(Some(0))
+                .to_sql_text(&Type::CHAR, &mut empty, &FormatOptions::default())
+                .expect("empty PostgreSQL char text"),
+            IsNull::No
+        ));
+        assert!(empty.is_empty());
     }
 
     #[test]
