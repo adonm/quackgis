@@ -540,7 +540,7 @@ kind-static-check:
     python3 deploy/kind/render.py --check
     python3 scripts/tests/test_kind_render.py
     python3 scripts/tests/test_project_doctor.py
-    sh -n deploy/kind/up.sh deploy/kind/down.sh deploy/kind/rotate.sh deploy/kind/rotate-rest-jwt.sh deploy/kind/rest-gates.sh
+    sh -n deploy/kind/up.sh deploy/kind/load-image.sh deploy/kind/down.sh deploy/kind/rotate.sh deploy/kind/rotate-rest-jwt.sh deploy/kind/rest-gates.sh
 
 # Build the non-root psql/psycopg/OGR qualification image with the selected engine.
 kind-client-image:

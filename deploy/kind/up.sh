@@ -101,25 +101,13 @@ if [ "$cluster_exists" = false ]; then
     --kubeconfig "$kubeconfig" \
     --wait 5m
 fi
-load_local_image() {
-  source_image=$1
-  archive_name=$2
-  archive="$work/$archive_name.tar"
-  rm -f "$archive"
-  if [ "$engine" = podman ]; then
-    "$engine" image save --format docker-archive --output "$archive" "$source_image"
-  else
-    "$engine" image save --output "$archive" "$source_image"
-  fi
-  kind load image-archive "$archive" --name quackgis
-  rm -f "$archive"
-}
-
 if [ -n "${QUACKGIS_RUNTIME_LOAD_IMAGE:-}" ]; then
-  load_local_image "$QUACKGIS_RUNTIME_LOAD_IMAGE" runtime-image
+  CONTAINER_ENGINE="$engine" "$root/deploy/kind/load-image.sh" \
+    "$QUACKGIS_RUNTIME_LOAD_IMAGE" runtime-image
 fi
 if [ -n "${QUACKGIS_CLIENT_LOAD_IMAGE:-}" ]; then
-  load_local_image "$QUACKGIS_CLIENT_LOAD_IMAGE" client-image
+  CONTAINER_ENGINE="$engine" "$root/deploy/kind/load-image.sh" \
+    "$QUACKGIS_CLIENT_LOAD_IMAGE" client-image
 fi
 
 node_digest_reference() {

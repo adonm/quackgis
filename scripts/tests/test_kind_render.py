@@ -27,15 +27,18 @@ def main() -> None:
     )
     assert "kindest/node:v1.36.1@sha256:" in cluster
     assert "KIND_EXPERIMENTAL_PROVIDER" in up
-    assert "kind load image-archive" in up
-    assert "--format docker-archive" in up
-    assert 'if [ "$engine" = podman ]' in up
+    assert 'deploy/kind/load-image.sh"' in up
     assert "QUACKGIS_RUNTIME_LOAD_IMAGE" in up
     assert "QUACKGIS_CLIENT_LOAD_IMAGE" in up
     assert "kind_cluster_stale" in up
     assert "get --raw=/readyz" in up
     assert "kind_pod_replace" in up
     assert "kind_statefulset_replace" in up
+    load_image = (ROOT / "deploy/kind/load-image.sh").read_text(encoding="utf-8")
+    assert "kind load image-archive" in load_image
+    assert "--format docker-archive" in load_image
+    assert 'if [ "$engine" = podman ]' in load_image
+    assert "invalid image archive name" in load_image
     assert "quackgis-old-client-denied" in rotate
     assert "previous-edge" in rotate
     assert "FROM registry.fedoraproject.org/fedora-minimal@sha256:" in clients_image
