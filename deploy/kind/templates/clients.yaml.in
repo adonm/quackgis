@@ -210,6 +210,26 @@ items:
                   ], features
                   print("ogr_direct_discovery_ok rows=2 geometry=point-null no_fid=true")
                   PY
+                  cat > "$output_dir/write.geojson" <<'JSON'
+                  {"type":"FeatureCollection","features":[{"type":"Feature","properties":{"id":10,"name":"ten"},"geometry":{"type":"Point","coordinates":[3,4]}},{"type":"Feature","properties":{"id":11,"name":null},"geometry":null}]}
+                  JSON
+                  python3 - <<'PY'
+                  import psycopg
+                  with psycopg.connect("", autocommit=True) as connection:
+                      connection.execute("CREATE TABLE IF NOT EXISTS public.kind_ogr_points(id INTEGER, name VARCHAR, geom_wkb BLOB)")
+                      connection.execute("DELETE FROM public.kind_ogr_points")
+                  PY
+                  ogr2ogr --config PG_USE_COPY YES -append -f PostgreSQL \
+                    "PG:host=quackgis.quackgis.svc.cluster.local port=5432 dbname=quackgis user=postgres tables=public.kind_ogr_points(geom_wkb) sslmode=verify-full sslrootcert=/etc/quackgis/tls/ca.crt sslcert=/etc/quackgis/tls/tls.crt sslkey=/etc/quackgis/tls/tls.key" \
+                    "$output_dir/write.geojson" -nln public.kind_ogr_points
+                  python3 - <<'PY'
+                  import psycopg
+                  expected = [(10, "ten", "POINT (3 4)"), (11, None, None)]
+                  with psycopg.connect("") as connection:
+                      rows = connection.execute("SELECT id, name, CASE WHEN geom_wkb IS NULL THEN NULL ELSE ST_AsText(ST_GeomFromWKB(geom_wkb)) END FROM public.kind_ogr_points ORDER BY id").fetchall()
+                  assert rows == expected, rows
+                  print("ogr_copy_write_ok rows=2 geometry=point-null reopen=true copy=atomic")
+                  PY
               env: *pg_environment
               securityContext: *client_security
               volumeMounts: *tls_mount

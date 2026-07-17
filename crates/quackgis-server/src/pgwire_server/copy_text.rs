@@ -9,7 +9,8 @@ use arrow_array::{
     Int32Array, Int64Array, RecordBatch, TimestampMicrosecondArray,
     builder::{BinaryBuilder, StringBuilder},
 };
-use arrow_schema::{DataType, SchemaRef, TimeUnit};
+use arrow_pg::datatypes::classify_spatial_field;
+use arrow_schema::{DataType, Field, SchemaRef, TimeUnit};
 use chrono::{NaiveDate, NaiveDateTime};
 
 pub const MAX_BATCHES_PER_COPY_CHUNK: usize = 128;
@@ -322,18 +323,14 @@ fn build_batch(schema: SchemaRef, rows: &CopyRows) -> Result<RecordBatch, CopyDe
         .fields()
         .iter()
         .enumerate()
-        .map(|(column, field)| copy_array(field.data_type(), rows, column))
+        .map(|(column, field)| copy_array(field, rows, column))
         .collect::<Result<Vec<_>, _>>()?;
     RecordBatch::try_new(schema, arrays)
         .map_err(|error| copy_error("22000", &format!("building COPY Arrow batch: {error}")))
 }
 
-fn copy_array(
-    data_type: &DataType,
-    rows: &CopyRows,
-    column: usize,
-) -> Result<ArrayRef, CopyDecodeError> {
-    match data_type {
+fn copy_array(field: &Field, rows: &CopyRows, column: usize) -> Result<ArrayRef, CopyDecodeError> {
+    match field.data_type() {
         DataType::Boolean => typed_values(rows, column, parse_bool)
             .map(|values| Arc::new(BooleanArray::from(values)) as ArrayRef),
         DataType::Int16 => typed_values(rows, column, |value| {
@@ -401,11 +398,12 @@ fn copy_array(
                 .sum();
             let mut builder = BinaryBuilder::with_capacity(rows.len(), value_bytes);
             let mut decoded = Vec::new();
+            let allow_postgis_hex = classify_spatial_field(field).is_some();
             for row in 0..rows.len() {
                 match rows.value(row, column) {
                     Some(raw) => {
                         let value = decode_copy_field(raw, true)?;
-                        parse_hex_into(&value, &mut decoded)?;
+                        parse_hex_into(&value, &mut decoded, allow_postgis_hex)?;
                         builder.append_value(&decoded);
                     }
                     None => builder.append_null(),
@@ -523,10 +521,21 @@ fn parse_timestamp(value: &[u8]) -> Result<i64, CopyDecodeError> {
         .map_err(|_| copy_error("22007", "invalid COPY Timestamp value"))
 }
 
-fn parse_hex_into(value: &[u8], output: &mut Vec<u8>) -> Result<(), CopyDecodeError> {
-    let hex = value
-        .strip_prefix(br"\x")
-        .ok_or_else(|| copy_error("22P02", "COPY binary value must use \\x hex format"))?;
+fn parse_hex_into(
+    value: &[u8],
+    output: &mut Vec<u8>,
+    allow_postgis_hex: bool,
+) -> Result<(), CopyDecodeError> {
+    let hex = match value.strip_prefix(br"\x") {
+        Some(hex) => hex,
+        None if allow_postgis_hex => value,
+        None => {
+            return Err(copy_error(
+                "22P02",
+                "COPY binary value must use \\x hex format",
+            ));
+        }
+    };
     if !hex.len().is_multiple_of(2) {
         return Err(copy_error(
             "22P02",
@@ -686,6 +695,56 @@ mod tests {
             .expect("payload");
         assert_eq!(payload.value(0), &[0, 255]);
         assert_eq!(payload.value(1), &[1, 2]);
+    }
+
+    #[test]
+    fn accepts_postgis_hex_only_for_spatial_binary_fields() {
+        let spatial_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("geom_wkb", DataType::Binary, true),
+        ]));
+        let mut spatial = CopyTextDecoder::new(
+            spatial_schema,
+            CopyBatchLimits {
+                max_rows: 8,
+                max_bytes: 65_536,
+                max_row_bytes: 256,
+            },
+        )
+        .expect("spatial decoder");
+        assert!(
+            spatial
+                .push(b"1\t0101000000000000000000F03F0000000000000040\n")
+                .expect("GDAL PostGIS COPY geometry")
+                .is_empty()
+        );
+        let batches = spatial.finish().expect("finish spatial COPY");
+        let geometry = batches[0]
+            .column(1)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .expect("geometry");
+        assert_eq!(geometry.value(0).len(), 21);
+
+        let mut ordinary = CopyTextDecoder::new(
+            schema(),
+            CopyBatchLimits {
+                max_rows: 8,
+                max_bytes: 65_536,
+                max_row_bytes: 256,
+            },
+        )
+        .expect("ordinary decoder");
+        assert!(
+            ordinary
+                .push(b"1\tvalue\t00ff\n")
+                .expect("buffer ordinary binary")
+                .is_empty()
+        );
+        let error = ordinary
+            .finish()
+            .expect_err("ordinary binary must retain bytea syntax");
+        assert_eq!(error.sqlstate, "22P02");
     }
 
     #[test]

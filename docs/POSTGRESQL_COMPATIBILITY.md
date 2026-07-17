@@ -770,10 +770,14 @@ spatial readback. Pinned GDAL/OGR 3.11.5 then reads that same fixture through it
 unmodified extended-protocol SQL-result cursor lifecycle (`BEGIN`, `DECLARE`,
 `FETCH 0`, bounded `FETCH`, `CLOSE`, transaction end) and must produce exact
 GeoJSON for `POINT (1 2)` plus NULL geometry/property values. Its direct-discovery
-path now passes the same exact rows with truthful no-FID behavior. Psql 18.3 runs
-the full captured `\d+` workflow and reports `ducklake`; psycopg and OGR also pass
-again after ordered Pod replacement and mTLS/iroh key rotation with old-client
-denial. OGR-authored COPY and authoritative CRS metadata remain open.
+path now passes the same exact rows with truthful no-FID behavior. OGR also
+appends a Point/NULL GeoJSON fixture to a separate predeclared table with
+`PG_USE_COPY=YES`; the bounded decoder accepts its plain PostGIS EWKB hex only on
+classified spatial fields, and a fresh connection proves exact atomic
+publication. Psql 18.3 runs the full captured `\d+` workflow and reports
+`ducklake`; psycopg and OGR also pass again after ordered Pod replacement and
+mTLS/iroh key rotation with old-client denial. OGR-created tables and
+authoritative CRS metadata remain open.
 
 Exact offscreen QGIS 3.44.11-Solothurn now passes the optional digest-pinned Kind
 gate as a read-only copied-data query layer with an explicit `id` key. It discovers

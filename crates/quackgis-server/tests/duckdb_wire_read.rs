@@ -2432,7 +2432,7 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
     let mut copy_rows = stream::iter(
         [
             Bytes::from_static(b"1\torigin\t\\x010100000000000000000000000000000000000000\n"),
-            Bytes::from_static(b"2\tone\t\\x0101000000000000000000F03F000000000000F03F\n"),
+            Bytes::from_static(b"2\tone\t0101000000000000000000F03F000000000000F03F\n"),
         ]
         .into_iter()
         .map(Ok::<_, tokio_postgres::Error>),

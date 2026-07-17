@@ -127,6 +127,8 @@ def main() -> None:
         assert "psql_describe_copied_data_ok" in clients
         assert "psycopg_copied_data_ok" in clients
         assert "ogr_copied_data_ok" in clients
+        assert "ogr_copy_write_ok" in clients
+        assert "PG_USE_COPY YES" in clients
         assert "qgis_query_layer_ok" in qgis
         assert "3.44.11-Solothurn" in qgis
         assert "public.kind_psycopg_points" in qgis
@@ -135,6 +137,7 @@ def main() -> None:
         assert "ogr_direct_discovery_ok" in clients
         assert 'ST_GeomFromWKB(geom_wkb) AS "ST_AsEWKB"' in clients
         assert "kind_psycopg_points" in clients
+        assert "kind_ogr_points" in clients
         assert "quackgis-direct-denied" in clients
         assert "quackgis-plaintext-denied" in clients
         assert "quackgis-uncredentialed-denied" in clients

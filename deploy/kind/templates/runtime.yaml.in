@@ -141,6 +141,7 @@ data:
       ],
       "table_owners": [
         {"table": "kind_psycopg_points", "role": "postgres"},
+        {"table": "kind_ogr_points", "role": "postgres"},
         {"table": "kind_rest_points", "role": "postgres"}
       ],
       "table_grants": [

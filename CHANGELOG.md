@@ -7,6 +7,12 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 
 ### Added
 
+- Pinned GDAL/OGR 3.11.5 now authors a bounded text COPY into a predeclared
+  official-DuckLake table through the packaged mutual-TLS tiny client, then a
+  fresh psycopg connection verifies exact scalar, Point, and NULL values. The
+  COPY decoder accepts GDAL's plain PostGIS EWKB hex only for fields already
+  classified as geometry/geography; ordinary binary fields still require
+  PostgreSQL `bytea` `\\x` syntax.
 - Pgwire startup now advertises the frozen PostgreSQL 18.4 profile consistently
   in trust, SCRAM, and edge-preauthenticated modes. Structural `version()`,
   `SHOW server_version[_num]`, and PostgreSQL-typed
@@ -49,7 +55,8 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   pinning, and clean bounded drain on close. The pinned GDAL/OGR 3.11.5 Kind job
   uses that unmodified SQL-result path to read the psycopg-created fixture and
   requires exact Point/NULL GeoJSON through mTLS, replacement, and key rotation.
-  Direct OGR discovery/COPY/no-FID qualification remains open.
+  Direct OGR discovery, no-FID behavior, and predeclared-target COPY now pass;
+  OGR-created tables and authoritative CRS metadata remain open.
 - The pinned psycopg 3.2.13 Kind job now runs a copied-data workflow through the
   mutual-TLS tiny-client ingress: create/reuse an official-DuckLake table, clear
   it, stream PostgreSQL COPY with exact WKB and NULL rows, close/reconnect, and

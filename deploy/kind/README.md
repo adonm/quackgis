@@ -35,8 +35,12 @@ reconnects, and requires exact scalar and `POINT (1 2)` readback. The same gate 
 rerun after ordered replacement and mTLS/iroh key rotation. The OGR 3.11.5 Job
 waits for that fixture, reads it through the driver's unmodified SQL-result cursor
 lifecycle, converts it to GeoJSON, and requires exact `POINT (1 2)`, NULL geometry,
-and NULL property values. This qualifies OGR SQL-result reads, not direct layer
-discovery, OGR COPY/no-FID behavior, or QGIS. The psql Job remains a scalar gate.
+and NULL property values. Its direct layer discovery proves truthful no-FID
+behavior. It then asks OGR to append a GeoJSON Point/NULL fixture to a separate
+predeclared table with `PG_USE_COPY=YES`; a fresh psycopg connection verifies the
+exact committed values. This qualifies OGR reads and predeclared-target COPY, not
+OGR table creation or authoritative CRS metadata. The psql Job executes the full
+captured `\d+` path.
 
 The complete server, worker, and bootstrap use Kubernetes native sidecar ordering;
 the tiny client is the regular container. Shutdown therefore removes ingress
@@ -97,7 +101,8 @@ unreachable named cluster is deleted and recreated before image loading.
 The pgwire client gates use `verify-full`, the generated client certificate, and
 the leased `postgres` role. The psycopg gate additionally proves copied-data COPY
 and reopen behavior, and the OGR gate proves copied-data SQL-result readback,
-through this exact path. The REST Deployment uses only the separately leased
+direct discovery, and OGR-authored COPY through this exact path. The REST
+Deployment uses only the separately leased
 `authenticator` role; its transaction-local `rest_reader` assumption succeeds and
 `rest_denied` sees neither the table path nor direct data. No database password
 exists in the packaged edge path: each authenticated bridge requires the

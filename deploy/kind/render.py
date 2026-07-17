@@ -106,6 +106,8 @@ def check_templates() -> None:
         "quackgis-ogr",
         "ogr_copied_data_ok",
         "ogr_direct_discovery_ok",
+        "ogr_copy_write_ok",
+        "PG_USE_COPY YES",
         'ST_GeomFromWKB(geom_wkb) AS "ST_AsEWKB"',
         "quackgis-direct-denied",
         "quackgis-plaintext-denied",
@@ -143,7 +145,8 @@ def check_templates() -> None:
         raise ValueError("only the internal edge Service may publish unready addresses")
     forbidden = ["datafusion", "sedona", "linkerd", "minio", "postgresql"]
     qgis_topology = qgis.replace("postgresql", "")
-    combined = f"{core}\n{clients}\n{rest}\n{seed}\n{qgis_topology}".lower()
+    clients_topology = clients.replace("-f PostgreSQL", "")
+    combined = f"{core}\n{clients_topology}\n{rest}\n{seed}\n{qgis_topology}".lower()
     present = [value for value in forbidden if value in combined]
     if present:
         raise ValueError(f"retired/deferred topology names present: {present}")
@@ -252,7 +255,7 @@ def main() -> None:
     args = parser().parse_args()
     if args.check:
         check_templates()
-        print("kind_template_check_ok topology=duckdb-only clients=6 optional=qgis copied_data=psycopg,ogr")
+        print("kind_template_check_ok topology=duckdb-only clients=6 optional=qgis copied_data=psycopg,ogr ogr_copy=enabled")
         return
     missing = [
         option

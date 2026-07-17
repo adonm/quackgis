@@ -26,8 +26,8 @@ DuckLake identity artifact is selected and otherwise validates exact
 role-filtered catalog revisions before requests. K0 now routes a separately registered `authenticator`
 lease through a loopback tiny-client sidecar in each of two REST Pods and proves
 role denial, balancing, failover, core reconnect, and credential replacement.
-Runtime assembly now includes the source/digest-pinned identity artifact; rerunning
-the complete Kind client matrix on that artifact remains open.
+Runtime assembly includes the source/digest-pinned identity artifact, and the
+complete packaged psql/psycopg/OGR matrix passes on that lane.
 
 There is no PostgreSQL, DataFusion, or Sedona query engine. DuckDB is the sole
 planner/executor and official DuckLake is the sole writer for new storage.
@@ -100,12 +100,14 @@ creates copied data, streams WKB/NULL rows with COPY, reconnects, and verifies
 exact spatial readback through that packaged ingress, including after ordered
 replacement and mTLS/edge-key rotation. Pinned OGR 3.11.5 reads the same fixture
 through its extended SQL-result cursor lifecycle and requires exact Point/NULL
-GeoJSON across those same operational gates. Both REST Pods independently pass
+GeoJSON across those same operational gates. It also uses native OGR COPY to load
+plain PostGIS EWKB hex into a separate predeclared table, then requires exact
+Point/NULL readback after reconnect. Both REST Pods independently pass
 reader/denied OpenAPI and exact data gates; the Service survives one Pod deletion,
 core replacement recovers, and old authenticator/JWT credentials are denied after
-replacement. The owned identity artifact removes the catalog-artifact schedule blocker; direct
-psql/OGR/QGIS query-shape closure and a packaged rerun remain. Packaged resource
-and hosted-relay qualification also remain open.
+replacement. The owned identity artifact removes the catalog-artifact schedule
+blocker. OGR-created tables, authoritative CRS metadata, broader QGIS workflows,
+and packaged resource/hosted-relay qualification remain open.
 
 TLS remains optional for local development. Set `QUACKGIS_TLS_MODE=required` with
 `QUACKGIS_TLS_CERT` and `QUACKGIS_TLS_KEY` to fail closed on plaintext startup.
@@ -129,7 +131,7 @@ lookup, reference integrity, PostgreSQL result types, and RowDescription text,
 binary, and NULL WKB transport pass. Stable user-object catalogs, origins,
 defaults, comments, NOT-NULL constraints, and an empty index projection pass with
 the supported pinned identity artifact; signed-only baseline startup rejects those
-surfaces. This is not yet full QGIS/OGR discovery evidence against QuackGIS.
+surfaces. This is not full PostgreSQL/PostGIS catalog parity.
 
 When `QUACKGIS_METRICS_PORT` is configured, the same loopback HTTP listener serves
 `/healthz`, startup/drain-aware readiness at `/readyz`, and Prometheus data at
