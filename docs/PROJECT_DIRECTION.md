@@ -212,6 +212,16 @@ application data only through `quackgis/edge/1`; they do not handle pairing,
 passwords, worker selection, credential registration/access-lease issuance, or
 local-client secrets.
 
+Shared operator recovery also uses authenticated iroh, but it is not pgwire data
+or a tiny-client file transfer. A separately authorized, versioned control
+capability starts and monitors a backend operation. The backend fences workers,
+coordinates one recovery point across the official DuckLake PostgreSQL catalog,
+the separate QuackGIS control database, and versioned object storage, and moves
+bytes through provider-native snapshot/copy APIs. Restore stays available while
+workers are fenced, advances assignment/security epochs, and requires independent
+DuckDB reopen before service resumes. Ordinary LOGIN roles and application access
+leases never grant this operator capability.
+
 ## Ownership rules
 
 - DuckDB is the only query planner and spatial execution engine.
@@ -447,6 +457,8 @@ weakening PostgreSQL-facing semantics.
 - Compressing enrollment/authentication/control traffic or sharing compression
   dictionaries across clients, credentials, requests, or sessions.
 - PL/pgSQL, triggers, LISTEN/NOTIFY, logical replication, or `pg_dump` fidelity.
+- Client-side `pg_dump` or iroh file streaming as the DuckLake backup mechanism;
+  shared backup bytes move between backend PostgreSQL/object-storage systems.
 - PostGIS topology, Tiger geocoder, SFCGAL, or raster pixel algebra.
 - Multi-writer/horizontal-scale claims based only on emulators.
 - Billion-row, 10 TB, trillion-class, or multi-modal release claims before the

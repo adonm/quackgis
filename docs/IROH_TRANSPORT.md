@@ -58,6 +58,24 @@ and one-Pod failover. Denial gates cover direct pgwire, plaintext, missing/old
 certificates, the old authenticator credential, and old JWTs after replacement.
 Host profiles remain authoritative for I0 resource budgets.
 
+## Planned shared operator control
+
+I0's `quackgis/control/1` remains the bounded pairing/lease protocol described
+above, and the tiny application client remains a pgwire/HTTP/cancellation forwarder.
+Shared backup and restore do not tunnel `pg_dump`, PostgreSQL files, or S3 objects
+through that client.
+
+M6 adds an operator-only, versioned control capability over authenticated iroh.
+It carries only start/status/result messages and an opaque operation ID. The
+backend uses managed PostgreSQL backup/snapshot APIs for both the official
+DuckLake metadata catalog and the separate QuackGIS control database, and
+provider-side versioning/copy/protection for the S3 object set. Restore remains
+available while application workers are fenced, invalidates stale assignment
+generations and leases, and re-enables workers only after independent reopen
+oracles pass. Operator authorization, message bounds, idempotency, audit, and
+recovery-point identity require separate executable M6 evidence; none is an I0
+or K0 implementation claim.
+
 Run the pure protocol evidence with `just iroh-protocol-test`. Run the executable
 local-direct seam with `just iroh-direct-smoke`; it creates real bootstrap,
 worker, and client iroh endpoints and proves concurrent sessions, local bridge

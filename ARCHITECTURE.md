@@ -126,6 +126,30 @@ Startup atomically creates or validates `_quackgis/storage-authority-v1` below t
 local data root before attach. A mismatched marker fails. Migration targets a
 separate root; alternating writers is never supported.
 
+### Backup and recovery control
+
+The M5 exact-path backup tool is a local-singleton backend primitive. It copies a
+stopped local DuckLake catalog and data root and is not the Shared 1.x backup
+transport.
+
+Shared recovery is an operator-only control operation reached over authenticated
+iroh. Iroh carries a bounded request, operation identifier, status, and audit
+result; it never carries catalog dumps, object payloads, cloud credentials, or
+private keys. The backend fences writers and new assignments, records one declared
+DuckLake/control recovery point, snapshots the managed PostgreSQL DuckLake and
+QuackGIS control catalogs, protects the referenced versioned object-store set,
+and verifies the result through an independent version-matched DuckDB reopen.
+Provider-native snapshot/copy APIs move the durable bytes directly between
+backend storage systems.
+
+Restore runs while worker generations remain fenced. It restores the catalog and
+object versions to the declared recovery point, advances assignment/security
+epochs so stale leases cannot return, verifies schemas/counts/samples/snapshots
+independently, and only then admits workers. A normal LOGIN role, pgwire SQL,
+HTTP request, tiny-client filesystem, or relay credential cannot authorize this
+operation. `pg_dump` compatibility is neither a complete DuckLake backup nor the
+shared recovery mechanism.
+
 ## Query lifecycle
 
 Current path:

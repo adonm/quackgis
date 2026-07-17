@@ -484,7 +484,11 @@ Deliver:
 - one common role, privilege, catalog visibility, statement authorization, and
   OpenAPI decision across pgwire and HTTP; and
 - backup, restore, migration, audit, revocation, and fail-closed cache-invalidation
-  procedures for control metadata.
+  procedures for control metadata; and
+- an operator-only versioned control capability over authenticated iroh that
+  starts and monitors backend backup/restore operations by opaque operation ID,
+  without granting the tiny client storage credentials or proxying catalog/object
+  bytes.
 
 ### M6.2 — tiny client and relay contract
 
@@ -522,8 +526,11 @@ Deliver:
 - measured multi-process readers/writers using supported DuckLake behavior;
 - reader visibility and writer consistency policy;
 - deterministic conflict/indeterminate-commit classification; and
-- throttling, interruption, rotation, backup, restore, cleanup, and independent
-  reader tests.
+- throttling, interruption, rotation, cleanup, and independent reader tests; and
+- one coordinated recovery-point procedure that fences writers/assignments,
+  snapshots both managed PostgreSQL catalogs, protects the referenced versioned
+  object-store set with provider-side operations, and verifies independent
+  version-matched DuckDB reopen before workers resume.
 
 Each worker retains the Rust policy edge, ADBC, and in-process DuckDB. Iroh does
 not introduce a Quack/engine split or grant direct DuckDB access.
@@ -583,6 +590,10 @@ Exit gates:
 - restored control metadata reproduces users, registered credential public keys,
   revocation, assignments, policy, and security/configuration epochs without
   private keys or stale access leases;
+- backup start/status/result passes through the operator iroh control capability,
+  no backup payload or cloud credential traverses the tiny application client,
+  restore works with application workers fenced, and stale worker assignments or
+  access leases cannot survive recovery;
 - at least 2,000 authenticated, mostly idle pgwire sessions share one reference
   worker within a published RSS budget while native engine leases, active queries,
   pinned work, and queues remain at their configured ceilings;

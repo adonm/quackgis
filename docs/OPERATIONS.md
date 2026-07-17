@@ -329,6 +329,14 @@ either target. This is functional offline checkpoint recovery evidence, not an
 online snapshot, point-in-time, relocated, release-scale, shared-storage,
 cross-version upgrade, or automated disaster-recovery claim.
 
+Shared 1.x deliberately replaces this filesystem procedure rather than exposing
+it through pgwire. An operator-only authenticated iroh control request starts and
+monitors a backend job; managed PostgreSQL and object-storage snapshot/copy APIs
+move the catalog and S3 bytes without traversing the tiny client. Restore runs
+with workers and assignment generations fenced, invalidates stale leases, and
+requires independent DuckDB reopen before service resumes. That control protocol
+and managed-service evidence remain future M6 work.
+
 The maintained pgwire workflow creates eight deliberately fragmented COPY files,
 runs official `ducklake_merge_adjacent_files`, requires the active file count to
 at least halve, and verifies unchanged row count/sum afterward. This is functional
