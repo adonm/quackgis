@@ -2480,10 +2480,7 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
             _ => None,
         })
         .expect("text geometry row");
-    assert_eq!(
-        geometry_text,
-        "\\x010100000000000000000000000000000000000000"
-    );
+    assert_eq!(geometry_text, "010100000000000000000000000000000000000000");
     let copied = client
         .query_one(
             "SELECT count(*)::BIGINT, \

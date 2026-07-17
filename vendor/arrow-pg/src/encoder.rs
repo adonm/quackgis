@@ -64,6 +64,56 @@ impl ToSqlText for PgRegOid {
     }
 }
 
+#[derive(Debug)]
+struct PgSpatialWkb<'a>(Option<&'a [u8]>);
+
+impl ToSql for PgSpatialWkb<'_> {
+    fn to_sql(
+        &self,
+        _ty: &Type,
+        out: &mut BytesMut,
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        let Some(value) = self.0 else {
+            return Ok(IsNull::Yes);
+        };
+        out.extend_from_slice(value);
+        Ok(IsNull::No)
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        is_geometry_wire_type(ty)
+    }
+
+    postgres_types::to_sql_checked!();
+}
+
+impl ToSqlText for PgSpatialWkb<'_> {
+    fn to_sql_text(
+        &self,
+        _ty: &Type,
+        out: &mut BytesMut,
+        _format_options: &FormatOptions,
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        let Some(value) = self.0 else {
+            return Ok(IsNull::Yes);
+        };
+        const HEX: &[u8; 16] = b"0123456789ABCDEF";
+        out.reserve(value.len().saturating_mul(2));
+        for byte in value {
+            out.extend_from_slice(&[HEX[(byte >> 4) as usize], HEX[(byte & 0x0f) as usize]]);
+        }
+        Ok(IsNull::No)
+    }
+}
+
+fn encode_binary_as_geometry(
+    encoder: &mut impl Encoder,
+    value: Option<&[u8]>,
+    pg_field: &FieldInfo,
+) -> PgWireResult<()> {
+    encoder.encode_field(&PgSpatialWkb(value), pg_field)
+}
+
 fn encode_binary_as_bytea(
     encoder: &mut impl Encoder,
     value: Option<&[u8]>,
@@ -435,7 +485,7 @@ pub fn encode_value<T: Encoder>(
         }
         DataType::Utf8View => encoder.encode_field(&get_utf8_view_value(arr, idx), pg_field)?,
         DataType::BinaryView if is_geometry_wire_type(pg_field.datatype()) => {
-            encode_binary_as_bytea(encoder, get_binary_view_value(arr, idx), pg_field)?
+            encode_binary_as_geometry(encoder, get_binary_view_value(arr, idx), pg_field)?
         }
         DataType::BinaryView => encoder.encode_field(&get_binary_view_value(arr, idx), pg_field)?,
         DataType::LargeUtf8 if *pg_field.datatype() == Type::CHAR => {
@@ -448,11 +498,11 @@ pub fn encode_value<T: Encoder>(
         }
         DataType::LargeUtf8 => encoder.encode_field(&get_large_utf8_value(arr, idx), pg_field)?,
         DataType::Binary if is_geometry_wire_type(pg_field.datatype()) => {
-            encode_binary_as_bytea(encoder, get_binary_value(arr, idx), pg_field)?
+            encode_binary_as_geometry(encoder, get_binary_value(arr, idx), pg_field)?
         }
         DataType::Binary => encoder.encode_field(&get_binary_value(arr, idx), pg_field)?,
         DataType::LargeBinary if is_geometry_wire_type(pg_field.datatype()) => {
-            encode_binary_as_bytea(encoder, get_large_binary_value(arr, idx), pg_field)?
+            encode_binary_as_geometry(encoder, get_large_binary_value(arr, idx), pg_field)?
         }
         DataType::LargeBinary => {
             encoder.encode_field(&get_large_binary_value(arr, idx), pg_field)?
@@ -761,7 +811,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn geometry_sentinel_preserves_generated_wkb_text_payloads(
+        fn geometry_sentinel_encodes_generated_wkb_as_bare_hex_text(
             values in prop::collection::vec(prop::option::of(prop::collection::vec(any::<u8>(), 0..128)), 0..64)
         ) {
             let array: Arc<dyn Array> = Arc::new(BinaryArray::from_iter(
@@ -775,19 +825,22 @@ mod tests {
                 crate::datatypes::geometry_pg_type(),
                 FieldFormat::Text,
             );
-            let bytea = FieldInfo::new(
-                "payload".to_owned(),
-                None,
-                None,
-                Type::BYTEA,
-                FieldFormat::Text,
-            );
-            for index in 0..values.len() {
+            for (index, value) in values.iter().enumerate() {
                 let mut geometry_encoder = TextCaptureEncoder::default();
                 encode_value(&mut geometry_encoder, &array, index, &arrow_field, &geometry)?;
-                let mut bytea_encoder = TextCaptureEncoder::default();
-                encode_value(&mut bytea_encoder, &array, index, &arrow_field, &bytea)?;
-                prop_assert_eq!(geometry_encoder.encoded, bytea_encoder.encoded);
+                let expected = value
+                    .as_ref()
+                    .map(|value| {
+                        value
+                            .iter()
+                            .flat_map(|byte| {
+                                const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                                [HEX[(byte >> 4) as usize], HEX[(byte & 0x0f) as usize]]
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                prop_assert_eq!(&geometry_encoder.encoded, &vec![expected]);
             }
         }
 
@@ -811,6 +864,33 @@ mod tests {
                 prop_assert_eq!(encoder.encoded.len(), 1);
             }
         }
+    }
+
+    #[test]
+    fn spatial_wkb_uses_bare_hex_text_and_raw_binary() {
+        let value = PgSpatialWkb(Some(&[0x01, 0xab, 0xff]));
+        let geometry = crate::datatypes::geometry_pg_type();
+
+        let mut text = BytesMut::new();
+        let text_null = value
+            .to_sql_text(&geometry, &mut text, &FormatOptions::default())
+            .expect("spatial text");
+        assert!(matches!(text_null, IsNull::No));
+        assert_eq!(text.as_ref(), b"01ABFF");
+
+        let mut binary = BytesMut::new();
+        let binary_null = value
+            .to_sql(&geometry, &mut binary)
+            .expect("spatial binary");
+        assert!(matches!(binary_null, IsNull::No));
+        assert_eq!(binary.as_ref(), &[0x01, 0xab, 0xff]);
+
+        let mut null = BytesMut::new();
+        let null_status = PgSpatialWkb(None)
+            .to_sql_text(&geometry, &mut null, &FormatOptions::default())
+            .expect("null spatial text");
+        assert!(matches!(null_status, IsNull::Yes));
+        assert!(null.is_empty());
     }
 
     #[test]
