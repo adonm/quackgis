@@ -569,6 +569,16 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
     assert_eq!(extents.get::<_, String>(1), "BOX3D(0 0 5,2 3 9)");
     assert_eq!(extents.get::<_, String>(2), "BOX(0 0,2 3)");
     assert_eq!(extents.get::<_, String>(3), "BOX3D(0 0 5,2 3 9)");
+    let row_srids = client
+        .query_one(
+            "SELECT ST_SRID(geom_wkb), ST_SRID(native_geom) \
+             FROM public.catalog_projection WHERE id = 8",
+            &[],
+        )
+        .await
+        .expect("maintained WKB and native geometry SRID compatibility");
+    assert_eq!(row_srids.get::<_, i32>(0), 0);
+    assert_eq!(row_srids.get::<_, i32>(1), 0);
 
     let catalog_sql = "SELECT c.oid, c.relname, c.relnamespace, c.reltype, c.relowner, \
                 c.relkind, c.relnatts, c.relrowsecurity, a.attrelid, a.attname, \

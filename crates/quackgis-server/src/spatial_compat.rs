@@ -34,7 +34,9 @@ CREATE OR REPLACE MACRO quackgis_st_curvetoline(g) AS g;
 CREATE OR REPLACE MACRO quackgis_st_hasarc(g) AS false;
 CREATE OR REPLACE MACRO quackgis_st_srid(g) AS
     CASE WHEN g IS NULL THEN NULL
-         ELSE coalesce(try_cast(regexp_extract(ST_CRS(g), '^EPSG:([0-9]+)$', 1) AS INTEGER), 0)
+         ELSE coalesce(try_cast(regexp_extract(
+                  ST_CRS(ST_GeomFromWKB(CAST(g AS BLOB))),
+                  '^EPSG:([0-9]+)$', 1) AS INTEGER), 0)
     END;
 CREATE OR REPLACE MACRO quackgis_st_extent(g) AS
     replace(CAST(ST_Extent(ST_Extent_Agg(ST_GeomFromWKB(CAST(g AS BLOB)))) AS VARCHAR),
