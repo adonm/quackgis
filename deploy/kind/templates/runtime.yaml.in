@@ -47,6 +47,17 @@ data:
 apiVersion: v1
 kind: Secret
 metadata:
+  name: quackgis-migration-client-tls
+  namespace: quackgis
+type: kubernetes.io/tls
+data:
+  tls.crt: @@TLS_CERTIFICATE@@
+  tls.key: @@TLS_PRIVATE_KEY@@
+  ca.crt: @@MIGRATION_TLS_CA_CERTIFICATE@@
+---
+apiVersion: v1
+kind: Secret
+metadata:
   name: quackgis-edge-keys
   namespace: quackgis
 type: Opaque
@@ -55,6 +66,8 @@ data:
   worker.key: @@WORKER_SECRET_KEY@@
   credential.key: @@CREDENTIAL_SECRET_KEY@@
   client-transport.key: @@CLIENT_TRANSPORT_SECRET_KEY@@
+  migration-credential.key: @@MIGRATION_CREDENTIAL_SECRET_KEY@@
+  migration-transport.key: @@MIGRATION_TRANSPORT_SECRET_KEY@@
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -84,6 +97,10 @@ data:
         {
           "credential": "@@REST_CREDENTIAL_PUBLIC_KEY@@",
           "login_role": "authenticator"
+        },
+        {
+          "credential": "@@MIGRATION_CREDENTIAL_PUBLIC_KEY@@",
+          "login_role": "migration_operator"
         }
       ],
       "worker": {
@@ -115,6 +132,25 @@ data:
       "compression": "auto",
       "max_connections": 64
     }
+  migration-client.json: |
+    {
+      "credential_secret_key_path": "/var/run/quackgis-migration-edge/migration-credential.key",
+      "transport_secret_key_path": "/var/run/quackgis-migration-edge/migration-transport.key",
+      "bootstrap": {
+        "endpoint_id": "@@BOOTSTRAP_PUBLIC_KEY@@",
+        "direct_hosts": ["quackgis-edge-internal.quackgis.svc.cluster.local:4243"]
+      },
+      "listen": "0.0.0.0:5433",
+      "local_tls": {
+        "certificate_path": "/etc/quackgis/migration-tls/tls.crt",
+        "private_key_path": "/etc/quackgis/migration-tls/tls.key",
+        "client_ca_path": "/etc/quackgis/migration-tls/ca.crt"
+      },
+      "disable_relays": true,
+      "bind": "0.0.0.0:4245",
+      "compression": "auto",
+      "max_connections": 8
+    }
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -128,7 +164,8 @@ data:
         {"oid": 100001, "name": "postgres", "login": true},
         {"oid": 100002, "name": "authenticator", "login": true, "inherit": false},
         {"oid": 100003, "name": "rest_reader"},
-        {"oid": 100004, "name": "rest_denied"}
+        {"oid": 100004, "name": "rest_denied"},
+        {"oid": 100005, "name": "migration_operator", "login": true}
       ],
       "memberships": [
         {"oid": 200001, "role": "rest_reader", "member": "authenticator",
@@ -142,7 +179,9 @@ data:
       "table_owners": [
         {"table": "kind_psycopg_points", "role": "postgres"},
         {"table": "kind_ogr_points", "role": "postgres"},
-        {"table": "kind_rest_points", "role": "postgres"}
+        {"table": "kind_rest_points", "role": "postgres"},
+        {"table": "kind_migration_places", "role": "migration_operator"},
+        {"table": "kind_migration_readings", "role": "migration_operator"}
       ],
       "table_grants": [
         {"table": "kind_rest_points", "role": "rest_reader", "privileges": ["SELECT"]}
@@ -166,6 +205,20 @@ spec:
       protocol: TCP
       port: 9090
       targetPort: status
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: quackgis-migration
+  namespace: quackgis
+spec:
+  selector:
+    app.kubernetes.io/name: quackgis
+  ports:
+    - name: pgwire
+      protocol: TCP
+      port: 5432
+      targetPort: migration-pgwire
 ---
 apiVersion: v1
 kind: Service
@@ -236,12 +289,13 @@ spec:
           command: ["/bin/sh", "-ceu"]
           args:
             - >-
-              mkdir -p /var/lib/quackgis/data /var/lib/quackgis/tmp /var/run/quackgis-edge-bootstrap /var/run/quackgis-edge-worker /var/run/quackgis-edge-client;
+              mkdir -p /var/lib/quackgis/data /var/lib/quackgis/tmp /var/run/quackgis-edge-bootstrap /var/run/quackgis-edge-worker /var/run/quackgis-edge-client /var/run/quackgis-migration-edge;
               cp /var/run/quackgis-edge-source/bootstrap.key /var/run/quackgis-edge-bootstrap/;
               cp /var/run/quackgis-edge-source/worker.key /var/run/quackgis-edge-worker/;
               cp /var/run/quackgis-edge-source/credential.key /var/run/quackgis-edge-source/client-transport.key /var/run/quackgis-edge-client/;
-              chmod 600 /var/run/quackgis-edge-bootstrap/*.key /var/run/quackgis-edge-worker/*.key /var/run/quackgis-edge-client/*.key;
-              chown -R 999:999 /var/lib/quackgis /var/run/quackgis-edge-bootstrap /var/run/quackgis-edge-worker /var/run/quackgis-edge-client
+              cp /var/run/quackgis-edge-source/migration-credential.key /var/run/quackgis-edge-source/migration-transport.key /var/run/quackgis-migration-edge/;
+              chmod 600 /var/run/quackgis-edge-bootstrap/*.key /var/run/quackgis-edge-worker/*.key /var/run/quackgis-edge-client/*.key /var/run/quackgis-migration-edge/*.key;
+              chown -R 999:999 /var/lib/quackgis /var/run/quackgis-edge-bootstrap /var/run/quackgis-edge-worker /var/run/quackgis-edge-client /var/run/quackgis-migration-edge
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -262,6 +316,8 @@ spec:
               mountPath: /var/run/quackgis-edge-worker
             - name: edge-client-keys
               mountPath: /var/run/quackgis-edge-client
+            - name: migration-edge-keys
+              mountPath: /var/run/quackgis-migration-edge
         - name: quackgis-server
           restartPolicy: Always
           image: "@@RUNTIME_IMAGE@@"
@@ -401,6 +457,36 @@ spec:
             - name: client-tls
               mountPath: /etc/quackgis/client-tls
               readOnly: true
+        - name: quackgis-migration-client
+          image: "@@RUNTIME_IMAGE@@"
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/quackgis-client"]
+          args: ["--config", "/etc/quackgis/edge/migration-client.json"]
+          ports:
+            - name: migration-pgwire
+              containerPort: 5433
+              protocol: TCP
+            - name: migration-edge
+              containerPort: 4245
+              protocol: UDP
+          startupProbe:
+            tcpSocket:
+              port: migration-pgwire
+            periodSeconds: 2
+            timeoutSeconds: 1
+            failureThreshold: 30
+          resources: *edge_resources
+          securityContext: *runtime_security
+          volumeMounts:
+            - name: edge-config
+              mountPath: /etc/quackgis/edge
+              readOnly: true
+            - name: migration-edge-keys
+              mountPath: /var/run/quackgis-migration-edge
+              readOnly: true
+            - name: migration-client-tls
+              mountPath: /etc/quackgis/migration-tls
+              readOnly: true
       volumes:
         - name: data
           persistentVolumeClaim:
@@ -423,7 +509,13 @@ spec:
           emptyDir: {}
         - name: edge-client-keys
           emptyDir: {}
+        - name: migration-edge-keys
+          emptyDir: {}
         - name: client-tls
           secret:
             secretName: quackgis-client-tls
+            defaultMode: 288
+        - name: migration-client-tls
+          secret:
+            secretName: quackgis-migration-client-tls
             defaultMode: 288

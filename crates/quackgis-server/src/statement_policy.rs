@@ -6,8 +6,8 @@ use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use sqlparser::ast::{
-    CommentObject, Delete, Expr, FromTable, ObjectName, ObjectNamePart, Query, SetExpr, Statement,
-    TableFactor, TableObject, TableWithJoins, visit_expressions,
+    CommentObject, Delete, Expr, FromTable, ObjectName, ObjectNamePart, ObjectType, Query, SetExpr,
+    Statement, TableFactor, TableObject, TableWithJoins, visit_expressions,
 };
 
 use crate::auth::{AccessRole, AuthConfig};
@@ -192,6 +192,7 @@ fn statement_kind(statement: &Statement) -> &'static str {
         Statement::CreateTable(_) => "create_table",
         Statement::Comment { .. } => "comment",
         Statement::Delete(_) => "delete",
+        Statement::Drop { .. } => "drop_table",
         Statement::Insert(_) => "insert",
         Statement::Query(_) => "query",
         Statement::Update { .. } => "update",
@@ -236,6 +237,16 @@ fn write_target(statement: &Statement) -> Option<TableKey> {
         } => comment_target_parts(*object_type, object_name),
         Statement::Insert(insert) => insert_target_parts(&insert.table),
         Statement::Delete(delete) => delete_target_parts(delete),
+        Statement::Drop {
+            object_type: ObjectType::Table,
+            names,
+            cascade: false,
+            restrict: false,
+            purge: false,
+            temporary: false,
+            table: None,
+            ..
+        } if names.len() == 1 => table_name_parts(&names[0]),
         Statement::Update(update) => update_target_parts(&update.table),
         _ => None,
     }?;
@@ -271,6 +282,7 @@ fn required_write_privilege(statement: &Statement) -> Option<TableWritePrivilege
         Statement::Insert(_) => Some(TableWritePrivilege::Table(TablePrivilege::Insert)),
         Statement::Update { .. } => Some(TableWritePrivilege::Table(TablePrivilege::Update)),
         Statement::Delete(_) => Some(TableWritePrivilege::Table(TablePrivilege::Delete)),
+        Statement::Drop { .. } => Some(TableWritePrivilege::Create),
         _ => None,
     }
 }
@@ -576,6 +588,7 @@ mod tests {
         for sql in [
             "COMMENT ON TABLE public.places IS 'table comment'",
             "COMMENT ON COLUMN public.places.label IS 'column comment'",
+            "DROP TABLE IF EXISTS public.places",
         ] {
             let statement = Parser::parse_sql(&PostgreSqlDialect {}, sql)
                 .unwrap()
@@ -591,5 +604,16 @@ mod tests {
         .unwrap()
         .remove(0);
         assert!(authorize_statement(&auth, Some("owner"), Some("owner"), &role_comment).is_err());
+
+        for sql in [
+            "DROP VIEW public.places",
+            "DROP TABLE public.places, public.other",
+            "DROP TABLE public.places CASCADE",
+        ] {
+            let statement = Parser::parse_sql(&PostgreSqlDialect {}, sql)
+                .unwrap()
+                .remove(0);
+            assert!(authorize_statement(&auth, Some("owner"), Some("owner"), &statement).is_err());
+        }
     }
 }

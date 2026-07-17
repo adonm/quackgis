@@ -8,7 +8,7 @@ use quackgis_migrate::connect::{ConnectionOptions, connect};
 use quackgis_migrate::report::write_json_atomic;
 use quackgis_migrate::{
     MigrationConfig, MigrationState, PreflightStatus, begin_source_snapshot, build_preflight,
-    run_migration,
+    cleanup_configured_targets, run_migration,
 };
 
 #[derive(Parser)]
@@ -24,6 +24,8 @@ enum Command {
     Preflight(PreflightArgs),
     /// Copy and verify selected tables in one source and one target transaction.
     Run(RunArgs),
+    /// Explicitly drop only the target tables named by the migration config.
+    Cleanup(CleanupArgs),
 }
 
 #[derive(Args)]
@@ -44,6 +46,18 @@ struct RunArgs {
     out: PathBuf,
     #[command(flatten)]
     source: SourceConnectionArgs,
+    #[command(flatten)]
+    target: TargetConnectionArgs,
+}
+
+#[derive(Args)]
+struct CleanupArgs {
+    #[arg(long)]
+    config: PathBuf,
+    #[arg(long)]
+    out: PathBuf,
+    #[arg(long)]
+    confirm_drop_configured_targets: bool,
     #[command(flatten)]
     target: TargetConnectionArgs,
 }
@@ -111,7 +125,17 @@ async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Preflight(args) => preflight(args).await,
         Command::Run(args) => run(args).await,
+        Command::Cleanup(args) => cleanup(args).await,
     }
+}
+
+async fn cleanup(args: CleanupArgs) -> Result<()> {
+    if !args.confirm_drop_configured_targets {
+        bail!("cleanup requires --confirm-drop-configured-targets");
+    }
+    let config = MigrationConfig::load(&args.config)?;
+    let report = cleanup_configured_targets(&config, &args.target.options()).await?;
+    write_json_atomic(&args.out, &report)
 }
 
 async fn run(args: RunArgs) -> Result<()> {

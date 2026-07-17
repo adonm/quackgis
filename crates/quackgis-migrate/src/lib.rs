@@ -15,8 +15,8 @@ pub use inventory::{
     SourceObject, SourceObjectKind, SourceRole, SourceTable,
 };
 pub use migration::{
-    ColumnVerification, MigrationReport, MigrationState, TableTransfer, TargetIdentity,
-    run_migration,
+    CleanupReport, ColumnVerification, MigrationReport, MigrationState, TableTransfer,
+    TargetIdentity, cleanup_configured_targets, run_migration,
 };
 pub use plan::{
     Action, ColumnPlan, Disposition, ObjectPlan, PreflightReport, PreflightStatus, TablePlan,

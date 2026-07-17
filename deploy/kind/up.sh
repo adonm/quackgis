@@ -34,21 +34,28 @@ fi
 command -v kind >/dev/null
 command -v kubectl >/dev/null
 tls_valid=true
-for file in ca.crt ca.key tls.crt tls.key client.crt client.key; do
+for file in ca.crt ca.key tls.crt tls.key client.crt client.key migration-ca.crt migration-ca.key migration-client.crt migration-client.key; do
   if [ ! -f "$tls/$file" ]; then tls_valid=false; fi
 done
 if [ "$tls_valid" = true ]; then
   openssl verify -purpose sslserver -verify_hostname quackgis.quackgis.svc.cluster.local \
     -CAfile "$tls/ca.crt" "$tls/tls.crt" >/dev/null 2>&1 || tls_valid=false
   openssl verify -purpose sslclient -CAfile "$tls/ca.crt" "$tls/client.crt" >/dev/null 2>&1 || tls_valid=false
+  openssl verify -purpose sslserver -verify_hostname quackgis-migration.quackgis.svc.cluster.local \
+    -CAfile "$tls/ca.crt" "$tls/tls.crt" >/dev/null 2>&1 || tls_valid=false
+  openssl verify -purpose sslclient -CAfile "$tls/migration-ca.crt" "$tls/migration-client.crt" >/dev/null 2>&1 || tls_valid=false
   openssl x509 -checkend 86400 -noout -in "$tls/ca.crt" >/dev/null 2>&1 || tls_valid=false
   openssl x509 -checkend 86400 -noout -in "$tls/tls.crt" >/dev/null 2>&1 || tls_valid=false
   openssl x509 -checkend 86400 -noout -in "$tls/client.crt" >/dev/null 2>&1 || tls_valid=false
+  openssl x509 -checkend 86400 -noout -in "$tls/migration-ca.crt" >/dev/null 2>&1 || tls_valid=false
+  openssl x509 -checkend 86400 -noout -in "$tls/migration-client.crt" >/dev/null 2>&1 || tls_valid=false
   server_cert=$(openssl x509 -in "$tls/tls.crt" -pubkey -noout | sha256sum | cut -d' ' -f1)
   server_key=$(openssl pkey -in "$tls/tls.key" -pubout | sha256sum | cut -d' ' -f1)
   client_cert=$(openssl x509 -in "$tls/client.crt" -pubkey -noout | sha256sum | cut -d' ' -f1)
   client_key=$(openssl pkey -in "$tls/client.key" -pubout | sha256sum | cut -d' ' -f1)
-  if [ "$server_cert" != "$server_key" ] || [ "$client_cert" != "$client_key" ]; then tls_valid=false; fi
+  migration_client_cert=$(openssl x509 -in "$tls/migration-client.crt" -pubkey -noout | sha256sum | cut -d' ' -f1)
+  migration_client_key=$(openssl pkey -in "$tls/migration-client.key" -pubout | sha256sum | cut -d' ' -f1)
+  if [ "$server_cert" != "$server_key" ] || [ "$client_cert" != "$client_key" ] || [ "$migration_client_cert" != "$migration_client_key" ]; then tls_valid=false; fi
 fi
 if [ "$tls_valid" = false ]; then
   rm -rf "$tls"
@@ -61,7 +68,7 @@ if [ ! -x "$keygen" ]; then
   exit 2
 fi
 mkdir -p "$edge" "$rest"
-for name in bootstrap worker credential client-transport rest-credential; do
+for name in bootstrap worker credential client-transport rest-credential migration-credential migration-transport; do
   if [ ! -f "$edge/$name.key" ]; then
     "$keygen" --out "$edge/$name.key" >/dev/null
   fi
@@ -83,6 +90,7 @@ bootstrap_public_key=$("$keygen" --public-from "$edge/bootstrap.key")
 worker_public_key=$("$keygen" --public-from "$edge/worker.key")
 credential_public_key=$("$keygen" --public-from "$edge/credential.key")
 rest_credential_public_key=$("$keygen" --public-from "$edge/rest-credential.key")
+migration_credential_public_key=$("$keygen" --public-from "$edge/migration-credential.key")
 
 cluster_exists=false
 if kind get clusters | grep -qx quackgis; then
@@ -155,6 +163,7 @@ python3 "$root/deploy/kind/render.py" \
   --worker-public-key "$worker_public_key" \
   --credential-public-key "$credential_public_key" \
   --rest-credential-public-key "$rest_credential_public_key" \
+  --migration-credential-public-key "$migration_credential_public_key" \
   --jwt-secret-file "$rest/jwt-secret" \
   --out-dir "$rendered"
 

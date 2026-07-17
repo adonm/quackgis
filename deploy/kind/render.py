@@ -26,6 +26,10 @@ EXPECTED_PLACEHOLDERS = {
         "@@WORKER_SECRET_KEY@@",
         "@@CREDENTIAL_SECRET_KEY@@",
         "@@CLIENT_TRANSPORT_SECRET_KEY@@",
+        "@@MIGRATION_CREDENTIAL_SECRET_KEY@@",
+        "@@MIGRATION_TRANSPORT_SECRET_KEY@@",
+        "@@MIGRATION_CREDENTIAL_PUBLIC_KEY@@",
+        "@@MIGRATION_TLS_CA_CERTIFICATE@@",
         "@@BOOTSTRAP_PUBLIC_KEY@@",
         "@@WORKER_PUBLIC_KEY@@",
         "@@CREDENTIAL_PUBLIC_KEY@@",
@@ -82,6 +86,8 @@ def check_templates() -> None:
         "quackgis-bootstrap",
         "quackgis-worker-edge",
         "quackgis-client",
+        "quackgis-migration-client",
+        "name: quackgis-migration",
         "name: quackgis-edge-internal",
         "name: quackgis-edge-access",
         "publishNotReadyAddresses: true",
@@ -92,6 +98,7 @@ def check_templates() -> None:
         "path: /readyz",
         "path: /healthz",
         '"login_role": "authenticator"',
+        '"login_role": "migration_operator"',
         "value: edge-preauthenticated",
         "name: quackgis-roles",
     ]:
@@ -194,7 +201,12 @@ def render(args: argparse.Namespace) -> None:
         "@@WORKER_SECRET_KEY@@": encoded(edge_dir / "worker.key"),
         "@@CREDENTIAL_SECRET_KEY@@": encoded(edge_dir / "credential.key"),
         "@@CLIENT_TRANSPORT_SECRET_KEY@@": encoded(edge_dir / "client-transport.key"),
+        "@@MIGRATION_CREDENTIAL_SECRET_KEY@@": encoded(
+            edge_dir / "migration-credential.key"
+        ),
+        "@@MIGRATION_TRANSPORT_SECRET_KEY@@": encoded(edge_dir / "migration-transport.key"),
         "@@REST_CREDENTIAL_SECRET_KEY@@": encoded(edge_dir / "rest-credential.key"),
+        "@@MIGRATION_TLS_CA_CERTIFICATE@@": encoded(tls_dir / "migration-ca.crt"),
         "@@JWT_SECRET@@": encoded(args.jwt_secret_file.resolve()),
         "@@BOOTSTRAP_PUBLIC_KEY@@": public_key(
             args.bootstrap_public_key, "--bootstrap-public-key"
@@ -205,6 +217,9 @@ def render(args: argparse.Namespace) -> None:
         ),
         "@@REST_CREDENTIAL_PUBLIC_KEY@@": public_key(
             args.rest_credential_public_key, "--rest-credential-public-key"
+        ),
+        "@@MIGRATION_CREDENTIAL_PUBLIC_KEY@@": public_key(
+            args.migration_credential_public_key, "--migration-credential-public-key"
         ),
     }
     args.out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -250,6 +265,7 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--worker-public-key")
     value.add_argument("--credential-public-key")
     value.add_argument("--rest-credential-public-key")
+    value.add_argument("--migration-credential-public-key")
     value.add_argument("--jwt-secret-file", type=Path)
     value.add_argument("--out-dir", type=Path)
     return value
@@ -271,6 +287,7 @@ def main() -> None:
             "bootstrap_public_key",
             "worker_public_key",
             "credential_public_key",
+            "migration_credential_public_key",
             "out_dir",
         ]
         if getattr(args, option) is None

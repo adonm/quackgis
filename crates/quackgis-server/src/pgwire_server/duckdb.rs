@@ -2124,6 +2124,16 @@ fn validate_statement_with_catalog_identity(
         Statement::Insert(_) => StatementKind::Write("INSERT"),
         Statement::Update { .. } => StatementKind::Write("UPDATE"),
         Statement::Delete(_) => StatementKind::Write("DELETE"),
+        Statement::Drop {
+            object_type: sqlparser::ast::ObjectType::Table,
+            names,
+            cascade: false,
+            restrict: false,
+            purge: false,
+            temporary: false,
+            table: None,
+            ..
+        } if names.len() == 1 => StatementKind::Write("DROP TABLE"),
         Statement::StartTransaction { .. } if transaction_read_only.is_some() => {
             StatementKind::Begin {
                 read_only: transaction_read_only.expect("validated transaction access mode"),

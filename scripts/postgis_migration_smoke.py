@@ -485,6 +485,40 @@ INSERT INTO public.bad_dates VALUES (1, 'infinity');
         ):
             raise RuntimeError("primary-key rejection is absent from the report")
 
+        cleanup_report = work / "cleanup-report.json"
+        cleaned = run(
+            [
+                str(migrate_bin),
+                "cleanup",
+                "--config",
+                str(config),
+                "--out",
+                str(cleanup_report),
+                "--confirm-drop-configured-targets",
+                "--allow-plaintext-target-loopback",
+            ],
+            env=migration_environment(source_port, target_port, password_file, "g0-cleanup"),
+            check=False,
+        )
+        cleanup = json.loads(cleanup_report.read_text(encoding="utf-8"))
+        if cleaned.returncode != 0 or cleanup["dropped_configured_targets"] != [
+            "main.migrated_places",
+            "main.migrated_readings",
+        ]:
+            raise RuntimeError(f"configured-target cleanup failed: {cleaned.stderr}")
+        cleanup_residue = target_psql(
+            engine,
+            args.postgis_image,
+            target_port,
+            "SELECT count(*)::BIGINT FROM information_schema.tables "
+            "WHERE table_schema = 'public' "
+            "AND table_name IN ('migrated_places','migrated_readings');",
+        )
+        if cleanup_residue != "0":
+            raise RuntimeError(
+                f"configured-target cleanup left table residue: {cleanup_residue}"
+            )
+
         summary = {
             "postgres_version_num": postgres_version,
             "postgis_version": postgis_version,
@@ -494,6 +528,7 @@ INSERT INTO public.bad_dates VALUES (1, 'infinity');
             "wire_bytes": sum(table["wire_bytes"] for table in report["tables"]),
             "failure_state": failure["state"],
             "rejection_state": rejection["state"],
+            "cleanup_targets": len(cleanup["dropped_configured_targets"]),
         }
         print(json.dumps(summary, sort_keys=True))
         return 0

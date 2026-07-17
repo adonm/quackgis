@@ -67,6 +67,53 @@ pub struct ColumnVerification {
     pub checksum: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CleanupReport {
+    pub format_version: u32,
+    pub target: TargetIdentity,
+    pub dropped_configured_targets: Vec<String>,
+    pub duration_ms: u64,
+}
+
+pub async fn cleanup_configured_targets(
+    config: &MigrationConfig,
+    target_options: &ConnectionOptions,
+) -> Result<CleanupReport> {
+    let started = Instant::now();
+    let mut target_client = connect(target_options)
+        .await
+        .context("connect migration target for explicit cleanup")?;
+    let target_identity = inspect_target_identity(&target_client).await?;
+    let target = target_client
+        .transaction()
+        .await
+        .context("begin configured-target cleanup transaction")?;
+    let mut dropped = Vec::with_capacity(config.tables.len());
+    for table in &config.tables {
+        let identity = format!("{}.{}", table.target_schema, table.target_table);
+        target
+            .batch_execute(&format!(
+                "DROP TABLE IF EXISTS {}.{}.{}",
+                quote_identifier("quackgis"),
+                quote_identifier(&table.target_schema),
+                quote_identifier(&table.target_table)
+            ))
+            .await
+            .with_context(|| format!("drop configured migration target {identity}"))?;
+        dropped.push(identity);
+    }
+    target
+        .commit()
+        .await
+        .context("commit configured-target cleanup")?;
+    Ok(CleanupReport {
+        format_version: 1,
+        target: target_identity,
+        dropped_configured_targets: dropped,
+        duration_ms: millis(started.elapsed()),
+    })
+}
+
 pub async fn run_migration(
     config: &MigrationConfig,
     source_options: &ConnectionOptions,

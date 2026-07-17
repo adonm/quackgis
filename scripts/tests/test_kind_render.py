@@ -65,7 +65,16 @@ def main() -> None:
         root = Path(temporary)
         tls = root / "tls"
         tls.mkdir()
-        for name in ["tls.crt", "tls.key", "ca.crt", "client.crt", "client.key"]:
+        for name in [
+            "tls.crt",
+            "tls.key",
+            "ca.crt",
+            "client.crt",
+            "client.key",
+            "migration-ca.crt",
+            "migration-client.crt",
+            "migration-client.key",
+        ]:
             (tls / name).write_text(name, encoding="utf-8")
         edge = root / "edge"
         edge.mkdir()
@@ -75,6 +84,8 @@ def main() -> None:
             "credential",
             "client-transport",
             "rest-credential",
+            "migration-credential",
+            "migration-transport",
         ]:
             (edge / f"{name}.key").write_text(f"{name}-secret", encoding="utf-8")
         jwt_secret = root / "jwt-secret"
@@ -90,6 +101,7 @@ def main() -> None:
                 worker_public_key="worker-public",
                 credential_public_key="credential-public",
                 rest_credential_public_key="rest-credential-public",
+                migration_credential_public_key="migration-credential-public",
                 jwt_secret_file=jwt_secret,
                 out_dir=output,
             )
@@ -110,6 +122,11 @@ def main() -> None:
         assert 'args: ["--host", "127.0.0.1", "--port", "5434"]' in rendered
         assert '"login_role": "postgres"' in rendered
         assert '"login_role": "authenticator"' in rendered
+        assert '"login_role": "migration_operator"' in rendered
+        assert "migration-credential-public" in rendered
+        assert "name: quackgis-migration" in rendered
+        assert '"listen": "0.0.0.0:5433"' in rendered
+        assert "migration-ca.crt" not in rendered
         assert "value: edge-preauthenticated" in rendered
         assert "kind_psycopg_points" in rendered
         assert "kind_rest_points" in rendered
@@ -158,6 +175,7 @@ def main() -> None:
                 worker_public_key="worker-public",
                 credential_public_key="credential-public",
                 rest_credential_public_key="rest-credential-public",
+                migration_credential_public_key="migration-credential-public",
                 jwt_secret_file=jwt_secret,
                 out_dir=output,
             )
