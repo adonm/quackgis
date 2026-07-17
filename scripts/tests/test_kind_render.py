@@ -120,6 +120,7 @@ def main() -> None:
         assert "PGSSLCERT" in clients
         assert "psycopg_copied_data_ok" in clients
         assert "ogr_copied_data_ok" in clients
+        assert "ogr_direct_discovery_ok" in clients
         assert 'ST_GeomFromWKB(geom_wkb) AS "ST_AsEWKB"' in clients
         assert "kind_psycopg_points" in clients
         assert "quackgis-direct-denied" in clients

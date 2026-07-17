@@ -1751,6 +1751,11 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
         .await
         .expect("public schema mapping");
     assert_eq!(public_count.get::<_, i64>(0), 3);
+    let unqualified_count = client
+        .query_one("SELECT count(*)::BIGINT FROM wire_points", &[])
+        .await
+        .expect("public search-path mapping");
+    assert_eq!(unqualified_count.get::<_, i64>(0), 3);
     client
         .batch_execute("CREATE TABLE quackgis.main.quoted_copy(id INTEGER, name VARCHAR)")
         .await

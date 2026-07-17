@@ -177,6 +177,20 @@ items:
                   ], features
                   print("ogr_copied_data_ok rows=2 geometry=point-null cursor=bounded")
                   PY
+                  ogr2ogr -f GeoJSON "$output_dir/direct.geojson" \
+                    "PG:host=quackgis.quackgis.svc.cluster.local port=5432 dbname=quackgis user=postgres sslmode=verify-full sslrootcert=/etc/quackgis/tls/ca.crt sslcert=/etc/quackgis/tls/tls.crt sslkey=/etc/quackgis/tls/tls.key" \
+                    public.kind_psycopg_points
+                  python3 - "$output_dir/direct.geojson" <<'PY'
+                  import json
+                  import sys
+                  with open(sys.argv[1], encoding="utf-8") as source:
+                      features = json.load(source)["features"]
+                  assert features == [
+                      {"type": "Feature", "properties": {"id": 1, "name": "one"}, "geometry": {"type": "Point", "coordinates": [1.0, 2.0]}},
+                      {"type": "Feature", "properties": {"id": 2, "name": None}, "geometry": None},
+                  ], features
+                  print("ogr_direct_discovery_ok rows=2 geometry=point-null no_fid=true")
+                  PY
               env: *pg_environment
               securityContext: *client_security
               volumeMounts: *tls_mount

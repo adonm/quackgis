@@ -2678,6 +2678,22 @@ fn supported_show_variable(variable: &[Ident]) -> Option<SessionVariable> {
 }
 
 fn rewrite_public_relations(statement: &mut Statement) {
+    let cte_names = match statement {
+        Statement::Query(query) => query
+            .with
+            .as_ref()
+            .map(|with| {
+                with.cte_tables
+                    .iter()
+                    .map(|cte| identifier_key(&cte.alias.name))
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default(),
+        _ => HashSet::new(),
+    };
+    let _ = statement.visit(&mut UnqualifiedUserRelationRewriter {
+        cte_names: &cte_names,
+    });
     let _: ControlFlow<()> = visit_relations_mut(statement, |name| {
         let table = match name.0.as_slice() {
             [
@@ -2704,6 +2720,41 @@ fn rewrite_public_relations(statement: &mut Statement) {
         }
         ControlFlow::Continue(())
     });
+}
+
+struct UnqualifiedUserRelationRewriter<'a> {
+    cte_names: &'a HashSet<String>,
+}
+
+impl VisitorMut for UnqualifiedUserRelationRewriter<'_> {
+    type Break = ();
+
+    fn pre_visit_table_factor(
+        &mut self,
+        table_factor: &mut TableFactor,
+    ) -> ControlFlow<Self::Break> {
+        let TableFactor::Table {
+            name, args: None, ..
+        } = table_factor
+        else {
+            return ControlFlow::Continue(());
+        };
+        let [ObjectNamePart::Identifier(table)] = name.0.as_slice() else {
+            return ControlFlow::Continue(());
+        };
+        if self.cte_names.contains(&identifier_key(table))
+            || maintained_catalog_relation(name).is_some()
+        {
+            return ControlFlow::Continue(());
+        }
+        let table = table.clone();
+        *name = ObjectName(vec![
+            ObjectNamePart::Identifier(Ident::new("quackgis")),
+            ObjectNamePart::Identifier(Ident::new("main")),
+            ObjectNamePart::Identifier(table),
+        ]);
+        ControlFlow::Continue(())
+    }
 }
 
 fn rewrite_session_identity(statement: &mut Statement, identity: &SessionIdentity) {
@@ -8204,6 +8255,23 @@ mod tests {
         )
         .expect("public relation");
         assert!(query.sql.contains("quackgis.main.\"points\""));
+
+        let unqualified =
+            validate_statement("SELECT count(*) FROM \"points\"", ProtocolMode::Simple)
+                .expect("unqualified public-search-path relation");
+        assert!(unqualified.sql.contains("quackgis.main.\"points\""));
+
+        let cte = validate_statement(
+            "WITH points AS (SELECT 1 AS id) SELECT id FROM points",
+            ProtocolMode::Simple,
+        )
+        .expect("unqualified CTE relation");
+        assert!(!cte.sql.contains("quackgis.main.points"));
+
+        let table_function =
+            validate_statement("SELECT i FROM range(10) AS rows(i)", ProtocolMode::Simple)
+                .expect("unqualified DuckDB table function");
+        assert!(!table_function.sql.contains("quackgis.main.range"));
 
         for sql in [
             "COPY points (id, name) FROM STDIN",

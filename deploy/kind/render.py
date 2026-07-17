@@ -96,6 +96,7 @@ def check_templates() -> None:
         "COPY {table} (id, name, geom_wkb) FROM STDIN",
         "quackgis-ogr",
         "ogr_copied_data_ok",
+        "ogr_direct_discovery_ok",
         'ST_GeomFromWKB(geom_wkb) AS "ST_AsEWKB"',
         "quackgis-direct-denied",
         "quackgis-plaintext-denied",
