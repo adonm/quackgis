@@ -15,8 +15,16 @@ const MAX_IDENTIFIER_BYTES: usize = 63;
 #[serde(deny_unknown_fields)]
 pub struct MigrationConfig {
     pub format_version: u32,
+    pub source: SourceRequirements,
     pub source_schemas: Vec<String>,
     pub tables: Vec<TableMapping>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceRequirements {
+    pub postgres_version_num: u32,
+    pub postgis_version: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -53,6 +61,19 @@ impl MigrationConfig {
     pub fn validate(&self) -> Result<()> {
         if self.format_version != 1 {
             bail!("unsupported migration config format_version");
+        }
+        if self.source.postgres_version_num < 100_000 {
+            bail!("source postgres_version_num must be an exact six-digit server version number");
+        }
+        if self.source.postgis_version.is_empty()
+            || self.source.postgis_version.len() > 64
+            || !self
+                .source
+                .postgis_version
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte == b'.')
+        {
+            bail!("source postgis_version must be an exact dotted numeric version");
         }
         if self.source_schemas.is_empty() || self.source_schemas.len() > MAX_SCHEMAS {
             bail!("source_schemas must contain between 1 and {MAX_SCHEMAS} entries");
@@ -138,6 +159,10 @@ mod tests {
     fn config() -> MigrationConfig {
         MigrationConfig {
             format_version: 1,
+            source: SourceRequirements {
+                postgres_version_num: 180_004,
+                postgis_version: "3.6.1".to_owned(),
+            },
             source_schemas: vec!["public".to_owned()],
             tables: vec![TableMapping {
                 source_schema: "public".to_owned(),

@@ -19,6 +19,7 @@ pub struct SourceInventory {
     pub tables: Vec<SourceTable>,
     pub objects: Vec<SourceObject>,
     pub roles: Vec<SourceRole>,
+    pub grants: Vec<SourceGrant>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -83,6 +84,7 @@ pub struct SourceObject {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceObjectKind {
+    Extension,
     View,
     MaterializedView,
     Sequence,
@@ -97,4 +99,11 @@ pub enum SourceObjectKind {
 pub struct SourceRole {
     pub name: String,
     pub login: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SourceGrant {
+    pub grantee: String,
+    pub object_identity: String,
+    pub privilege: String,
 }

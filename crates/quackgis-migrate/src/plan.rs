@@ -39,6 +39,7 @@ pub struct PreflightReport {
     pub tables: Vec<TablePlan>,
     pub objects: Vec<ObjectPlan>,
     pub roles: Vec<ObjectPlan>,
+    pub grants: Vec<ObjectPlan>,
     pub errors: Vec<String>,
 }
 
@@ -125,6 +126,7 @@ pub fn build_preflight(config: &MigrationConfig, inventory: SourceInventory) -> 
             identity: format!("{}.{}", object.schema, object.name),
             kind: format!("{:?}", object.kind).to_lowercase(),
             disposition: reject(match object.kind {
+                SourceObjectKind::Extension => "extensions are not copied implicitly",
                 SourceObjectKind::View => "views are not copied implicitly",
                 SourceObjectKind::MaterializedView => {
                     "materialized views are not copied implicitly"
@@ -136,6 +138,15 @@ pub fn build_preflight(config: &MigrationConfig, inventory: SourceInventory) -> 
                 SourceObjectKind::Trigger => "triggers are not copied implicitly",
                 SourceObjectKind::Other => "source object kind is unsupported",
             }),
+        })
+        .collect();
+    let grants = inventory
+        .grants
+        .iter()
+        .map(|grant| ObjectPlan {
+            identity: format!("{}:{}", grant.object_identity, grant.grantee),
+            kind: grant.privilege.to_ascii_lowercase(),
+            disposition: reject("source grants require an explicit target role/grant mapping"),
         })
         .collect();
     let roles = inventory
@@ -164,6 +175,7 @@ pub fn build_preflight(config: &MigrationConfig, inventory: SourceInventory) -> 
         tables,
         objects,
         roles,
+        grants,
         errors,
     }
 }
@@ -377,9 +389,8 @@ fn varchar_target_type(type_modifier: i32) -> String {
 }
 
 fn timestamp_target_type(type_modifier: i32) -> String {
-    let precision = type_modifier.saturating_sub(4);
-    if (0..=6).contains(&precision) {
-        format!("TIMESTAMP({precision})")
+    if (0..=6).contains(&type_modifier) {
+        format!("TIMESTAMP({type_modifier})")
     } else {
         "TIMESTAMP".to_owned()
     }
@@ -539,6 +550,10 @@ mod tests {
     fn config() -> MigrationConfig {
         MigrationConfig {
             format_version: 1,
+            source: crate::config::SourceRequirements {
+                postgres_version_num: 180_004,
+                postgis_version: "3.6.1".to_owned(),
+            },
             source_schemas: vec!["public".to_owned()],
             tables: vec![TableMapping {
                 source_schema: "public".to_owned(),
@@ -566,6 +581,7 @@ mod tests {
                     name: "source_reader".to_owned(),
                     login: true,
                 }],
+                grants: vec![],
             },
         );
         assert_eq!(report.status, PreflightStatus::Ready);
@@ -608,6 +624,7 @@ mod tests {
                 tables: vec![source],
                 objects: vec![],
                 roles: vec![],
+                grants: vec![],
             },
         );
         assert_eq!(report.status, PreflightStatus::Rejected);
@@ -654,6 +671,13 @@ mod tests {
     }
 
     #[test]
+    fn preserves_postgresql_timestamp_precision_typmods() {
+        assert_eq!(timestamp_target_type(-1), "TIMESTAMP");
+        assert_eq!(timestamp_target_type(0), "TIMESTAMP(0)");
+        assert_eq!(timestamp_target_type(6), "TIMESTAMP(6)");
+    }
+
+    #[test]
     fn missing_and_unselected_tables_are_explicit() {
         let mut config = config();
         config.tables.push(TableMapping {
@@ -672,6 +696,7 @@ mod tests {
                 tables: vec![table(), unselected],
                 objects: vec![],
                 roles: vec![],
+                grants: vec![],
             },
         );
         assert_eq!(report.status, PreflightStatus::Rejected);

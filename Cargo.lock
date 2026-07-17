@@ -3699,9 +3699,14 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
+ "rustls",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "sqlparser",
+ "tokio",
+ "tokio-postgres",
+ "tokio-postgres-rustls",
 ]
 
 [[package]]
