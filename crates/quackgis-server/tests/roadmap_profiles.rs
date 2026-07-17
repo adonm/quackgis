@@ -900,6 +900,257 @@ async fn termination_atomicity_profile() {
 
 #[tokio::test]
 #[ignore = "requires the pinned DuckDB ADBC runtime"]
+async fn offline_recovery_profile() {
+    let profile = RecoveryProfile::from_environment();
+    let output_path = std::env::var_os("QUACKGIS_PROFILE_OUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| ".tmp/duckdb-recovery/manifest.json".into());
+    let driver =
+        PathBuf::from(std::env::var_os("QUACKGIS_DUCKDB_ADBC_DRIVER").expect("set ADBC driver"));
+    let temp = tempfile::tempdir().expect("recovery profile tempdir");
+    let catalog = temp.path().join("catalog.ducklake");
+    let data = temp.path().join("data");
+    let backup = temp.path().join("checkpoint-backup");
+
+    let first_port = unused_local_port().await;
+    let mut first_server = spawn_profile_server(&driver, &catalog, &data, first_port);
+    let (client, connection) = connect_profile_server(first_port, &mut first_server).await;
+    client
+        .batch_execute(
+            "CREATE TABLE quackgis.main.recovery_profile(\
+             id BIGINT, phase VARCHAR, geom_wkb BLOB)",
+        )
+        .await
+        .expect("create recovery profile table");
+    client
+        .batch_execute(&format!(
+            "INSERT INTO quackgis.main.recovery_profile \
+             SELECT i, 'checkpoint-' || i::VARCHAR, from_hex('{COPY_WKB_HEX}') \
+             FROM range(1, 101) AS checkpoint_rows(i)"
+        ))
+        .await
+        .expect("seed recovery checkpoint");
+    let checkpoint = client
+        .query_one(
+            "SELECT count(*)::BIGINT, sum(id)::BIGINT, \
+             sum(octet_length(geom_wkb))::BIGINT \
+             FROM quackgis.main.recovery_profile",
+            &[],
+        )
+        .await
+        .expect("query recovery checkpoint");
+    assert_eq!(
+        (
+            checkpoint.get::<_, i64>(0),
+            checkpoint.get::<_, i64>(1),
+            checkpoint.get::<_, i64>(2),
+        ),
+        (100, 5_050, 2_100)
+    );
+    drop(client);
+    connection.abort();
+    stop_profile_server(&mut first_server).await;
+
+    let backup_started = Instant::now();
+    let backup_output = std::process::Command::new("python3")
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../scripts/duckdb_local_backup.py"),
+        )
+        .arg("backup")
+        .arg("--catalog")
+        .arg(&catalog)
+        .arg("--data-root")
+        .arg(&data)
+        .arg("--destination")
+        .arg(&backup)
+        .output()
+        .expect("run recovery backup");
+    let backup_ms = backup_started.elapsed().as_secs_f64() * 1000.0;
+    assert!(
+        backup_output.status.success(),
+        "recovery backup failed: {}",
+        String::from_utf8_lossy(&backup_output.stderr)
+    );
+    let backup_manifest_bytes =
+        std::fs::read(backup.join("manifest.json")).expect("read recovery backup manifest");
+    let backup_manifest: serde_json::Value =
+        serde_json::from_slice(&backup_manifest_bytes).expect("parse recovery backup manifest");
+    let backup_files = backup_manifest["files"]
+        .as_array()
+        .expect("recovery backup files");
+    let backup_file_count = backup_files.len() as u64;
+    let backup_bytes = backup_files
+        .iter()
+        .map(|entry| entry["size"].as_u64().expect("recovery backup file size"))
+        .sum::<u64>();
+    let backup_manifest_sha256 = format!("{:x}", Sha256::digest(&backup_manifest_bytes));
+
+    let mutation_port = unused_local_port().await;
+    let mut mutation_server = spawn_profile_server(&driver, &catalog, &data, mutation_port);
+    let (mutation_client, mutation_connection) =
+        connect_profile_server(mutation_port, &mut mutation_server).await;
+    mutation_client
+        .batch_execute(&format!(
+            "INSERT INTO quackgis.main.recovery_profile \
+             SELECT i, 'after-checkpoint-' || i::VARCHAR, from_hex('{COPY_WKB_HEX}') \
+             FROM range(101, 126) AS later_rows(i)"
+        ))
+        .await
+        .expect("write after recovery checkpoint");
+    assert_eq!(
+        mutation_client
+            .query_one(
+                "SELECT count(*)::BIGINT FROM quackgis.main.recovery_profile",
+                &[],
+            )
+            .await
+            .expect("count post-checkpoint source rows")
+            .get::<_, i64>(0),
+        125
+    );
+    drop(mutation_client);
+    mutation_connection.abort();
+    stop_profile_server(&mut mutation_server).await;
+
+    std::fs::remove_file(&catalog).expect("remove failed catalog before restore");
+    std::fs::remove_dir_all(&data).expect("remove failed data root before restore");
+    let restore_started = Instant::now();
+    let restore_output = std::process::Command::new("python3")
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../scripts/duckdb_local_backup.py"),
+        )
+        .arg("restore")
+        .arg("--backup")
+        .arg(&backup)
+        .arg("--catalog")
+        .arg(&catalog)
+        .arg("--data-root")
+        .arg(&data)
+        .output()
+        .expect("run recovery restore");
+    let restore_ms = restore_started.elapsed().as_secs_f64() * 1000.0;
+    assert!(
+        restore_output.status.success(),
+        "recovery restore failed: {}",
+        String::from_utf8_lossy(&restore_output.stderr)
+    );
+
+    let restart_started = Instant::now();
+    let recovery_port = unused_local_port().await;
+    let mut recovery_server = spawn_profile_server(&driver, &catalog, &data, recovery_port);
+    let (recovered, recovered_connection) =
+        connect_profile_server(recovery_port, &mut recovery_server).await;
+    let restore_to_queryable_ms = restart_started.elapsed().as_secs_f64() * 1000.0;
+    assert!(
+        restore_to_queryable_ms <= profile.restart_budget_ms,
+        "restored restart {restore_to_queryable_ms:.3} ms exceeded {:.3} ms",
+        profile.restart_budget_ms
+    );
+    let restored = recovered
+        .query_one(
+            "SELECT count(*)::BIGINT, sum(id)::BIGINT, \
+             sum(octet_length(geom_wkb))::BIGINT, \
+             count(*) FILTER (WHERE id > 100)::BIGINT \
+             FROM quackgis.main.recovery_profile",
+            &[],
+        )
+        .await
+        .expect("query restored checkpoint");
+    let restored_count = restored.get::<_, i64>(0);
+    let restored_sum = restored.get::<_, i64>(1);
+    let restored_wkb_bytes = restored.get::<_, i64>(2);
+    let post_checkpoint_rows = restored.get::<_, i64>(3);
+    assert_eq!(
+        (
+            restored_count,
+            restored_sum,
+            restored_wkb_bytes,
+            post_checkpoint_rows,
+        ),
+        (100, 5_050, 2_100, 0)
+    );
+    recovered
+        .batch_execute(&format!(
+            "INSERT INTO quackgis.main.recovery_profile \
+             VALUES (1000, 'after-recovery', from_hex('{COPY_WKB_HEX}'))"
+        ))
+        .await
+        .expect("write after recovery");
+    let final_state = recovered
+        .query_one(
+            "SELECT count(*)::BIGINT, sum(id)::BIGINT \
+             FROM quackgis.main.recovery_profile",
+            &[],
+        )
+        .await
+        .expect("query post-recovery state");
+    let final_count = final_state.get::<_, i64>(0);
+    let final_sum = final_state.get::<_, i64>(1);
+    assert_eq!((final_count, final_sum), (101, 6_050));
+    drop(recovered);
+    recovered_connection.abort();
+    stop_profile_server(&mut recovery_server).await;
+
+    let evidence = EvidenceEnvelope::collect(
+        EvidenceProfile::new(
+            format!("duckdb-offline-recovery-{}-v1", profile.level.as_str()),
+            profile.level,
+            profile.environment,
+            "actual server processes checkpoint exact scalar/WKB state, stop for a checksum-verified backup, mutate the original, delete both durable paths, restore to the exact paths, and prove checkpoint recovery plus a new write",
+        ),
+        json!({
+            "checkpoint_rows": 100,
+            "checkpoint_id_sum": 5_050,
+            "checkpoint_wkb_bytes": 2_100,
+            "post_checkpoint_rows_written_to_original": 25,
+            "backup_files": backup_file_count,
+            "backup_bytes": backup_bytes,
+            "backup_manifest_sha256": backup_manifest_sha256,
+        }),
+        json!({
+            "catalog_and_data_deleted_before_restore": true,
+            "restored_count": restored_count,
+            "restored_sum": restored_sum,
+            "restored_wkb_bytes": restored_wkb_bytes,
+            "post_checkpoint_rows_visible": post_checkpoint_rows,
+            "post_recovery_write_succeeded": true,
+            "final_count": final_count,
+            "final_sum": final_sum,
+        }),
+        json!({
+            "backup_ms": backup_ms,
+            "restore_ms": restore_ms,
+            "restore_to_queryable_ms": restore_to_queryable_ms,
+        }),
+        json!({
+            "restore_to_queryable_max_ms": profile.restart_budget_ms,
+            "restored_count": 100,
+            "restored_sum": 5_050,
+            "restored_wkb_bytes": 2_100,
+            "post_checkpoint_rows_visible_max": 0,
+            "checksum_verification_required": true,
+            "exact_original_paths_required": true,
+        }),
+    )
+    .expect("collect recovery evidence");
+    evidence
+        .write(&output_path)
+        .expect("write recovery evidence");
+    println!(
+        "duckdb_offline_recovery_profile_ok files={} bytes={} backup_ms={:.3} restore_ms={:.3} restart_ms={:.3} out={}",
+        backup_file_count,
+        backup_bytes,
+        backup_ms,
+        restore_ms,
+        restore_to_queryable_ms,
+        output_path.display()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires the pinned DuckDB ADBC runtime"]
 async fn tls_required_rotation_profile() {
     let profile = TlsRotationProfile::from_environment();
     let output_path = std::env::var_os("QUACKGIS_PROFILE_OUT")
@@ -2045,6 +2296,12 @@ struct TerminationProfile {
     restart_budget_ms: f64,
 }
 
+struct RecoveryProfile {
+    level: EvidenceLevel,
+    environment: ExecutionEnvironment,
+    restart_budget_ms: f64,
+}
+
 struct TlsRotationProfile {
     level: EvidenceLevel,
     environment: ExecutionEnvironment,
@@ -2156,6 +2413,30 @@ impl TlsRotationProfile {
 }
 
 impl TerminationProfile {
+    fn from_environment() -> Self {
+        let level = EvidenceLevel::parse(
+            &std::env::var("QUACKGIS_EVIDENCE_LEVEL").unwrap_or_else(|_| "smoke".to_owned()),
+        )
+        .expect("valid evidence level");
+        assert_ne!(
+            level,
+            EvidenceLevel::External,
+            "external evidence is not local"
+        );
+        let environment = ExecutionEnvironment::parse(
+            &std::env::var("QUACKGIS_EXECUTION_ENVIRONMENT")
+                .unwrap_or_else(|_| "host_process".to_owned()),
+        )
+        .expect("valid execution environment");
+        Self {
+            level,
+            environment,
+            restart_budget_ms: 60_000.0,
+        }
+    }
+}
+
+impl RecoveryProfile {
     fn from_environment() -> Self {
         let level = EvidenceLevel::parse(
             &std::env::var("QUACKGIS_EVIDENCE_LEVEL").unwrap_or_else(|_| "smoke".to_owned()),
@@ -3305,6 +3586,14 @@ async fn wait_for_child(child: &mut ChildGuard, timeout: Duration) -> std::proce
     })
     .await
     .expect("profile server exit timeout")
+}
+
+async fn stop_profile_server(child: &mut ChildGuard) -> std::process::ExitStatus {
+    let signal_result = unsafe { libc::kill(child.0.id() as i32, libc::SIGTERM) };
+    assert_eq!(signal_result, 0, "stop profile server");
+    let status = wait_for_child(child, Duration::from_secs(10)).await;
+    assert!(status.success(), "profile server exit: {status}");
+    status
 }
 
 #[test]
