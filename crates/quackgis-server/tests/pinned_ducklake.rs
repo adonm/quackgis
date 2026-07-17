@@ -394,7 +394,14 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
         (
             "pg_catalog.pg_class",
             "SELECT oid, relname, relnamespace, reltype, relowner, relkind, relnatts, \
-                    relrowsecurity FROM pg_class WHERE relname = 'catalog_projection'",
+                    relchecks, relhasindex, relhasrules, relhastriggers, relrowsecurity, \
+                    relforcerowsecurity, reltoastrelid, relispartition, reloptions, \
+                    reltablespace, reloftype, relpersistence, relreplident, relam \
+             FROM pg_class WHERE relname = 'catalog_projection'",
+        ),
+        (
+            "pg_catalog.pg_am",
+            "SELECT oid, amname FROM pg_am WHERE amname = 'ducklake'",
         ),
         (
             "pg_catalog.pg_attribute",
@@ -669,6 +676,65 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
     assert_eq!(psql_relation.get::<_, u32>(0), relation_oid);
     assert_eq!(psql_relation.get::<_, String>(1), "public");
     assert_eq!(psql_relation.get::<_, String>(2), "catalog_projection");
+
+    let psql_properties_sql = format!(
+        "SELECT c.relchecks, c.relkind, c.relhasindex, c.relhasrules, \
+         c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, \
+         false AS relhasoids, c.relispartition, \
+         pg_catalog.array_to_string(c.reloptions || array(SELECT 'toast.' || x \
+         FROM pg_catalog.unnest(tc.reloptions) x), ', '), c.reltablespace, \
+         CASE WHEN c.reloftype = 0 THEN '' ELSE \
+         c.reloftype::pg_catalog.regtype::pg_catalog.text END, \
+         c.relpersistence, c.relreplident, am.amname \
+         FROM pg_catalog.pg_class c \
+         LEFT JOIN pg_catalog.pg_class tc ON c.reltoastrelid = tc.oid \
+         LEFT JOIN pg_catalog.pg_am am ON c.relam = am.oid \
+         WHERE c.oid = {relation_oid}"
+    );
+    let psql_properties = client
+        .prepare(&psql_properties_sql)
+        .await
+        .expect("prepare captured psql relation properties");
+    let psql_property_types = [
+        tokio_postgres::types::Type::INT2,
+        tokio_postgres::types::Type::CHAR,
+        tokio_postgres::types::Type::BOOL,
+        tokio_postgres::types::Type::BOOL,
+        tokio_postgres::types::Type::BOOL,
+        tokio_postgres::types::Type::BOOL,
+        tokio_postgres::types::Type::BOOL,
+        tokio_postgres::types::Type::BOOL,
+        tokio_postgres::types::Type::BOOL,
+        tokio_postgres::types::Type::TEXT,
+        tokio_postgres::types::Type::OID,
+        tokio_postgres::types::Type::TEXT,
+        tokio_postgres::types::Type::CHAR,
+        tokio_postgres::types::Type::CHAR,
+        tokio_postgres::types::Type::NAME,
+    ];
+    for (column, expected) in psql_properties.columns().iter().zip(psql_property_types) {
+        assert_eq!(
+            column.type_(),
+            &expected,
+            "psql relation property field {}",
+            column.name()
+        );
+    }
+    let properties = client
+        .query_one(&psql_properties, &[])
+        .await
+        .expect("captured psql relation properties");
+    assert_eq!(properties.get::<_, i16>(0), 0);
+    assert_eq!(properties.get::<_, i8>(1), b'r' as i8);
+    for index in 2..=8 {
+        assert!(!properties.get::<_, bool>(index));
+    }
+    assert_eq!(properties.get::<_, Option<String>>(9), None);
+    assert_eq!(properties.get::<_, u32>(10), 0);
+    assert_eq!(properties.get::<_, String>(11), "");
+    assert_eq!(properties.get::<_, i8>(12), b'p' as i8);
+    assert_eq!(properties.get::<_, i8>(13), b'd' as i8);
+    assert_eq!(properties.get::<_, String>(14), "ducklake");
 
     let expected = [
         ("id", 20_u32, 8_i16, true),

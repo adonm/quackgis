@@ -21,6 +21,7 @@ pub const POSTGIS_LIB_VERSION_PROC_OID: u32 = 90_005;
 pub const POSTGIS_VERSION_PROC_OID: u32 = 90_006;
 pub const POSTGIS_GEOS_VERSION_PROC_OID: u32 = 90_007;
 pub const POSTGIS_PROJ_VERSION_PROC_OID: u32 = 90_008;
+pub const DUCKLAKE_ACCESS_METHOD_OID: u32 = 90_009;
 pub const DYNAMIC_OBJECT_OID_START: u32 = 100_000;
 pub const INTERNAL_SCHEMA: &str = "_quackgis";
 
@@ -288,6 +289,9 @@ pub fn duckdb_catalog_bootstrap_sql() -> String {
                 typnotnull, typbasetype, typtypmod, typndims, typcollation);\n\
          CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_range AS\n\
          SELECT NULL::UINTEGER AS rngtypid, NULL::UINTEGER AS rngsubtype WHERE false;\n\
+         CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_am AS\n\
+         SELECT {DUCKLAKE_ACCESS_METHOD_OID}::UINTEGER AS oid,\n\
+                'ducklake'::VARCHAR AS amname;\n\
          CREATE OR REPLACE VIEW quackgis_pg_catalog.pg_collation AS\n\
          SELECT * FROM (VALUES\n\
            (100::UINTEGER, 'default'::VARCHAR, {PG_CATALOG_NAMESPACE_OID}::UINTEGER,\n\
@@ -1333,7 +1337,13 @@ pub fn duckdb_identity_catalog_bootstrap_sql(catalog: &str) -> String {
                 columns.namespace_oid AS relnamespace, columns.row_type_oid AS reltype,\n\
                 coalesce(max(owner.role_oid), {BOOTSTRAP_OWNER_OID}::UINTEGER) AS relowner,\n\
                 'r'::VARCHAR AS relkind, CAST(max(columns.attnum) AS SMALLINT) AS relnatts,\n\
-                false AS relrowsecurity\n\
+                0::SMALLINT AS relchecks, false AS relhasindex, false AS relhasrules,\n\
+                false AS relhastriggers, false AS relrowsecurity,\n\
+                false AS relforcerowsecurity, 0::UINTEGER AS reltoastrelid,\n\
+                false AS relispartition, NULL::VARCHAR[] AS reloptions,\n\
+                0::UINTEGER AS reltablespace, 0::UINTEGER AS reloftype,\n\
+                'p'::VARCHAR AS relpersistence, 'd'::VARCHAR AS relreplident,\n\
+                {DUCKLAKE_ACCESS_METHOD_OID}::UINTEGER AS relam\n\
          FROM quackgis_pg_catalog._current_columns columns\n\
          LEFT JOIN quackgis_pg_catalog.pg_table_owners owner\n\
            ON owner.schema_name = columns.schema_name\n\
@@ -1796,6 +1806,7 @@ mod tests {
             POSTGIS_VERSION_PROC_OID,
             POSTGIS_GEOS_VERSION_PROC_OID,
             POSTGIS_PROJ_VERSION_PROC_OID,
+            DUCKLAKE_ACCESS_METHOD_OID,
         ];
         assert_eq!(
             reserved_compatibility_oids
@@ -1863,6 +1874,7 @@ mod tests {
         assert!(sql.contains("quackgis_pg_catalog.pg_proc"));
         assert!(sql.contains("quackgis_pg_catalog.pg_type"));
         assert!(sql.contains("quackgis_pg_catalog.pg_range"));
+        assert!(sql.contains("quackgis_pg_catalog.pg_am"));
         assert!(sql.contains("quackgis_pg_catalog.pg_collation"));
         assert!(sql.contains("quackgis_pg_catalog.pg_roles"));
         assert!(sql.contains("quackgis_owner"));

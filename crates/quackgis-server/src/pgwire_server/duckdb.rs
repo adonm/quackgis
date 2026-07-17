@@ -1982,7 +1982,11 @@ fn validate_statement_with_catalog_identity(
             "DuckDB pgwire backend supports exactly one statement",
         ));
     }
-    let statement = statements.pop().expect("one parsed statement");
+    let mut statement = statements.pop().expect("one parsed statement");
+    let psql_relation_properties = is_psql_relation_properties_query(&statement);
+    if psql_relation_properties {
+        rewrite_psql_relation_properties(&mut statement);
+    }
     if let Some(function) = unsupported_spatial_function(&statement) {
         return Err(user_error(
             "0A000",
@@ -2081,7 +2085,7 @@ fn validate_statement_with_catalog_identity(
             "PostgreSQL information-schema relations do not accept table-function modifiers",
         ));
     }
-    if !catalog_query_shape_supported(&statement) {
+    if !psql_relation_properties && !catalog_query_shape_supported(&statement) {
         return Err(user_error(
             "0A000",
             "PostgreSQL catalog query shape is outside the maintained projection contract",
@@ -4194,6 +4198,7 @@ fn maintained_pg_catalog_relation(name: &ObjectName) -> Option<&'static str> {
         "pg_description",
         "pg_constraint",
         "pg_index",
+        "pg_am",
         "pg_range",
         "pg_collation",
         "pg_roles",
@@ -4552,6 +4557,89 @@ fn catalog_query_shape_supported(statement: &Statement) -> bool {
     aliases.len() == relation_count
 }
 
+const PSQL_RELATION_PROPERTIES_QUERY: &str = "SELECT c.relchecks, c.relkind, \
+c.relhasindex, c.relhasrules, c.relhastriggers, c.relrowsecurity, \
+c.relforcerowsecurity, false AS relhasoids, c.relispartition, \
+pg_catalog.array_to_string(c.reloptions || array(SELECT 'toast.' || x FROM \
+pg_catalog.unnest(tc.reloptions) x), ', '), c.reltablespace, \
+CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, \
+c.relpersistence, c.relreplident, am.amname FROM pg_catalog.pg_class c \
+LEFT JOIN pg_catalog.pg_class tc ON c.reltoastrelid = tc.oid \
+LEFT JOIN pg_catalog.pg_am am ON c.relam = am.oid WHERE c.oid = 0";
+
+fn is_psql_relation_properties_query(statement: &Statement) -> bool {
+    let mut normalized = statement.clone();
+    let Statement::Query(query) = &mut normalized else {
+        return false;
+    };
+    let SetExpr::Select(select) = query.body.as_mut() else {
+        return false;
+    };
+    let Some(Expr::BinaryOp { left, op, right }) = &mut select.selection else {
+        return false;
+    };
+    if *op != BinaryOperator::Eq
+        || !matches!(left.as_ref(), Expr::CompoundIdentifier(identifiers)
+            if matches!(identifiers.as_slice(), [alias, column]
+                if pg_identifier_matches(alias, "c") && pg_identifier_matches(column, "oid")))
+    {
+        return false;
+    }
+    let Expr::Value(value) = right.as_ref() else {
+        return false;
+    };
+    let Value::Number(relation_oid, false) = &value.value else {
+        return false;
+    };
+    if relation_oid
+        .parse::<u32>()
+        .ok()
+        .is_none_or(|oid| oid < crate::postgres_compat::DYNAMIC_OBJECT_OID_START)
+    {
+        return false;
+    }
+    **right = Expr::Value(Value::Number("0".to_owned(), false).into());
+
+    Parser::parse_sql(&PostgreSqlDialect {}, PSQL_RELATION_PROPERTIES_QUERY)
+        .ok()
+        .and_then(|mut expected| (expected.len() == 1).then(|| expected.remove(0)))
+        .is_some_and(|expected| normalized == expected)
+}
+
+fn rewrite_psql_relation_properties(statement: &mut Statement) {
+    if let Statement::Query(query) = statement
+        && let SetExpr::Select(select) = query.body.as_mut()
+    {
+        select.projection[11] =
+            SelectItem::UnnamedExpr(Expr::Value(Value::SingleQuotedString(String::new()).into()));
+    }
+    let _: ControlFlow<()> = visit_expressions_mut(statement, |expression| {
+        let Expr::Function(function) = expression else {
+            return ControlFlow::Continue(());
+        };
+        if matches!(function.name.0.as_slice(),
+            [ObjectNamePart::Identifier(schema), ObjectNamePart::Identifier(name)]
+                if pg_identifier_matches(schema, "pg_catalog")
+                    && pg_identifier_matches(name, "array_to_string"))
+        {
+            function.name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(
+                "array_to_string",
+            ))]);
+        }
+        ControlFlow::Continue(())
+    });
+    let _: ControlFlow<()> = visit_relations_mut(statement, |name| {
+        if matches!(name.0.as_slice(),
+            [ObjectNamePart::Identifier(schema), ObjectNamePart::Identifier(function)]
+                if pg_identifier_matches(schema, "pg_catalog")
+                    && pg_identifier_matches(function, "unnest"))
+        {
+            *name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new("unnest"))]);
+        }
+        ControlFlow::Continue(())
+    });
+}
+
 fn supported_catalog_boolean_expression(
     expression: &Expr,
     aliases: &HashMap<String, &'static str>,
@@ -4703,6 +4791,7 @@ fn stale_catalog_column_qualifier(expression: &Expr) -> bool {
             "pg_description",
             "pg_constraint",
             "pg_index",
+            "pg_am",
             "pg_range",
             "pg_collation",
             "pg_roles",
@@ -5170,7 +5259,14 @@ fn catalog_columns(relation: &str) -> &'static [(&'static str, PgTypeHint)] {
             ("reltype", PgTypeHint::Oid),
             ("relowner", PgTypeHint::Oid),
             ("relkind", PgTypeHint::Char),
+            ("reltoastrelid", PgTypeHint::Oid),
+            ("reltablespace", PgTypeHint::Oid),
+            ("reloftype", PgTypeHint::Oid),
+            ("relpersistence", PgTypeHint::Char),
+            ("relreplident", PgTypeHint::Char),
+            ("relam", PgTypeHint::Oid),
         ],
+        "pg_am" => &[("oid", PgTypeHint::Oid), ("amname", PgTypeHint::Name)],
         "pg_attribute" => &[
             ("attrelid", PgTypeHint::Oid),
             ("attname", PgTypeHint::Name),
@@ -5333,8 +5429,22 @@ fn catalog_column_names(relation: &str) -> &'static [&'static str] {
             "relowner",
             "relkind",
             "relnatts",
+            "relchecks",
+            "relhasindex",
+            "relhasrules",
+            "relhastriggers",
             "relrowsecurity",
+            "relforcerowsecurity",
+            "reltoastrelid",
+            "relispartition",
+            "reloptions",
+            "reltablespace",
+            "reloftype",
+            "relpersistence",
+            "relreplident",
+            "relam",
         ],
+        "pg_am" => &["oid", "amname"],
         "pg_attribute" => &[
             "attrelid",
             "attname",
@@ -7323,18 +7433,46 @@ mod tests {
             );
         }
 
+        let psql_relation_properties =
+            PSQL_RELATION_PROPERTIES_QUERY.replace("WHERE c.oid = 0", "WHERE c.oid = 100000");
+        let relation_properties = validate_statement_with_catalog_identity(
+            &psql_relation_properties,
+            ProtocolMode::Extended,
+            true,
+            None,
+            None,
+        )
+        .expect("captured psql relation properties");
         assert!(
-            validate_statement_with_catalog_identity(
-                "SELECT c.relchecks, am.amname FROM pg_class c \
-                 LEFT JOIN pg_am am ON c.relam = am.oid WHERE c.oid = 100000",
-                ProtocolMode::Extended,
-                true,
-                None,
-                None,
-            )
-            .is_err(),
-            "psql relation_properties must remain blocked until its catalog exists"
+            relation_properties
+                .sql
+                .contains("quackgis_pg_catalog.pg_am")
         );
+        assert!(relation_properties.sql.contains("FROM unnest"));
+        assert!(!relation_properties.sql.contains("pg_catalog.unnest"));
+        assert!(
+            !relation_properties
+                .sql
+                .contains("pg_catalog.array_to_string")
+        );
+        assert!(!relation_properties.sql.contains("regtype"));
+
+        for unsupported_relation_properties in [
+            psql_relation_properties.replace("tc.reloptions", "c.reloptions"),
+            psql_relation_properties.replace("c.relispartition", "NOT c.relispartition"),
+        ] {
+            assert!(
+                validate_statement_with_catalog_identity(
+                    &unsupported_relation_properties,
+                    ProtocolMode::Extended,
+                    true,
+                    None,
+                    None,
+                )
+                .is_err(),
+                "modified relation-properties shape must fail closed"
+            );
+        }
 
         for unsupported in [
             "SELECT relname FROM pg_catalog.pg_class",

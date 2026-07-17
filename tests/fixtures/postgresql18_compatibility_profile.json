@@ -105,7 +105,7 @@
     {
       "name": "pg_catalog.pg_class",
       "stage": "C3",
-      "trace_status": "reference_pending",
+      "trace_status": "implemented_psql_relation_properties",
       "required_columns": [
         { "name": "oid", "type_oid": 26, "nullable": false },
         { "name": "relname", "type_oid": 19, "nullable": false },
@@ -114,7 +114,29 @@
         { "name": "relowner", "type_oid": 26, "nullable": false },
         { "name": "relkind", "type_oid": 18, "nullable": false },
         { "name": "relnatts", "type_oid": 21, "nullable": false },
-        { "name": "relrowsecurity", "type_oid": 16, "nullable": false }
+        { "name": "relchecks", "type_oid": 21, "nullable": false },
+        { "name": "relhasindex", "type_oid": 16, "nullable": false },
+        { "name": "relhasrules", "type_oid": 16, "nullable": false },
+        { "name": "relhastriggers", "type_oid": 16, "nullable": false },
+        { "name": "relrowsecurity", "type_oid": 16, "nullable": false },
+        { "name": "relforcerowsecurity", "type_oid": 16, "nullable": false },
+        { "name": "reltoastrelid", "type_oid": 26, "nullable": false },
+        { "name": "relispartition", "type_oid": 16, "nullable": false },
+        { "name": "reloptions", "type_oid": 1009, "nullable": true },
+        { "name": "reltablespace", "type_oid": 26, "nullable": false },
+        { "name": "reloftype", "type_oid": 26, "nullable": false },
+        { "name": "relpersistence", "type_oid": 18, "nullable": false },
+        { "name": "relreplident", "type_oid": 18, "nullable": false },
+        { "name": "relam", "type_oid": 26, "nullable": false }
+      ]
+    },
+    {
+      "name": "pg_catalog.pg_am",
+      "stage": "C3",
+      "trace_status": "implemented_psql_relation_properties",
+      "required_columns": [
+        { "name": "oid", "type_oid": 26, "nullable": false },
+        { "name": "amname", "type_oid": 19, "nullable": false }
       ]
     },
     {
