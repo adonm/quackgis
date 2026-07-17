@@ -123,6 +123,7 @@ def main() -> None:
         assert "kind_rest_seed_ok" in seed
         assert "sslmode=verify-full" in clients
         assert "PGSSLCERT" in clients
+        assert "psql_describe_copied_data_ok" in clients
         assert "psycopg_copied_data_ok" in clients
         assert "ogr_copied_data_ok" in clients
         assert "ogr_direct_discovery_ok" in clients

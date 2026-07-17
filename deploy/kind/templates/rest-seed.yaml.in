@@ -16,7 +16,7 @@ metadata:
   name: quackgis-rest-seed
   namespace: quackgis
 spec:
-  backoffLimit: 2
+  backoffLimit: 0
   template:
     spec:
       restartPolicy: Never
@@ -37,6 +37,15 @@ spec:
               PGSSLCERT=/etc/quackgis/tls/tls.crt
               PGSSLKEY=/etc/quackgis/tls/tls.key;
               connection='-h quackgis.quackgis.svc.cluster.local -p 5432 -U postgres -d quackgis';
+              attempts=0;
+              until psql $connection -v ON_ERROR_STOP=1 -c 'SELECT 1' >/dev/null 2>&1; do
+                attempts=$((attempts + 1));
+                if [ "$attempts" -ge 60 ]; then
+                  echo 'REST seed pgwire readiness timed out' >&2;
+                  exit 1;
+                fi;
+                sleep 1;
+              done;
               psql $connection -v ON_ERROR_STOP=1 -c
               'CREATE TABLE IF NOT EXISTS quackgis.main.kind_rest_points(id INTEGER, name VARCHAR)';
               psql $connection -v ON_ERROR_STOP=1 -c

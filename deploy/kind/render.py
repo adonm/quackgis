@@ -91,6 +91,7 @@ def check_templates() -> None:
             raise ValueError(f"core template is missing {required!r}")
     for required in [
         "quackgis-psql",
+        "psql_describe_copied_data_ok",
         "quackgis-psycopg",
         "psycopg_copied_data_ok",
         "COPY {table} (id, name, geom_wkb) FROM STDIN",

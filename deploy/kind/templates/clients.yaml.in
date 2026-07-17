@@ -45,8 +45,27 @@ items:
             - name: psql
               image: "@@CLIENT_IMAGE@@"
               imagePullPolicy: IfNotPresent
-              command: ["psql"]
-              args: ["-v", "ON_ERROR_STOP=1", "-c", "SELECT 1::INTEGER AS ok"]
+              command: ["/bin/sh", "-ceu"]
+              args:
+                - |-
+                  python3 - <<'PY'
+                  import time
+                  import psycopg
+                  deadline = time.monotonic() + 60
+                  while time.monotonic() < deadline:
+                      try:
+                          with psycopg.connect("") as connection:
+                              ready = connection.execute("SELECT count(*) = 2 FROM public.kind_psycopg_points").fetchone()[0]
+                          if ready:
+                              break
+                      except psycopg.Error:
+                          pass
+                      time.sleep(1)
+                  else:
+                      raise AssertionError("psql describe fixture was not ready")
+                  PY
+                  psql -X -v ON_ERROR_STOP=1 -c '\d+ public.kind_psycopg_points'
+                  echo "psql_describe_copied_data_ok columns=id,name,geom_wkb geometry=geometry"
               env: &pg_environment
                 - name: PGHOST
                   value: quackgis.quackgis.svc.cluster.local
