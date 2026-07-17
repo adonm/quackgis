@@ -152,8 +152,20 @@ eight-operation global limit never admits nine. The native pgwire workflow above
 proves the same ceiling for readers. `just duckdb-mixed-concurrency-profile`
 additionally saturates a three-operation global limit with two suspended reader
 portals and one open COPY, observes reader, writer, and maintenance work queued,
-then proves every class completes without rejection or timeout. This is bounded
-admission evidence, not the Local 1.0 mixed-workload soak.
+then proves every class completes without rejection or timeout.
+
+`just duckdb-mixed-release-profile` composes the M5 operational paths in one actual
+server process. For the configured duration it repeatedly publishes 100-row
+COPYs, mutates checkpoint state through typed parameters, validates exact
+concurrent count/sum/WKB snapshots, cancels and quarantines independent long-query
+sessions, and runs official compaction every fifth COPY. It then requires all
+transaction/operation/queue gauges to return to zero, restarts on the same paths,
+verifies exact state, and commits another write. Process RSS is sampled every 10
+milliseconds. Smoke and local runs use the same oracle; reference mode rejects any
+duration other than 86,400 seconds. The clean source-`a664dbd` smoke ran for 3.01
+seconds, published 16,900 rows, validated 281 reads and 385 cancellations, ran 33
+compactions, grew RSS by 118.05 MiB, and reopened in 131.45 ms. This is reduced
+functional evidence, not the required 24-hour no-growth soak.
 
 Adjacent-file compaction is the only server-exposed maintenance operation. It is
 available through simple protocol only, requires the explicitly configured

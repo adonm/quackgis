@@ -6,6 +6,12 @@ run through `just ci` or the pinned native recipes.
 `duckdb_wire_read::current_duckdb_transport_profile` owns the required 100k-row
 direct DuckDB/ADBC/pgwire benchmark smoke and writes its manifest under `.tmp`.
 
+`roadmap_profiles::offline_recovery_profile` owns the actual-process exact-path
+checkpoint backup/restore gate. `roadmap_profiles::mixed_release_workload_profile`
+owns the duration-controlled M5 read/COPY/mutation/cancel/compaction/restart
+oracle; smoke/local use the same implementation, while reference mode requires
+exactly 24 hours.
+
 `iroh_direct::duckdb_pgwire_oracles_pass_through_local_iroh` owns the first native
 I0 direct-path smoke. It uses real bootstrap, worker, and tiny-client endpoints
 and proves typed/spatial query, COPY, rollback, cancellation/quarantine, and fresh

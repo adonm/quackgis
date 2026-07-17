@@ -182,6 +182,7 @@ mise exec -- just duckdb-spatial-compat-probe
 mise exec -- just duckdb-current-benchmark
 mise exec -- just duckdb-runtime-static-check
 mise exec -- just duckdb-recovery-smoke
+mise exec -- just duckdb-mixed-release-smoke
 mise exec -- just iroh-protocol-test
 mise exec -- just iroh-direct-smoke
 mise exec -- just iroh-custom-relay-smoke

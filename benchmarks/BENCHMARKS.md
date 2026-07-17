@@ -176,8 +176,32 @@ mise exec -- just duckdb-mixed-concurrency-profile \
 
 The smoke run is a functional concurrency oracle rather than a throughput claim.
 Together with the maintained 32-client/eight-reader native workflow, it closes the
-open M1 mixed-class admission evidence slice; write/commit interruption and the
-Local 1.0 mixed-workload soak remain separate gates.
+open M1 mixed-class admission evidence slice; write/commit interruption remains a
+separate gate.
+
+## Mixed release workload profile
+
+The M5 workload runs an actual server process for a configured duration while one
+writer repeatedly publishes 100-row COPYs and mutates checkpoint state, a reader
+validates exact count/sum/WKB snapshots, independent sessions repeatedly cancel
+long native queries and prove quarantine, and official compaction runs every fifth
+COPY. It samples server RSS, requires active transaction/operation/queue gauges to
+return to zero, restarts on the same paths, verifies exact state, and commits a
+post-restart write.
+
+```sh
+mise exec -- just duckdb-mixed-release-profile \
+  level=local duration=300 \
+  out=.tmp/duckdb-mixed-release/local-s300.json
+```
+
+Reference mode requires exactly 86,400 seconds and a clean source tree. The clean
+source-`a664dbd` three-second smoke completed 169 COPYs/16,900 rows, 281 exact
+reader snapshots, 385 successful cancellations/quarantines, and 33 compactions.
+All idle gauges returned to zero, process RSS grew by 123,781,120 bytes (118.05
+MiB), exact state became queryable 131.45 ms after restart, and a new write
+succeeded. This closes the reduced functional composition slice, not the 24-hour
+no-correctness-failure/no-unbounded-growth M5 soak.
 
 ## Spatial scan profile
 
@@ -286,6 +310,6 @@ point-in-time, cross-version, or disaster-recovery evidence.
 
 E1's result, cancellation, transport, mixed-class, and COPY reference budgets now
 pass, and M4's complete mixed-shape analytical workload passes twice at both 10M
-and 100M. M5's reduced actual-process recovery gate now passes. Next profiles are
-packaged I0 resources/hosted relay, cross-version upgrade, mixed release workload,
-and soak.
+and 100M. M5's reduced actual-process recovery and mixed release workload gates
+now pass. Next profiles are packaged I0 resources/hosted relay, cross-version
+upgrade, and the 24-hour soak.

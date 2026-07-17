@@ -207,8 +207,12 @@ unless a focused test says otherwise.
   effect before the independent RLS milestone.
 - Global and reader/writer/maintenance admission are bounded. Native gates prove
   the default eight-reader ceiling under 32 clients and simultaneous all-class
-  queueing/completion at reduced smoke scale; this is not mixed-workload soak
-  evidence. The maintained Kind core limit is 4 GiB: the default 60% DuckDB
+  queueing/completion at reduced smoke scale. A clean actual-process profile now
+  combines concurrent exact reads, atomic COPY, parameterized mutation, repeated
+  cancellation/quarantine, official compaction, idle-state gauges, restart, and a
+  post-restart write for three seconds within a 118.05 MiB RSS delta. The same
+  oracle is fixed at 24 hours for reference evidence; that soak remains open. The
+  maintained Kind core limit is 4 GiB: the default 60% DuckDB
   budget is about 2.4 GiB, while the prior 2 GiB container produced a 1.1 GiB
   DuckDB budget and could not complete QGIS provider discovery.
 - The scalar transport profile enforces the 15% pgwire-over-ADBC p50 budget only

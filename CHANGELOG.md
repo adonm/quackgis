@@ -236,6 +236,13 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 - A registered mixed-class native profile that saturates admission with retained
   reader/COPY work, observes reader, writer, and maintenance queueing together,
   and completes without rejection or timeout.
+- A duration-controlled actual-process M5 mixed release profile now combines
+  concurrent exact reads, atomic COPY, parameterized mutation, repeated native
+  cancellation/quarantine, official compaction, process RSS sampling, idle-state
+  metrics, same-path restart, and a post-restart write. The clean three-second
+  smoke publishes 16,900 rows, validates 281 reads and 385 cancellations, runs 33
+  compactions, stays within 118.05 MiB RSS growth, and restarts in 131.45 ms; the
+  same oracle requires exactly 24 hours in reference mode.
 - Opt-in maintenance identity and a literal-only server-owned adjacent-file
   compaction call with write-policy enforcement, maintenance admission, audit
   events, transaction rejection, and pgwire/reopen evidence.
