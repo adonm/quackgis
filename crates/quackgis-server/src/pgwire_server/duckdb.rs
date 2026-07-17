@@ -1984,6 +1984,7 @@ fn validate_statement_with_catalog_identity(
     }
     let mut statement = statements.pop().expect("one parsed statement");
     let psql_relation_properties = is_psql_relation_properties_query(&statement);
+    let psql_column_properties = is_psql_column_properties_query(&statement);
     if psql_relation_properties {
         rewrite_psql_relation_properties(&mut statement);
     }
@@ -2085,7 +2086,10 @@ fn validate_statement_with_catalog_identity(
             "PostgreSQL information-schema relations do not accept table-function modifiers",
         ));
     }
-    if !psql_relation_properties && !catalog_query_shape_supported(&statement) {
+    if !psql_relation_properties
+        && !psql_column_properties
+        && !catalog_query_shape_supported(&statement)
+    {
         return Err(user_error(
             "0A000",
             "PostgreSQL catalog query shape is outside the maintained projection contract",
@@ -4568,42 +4572,69 @@ LEFT JOIN pg_catalog.pg_class tc ON c.reltoastrelid = tc.oid \
 LEFT JOIN pg_catalog.pg_am am ON c.relam = am.oid WHERE c.oid = 0";
 
 fn is_psql_relation_properties_query(statement: &Statement) -> bool {
-    let mut normalized = statement.clone();
-    let Statement::Query(query) = &mut normalized else {
-        return false;
-    };
-    let SetExpr::Select(select) = query.body.as_mut() else {
-        return false;
-    };
-    let Some(Expr::BinaryOp { left, op, right }) = &mut select.selection else {
-        return false;
-    };
-    if *op != BinaryOperator::Eq
-        || !matches!(left.as_ref(), Expr::CompoundIdentifier(identifiers)
-            if matches!(identifiers.as_slice(), [alias, column]
-                if pg_identifier_matches(alias, "c") && pg_identifier_matches(column, "oid")))
-    {
-        return false;
-    }
-    let Expr::Value(value) = right.as_ref() else {
-        return false;
-    };
-    let relation_oid = match &value.value {
-        Value::Number(relation_oid, false) | Value::SingleQuotedString(relation_oid) => {
-            relation_oid
-        }
-        _ => return false,
-    };
-    if relation_oid
-        .parse::<u32>()
-        .ok()
-        .is_none_or(|oid| oid < crate::postgres_compat::DYNAMIC_OBJECT_OID_START)
-    {
-        return false;
-    }
-    **right = Expr::Value(Value::Number("0".to_owned(), false).into());
+    is_psql_catalog_query(statement, PSQL_RELATION_PROPERTIES_QUERY, "c", "oid")
+}
 
-    Parser::parse_sql(&PostgreSqlDialect {}, PSQL_RELATION_PROPERTIES_QUERY)
+const PSQL_COLUMN_PROPERTIES_QUERY: &str = "SELECT a.attname, \
+pg_catalog.format_type(a.atttypid, a.atttypmod), \
+(SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true) \
+FROM pg_catalog.pg_attrdef d WHERE d.adrelid = a.attrelid \
+AND d.adnum = a.attnum AND a.atthasdef), a.attnotnull, \
+(SELECT c.collname FROM pg_catalog.pg_collation c, pg_catalog.pg_type t \
+WHERE c.oid = a.attcollation AND t.oid = a.atttypid \
+AND a.attcollation <> t.typcollation) AS attcollation, a.attidentity, \
+a.attgenerated, a.attstorage, a.attcompression AS attcompression, \
+CASE WHEN a.attstattarget = -1 THEN NULL ELSE a.attstattarget END AS attstattarget, \
+pg_catalog.col_description(a.attrelid, a.attnum) FROM pg_catalog.pg_attribute a \
+WHERE a.attrelid = 0 AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum";
+
+fn is_psql_column_properties_query(statement: &Statement) -> bool {
+    is_psql_catalog_query(statement, PSQL_COLUMN_PROPERTIES_QUERY, "a", "attrelid")
+}
+
+fn is_psql_catalog_query(
+    statement: &Statement,
+    expected_sql: &str,
+    relation_alias: &str,
+    oid_column: &str,
+) -> bool {
+    let mut normalized = statement.clone();
+    let mut oid_literals = 0usize;
+    let _: ControlFlow<()> = visit_expressions_mut(&mut normalized, |expression| {
+        let Expr::BinaryOp { left, op, right } = expression else {
+            return ControlFlow::Continue(());
+        };
+        if *op != BinaryOperator::Eq
+            || !matches!(left.as_ref(), Expr::CompoundIdentifier(identifiers)
+                if matches!(identifiers.as_slice(), [alias, column]
+                    if pg_identifier_matches(alias, relation_alias)
+                        && pg_identifier_matches(column, oid_column)))
+        {
+            return ControlFlow::Continue(());
+        }
+        let Expr::Value(value) = right.as_ref() else {
+            return ControlFlow::Continue(());
+        };
+        let relation_oid = match &value.value {
+            Value::Number(relation_oid, false) | Value::SingleQuotedString(relation_oid) => {
+                relation_oid
+            }
+            _ => return ControlFlow::Continue(()),
+        };
+        if relation_oid
+            .parse::<u32>()
+            .ok()
+            .is_some_and(|oid| oid >= crate::postgres_compat::DYNAMIC_OBJECT_OID_START)
+        {
+            **right = Expr::Value(Value::Number("0".to_owned(), false).into());
+            oid_literals += 1;
+        }
+        ControlFlow::Continue(())
+    });
+    if oid_literals != 1 {
+        return false;
+    }
+    Parser::parse_sql(&PostgreSqlDialect {}, expected_sql)
         .ok()
         .and_then(|mut expected| (expected.len() == 1).then(|| expected.remove(0)))
         .is_some_and(|expected| normalized == expected)
@@ -5660,6 +5691,8 @@ fn maintained_cast_hint(data_type: &sqlparser::ast::DataType) -> Option<PgTypeHi
 }
 
 fn annotate_catalog_result_schema(statement: &Statement, schema: &Schema) -> Schema {
+    let psql_column_properties =
+        is_psql_column_properties_query(statement) && schema.fields().len() == 11;
     let aliases = top_level_catalog_aliases(statement);
     let Statement::Query(query) = statement else {
         return schema.clone();
@@ -5696,7 +5729,8 @@ fn annotate_catalog_result_schema(statement: &Statement, schema: &Schema) -> Sch
             .fields()
             .iter()
             .zip(&select.projection)
-            .map(|(field, item)| {
+            .enumerate()
+            .map(|(index, (field, item))| {
                 let expression = match item {
                     SelectItem::UnnamedExpr(expression)
                     | SelectItem::ExprWithAlias {
@@ -5705,7 +5739,8 @@ fn annotate_catalog_result_schema(statement: &Statement, schema: &Schema) -> Sch
                     _ => return field.as_ref().clone(),
                 };
                 let hint = catalog_expression_hint(expression, &aliases)
-                    .or_else(|| maintained_function_hint(expression));
+                    .or_else(|| maintained_function_hint(expression))
+                    .or_else(|| (psql_column_properties && index == 4).then_some(PgTypeHint::Name));
                 hint.map(|hint| with_pg_type_hint(field.as_ref().clone(), hint))
                     .unwrap_or_else(|| field.as_ref().clone())
             })
@@ -7474,6 +7509,48 @@ mod tests {
                 )
                 .is_err(),
                 "modified relation-properties shape must fail closed"
+            );
+        }
+
+        let psql_column_properties =
+            PSQL_COLUMN_PROPERTIES_QUERY.replace("a.attrelid = 0", "a.attrelid = '100000'");
+        let column_properties = validate_statement_with_catalog_identity(
+            &psql_column_properties,
+            ProtocolMode::Extended,
+            true,
+            None,
+            None,
+        )
+        .expect("captured psql column properties");
+        for relation in ["pg_attribute", "pg_attrdef", "pg_collation", "pg_type"] {
+            assert!(
+                column_properties
+                    .sql
+                    .contains(&format!("quackgis_pg_catalog.{relation}")),
+                "missing rewritten {relation}"
+            );
+        }
+        assert!(column_properties.sql.contains("quackgis_pg_format_type"));
+        assert!(column_properties.sql.contains("quackgis_pg_get_expr"));
+        assert!(
+            column_properties
+                .sql
+                .contains("quackgis_pg_col_description")
+        );
+        for unsupported_column_properties in [
+            psql_column_properties.replace("a.attnum > 0", "a.attnum >= 0"),
+            psql_column_properties.replace("NOT a.attisdropped", "a.attisdropped"),
+        ] {
+            assert!(
+                validate_statement_with_catalog_identity(
+                    &unsupported_column_properties,
+                    ProtocolMode::Extended,
+                    true,
+                    None,
+                    None,
+                )
+                .is_err(),
+                "modified column-properties shape must fail closed"
             );
         }
 

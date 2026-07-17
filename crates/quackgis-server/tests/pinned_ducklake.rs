@@ -736,6 +736,69 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
     assert_eq!(properties.get::<_, i8>(13), b'd' as i8);
     assert_eq!(properties.get::<_, String>(14), "ducklake");
 
+    let psql_columns_sql = format!(
+        "SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod), \
+         (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true) \
+         FROM pg_catalog.pg_attrdef d WHERE d.adrelid = a.attrelid \
+         AND d.adnum = a.attnum AND a.atthasdef), a.attnotnull, \
+         (SELECT c.collname FROM pg_catalog.pg_collation c, pg_catalog.pg_type t \
+         WHERE c.oid = a.attcollation AND t.oid = a.atttypid \
+         AND a.attcollation <> t.typcollation) AS attcollation, a.attidentity, \
+         a.attgenerated, a.attstorage, a.attcompression AS attcompression, \
+         CASE WHEN a.attstattarget = -1 THEN NULL ELSE a.attstattarget END \
+         AS attstattarget, pg_catalog.col_description(a.attrelid, a.attnum) \
+         FROM pg_catalog.pg_attribute a WHERE a.attrelid = '{relation_oid}' \
+         AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum"
+    );
+    let psql_columns = client
+        .prepare(&psql_columns_sql)
+        .await
+        .expect("prepare captured psql column properties");
+    let psql_column_types = [
+        tokio_postgres::types::Type::NAME,
+        tokio_postgres::types::Type::TEXT,
+        tokio_postgres::types::Type::TEXT,
+        tokio_postgres::types::Type::BOOL,
+        tokio_postgres::types::Type::NAME,
+        tokio_postgres::types::Type::CHAR,
+        tokio_postgres::types::Type::CHAR,
+        tokio_postgres::types::Type::CHAR,
+        tokio_postgres::types::Type::CHAR,
+        tokio_postgres::types::Type::INT2,
+        tokio_postgres::types::Type::TEXT,
+    ];
+    for (column, expected) in psql_columns.columns().iter().zip(psql_column_types) {
+        assert_eq!(
+            column.type_(),
+            &expected,
+            "psql column property field {}",
+            column.name()
+        );
+    }
+    let column_properties = client
+        .query(&psql_columns, &[])
+        .await
+        .expect("captured psql column properties");
+    assert_eq!(column_properties.len(), 6);
+    let id_properties = &column_properties[0];
+    assert_eq!(id_properties.get::<_, String>(0), "id");
+    assert_eq!(id_properties.get::<_, String>(1), "bigint");
+    assert_eq!(
+        id_properties.get::<_, Option<String>>(2).as_deref(),
+        Some("'7'")
+    );
+    assert!(id_properties.get::<_, bool>(3));
+    assert_eq!(id_properties.get::<_, Option<String>>(4), None);
+    assert_eq!(id_properties.get::<_, i8>(5), 0);
+    assert_eq!(id_properties.get::<_, i8>(6), 0);
+    assert_eq!(id_properties.get::<_, i8>(7), b'p' as i8);
+    assert_eq!(id_properties.get::<_, i8>(8), 0);
+    assert_eq!(id_properties.get::<_, Option<i16>>(9), None);
+    assert_eq!(
+        id_properties.get::<_, Option<String>>(10).as_deref(),
+        Some("stable identifier")
+    );
+
     let expected = [
         ("id", 20_u32, 8_i16, true),
         ("label", 25, -1, false),

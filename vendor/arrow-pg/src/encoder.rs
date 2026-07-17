@@ -123,7 +123,7 @@ fn encode_binary_as_bytea(
 }
 
 fn pg_char_from_str(value: Option<&str>) -> Option<i8> {
-    value.and_then(|s| s.as_bytes().first().copied().map(|b| b as i8))
+    value.map(|value| value.as_bytes().first().copied().unwrap_or_default() as i8)
 }
 
 pub trait Encoder {
@@ -891,6 +891,13 @@ mod tests {
             .expect("null spatial text");
         assert!(matches!(null_status, IsNull::Yes));
         assert!(null.is_empty());
+    }
+
+    #[test]
+    fn empty_postgresql_char_is_nul_not_null() {
+        assert_eq!(pg_char_from_str(None), None);
+        assert_eq!(pg_char_from_str(Some("")), Some(0));
+        assert_eq!(pg_char_from_str(Some("p")), Some(b'p' as i8));
     }
 
     #[test]

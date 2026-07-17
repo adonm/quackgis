@@ -142,7 +142,7 @@
     {
       "name": "pg_catalog.pg_attribute",
       "stage": "C3",
-      "trace_status": "reference_pending",
+      "trace_status": "implemented_psql_column_properties",
       "required_columns": [
         { "name": "attrelid", "type_oid": 26, "nullable": false },
         { "name": "attname", "type_oid": 19, "nullable": false },
