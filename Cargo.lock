@@ -3694,6 +3694,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "quackgis-migrate"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "sqlparser",
+]
+
+[[package]]
 name = "quackgis-rest"
 version = "0.2.0"
 dependencies = [
