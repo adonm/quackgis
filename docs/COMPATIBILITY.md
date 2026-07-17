@@ -36,19 +36,22 @@ host evidence, not packaged WAN or hosted-relay SLOs.
 
 The exact OGR 3.11.5 client image also has a credential-free normalized
 copied-point trace against digest-pinned PostgreSQL 18.4/PostGIS. Its 21 query
-families are an implementation oracle, not evidence that copied spatial discovery
-currently succeeds against QuackGIS.
+families remain the broad implementation oracle; the packaged SQL-result and
+direct-discovery Point/NULL read slices now pass against QuackGIS.
 
 The same oracle now includes exact psql 18.3 `\d+` evidence: 12 normalized catalog
-query families and the rendered structure of a five-column spatial table. This is
-also a target corpus, not current QuackGIS describe support.
+query families and the rendered structure of a five-column spatial table. The
+packaged copied-table gate now executes all 12 families; PostgreSQL's richer
+five-column fixture remains the target for key/identity/default presentation.
 
 An offscreen, digest-pinned QGIS 3.44.11 PostgreSQL provider oracle also succeeds
 for layer open, field/CRS discovery, privilege and owner inquiry, count, 3D extent,
 and first-feature binary cursor read. Its 32 statements (26 unique families) are
-frozen as targets. QuackGIS actual-pgwire now executes the three frozen binary
-cursor messages with exact payload and transaction-state assertions; the full
-headless client workflow does not yet pass against the packaged runtime.
+frozen as targets. QuackGIS actual-pgwire executes the three frozen binary cursor
+messages with exact payload and transaction-state assertions. The packaged
+runtime additionally passes the pinned headless provider over mutual TLS as a
+read-only query layer with an explicit `id` key, exact fields/count, and Point/NULL
+feature values.
 
 ## Proven local contract
 
@@ -141,11 +144,11 @@ mise exec -- just ci
 
 | Client/surface | Current status |
 |---|---|
-| `psql` / PostgreSQL protocol clients | bounded simple/extended protocol supported; mutual-TLS scalar smoke passes with psql 18.3 through the tiny client in rootless-Podman Kind. The pinned native lane executes the exact captured anchored-regex `resolve_relation` query with OID/name/name types; the older-image copied-table `\d+` retry stopped at `pg_class`, and the next `relation_properties` query remains unsupported |
+| `psql` / PostgreSQL protocol clients | bounded simple/extended protocol supported. Pinned psql 18.3 executes the complete captured 12-stage `\d+` workflow through the mutual-TLS tiny client in rootless-Podman Kind, renders exact `id integer`, `name text`, and `geom_wkb geometry` columns, and reports the truthful `ducklake` access method. Optional policy/statistics/publication/inheritance probes are accepted only at their exact captured shapes and return typed empty results; arbitrary catalog shapes remain fail-closed |
 | `tokio-postgres` | maintained real-driver integration client |
 | PostgreSQL text COPY clients | bounded maintained type set supported |
-| GDAL/OGR | pinned 3.11.5 reads the psycopg-created copied-data fixture through the mutual-TLS tiny client and its unmodified SQL-result cursor lifecycle, with exact Point/NULL GeoJSON. The pinned native catalog contract executes the captured `pg_proc` namespace, derived `column_structure`, and zero-row `primary_key_columns` queries with exact types/defaults/comments and no invented key. The last older-image packaged direct-discovery retry stopped at `pg_proc`/`pg_class`, so a pinned-image rerun and downstream COPY/no-FID/CRS qualification remain open |
-| QGIS | exact offscreen 3.44.11 connects through current mutual TLS and retries direct, no-FID, and copied-SQL layers. The pinned lane passes its QGIS-shaped OID privilege/recovery projection, exact derived `attribute_structure` query, and `pg_is_in_recovery=false`; PostgreSQL 18.4 startup/version identity and failed/idle transaction cleanup pass. Native actual-pgwire executes the exact captured read-only binary-cursor messages with all-binary RowDescription, exact WKB/BIGINT/text/NULL DataRows, COMMIT/ROLLBACK, and `25006` write denial. Pinned-image and full copied-layer qualification remain open |
+| GDAL/OGR | pinned 3.11.5 reads the psycopg-created copied-data fixture through the mutual-TLS tiny client in both its unmodified SQL-result cursor lifecycle and direct discovery path, with exact Point/NULL GeoJSON and truthful no-FID behavior. The pinned native catalog contract executes the captured `pg_proc` namespace, derived `column_structure`, and zero-row `primary_key_columns` queries with exact types/defaults/comments and no invented key. OGR-authored COPY and authoritative CRS qualification remain open |
+| QGIS | pinned offscreen 3.44.11-Solothurn passes the optional Kind gate through mutual TLS. A read-only copied-data query layer uses an explicit `id` key, discovers exact `id`/`name` fields, counts two rows, and reads exact Point/NULL features through QGIS's binary cursor. The native lane also proves QGIS-shaped privilege/recovery, derived `attribute_structure`, startup/version, transaction cleanup, binary payload, and `25006` write denial. Direct ordinary-table open remains unsupported without a real primary/unique key; QuackGIS does not invent one from DuckLake metadata |
 | GeoServer, Martin | target; client traces and QuackGIS qualification remain open |
 | psycopg | pinned 3.2.13 passes a mutual-TLS tiny-client copied-data workflow in Kind: create/reuse, delete, text COPY with exact WKB/NULL values, close/reconnect, and exact spatial readback |
 | `quackgis-rest` | signed-HS256-JWT read-only preview maps a bounded role claim and uses transaction-local role/claims. Direct SCRAM rotation, shared epoch invalidation with pinned identity, and exact signed-only fallback pass. K0 packages two replicas behind separately registered authenticator tiny clients with no database password; role-aware data/OpenAPI, two endpoints, one-Pod failover, core reconnect, and old authenticator/JWT denial pass. Pinned-epoch package rerun, multi-key overlap, public HTTP policy, and full PostgREST remain open |
@@ -161,8 +164,9 @@ function spellings without touching quoted SQL text or comments:
 
 - `ST_MakePoint` → `ST_Point`;
 - `ST_NumPoints` → `ST_NPoints`;
-- `ST_GeomFromEWKT`, `ST_AsHEXEWKB`, `GeometryType`, `ST_GeometryType`,
-  `ST_CurveToLine`, `ST_HasArc`, `ST_SRID`, `ST_Extent`, and `ST_3DExtent` →
+- `ST_GeomFromEWKT`, `ST_AsBinary`, `ST_AsHEXEWKB`, `GeometryType`,
+  `ST_GeometryType`, `ST_CurveToLine`, `ST_HasArc`, `ST_SRID`, `ST_Zmflag`,
+  `ST_Extent`, and `ST_3DExtent` →
   bounded QuackGIS-owned DuckDB macros; and
 - `postgis_lib_version()`, `postgis_version()`, `postgis_geos_version()`, and
   `postgis_proj_version()` → compatibility/runtime markers.
@@ -204,7 +208,9 @@ unless a focused test says otherwise.
 - Global and reader/writer/maintenance admission are bounded. Native gates prove
   the default eight-reader ceiling under 32 clients and simultaneous all-class
   queueing/completion at reduced smoke scale; this is not mixed-workload soak
-  evidence.
+  evidence. The maintained Kind core limit is 4 GiB: the default 60% DuckDB
+  budget is about 2.4 GiB, while the prior 2 GiB container produced a 1.1 GiB
+  DuckDB budget and could not complete QGIS provider discovery.
 - The scalar transport profile enforces the 15% pgwire-over-ADBC p50 budget only
   in reference mode and only when direct ADBC lasts at least one second. Reduced
   smoke/local ratios are diagnostic and do not establish the release budget.

@@ -249,8 +249,8 @@ the frozen QGIS two-statement shapes `BEGIN READ ONLY; DECLARE ... BINARY CURSOR
 and `CLOSE ...; COMMIT|ROLLBACK`. The transaction mode is enforced at both DML/DDL
 and COPY ingest entry points with SQLSTATE `25006`; it is not syntax-only. A
 binary declaration forces every result column to PostgreSQL binary format,
-including metadata-only and EOF fetches. `ST_AsBinary(..., 'NDR')` maps to raw WKB
-through a bounded NDR-only macro. A session may retain at most 16 cursors and one
+including metadata-only and EOF fetches. `ST_AsBinary(..., 'NDR')` maps maintained
+WKB/BLOB and native geometry to raw WKB through a bounded NDR-only macro. A session may retain at most 16 cursors and one
 fetch may request at most 4,096 rows. The native stream starts on first non-zero
 fetch, pins its requested result format, and is drained in bounded pages before
 close or transaction end so an unfinished ADBC reader is not reused.
@@ -273,14 +273,16 @@ select its no-FID path without QuackGIS fabricating a primary key.
 This does not claim primary/unique keys, richer index semantics, or authoritative
 geometry subtype/dimension/SRID metadata.
 
-The pinned identity lane also executes psql 18.3's first captured `resolve_relation`
-query. QuackGIS structurally rewrites only anchored literal
+The pinned identity lane executes psql 18.3's complete captured 12-stage `\d+`
+workflow. QuackGIS structurally rewrites only anchored literal
 `OPERATOR(pg_catalog.~)` comparisons carrying `COLLATE pg_catalog.default`; other
 custom operators, collations, or unanchored patterns fail with `0A000`. The result
-retains exact OID/name/name wire types. This advances psql to its next
-`relation_properties` query, which remains intentionally blocked because
-`pg_am` and multiple requested `pg_class` fields are not maintained. Full `\d+`
-support is therefore still not claimed.
+retains exact OID/name/name wire types. Exact `relation_properties` and
+`column_properties` shapes read maintained `pg_class`/`pg_am`/`pg_attribute`
+state. Foreign-key, policy, extended-statistics, publication, and inheritance
+stages return typed empty results only for their exact captured shapes; modified
+or general catalog queries still fail closed. The packaged psql gate renders the
+copied table's three columns and truthful `ducklake` access method.
 
 ## Compatibility surfaces
 
@@ -767,19 +769,18 @@ with PostgreSQL text COPY, closes and reconnects, and verifies exact scalar and
 spatial readback. Pinned GDAL/OGR 3.11.5 then reads that same fixture through its
 unmodified extended-protocol SQL-result cursor lifecycle (`BEGIN`, `DECLARE`,
 `FETCH 0`, bounded `FETCH`, `CLOSE`, transaction end) and must produce exact
-GeoJSON for `POINT (1 2)` plus NULL geometry/property values. Both pass again
-after ordered Pod replacement and mTLS/iroh key rotation with old-client denial.
-This closes the psycopg copied-data slice and the OGR SQL-result read slice only.
-The remaining clients were retried through current mutual TLS. In that older-image
-run, psql 18.3 `\d+` stopped at unavailable `pg_class`, while OGR direct discovery
-reported the optional `pg_proc` failure and then stopped at `pg_class`. The native
-catalog contract now executes OGR's exact `pg_proc` PostGIS namespace lookup with
-four stable maintained routine identities and its captured derived
-`column_structure` query. The pinned-image rerun and downstream COPY/no-FID work
-remain open. Exact offscreen QGIS 3.44.11 retries direct, no-FID,
-and copied-SQL layers. The pinned lane now executes its full layer privilege
-projection with PostgreSQL `bool` `pg_is_in_recovery=false`, while all startup
-modes advertise PostgreSQL 18.4 and `version()`/`SHOW server_version[_num]` agree.
+GeoJSON for `POINT (1 2)` plus NULL geometry/property values. Its direct-discovery
+path now passes the same exact rows with truthful no-FID behavior. Psql 18.3 runs
+the full captured `\d+` workflow and reports `ducklake`; psycopg and OGR also pass
+again after ordered Pod replacement and mTLS/iroh key rotation with old-client
+denial. OGR-authored COPY and authoritative CRS metadata remain open.
+
+Exact offscreen QGIS 3.44.11-Solothurn now passes the optional digest-pinned Kind
+gate as a read-only copied-data query layer with an explicit `id` key. It discovers
+exact `id`/`name` fields, counts two rows, and reads Point/NULL features through
+the binary cursor. The pinned lane executes its full layer privilege projection
+with PostgreSQL `bool` `pg_is_in_recovery=false`, while all startup modes advertise
+PostgreSQL 18.4 and `version()`/`SHOW server_version[_num]` agree.
 Simple and extended idle transaction end, failed `COMMIT`-as-rollback, subsequent
 `ROLLBACK`, explicit failed `ROLLBACK`, and `25P02` precedence pass without a
 client-name branch. Native actual-pgwire coverage now executes the exact captured
@@ -787,8 +788,8 @@ QGIS read-only/binary cursor start, `FETCH FORWARD 2000`, and close/commit shape
 it verifies binary raw WKB/BIGINT/text/NULL values, close/rollback, failed-declare
 status, and read-only `25006` cleanup. The pinned identity lane also executes the
 captured QGIS `attribute_structure` query with exact default/comment/empty-index
-semantics. Broader catalog shapes, the pinned package rerun, and full headless
-QGIS qualification remain C6 blockers.
+semantics. Direct ordinary-table open remains blocked on real primary/unique-key
+support; broader filter, identify, extent, and render workflows remain C6 work.
 
 ### H1 — migrate and package role-aware REST
 
