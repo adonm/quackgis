@@ -14,7 +14,8 @@ CREATE OR REPLACE MACRO quackgis_postgis_version() AS '3.4.0 QUACKGIS';
 CREATE OR REPLACE MACRO quackgis_st_geomfromewkt(ewkt) AS
     ST_GeomFromText(regexp_replace(CAST(ewkt AS VARCHAR), '^[sS][rR][iI][dD]=[0-9]+;', ''));
 CREATE OR REPLACE MACRO quackgis_st_asbinary(g, byte_order) AS
-    CASE WHEN upper(CAST(byte_order AS VARCHAR)) = 'NDR' THEN ST_AsWKB(g)
+    CASE WHEN upper(CAST(byte_order AS VARCHAR)) = 'NDR'
+         THEN ST_AsWKB(ST_GeomFromWKB(CAST(g AS BLOB)))
          ELSE error('QuackGIS ST_AsBinary supports NDR byte order only') END;
 CREATE OR REPLACE MACRO quackgis_st_ashexewkb(g) AS hex(ST_AsWKB(g));
 CREATE OR REPLACE MACRO quackgis_geometry_type(g) AS

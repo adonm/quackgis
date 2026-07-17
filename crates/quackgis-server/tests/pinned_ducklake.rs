@@ -591,7 +591,9 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
     let row_srids = client
         .query_one(
             "SELECT ST_SRID(geom_wkb), ST_SRID(native_geom), \
-                    ST_Zmflag(geom_wkb), GeometryType(geom_wkb) \
+                    ST_Zmflag(geom_wkb), GeometryType(geom_wkb), \
+                    ST_AsBinary(geom_wkb, 'NDR'), \
+                    ST_AsBinary(native_geom, 'NDR') \
              FROM public.catalog_projection WHERE id = 8",
             &[],
         )
@@ -601,6 +603,9 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
     assert_eq!(row_srids.get::<_, i32>(1), 0);
     assert_eq!(row_srids.get::<_, i16>(2), 2);
     assert_eq!(row_srids.get::<_, String>(3), "POINT");
+    let maintained_wkb = row_srids.get::<_, Vec<u8>>(4);
+    assert!(!maintained_wkb.is_empty());
+    assert_eq!(maintained_wkb, row_srids.get::<_, Vec<u8>>(5));
 
     let catalog_sql = "SELECT c.oid, c.relname, c.relnamespace, c.reltype, c.relowner, \
                 c.relkind, c.relnatts, c.relrowsecurity, a.attrelid, a.attname, \
