@@ -1986,11 +1986,15 @@ fn validate_statement_with_catalog_identity(
     let psql_relation_properties = is_psql_relation_properties_query(&statement);
     let psql_column_properties = is_psql_column_properties_query(&statement);
     let psql_incoming_foreign_keys = is_psql_incoming_foreign_keys_query(&statement);
+    let psql_empty_describe_query = psql_empty_describe_query(&statement);
     if psql_relation_properties {
         rewrite_psql_relation_properties(&mut statement);
     }
     if psql_incoming_foreign_keys {
         rewrite_select_filter_false(&mut statement);
+    }
+    if let Some(query) = psql_empty_describe_query {
+        statement = query.replacement_statement()?;
     }
     if let Some(function) = unsupported_spatial_function(&statement) {
         return Err(user_error(
@@ -4630,6 +4634,16 @@ VALUES (0::pg_catalog.regclass)) AND contype = 'f' AND conparentid = 0 \
 ORDER BY conname";
 
 fn is_psql_incoming_foreign_keys_query(statement: &Statement) -> bool {
+    normalized_psql_dynamic_oid_query(statement, 2).is_some_and(|normalized| {
+        parse_single_statement(PSQL_INCOMING_FOREIGN_KEYS_QUERY)
+            .is_some_and(|expected| normalized == expected)
+    })
+}
+
+fn normalized_psql_dynamic_oid_query(
+    statement: &Statement,
+    expected_literals: usize,
+) -> Option<Statement> {
     let mut normalized = statement.clone();
     let mut oid_literals = 0usize;
     let _: ControlFlow<()> = visit_expressions_mut(&mut normalized, |expression| {
@@ -4652,11 +4666,13 @@ fn is_psql_incoming_foreign_keys_query(statement: &Statement) -> bool {
         }
         ControlFlow::Continue(())
     });
-    oid_literals == 2
-        && Parser::parse_sql(&PostgreSqlDialect {}, PSQL_INCOMING_FOREIGN_KEYS_QUERY)
-            .ok()
-            .and_then(|mut expected| (expected.len() == 1).then(|| expected.remove(0)))
-            .is_some_and(|expected| normalized == expected)
+    (oid_literals == expected_literals).then_some(normalized)
+}
+
+fn parse_single_statement(sql: &str) -> Option<Statement> {
+    Parser::parse_sql(&PostgreSqlDialect {}, sql)
+        .ok()
+        .and_then(|mut statements| (statements.len() == 1).then(|| statements.remove(0)))
 }
 
 fn rewrite_select_filter_false(statement: &mut Statement) {
@@ -4665,6 +4681,164 @@ fn rewrite_select_filter_false(statement: &mut Statement) {
     {
         select.selection = Some(Expr::Value(Value::Boolean(false).into()));
     }
+}
+
+const PSQL_ROW_SECURITY_POLICIES_QUERY: &str = "SELECT pol.polname, pol.polpermissive, \
+CASE WHEN pol.polroles = '{0}' THEN NULL ELSE pg_catalog.array_to_string(\
+array(SELECT rolname FROM pg_catalog.pg_roles WHERE oid = any(pol.polroles) ORDER BY 1), ',') END, \
+pg_catalog.pg_get_expr(pol.polqual, pol.polrelid), \
+pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid), CASE pol.polcmd \
+WHEN 'r' THEN 'SELECT' WHEN 'a' THEN 'INSERT' WHEN 'w' THEN 'UPDATE' \
+WHEN 'd' THEN 'DELETE' END AS cmd FROM pg_catalog.pg_policy pol \
+WHERE pol.polrelid = 0 ORDER BY 1";
+
+const PSQL_EXTENDED_STATISTICS_QUERY: &str = "SELECT oid, \
+stxrelid::pg_catalog.regclass, stxnamespace::pg_catalog.regnamespace::pg_catalog.text AS nsp, \
+stxname, pg_catalog.pg_get_statisticsobjdef_columns(oid) AS columns, \
+'d' = any(stxkind) AS ndist_enabled, 'f' = any(stxkind) AS deps_enabled, \
+'m' = any(stxkind) AS mcv_enabled, stxstattarget \
+FROM pg_catalog.pg_statistic_ext WHERE stxrelid = 0 ORDER BY nsp, stxname";
+
+const PSQL_PUBLICATIONS_QUERY: &str = "SELECT pubname, NULL, NULL \
+FROM pg_catalog.pg_publication p JOIN pg_catalog.pg_publication_namespace pn \
+ON p.oid = pn.pnpubid JOIN pg_catalog.pg_class pc ON pc.relnamespace = pn.pnnspid \
+WHERE pc.oid = 0 AND pg_catalog.pg_relation_is_publishable(0) UNION \
+SELECT pubname, pg_get_expr(pr.prqual, c.oid), CASE WHEN pr.prattrs IS NOT NULL THEN \
+(SELECT string_agg(attname, ', ') FROM pg_catalog.generate_series(0, \
+pg_catalog.array_upper(pr.prattrs::pg_catalog.int2[], 1)) s, pg_catalog.pg_attribute \
+WHERE attrelid = pr.prrelid AND attnum = prattrs[s]) ELSE NULL END \
+FROM pg_catalog.pg_publication p JOIN pg_catalog.pg_publication_rel pr \
+ON p.oid = pr.prpubid JOIN pg_catalog.pg_class c ON c.oid = pr.prrelid \
+WHERE pr.prrelid = 0 UNION SELECT pubname, NULL, NULL \
+FROM pg_catalog.pg_publication p WHERE p.puballtables \
+AND pg_catalog.pg_relation_is_publishable(0) ORDER BY 1";
+
+const PSQL_INHERITANCE_PARENTS_QUERY: &str = "SELECT c.oid::pg_catalog.regclass \
+FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i \
+WHERE c.oid = i.inhparent AND i.inhrelid = 0 AND c.relkind != 'p' \
+AND c.relkind != 'I' ORDER BY inhseqno";
+
+const PSQL_PARTITION_CHILDREN_QUERY: &str = "SELECT c.oid::pg_catalog.regclass, \
+c.relkind, inhdetachpending, pg_catalog.pg_get_expr(c.relpartbound, c.oid) \
+FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i \
+WHERE c.oid = i.inhrelid AND i.inhparent = 0 \
+ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', \
+c.oid::pg_catalog.regclass::pg_catalog.text";
+
+const PSQL_EMPTY_ROW_SECURITY: &str = "SELECT CAST(NULL AS VARCHAR) AS polname, \
+CAST(NULL AS BOOLEAN) AS polpermissive, CAST(NULL AS VARCHAR) AS roles, \
+CAST(NULL AS VARCHAR) AS qual, CAST(NULL AS VARCHAR) AS withcheck, \
+CAST(NULL AS VARCHAR) AS cmd WHERE false";
+const PSQL_EMPTY_EXTENDED_STATISTICS: &str = "SELECT CAST(NULL AS UINTEGER) AS oid, \
+CAST(NULL AS UINTEGER) AS stxrelid, CAST(NULL AS VARCHAR) AS nsp, \
+CAST(NULL AS VARCHAR) AS stxname, CAST(NULL AS VARCHAR) AS columns, \
+CAST(NULL AS BOOLEAN) AS ndist_enabled, CAST(NULL AS BOOLEAN) AS deps_enabled, \
+CAST(NULL AS BOOLEAN) AS mcv_enabled, CAST(NULL AS SMALLINT) AS stxstattarget WHERE false";
+const PSQL_EMPTY_PUBLICATIONS: &str = "SELECT CAST(NULL AS VARCHAR) AS pubname, \
+CAST(NULL AS VARCHAR) AS rowfilter, CAST(NULL AS VARCHAR) AS columns WHERE false";
+const PSQL_EMPTY_INHERITANCE_PARENTS: &str = "SELECT CAST(NULL AS UINTEGER) AS oid WHERE false";
+const PSQL_EMPTY_PARTITION_CHILDREN: &str = "SELECT CAST(NULL AS UINTEGER) AS oid, \
+CAST(NULL AS VARCHAR) AS relkind, CAST(NULL AS BOOLEAN) AS inhdetachpending, \
+CAST(NULL AS VARCHAR) AS bound WHERE false";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PsqlEmptyDescribeQuery {
+    RowSecurityPolicies,
+    ExtendedStatistics,
+    Publications,
+    InheritanceParents,
+    PartitionChildren,
+}
+
+impl PsqlEmptyDescribeQuery {
+    const ALL: [Self; 5] = [
+        Self::RowSecurityPolicies,
+        Self::ExtendedStatistics,
+        Self::Publications,
+        Self::InheritanceParents,
+        Self::PartitionChildren,
+    ];
+
+    const fn expected(self) -> (&'static str, usize) {
+        match self {
+            Self::RowSecurityPolicies => (PSQL_ROW_SECURITY_POLICIES_QUERY, 1),
+            Self::ExtendedStatistics => (PSQL_EXTENDED_STATISTICS_QUERY, 1),
+            Self::Publications => (PSQL_PUBLICATIONS_QUERY, 4),
+            Self::InheritanceParents => (PSQL_INHERITANCE_PARENTS_QUERY, 1),
+            Self::PartitionChildren => (PSQL_PARTITION_CHILDREN_QUERY, 1),
+        }
+    }
+
+    const fn replacement_sql(self) -> &'static str {
+        match self {
+            Self::RowSecurityPolicies => PSQL_EMPTY_ROW_SECURITY,
+            Self::ExtendedStatistics => PSQL_EMPTY_EXTENDED_STATISTICS,
+            Self::Publications => PSQL_EMPTY_PUBLICATIONS,
+            Self::InheritanceParents => PSQL_EMPTY_INHERITANCE_PARENTS,
+            Self::PartitionChildren => PSQL_EMPTY_PARTITION_CHILDREN,
+        }
+    }
+
+    fn replacement_statement(self) -> PgWireResult<Statement> {
+        parse_single_statement(self.replacement_sql()).ok_or_else(|| {
+            user_error(
+                "XX000",
+                "invalid internal psql describe compatibility query",
+            )
+        })
+    }
+
+    fn result_hints(self) -> &'static [Option<PgTypeHint>] {
+        match self {
+            Self::RowSecurityPolicies => &[
+                Some(PgTypeHint::Name),
+                None,
+                Some(PgTypeHint::Text),
+                Some(PgTypeHint::Text),
+                Some(PgTypeHint::Text),
+                Some(PgTypeHint::Text),
+            ],
+            Self::ExtendedStatistics => &[
+                Some(PgTypeHint::Oid),
+                Some(PgTypeHint::Regclass),
+                Some(PgTypeHint::Text),
+                Some(PgTypeHint::Name),
+                Some(PgTypeHint::Text),
+                None,
+                None,
+                None,
+                None,
+            ],
+            Self::Publications => &[
+                Some(PgTypeHint::Name),
+                Some(PgTypeHint::Text),
+                Some(PgTypeHint::Text),
+            ],
+            Self::InheritanceParents => &[Some(PgTypeHint::Regclass)],
+            Self::PartitionChildren => &[
+                Some(PgTypeHint::Regclass),
+                Some(PgTypeHint::Char),
+                None,
+                Some(PgTypeHint::Text),
+            ],
+        }
+    }
+}
+
+fn psql_empty_describe_query(statement: &Statement) -> Option<PsqlEmptyDescribeQuery> {
+    PsqlEmptyDescribeQuery::ALL.into_iter().find(|query| {
+        let (expected, oid_literals) = query.expected();
+        normalized_psql_dynamic_oid_query(statement, oid_literals).is_some_and(|normalized| {
+            parse_single_statement(expected).is_some_and(|expected| normalized == expected)
+        })
+    })
+}
+
+fn psql_empty_describe_replacement(statement: &Statement) -> Option<PsqlEmptyDescribeQuery> {
+    PsqlEmptyDescribeQuery::ALL.into_iter().find(|query| {
+        parse_single_statement(query.replacement_sql())
+            .is_some_and(|expected| *statement == expected)
+    })
 }
 
 fn is_psql_catalog_query(
@@ -5766,6 +5940,21 @@ fn maintained_cast_hint(data_type: &sqlparser::ast::DataType) -> Option<PgTypeHi
 }
 
 fn annotate_catalog_result_schema(statement: &Statement, schema: &Schema) -> Schema {
+    if let Some(query) = psql_empty_describe_replacement(statement)
+        && query.result_hints().len() == schema.fields().len()
+    {
+        return Schema::new(
+            schema
+                .fields()
+                .iter()
+                .zip(query.result_hints())
+                .map(|(field, hint)| {
+                    hint.map(|hint| with_pg_type_hint(field.as_ref().clone(), hint))
+                        .unwrap_or_else(|| field.as_ref().clone())
+                })
+                .collect::<Vec<_>>(),
+        );
+    }
     let psql_column_properties =
         is_psql_column_properties_query(statement) && schema.fields().len() == 11;
     let aliases = top_level_catalog_aliases(statement);
@@ -7684,6 +7873,71 @@ mod tests {
             .is_err(),
             "modified incoming foreign-key shape must fail closed"
         );
+
+        for query in PsqlEmptyDescribeQuery::ALL {
+            let captured = match query {
+                PsqlEmptyDescribeQuery::RowSecurityPolicies => query
+                    .expected()
+                    .0
+                    .replace("pol.polrelid = 0", "pol.polrelid = '100000'"),
+                PsqlEmptyDescribeQuery::ExtendedStatistics => query
+                    .expected()
+                    .0
+                    .replace("stxrelid = 0", "stxrelid = '100000'"),
+                PsqlEmptyDescribeQuery::Publications => query
+                    .expected()
+                    .0
+                    .replace("pc.oid = 0", "pc.oid = '100000'")
+                    .replace(
+                        "pg_relation_is_publishable(0)",
+                        "pg_relation_is_publishable('100000')",
+                    )
+                    .replace("pr.prrelid = 0", "pr.prrelid = '100000'"),
+                PsqlEmptyDescribeQuery::InheritanceParents => query
+                    .expected()
+                    .0
+                    .replace("i.inhrelid = 0", "i.inhrelid = '100000'"),
+                PsqlEmptyDescribeQuery::PartitionChildren => query
+                    .expected()
+                    .0
+                    .replace("i.inhparent = 0", "i.inhparent = '100000'"),
+            };
+            let validated = validate_statement_with_catalog_identity(
+                &captured,
+                ProtocolMode::Extended,
+                true,
+                None,
+                None,
+            )
+            .unwrap_or_else(|error| panic!("captured psql {query:?}: {error}"));
+            assert_eq!(validated.ast, query.replacement_statement().unwrap());
+            assert!(
+                validate_statement_with_catalog_identity(
+                    &format!("{captured} LIMIT 1"),
+                    ProtocolMode::Extended,
+                    true,
+                    None,
+                    None,
+                )
+                .is_err(),
+                "modified psql {query:?} shape must fail closed"
+            );
+        }
+
+        let psql_not_null_constraints = "SELECT c.conname, a.attname, c.connoinherit, \
+            c.conislocal, c.coninhcount <> 0, c.convalidated \
+            FROM pg_catalog.pg_constraint c JOIN pg_catalog.pg_attribute a \
+            ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1] \
+            WHERE c.contype = 'n' AND c.conrelid = '100000'::pg_catalog.regclass \
+            ORDER BY a.attnum";
+        validate_statement_with_catalog_identity(
+            psql_not_null_constraints,
+            ProtocolMode::Extended,
+            true,
+            None,
+            None,
+        )
+        .expect("captured psql not-null constraints");
 
         for unsupported in [
             "SELECT relname FROM pg_catalog.pg_class",
