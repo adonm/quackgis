@@ -87,11 +87,16 @@ rest_credential_public_key=$("$keygen" --public-from "$edge/rest-credential.key"
 cluster_exists=false
 if kind get clusters | grep -qx quackgis; then
   cluster_exists=true
-  kind export kubeconfig --name quackgis --kubeconfig "$kubeconfig"
-  if ! kubectl --request-timeout=5s get --raw=/readyz >/dev/null 2>&1; then
-    printf 'kind_cluster_stale provider=%s cluster=quackgis action=recreate\n' \
-      "$KIND_EXPERIMENTAL_PROVIDER" >&2
-    kind delete cluster --name quackgis
+  stale_reason=
+  if ! kind export kubeconfig --name quackgis --kubeconfig "$kubeconfig"; then
+    stale_reason=kubeconfig-export
+  elif ! kubectl --request-timeout=5s get --raw=/readyz >/dev/null 2>&1; then
+    stale_reason=api-not-ready
+  fi
+  if [ -n "$stale_reason" ]; then
+    printf 'kind_cluster_stale provider=%s cluster=quackgis reason=%s action=recreate\n' \
+      "$KIND_EXPERIMENTAL_PROVIDER" "$stale_reason" >&2
+    kind delete cluster --name quackgis || true
     cluster_exists=false
   fi
 fi

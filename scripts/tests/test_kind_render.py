@@ -31,6 +31,8 @@ def main() -> None:
     assert "QUACKGIS_RUNTIME_LOAD_IMAGE" in up
     assert "QUACKGIS_CLIENT_LOAD_IMAGE" in up
     assert "kind_cluster_stale" in up
+    assert "reason=%s action=recreate" in up
+    assert "stale_reason=kubeconfig-export" in up
     assert "get --raw=/readyz" in up
     assert "kind_pod_replace" in up
     assert "kind_statefulset_replace" in up
