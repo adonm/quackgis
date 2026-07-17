@@ -20,6 +20,7 @@ use quackgis_server::engine_api::{
 use quackgis_server::pgwire_server::ServerOptions;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[path = "support/runtime.rs"]
 mod runtime;
@@ -1145,6 +1146,416 @@ async fn offline_recovery_profile() {
         backup_ms,
         restore_ms,
         restore_to_queryable_ms,
+        output_path.display()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires the pinned DuckDB ADBC runtime"]
+async fn mixed_release_workload_profile() {
+    const COPY_ROWS_PER_CYCLE: u64 = 100;
+    const COMPACTION_INTERVAL: u64 = 5;
+
+    let profile = MixedReleaseProfile::from_environment();
+    let output_path = std::env::var_os("QUACKGIS_PROFILE_OUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| ".tmp/duckdb-mixed-release/manifest.json".into());
+    let driver =
+        PathBuf::from(std::env::var_os("QUACKGIS_DUCKDB_ADBC_DRIVER").expect("set ADBC driver"));
+    let temp = tempfile::tempdir().expect("mixed release profile tempdir");
+    let catalog = temp.path().join("catalog.ducklake");
+    let data = temp.path().join("data");
+    let port = unused_local_port().await;
+    let metrics_port = unused_local_port().await;
+    let mut server = spawn_mixed_profile_server(&driver, &catalog, &data, port, metrics_port);
+    let (writer, writer_connection) = connect_profile_server(port, &mut server).await;
+    writer
+        .batch_execute(
+            "CREATE TABLE quackgis.main.mixed_release_profile(\
+             id BIGINT, phase VARCHAR, geom_wkb BLOB)",
+        )
+        .await
+        .expect("create mixed release data table");
+    writer
+        .batch_execute(
+            "CREATE TABLE quackgis.main.mixed_release_state(\
+             id INTEGER, copy_cycles BIGINT, last_id BIGINT)",
+        )
+        .await
+        .expect("create mixed release state table");
+    writer
+        .batch_execute(&format!(
+            "INSERT INTO quackgis.main.mixed_release_profile \
+             VALUES (1, 'baseline', from_hex('{COPY_WKB_HEX}'))"
+        ))
+        .await
+        .expect("insert mixed release baseline");
+    writer
+        .batch_execute("INSERT INTO quackgis.main.mixed_release_state VALUES (1, 0, 1)")
+        .await
+        .expect("insert mixed release state");
+    let state_update = writer
+        .prepare_typed(
+            "UPDATE quackgis.main.mixed_release_state \
+             SET copy_cycles = $1::BIGINT, last_id = $2::BIGINT WHERE id = 1",
+            &[
+                tokio_postgres::types::Type::INT8,
+                tokio_postgres::types::Type::INT8,
+            ],
+        )
+        .await
+        .expect("prepare mixed release state mutation");
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let reader_stop = Arc::clone(&stop);
+    let (reader, reader_connection) = connect_profile_client(port).await;
+    let reader_task = tokio::spawn(async move {
+        let mut samples = 0_u64;
+        let mut maximum_rows = 0_u64;
+        while !reader_stop.load(Ordering::Acquire) {
+            let row = reader
+                .query_one(
+                    "SELECT count(*)::BIGINT, sum(id)::BIGINT, \
+                     max(id)::BIGINT, sum(octet_length(geom_wkb))::BIGINT \
+                     FROM quackgis.main.mixed_release_profile",
+                    &[],
+                )
+                .await
+                .expect("mixed release reader query");
+            let count = u64::try_from(row.get::<_, i64>(0)).expect("non-negative row count");
+            let sum = u64::try_from(row.get::<_, i64>(1)).expect("non-negative ID sum");
+            let maximum = u64::try_from(row.get::<_, i64>(2)).expect("non-negative maximum ID");
+            let wkb_bytes =
+                u64::try_from(row.get::<_, i64>(3)).expect("non-negative WKB byte count");
+            assert_eq!(maximum, count, "mixed release IDs must stay contiguous");
+            assert_eq!(sum, count * (count + 1) / 2, "mixed release ID sum");
+            assert_eq!(wkb_bytes, count * COPY_WKB.len() as u64);
+            samples += 1;
+            maximum_rows = maximum_rows.max(count);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        drop(reader);
+        reader_connection.abort();
+        (samples, maximum_rows)
+    });
+
+    let cancellation_stop = Arc::clone(&stop);
+    let cancellation_task = tokio::spawn(async move {
+        let mut latencies_ms = Vec::new();
+        while !cancellation_stop.load(Ordering::Acquire) {
+            let (client, connection) = connect_profile_client(port).await;
+            let cancel = client.cancel_token();
+            let rows = client
+                .query_raw(
+                    "SELECT i::BIGINT FROM range(1000000000) AS mixed_cancel(i)",
+                    std::iter::empty::<&i32>(),
+                )
+                .await
+                .expect("open mixed release cancellation query");
+            futures::pin_mut!(rows);
+            rows.next()
+                .await
+                .expect("mixed release cancellation first row")
+                .expect("mixed release cancellation first result");
+            let started = Instant::now();
+            cancel
+                .cancel_query(tokio_postgres::NoTls)
+                .await
+                .expect("send mixed release cancellation");
+            let error = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match rows.next().await {
+                        Some(Ok(_)) => continue,
+                        Some(Err(error)) => break error,
+                        None => panic!("mixed release cancellation query completed"),
+                    }
+                }
+            })
+            .await
+            .expect("mixed release cancellation timeout");
+            assert_eq!(
+                error.code(),
+                Some(&tokio_postgres::error::SqlState::QUERY_CANCELED)
+            );
+            let quarantine = client
+                .query_one("SELECT 1::INTEGER", &[])
+                .await
+                .expect_err("mixed release cancelled session must be quarantined");
+            assert_eq!(
+                quarantine.code(),
+                Some(&tokio_postgres::error::SqlState::INTERNAL_ERROR)
+            );
+            latencies_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+            drop(client);
+            connection.abort();
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        latencies_ms
+    });
+
+    let rss_sampler = ProcessRssSampler::start(server.0.id());
+    let workload_started = Instant::now();
+    let deadline = workload_started + Duration::from_secs(profile.duration_seconds);
+    let mut copy_cycles = 0_u64;
+    let mut copied_rows = 0_u64;
+    let mut maintenance_cycles = 0_u64;
+    while Instant::now() < deadline || copy_cycles < COMPACTION_INTERVAL {
+        let first_id = copied_rows + 2;
+        let end_id = first_id + COPY_ROWS_PER_CYCLE;
+        let sink: tokio_postgres::CopyInSink<Bytes> = writer
+            .copy_in(
+                "COPY quackgis.main.mixed_release_profile \
+                 (id, phase, geom_wkb) FROM STDIN",
+            )
+            .await
+            .expect("start mixed release COPY");
+        let mut sink = Box::pin(sink);
+        let mut chunk = String::new();
+        for id in first_id..end_id {
+            chunk.push_str(&format!(
+                "{id}\tcycle-{}\t\\x{COPY_WKB_HEX}\n",
+                copy_cycles + 1
+            ));
+        }
+        sink.as_mut()
+            .send(Bytes::from(chunk))
+            .await
+            .expect("send mixed release COPY");
+        assert_eq!(
+            sink.as_mut()
+                .finish()
+                .await
+                .expect("finish mixed release COPY"),
+            COPY_ROWS_PER_CYCLE
+        );
+        copy_cycles += 1;
+        copied_rows += COPY_ROWS_PER_CYCLE;
+        let last_id = copied_rows + 1;
+        writer
+            .execute(&state_update, &[&(copy_cycles as i64), &(last_id as i64)])
+            .await
+            .expect("update mixed release state");
+        if copy_cycles.is_multiple_of(COMPACTION_INTERVAL) {
+            writer
+                .batch_execute(
+                    "CALL quackgis_merge_adjacent_files(\
+                     'public', 'mixed_release_profile', 8, 16777216, NULL)",
+                )
+                .await
+                .expect("compact mixed release data");
+            maintenance_cycles += 1;
+        }
+    }
+    let workload_ms = workload_started.elapsed().as_secs_f64() * 1000.0;
+    stop.store(true, Ordering::Release);
+    let (reader_samples, reader_maximum_rows) =
+        reader_task.await.expect("mixed release reader task");
+    let cancellation_latencies = cancellation_task
+        .await
+        .expect("mixed release cancellation task");
+    let rss = rss_sampler.finish().await;
+    assert!(
+        reader_samples > 0,
+        "mixed release reader produced no samples"
+    );
+    assert!(
+        !cancellation_latencies.is_empty(),
+        "mixed release cancellation produced no samples"
+    );
+    assert!(maintenance_cycles > 0);
+    assert!(
+        rss.delta <= profile.rss_budget_bytes,
+        "mixed release RSS delta {} MiB exceeded {} MiB",
+        rss.delta / MIB,
+        profile.rss_budget_bytes / MIB
+    );
+
+    let expected_count = copied_rows + 1;
+    let expected_sum = expected_count * (expected_count + 1) / 2;
+    let final_row = writer
+        .query_one(
+            "SELECT count(*)::BIGINT, sum(id)::BIGINT, \
+             sum(octet_length(geom_wkb))::BIGINT \
+             FROM quackgis.main.mixed_release_profile",
+            &[],
+        )
+        .await
+        .expect("query mixed release final state");
+    assert_eq!(final_row.get::<_, i64>(0), expected_count as i64);
+    assert_eq!(final_row.get::<_, i64>(1), expected_sum as i64);
+    assert_eq!(
+        final_row.get::<_, i64>(2),
+        (expected_count * COPY_WKB.len() as u64) as i64
+    );
+    let state = writer
+        .query_one(
+            "SELECT copy_cycles, last_id FROM quackgis.main.mixed_release_state WHERE id = 1",
+            &[],
+        )
+        .await
+        .expect("query mixed release mutation state");
+    assert_eq!(state.get::<_, i64>(0), copy_cycles as i64);
+    assert_eq!(state.get::<_, i64>(1), expected_count as i64);
+
+    let metrics = scrape_profile_metrics(metrics_port).await;
+    let cancellations_requested =
+        prometheus_u64(&metrics, "quackgis_cancellations_requested_total")
+            .expect("mixed release requested cancellation metric");
+    let cancellations_completed =
+        prometheus_u64(&metrics, "quackgis_cancellations_completed_total")
+            .expect("mixed release completed cancellation metric");
+    let cancellations_failed = prometheus_u64(&metrics, "quackgis_cancellations_failed_total")
+        .expect("mixed release failed cancellation metric");
+    let quarantined = prometheus_u64(&metrics, "quackgis_connections_quarantined_total")
+        .expect("mixed release quarantine metric");
+    let copy_completed = prometheus_u64(&metrics, "quackgis_copy_completed_total")
+        .expect("mixed release COPY completion metric");
+    let active_transactions = prometheus_u64(&metrics, "quackgis_transactions_active")
+        .expect("mixed release transaction metric");
+    let active_operations = prometheus_u64(&metrics, "quackgis_operations_active")
+        .expect("mixed release active operation metric");
+    let queued_operations = prometheus_u64(&metrics, "quackgis_operations_queued")
+        .expect("mixed release queued operation metric");
+    let maintenance_high_water = prometheus_labeled_u64(
+        &metrics,
+        "quackgis_operations_class_high_water",
+        "class",
+        "maintenance",
+    )
+    .expect("mixed release maintenance high water");
+    assert_eq!(cancellations_requested, cancellation_latencies.len() as u64);
+    assert_eq!(cancellations_completed, cancellation_latencies.len() as u64);
+    assert_eq!(cancellations_failed, 0);
+    assert_eq!(quarantined, cancellation_latencies.len() as u64);
+    assert_eq!(copy_completed, copy_cycles);
+    assert_eq!(active_transactions, 0);
+    assert_eq!(active_operations, 0);
+    assert_eq!(queued_operations, 0);
+    assert_eq!(maintenance_high_water, 1);
+    let cancellation_summary = latency_summary(&cancellation_latencies);
+
+    drop(writer);
+    writer_connection.abort();
+    stop_profile_server(&mut server).await;
+    let restart_started = Instant::now();
+    let restart_port = unused_local_port().await;
+    let mut restarted_server = spawn_profile_server(&driver, &catalog, &data, restart_port);
+    let (restarted, restarted_connection) =
+        connect_profile_server(restart_port, &mut restarted_server).await;
+    let restart_to_queryable_ms = restart_started.elapsed().as_secs_f64() * 1000.0;
+    assert!(restart_to_queryable_ms <= profile.restart_budget_ms);
+    let reopened = restarted
+        .query_one(
+            "SELECT count(*)::BIGINT, sum(id)::BIGINT \
+             FROM quackgis.main.mixed_release_profile",
+            &[],
+        )
+        .await
+        .expect("query restarted mixed release state");
+    assert_eq!(reopened.get::<_, i64>(0), expected_count as i64);
+    assert_eq!(reopened.get::<_, i64>(1), expected_sum as i64);
+    let post_restart_id = expected_count + 1;
+    restarted
+        .batch_execute(&format!(
+            "INSERT INTO quackgis.main.mixed_release_profile \
+             VALUES ({post_restart_id}, 'after-restart', from_hex('{COPY_WKB_HEX}'))"
+        ))
+        .await
+        .expect("mixed release post-restart write");
+    let post_restart_count = restarted
+        .query_one(
+            "SELECT count(*)::BIGINT FROM quackgis.main.mixed_release_profile",
+            &[],
+        )
+        .await
+        .expect("mixed release post-restart count")
+        .get::<_, i64>(0);
+    assert_eq!(post_restart_count, (expected_count + 1) as i64);
+    drop(restarted);
+    restarted_connection.abort();
+    stop_profile_server(&mut restarted_server).await;
+
+    let evidence = EvidenceEnvelope::collect(
+        EvidenceProfile::new(
+            format!(
+                "duckdb-mixed-release-{}-s{}-v1",
+                profile.level.as_str(),
+                profile.duration_seconds
+            ),
+            profile.level,
+            profile.environment,
+            "actual server process runs atomic COPY, ordinary mutation, exact concurrent reads, repeated native cancellation/quarantine, and official compaction for the configured duration, proves idle resource/transaction state, restarts on the same paths, and accepts another write",
+        ),
+        json!({
+            "target_duration_seconds": profile.duration_seconds,
+            "copy_rows_per_cycle": COPY_ROWS_PER_CYCLE,
+            "copy_cycles": copy_cycles,
+            "copied_rows": copied_rows,
+            "maintenance_cycles": maintenance_cycles,
+            "final_rows_before_restart": expected_count,
+            "final_id_sum_before_restart": expected_sum,
+        }),
+        json!({
+            "all_reader_snapshots_exact": true,
+            "reader_samples": reader_samples,
+            "reader_maximum_rows": reader_maximum_rows,
+            "copy_rows_exact": true,
+            "mutation_state_exact": true,
+            "cancellations_requested": cancellations_requested,
+            "cancellations_completed": cancellations_completed,
+            "cancellations_failed": cancellations_failed,
+            "cancelled_sessions_quarantined": quarantined,
+            "compactions_completed": maintenance_cycles,
+            "active_transactions_after_workload": active_transactions,
+            "active_operations_after_workload": active_operations,
+            "queued_operations_after_workload": queued_operations,
+            "restart_state_exact": true,
+            "post_restart_write_succeeded": true,
+            "post_restart_count": post_restart_count,
+        }),
+        json!({
+            "workload_ms": workload_ms,
+            "copy_completed": copy_completed,
+            "cancellation_latency_ms": latency_json(&cancellation_summary),
+            "process_rss": {
+                "initial_bytes": rss.idle,
+                "peak_bytes": rss.peak,
+                "final_bytes": rss.final_value,
+                "delta_bytes": rss.delta,
+                "samples": rss.samples,
+            },
+            "maintenance_high_water": maintenance_high_water,
+            "restart_to_queryable_ms": restart_to_queryable_ms,
+        }),
+        json!({
+            "duration_min_seconds": profile.duration_seconds,
+            "reader_samples_min": 1,
+            "copy_cycles_min": COMPACTION_INTERVAL,
+            "cancellations_min": 1,
+            "maintenance_cycles_min": 1,
+            "cancellation_failures_max": 0,
+            "active_transactions_after_workload_max": 0,
+            "active_operations_after_workload_max": 0,
+            "queued_operations_after_workload_max": 0,
+            "process_rss_delta_max_bytes": profile.rss_budget_bytes,
+            "restart_to_queryable_max_ms": profile.restart_budget_ms,
+            "reference_duration_seconds": 86_400,
+        }),
+    )
+    .expect("collect mixed release evidence");
+    evidence
+        .write(&output_path)
+        .expect("write mixed release evidence");
+    println!(
+        "duckdb_mixed_release_profile_ok duration_ms={:.3} copies={} rows={} reads={} cancels={} maintenance={} rss_delta_mib={} restart_ms={:.3} out={}",
+        workload_ms,
+        copy_cycles,
+        copied_rows,
+        reader_samples,
+        cancellation_latencies.len(),
+        maintenance_cycles,
+        rss.delta / MIB,
+        restart_to_queryable_ms,
         output_path.display()
     );
 }
@@ -2302,6 +2713,14 @@ struct RecoveryProfile {
     restart_budget_ms: f64,
 }
 
+struct MixedReleaseProfile {
+    level: EvidenceLevel,
+    environment: ExecutionEnvironment,
+    duration_seconds: u64,
+    rss_budget_bytes: u64,
+    restart_budget_ms: f64,
+}
+
 struct TlsRotationProfile {
     level: EvidenceLevel,
     environment: ExecutionEnvironment,
@@ -2455,6 +2874,55 @@ impl RecoveryProfile {
         Self {
             level,
             environment,
+            restart_budget_ms: 60_000.0,
+        }
+    }
+}
+
+impl MixedReleaseProfile {
+    fn from_environment() -> Self {
+        let level = EvidenceLevel::parse(
+            &std::env::var("QUACKGIS_EVIDENCE_LEVEL").unwrap_or_else(|_| "smoke".to_owned()),
+        )
+        .expect("valid evidence level");
+        assert_ne!(
+            level,
+            EvidenceLevel::External,
+            "external evidence is not local"
+        );
+        let environment = ExecutionEnvironment::parse(
+            &std::env::var("QUACKGIS_EXECUTION_ENVIRONMENT")
+                .unwrap_or_else(|_| "host_process".to_owned()),
+        )
+        .expect("valid execution environment");
+        let default_duration_seconds = match level {
+            EvidenceLevel::Smoke => 3,
+            EvidenceLevel::Local => 300,
+            EvidenceLevel::Reference => 86_400,
+            EvidenceLevel::External => unreachable!("external rejected above"),
+        };
+        let duration_seconds = std::env::var("QUACKGIS_PROFILE_DURATION_SECONDS")
+            .map(|value| value.parse::<u64>().expect("integer profile duration"))
+            .unwrap_or(default_duration_seconds);
+        assert!(
+            (1..=86_400).contains(&duration_seconds),
+            "mixed release duration must be between 1 second and 24 hours"
+        );
+        if level == EvidenceLevel::Reference {
+            assert_eq!(
+                duration_seconds, 86_400,
+                "reference mixed release profile requires 24 hours"
+            );
+        }
+        Self {
+            level,
+            environment,
+            duration_seconds,
+            rss_budget_bytes: match level {
+                EvidenceLevel::Smoke => 512 * MIB,
+                EvidenceLevel::Local | EvidenceLevel::Reference => 256 * MIB,
+                EvidenceLevel::External => unreachable!("external rejected above"),
+            },
             restart_budget_ms: 60_000.0,
         }
     }
@@ -2630,6 +3098,23 @@ struct RssSample {
     delta: u64,
 }
 
+struct ProcessRssSampler {
+    pid: u32,
+    idle: u64,
+    peak: Arc<AtomicU64>,
+    samples: Arc<AtomicU64>,
+    sampling: Arc<AtomicBool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+struct ProcessRssSample {
+    idle: u64,
+    peak: u64,
+    final_value: u64,
+    delta: u64,
+    samples: u64,
+}
+
 struct ResourceSampler {
     storage: Arc<quackgis_server::duckdb_adbc_storage::DuckDbAdbcStorage>,
     memory_initial: u64,
@@ -2681,6 +3166,51 @@ impl RssSampler {
             idle: self.idle,
             peak,
             delta: peak.saturating_sub(self.idle),
+        }
+    }
+}
+
+impl ProcessRssSampler {
+    fn start(pid: u32) -> Self {
+        let idle = process_rss_bytes_for(pid).expect("profile server RSS");
+        let peak = Arc::new(AtomicU64::new(idle));
+        let samples = Arc::new(AtomicU64::new(1));
+        let sampling = Arc::new(AtomicBool::new(true));
+        let sampler_peak = Arc::clone(&peak);
+        let sampler_samples = Arc::clone(&samples);
+        let sampler_sampling = Arc::clone(&sampling);
+        let task = tokio::spawn(async move {
+            while sampler_sampling.load(Ordering::Acquire) {
+                if let Some(rss) = process_rss_bytes_for(pid) {
+                    sampler_peak.fetch_max(rss, Ordering::Relaxed);
+                    sampler_samples.fetch_add(1, Ordering::Relaxed);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        Self {
+            pid,
+            idle,
+            peak,
+            samples,
+            sampling,
+            task,
+        }
+    }
+
+    async fn finish(self) -> ProcessRssSample {
+        self.sampling.store(false, Ordering::Release);
+        self.task.await.expect("profile server RSS sampler");
+        let final_value = process_rss_bytes_for(self.pid).expect("final profile server RSS");
+        self.peak.fetch_max(final_value, Ordering::Relaxed);
+        self.samples.fetch_add(1, Ordering::Relaxed);
+        let peak = self.peak.load(Ordering::Relaxed);
+        ProcessRssSample {
+            idle: self.idle,
+            peak,
+            final_value,
+            delta: peak.saturating_sub(self.idle),
+            samples: self.samples.load(Ordering::Relaxed),
         }
     }
 }
@@ -3344,7 +3874,11 @@ fn copy_text_chunk(start: u64, rows: u64, max_bytes: usize) -> (String, u64) {
 }
 
 fn process_rss_bytes() -> Option<u64> {
-    let contents = std::fs::read_to_string("/proc/self/status").ok()?;
+    process_rss_bytes_for(std::process::id())
+}
+
+fn process_rss_bytes_for(pid: u32) -> Option<u64> {
+    let contents = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
     let kib = contents.lines().find_map(|line| {
         let value = line.strip_prefix("VmRSS:")?;
         value.split_whitespace().next()?.parse::<u64>().ok()
@@ -3441,6 +3975,35 @@ fn spawn_profile_server(
             .stderr(std::process::Stdio::null())
             .spawn()
             .expect("spawn profile server"),
+    )
+}
+
+fn spawn_mixed_profile_server(
+    driver: &std::path::Path,
+    catalog: &std::path::Path,
+    data: &std::path::Path,
+    port: u16,
+    metrics_port: u16,
+) -> ChildGuard {
+    ChildGuard(
+        std::process::Command::new(env!("CARGO_BIN_EXE_quackgis-server"))
+            .arg("--duckdb-driver")
+            .arg(driver)
+            .arg("--catalog-path")
+            .arg(catalog)
+            .arg("--data-path")
+            .arg(data)
+            .arg("--host=127.0.0.1")
+            .arg(format!("--port={port}"))
+            .arg("--metrics-host=127.0.0.1")
+            .arg(format!("--metrics-port={metrics_port}"))
+            .arg("--maintenance-user=postgres")
+            .arg("--shutdown-timeout-ms=1000")
+            .arg("--statement-timeout-ms=30000")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn mixed release profile server"),
     )
 }
 
@@ -3594,6 +4157,28 @@ async fn stop_profile_server(child: &mut ChildGuard) -> std::process::ExitStatus
     let status = wait_for_child(child, Duration::from_secs(10)).await;
     assert!(status.success(), "profile server exit: {status}");
     status
+}
+
+async fn scrape_profile_metrics(port: u16) -> String {
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("connect profile metrics");
+    stream
+        .write_all(b"GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .await
+        .expect("write profile metrics request");
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .await
+        .expect("read profile metrics response");
+    let response = String::from_utf8(response).expect("profile metrics UTF-8");
+    assert!(response.starts_with("HTTP/1.1 200 OK"));
+    response
+        .split_once("\r\n\r\n")
+        .expect("profile metrics HTTP body")
+        .1
+        .to_owned()
 }
 
 #[test]
