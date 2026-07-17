@@ -1985,8 +1985,12 @@ fn validate_statement_with_catalog_identity(
     let mut statement = statements.pop().expect("one parsed statement");
     let psql_relation_properties = is_psql_relation_properties_query(&statement);
     let psql_column_properties = is_psql_column_properties_query(&statement);
+    let psql_incoming_foreign_keys = is_psql_incoming_foreign_keys_query(&statement);
     if psql_relation_properties {
         rewrite_psql_relation_properties(&mut statement);
+    }
+    if psql_incoming_foreign_keys {
+        rewrite_select_filter_false(&mut statement);
     }
     if let Some(function) = unsupported_spatial_function(&statement) {
         return Err(user_error(
@@ -4615,6 +4619,52 @@ WHERE a.attrelid = 0 AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum";
 
 fn is_psql_column_properties_query(statement: &Statement) -> bool {
     is_psql_catalog_query(statement, PSQL_COLUMN_PROPERTIES_QUERY, "a", "attrelid")
+}
+
+const PSQL_INCOMING_FOREIGN_KEYS_QUERY: &str = "SELECT conname, \
+conrelid::pg_catalog.regclass AS ontable, \
+pg_catalog.pg_get_constraintdef(oid, true) AS condef \
+FROM pg_catalog.pg_constraint c WHERE confrelid IN \
+(SELECT pg_catalog.pg_partition_ancestors(0) UNION ALL \
+VALUES (0::pg_catalog.regclass)) AND contype = 'f' AND conparentid = 0 \
+ORDER BY conname";
+
+fn is_psql_incoming_foreign_keys_query(statement: &Statement) -> bool {
+    let mut normalized = statement.clone();
+    let mut oid_literals = 0usize;
+    let _: ControlFlow<()> = visit_expressions_mut(&mut normalized, |expression| {
+        let Expr::Value(value) = expression else {
+            return ControlFlow::Continue(());
+        };
+        let relation_oid = match &value.value {
+            Value::Number(relation_oid, false) | Value::SingleQuotedString(relation_oid) => {
+                relation_oid
+            }
+            _ => return ControlFlow::Continue(()),
+        };
+        if relation_oid
+            .parse::<u32>()
+            .ok()
+            .is_some_and(|oid| oid >= crate::postgres_compat::DYNAMIC_OBJECT_OID_START)
+        {
+            *expression = Expr::Value(Value::Number("0".to_owned(), false).into());
+            oid_literals += 1;
+        }
+        ControlFlow::Continue(())
+    });
+    oid_literals == 2
+        && Parser::parse_sql(&PostgreSqlDialect {}, PSQL_INCOMING_FOREIGN_KEYS_QUERY)
+            .ok()
+            .and_then(|mut expected| (expected.len() == 1).then(|| expected.remove(0)))
+            .is_some_and(|expected| normalized == expected)
+}
+
+fn rewrite_select_filter_false(statement: &mut Statement) {
+    if let Statement::Query(query) = statement
+        && let SetExpr::Select(select) = query.body.as_mut()
+    {
+        select.selection = Some(Expr::Value(Value::Boolean(false).into()));
+    }
 }
 
 fn is_psql_catalog_query(
@@ -7605,6 +7655,35 @@ mod tests {
                 "modified column-properties shape must fail closed"
             );
         }
+
+        let psql_incoming_foreign_keys = PSQL_INCOMING_FOREIGN_KEYS_QUERY
+            .replacen(
+                "pg_partition_ancestors(0)",
+                "pg_partition_ancestors('100000')",
+                1,
+            )
+            .replacen("VALUES (0::", "VALUES ('100000'::", 1);
+        let incoming_foreign_keys = validate_statement_with_catalog_identity(
+            &psql_incoming_foreign_keys,
+            ProtocolMode::Extended,
+            true,
+            None,
+            None,
+        )
+        .expect("captured psql incoming foreign keys");
+        assert!(incoming_foreign_keys.sql.contains("WHERE false"));
+        assert!(!incoming_foreign_keys.sql.contains("pg_partition_ancestors"));
+        assert!(
+            validate_statement_with_catalog_identity(
+                &psql_incoming_foreign_keys.replace("conparentid = 0", "conparentid >= 0"),
+                ProtocolMode::Extended,
+                true,
+                None,
+                None,
+            )
+            .is_err(),
+            "modified incoming foreign-key shape must fail closed"
+        );
 
         for unsupported in [
             "SELECT relname FROM pg_catalog.pg_class",
