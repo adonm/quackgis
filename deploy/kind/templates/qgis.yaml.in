@@ -1,0 +1,116 @@
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: Secret
+metadata:
+  name: quackgis-kind-qgis-tls
+  namespace: quackgis
+type: kubernetes.io/tls
+data:
+  tls.crt: @@CLIENT_TLS_CERTIFICATE@@
+  tls.key: @@CLIENT_TLS_PRIVATE_KEY@@
+  ca.crt: @@TLS_CA_CERTIFICATE@@
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: quackgis-qgis
+  namespace: quackgis
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: quackgis-qgis
+    spec:
+      restartPolicy: Never
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: qgis
+          image: "@@QGIS_IMAGE@@"
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-ceu"]
+          args:
+            - |-
+              export HOME=/tmp/qgis-home
+              export QT_QPA_PLATFORM=offscreen
+              mkdir -p "$HOME/.postgresql"
+              cp /etc/quackgis/tls/ca.crt "$HOME/.postgresql/root.crt"
+              cp /etc/quackgis/tls/tls.crt "$HOME/.postgresql/postgresql.crt"
+              cp /etc/quackgis/tls/tls.key "$HOME/.postgresql/postgresql.key"
+              chmod 600 "$HOME/.postgresql/postgresql.key"
+              python3 - <<'PY'
+              from qgis.core import Qgis, QgsApplication, QgsDataSourceUri, QgsFeatureRequest, QgsVectorLayer
+
+              assert Qgis.QGIS_VERSION == "3.44.11-Solothurn", Qgis.QGIS_VERSION
+              app = QgsApplication([], False)
+              app.initQgis()
+              try:
+                  uri = QgsDataSourceUri()
+                  uri.setConnection(
+                      "quackgis.quackgis.svc.cluster.local",
+                      "5432",
+                      "quackgis",
+                      "postgres",
+                      "",
+                      QgsDataSourceUri.SslVerifyFull,
+                  )
+                  uri.setUseEstimatedMetadata(True)
+                  uri.setDataSource(
+                      "",
+                      "(SELECT id, name, geom_wkb FROM public.kind_psycopg_points)",
+                      "geom_wkb",
+                      "",
+                      "id",
+                  )
+                  layer = QgsVectorLayer(uri.uri(False), "kind_psycopg_points", "postgres")
+                  assert layer.isValid(), layer.error().message()
+                  fields = [field.name() for field in layer.fields()]
+                  assert fields == ["id", "name"], fields
+                  assert layer.featureCount() == 2
+                  features = list(layer.getFeatures(QgsFeatureRequest().setLimit(2)))
+                  values = sorted(
+                      (
+                          feature["id"],
+                          feature["name"],
+                          feature.geometry().asWkt() if feature.hasGeometry() else None,
+                      )
+                      for feature in features
+                  )
+                  assert values == [(1, "one", "Point (1 2)"), (2, None, None)], values
+                  print(
+                      "qgis_query_layer_ok version=%s rows=2 geometry=point-null key=id"
+                      % Qgis.QGIS_VERSION
+                  )
+              finally:
+                  app.exitQgis()
+              PY
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/quackgis/tls
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: quackgis-kind-qgis-tls
+            defaultMode: 288

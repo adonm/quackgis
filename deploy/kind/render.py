@@ -15,6 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 TEMPLATES = ROOT / "templates"
 IMAGE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
+QGIS_IMAGE = "docker.io/qgis/qgis@sha256:aa55ce7f4b87d8fd28accc51658fe550667865c2ed088778c35915c2b4347587"
 EXPECTED_PLACEHOLDERS = {
     "runtime.yaml.in": {
         "@@RUNTIME_IMAGE@@",
@@ -50,6 +51,12 @@ EXPECTED_PLACEHOLDERS = {
         "@@CLIENT_TLS_CERTIFICATE@@",
         "@@CLIENT_TLS_PRIVATE_KEY@@",
     },
+    "qgis.yaml.in": {
+        "@@QGIS_IMAGE@@",
+        "@@TLS_CA_CERTIFICATE@@",
+        "@@CLIENT_TLS_CERTIFICATE@@",
+        "@@CLIENT_TLS_PRIVATE_KEY@@",
+    },
 }
 
 
@@ -67,6 +74,7 @@ def check_templates() -> None:
     clients = (TEMPLATES / "clients.yaml.in").read_text(encoding="utf-8")
     rest = (TEMPLATES / "rest.yaml.in").read_text(encoding="utf-8")
     seed = (TEMPLATES / "rest-seed.yaml.in").read_text(encoding="utf-8")
+    qgis = (TEMPLATES / "qgis.yaml.in").read_text(encoding="utf-8")
     for required in [
         "kind: StatefulSet",
         "replicas: 1",
@@ -122,10 +130,20 @@ def check_templates() -> None:
     for required in ["name: quackgis-rest-seed", "kind_rest_points", "kind_rest_seed_ok"]:
         if required not in seed:
             raise ValueError(f"REST seed template is missing {required!r}")
+    for required in [
+        "name: quackgis-qgis",
+        "3.44.11-Solothurn",
+        "qgis_query_layer_ok",
+        "QgsDataSourceUri.SslVerifyFull",
+        "public.kind_psycopg_points",
+    ]:
+        if required not in qgis:
+            raise ValueError(f"QGIS template is missing {required!r}")
     if core.count("publishNotReadyAddresses: true") != 1:
         raise ValueError("only the internal edge Service may publish unready addresses")
     forbidden = ["datafusion", "sedona", "linkerd", "minio", "postgresql"]
-    combined = f"{core}\n{clients}\n{rest}\n{seed}".lower()
+    qgis_topology = qgis.replace("postgresql", "")
+    combined = f"{core}\n{clients}\n{rest}\n{seed}\n{qgis_topology}".lower()
     present = [value for value in forbidden if value in combined]
     if present:
         raise ValueError(f"retired/deferred topology names present: {present}")
@@ -159,6 +177,7 @@ def render(args: argparse.Namespace) -> None:
     substitutions = {
         "@@RUNTIME_IMAGE@@": runtime_image,
         "@@CLIENT_IMAGE@@": client_image,
+        "@@QGIS_IMAGE@@": pinned_image(QGIS_IMAGE, "QGIS image"),
         "@@TLS_CERTIFICATE@@": encoded(tls_dir / "tls.crt"),
         "@@TLS_PRIVATE_KEY@@": encoded(tls_dir / "tls.key"),
         "@@TLS_CA_CERTIFICATE@@": encoded(tls_dir / "ca.crt"),
@@ -188,6 +207,7 @@ def render(args: argparse.Namespace) -> None:
         ("rest-seed.yaml.in", "rest-seed.yaml"),
         ("rest.yaml.in", "rest.yaml"),
         ("clients.yaml.in", "clients.yaml"),
+        ("qgis.yaml.in", "qgis.yaml"),
     ]:
         text = (TEMPLATES / source_name).read_text(encoding="utf-8")
         for marker, value in substitutions.items():
@@ -232,7 +252,7 @@ def main() -> None:
     args = parser().parse_args()
     if args.check:
         check_templates()
-        print("kind_template_check_ok topology=duckdb-only clients=6 copied_data=psycopg,ogr")
+        print("kind_template_check_ok topology=duckdb-only clients=6 optional=qgis copied_data=psycopg,ogr")
         return
     missing = [
         option

@@ -573,6 +573,16 @@ kind-client-gates:
     done; \
     deploy/kind/rest-gates.sh
 
+# Run the normal copied-data matrix, then qualify the pinned headless QGIS provider.
+kind-qgis-gate: kind-client-gates
+    @set -eu; export KUBECONFIG="${KUBECONFIG:-$PWD/.tmp/kind/kubeconfig}"; \
+    kubectl delete -f .tmp/kind/rendered/qgis.yaml --ignore-not-found >/dev/null; \
+    kubectl apply -f .tmp/kind/rendered/qgis.yaml; \
+    if ! kubectl -n quackgis wait --for=condition=complete job/quackgis-qgis --timeout=5m; then \
+      kubectl -n quackgis logs job/quackgis-qgis --all-containers=true || true; exit 1; \
+    fi; \
+    kubectl -n quackgis logs job/quackgis-qgis --all-containers=true
+
 # Prove both REST Pods, role denial, Service endpoints, and one-Pod failover.
 kind-rest-gates:
     deploy/kind/rest-gates.sh

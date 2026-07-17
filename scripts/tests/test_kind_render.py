@@ -98,7 +98,8 @@ def main() -> None:
         clients = (output / "clients.yaml").read_text(encoding="utf-8")
         rest = (output / "rest.yaml").read_text(encoding="utf-8")
         seed = (output / "rest-seed.yaml").read_text(encoding="utf-8")
-        assert "@@" not in rendered + clients + rest + seed
+        qgis = (output / "qgis.yaml").read_text(encoding="utf-8")
+        assert "@@" not in rendered + clients + rest + seed + qgis
         assert digest in rendered
         assert "Ym9vdHN0cmFwLXNlY3JldA==" in rendered
         assert '"listen": "0.0.0.0:5432"' in rendered
@@ -126,6 +127,11 @@ def main() -> None:
         assert "psql_describe_copied_data_ok" in clients
         assert "psycopg_copied_data_ok" in clients
         assert "ogr_copied_data_ok" in clients
+        assert "qgis_query_layer_ok" in qgis
+        assert "3.44.11-Solothurn" in qgis
+        assert "public.kind_psycopg_points" in qgis
+        assert "QgsDataSourceUri.SslVerifyFull" in qgis
+        assert "@sha256:" in qgis
         assert "ogr_direct_discovery_ok" in clients
         assert 'ST_GeomFromWKB(geom_wkb) AS "ST_AsEWKB"' in clients
         assert "kind_psycopg_points" in clients
