@@ -387,6 +387,30 @@ bytes, memory, spill, cancellation, files and bytes scanned, candidate/exact row
 ingest throughput, transaction/conflict outcomes, and quarantined connections.
 Never expose SQL text, parameters, credentials, or object paths in metrics.
 
+## PostGIS migration path
+
+Migration has two products with different dependency floors:
+
+- **G0 offline snapshot** follows bounded COPY and catalog/type preflight. A small
+  migrator holds source PostgreSQL credentials, reads one repeatable-read PostGIS
+  snapshot, and writes only through the packaged iroh tiny client. It has no
+  DuckDB, ADBC, object-store credentials, or DuckLake metadata access. Every
+  source schema/type/geometry/security feature is migrated, explicitly mapped, or
+  rejected before publication; exact counts/checksums/spatial summaries and named
+  client reads gate cutover.
+- **G1 online catch-up** waits for M6 durable control metadata, shared DuckLake,
+  and worker fencing. One PostgreSQL logical slot exports the initial snapshot and
+  start LSN. Durable source/LSN batch identity makes at-least-once decoding
+  idempotent across target commit response loss; it is not described as
+  distributed exactly-once commit. Supported UPDATE/DELETE tables require a real
+  source replica identity, DDL stops apply, and cutover freezes PostGIS writes only
+  long enough to drain to a declared final LSN and rerun G0 verification.
+
+PostGIS remains the read-only rollback source for a timed window. The first
+release has no dual-write, reverse replication, physical PostgreSQL replication,
+or implicit migration of RLS, triggers, functions, roles/passwords, unsupported
+types, or unsupported CRS/dimension semantics.
+
 ## Capability and claim policy
 
 A capability is supported only when it:

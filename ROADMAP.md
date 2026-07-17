@@ -76,15 +76,22 @@ prerequisites.
 6. **H0 — role-aware HTTP:** migrate schema discovery and OpenAPI to the common
    catalog/authorization boundary, route the sidecar through the tiny client, then
    package multiple stateless replicas.
-7. **P0 — M4 host profiles:** conservative predicate/layout work followed by two
+7. **G0 — offline PostGIS migration:** inventory and fail-closed schema preflight,
+   one consistent read-only source snapshot, bounded COPY through the packaged
+   tiny client, exact verification, and an auditable cutover report.
+8. **P0 — M4 host profiles:** conservative predicate/layout work followed by two
    10M runs; introduce 100M only after those runs pass.
-8. **K1 — operations and shared rehearsal:** termination, rotation, upgrade,
+9. **K1 — operations and shared rehearsal:** termination, rotation, upgrade,
    recovery, mixed workload and soak locally; PostgreSQL/MinIO shared-profile
    rehearsal begins only after Local 1.0 closes.
-9. **I1 — shared iroh cluster:** durable user/control metadata, one-time client
+10. **I1 — shared iroh cluster:** durable user/control metadata, one-time client
    pairing, a tiny desktop/serverless client, one-credential/one-worker affinity,
    bounded bootstrap/worker gossip, complete shared-DuckLake workers, and common
    pgwire/HTTP delivery. It builds on I0 and begins after Local 1.0 closes.
+11. **G1 — online PostGIS catch-up/cutover:** after shared control/storage is
+    proven, pair one replication-slot snapshot with ordered logical changes,
+    durable source-LSN checkpoints, idempotent DuckLake microbatches, lag and
+    response-loss reconciliation, and an explicit source-freeze cutover.
 
 ## Baseline
 
@@ -394,6 +401,71 @@ Exit gates:
 - two consecutive 100M runs publish and satisfy committed load, first-row,
   p50/p95/p99, RSS, spill, scan-byte, file, row-group, and plan budgets.
 
+## G0 — offline PostGIS migration
+
+**Outcome:** an operator can move a declared supported PostGIS dataset into a
+fresh QuackGIS root without hand-written export SQL, partial publication, or
+silent semantic loss.
+
+G0 may proceed after M2 COPY and the required C0 catalog/type identity slices are
+stable. It is independent from online replication and does not require M6 shared
+storage. The first slice may reject keys, CRS, dimensions, or scalar types whose
+target semantics are not yet authoritative; rejection is preferable to
+normalizing them silently.
+
+Deliver:
+
+- a version-pinned PostgreSQL/PostGIS source connector that opens one read-only
+  repeatable-read snapshot, records source server/database identity and snapshot
+  time, and never requires a QuackGIS worker to hold source credentials;
+- a client-neutral preflight inventory for schemas, tables, columns, scalar and
+  geometry/geography types, typmods, SRIDs, dimensions, primary/unique replica
+  identity, defaults, NOT NULL, comments, row counts, estimated bytes, roles and
+  unsupported objects, with an explicit migrate/map/reject disposition for every
+  item;
+- explicit configuration for schema/table selection, target names, role/grant
+  mapping, and any approved lossy conversion; RLS, triggers, functions, views,
+  sequences, extensions, and role passwords are not copied implicitly;
+- target creation only through supported QuackGIS/DuckLake catalog operations,
+  followed by bounded source `COPY (SELECT ...) TO STDOUT` to target `COPY FROM
+  STDIN` streams through the packaged iroh tiny client; the migrator stores no
+  DuckDB, ADBC, object-store credential, or private DuckLake metadata knowledge;
+- canonical conversion for the release scalar set plus exact WKB/EWKB/NULL
+  handling. Nonzero/mixed SRID, Z/M, geography, curve, raster, or key semantics
+  remain rejected until the maintained target catalog can represent them
+  truthfully;
+- staging under a fresh target namespace/root with no partial release visibility,
+  bounded progress/checkpoint metadata, safe retry before promotion, and explicit
+  cleanup after failure;
+- exact source/target row counts, canonical per-column checksums, NULL counts,
+  key duplicate checks where keys are declared, geometry family/SRID/dimension/
+  validity counts, extents, and deterministic samples; and
+- a path-free migration report naming source identity/version, target
+  source/runtime digests, snapshot, mappings/rejections, rows/bytes, checksums,
+  duration, errors, and final promotion decision.
+
+Exit gates:
+
+- a pinned PostGIS fixture covering every release scalar, Point/NULL WKB,
+  defaults/comments/NOT-NULL, multiple schemas, and deliberately unsupported
+  objects either migrates exactly or fails in preflight before target publication;
+- source writes concurrent with the copy cannot enter the repeatable-read
+  snapshot, and every target row comes from that one snapshot;
+- interruption before promotion leaves no visible release, retry into a fresh
+  staging target produces the same checksums, and promotion is one explicit
+  operator decision;
+- all accepted tables match exact counts, canonical checksums, NULL disposition,
+  geometry bytes/metadata, extents, and deterministic samples after target reopen;
+- copied-data psql, psycopg, OGR, and the maintained QGIS read workflow enter only
+  through the packaged tiny client and match the post-migration report; and
+- the report lists every rejected or deliberately mapped source feature. A green
+  run cannot omit an unclassified table, column, geometry shape, or security
+  object.
+
+Offline migration is not `pg_dump` compatibility and does not make QuackGIS a
+logical PostgreSQL restore target. PostGIS remains unchanged and is the rollback
+source until the operator separately retires it.
+
 ## M5 — Local 1.0
 
 **Outcome:** a user can deploy and operate the single-node product without
@@ -611,6 +683,69 @@ Exit gates:
 - two managed catalog/object-storage/hosted-relay runs, including one serverless
   client profile, pass on the same release candidate.
 
+## G1 — online PostGIS catch-up and cutover 1.x
+
+**Outcome:** a large PostGIS source can remain writable while QuackGIS takes an
+initial consistent snapshot, catches up through logical changes, and performs a
+short, measured write-freeze cutover with deterministic rollback information.
+
+G1 begins only after M6 provides durable transactional control metadata, shared
+official DuckLake, worker fencing, conflict/response-loss classification, and
+backend recovery. It uses PostgreSQL logical decoding; physical streaming
+replication, dual-write, bidirectional replication, and reverse apply are out of
+scope.
+
+Deliver:
+
+- a version-pinned PostgreSQL logical replication publication/slot whose exported
+  initial snapshot and consistent start LSN feed the same table/type preflight and
+  bulk-copy oracle as G0;
+- durable source identity containing PostgreSQL system identifier, timeline,
+  database/publication/slot identity, schema fingerprint, and acknowledged LSN,
+  with fail-closed refusal after source replacement, timeline divergence, slot
+  loss, or incompatible schema change;
+- mandatory stable source replica identity for every UPDATE/DELETE table. Tables
+  without a declared supported key are insert-only or rejected; QuackGIS does not
+  infer a key from row contents or advertise a target index DuckLake cannot
+  enforce;
+- transaction-ordered INSERT/UPDATE/DELETE decoding into bounded batches with
+  source transaction/LSN identity, schema/type validation, and no execution of
+  source triggers, functions, DDL, role changes, or arbitrary logical messages;
+- idempotent DuckLake staging/publication keyed by source identity and LSN range,
+  with the durable checkpoint advanced only after target commit is reconciled.
+  Delivery is at least once; replay after response loss must produce the same
+  visible rows rather than being described as distributed exactly-once commit;
+- bounded capture/apply queues, backpressure, WAL-retention alarms, lag/throughput
+  metrics, dead-letter-free fail-stop behavior, restart/resume, and operator
+  pause/resnapshot procedures;
+- an explicit cutover state machine: preflight, initial snapshot, catch-up,
+  source write fence, final-LSN drain, exact G0 verification, worker/client switch,
+  and a timed PostGIS read-only rollback window; and
+- path-free audit/evidence for source and target identities, snapshot/start/final/
+  acknowledged LSNs, transaction and row counts, lag, retries/replays, checksum
+  reconciliation, freeze duration, and cutover/rollback decision.
+
+Exit gates:
+
+- concurrent source INSERT/UPDATE/DELETE transactions during the initial copy and
+  catch-up produce no missing, duplicate, partially visible, or out-of-order final
+  state across crash/restart and worker replacement;
+- failures before target commit, after target commit but before checkpoint, and
+  after checkpoint each reconcile deterministically from source-LSN/batch identity;
+- schema DDL, replica-identity loss, unsupported type/geometry change, slot loss,
+  and source identity/timeline change stop apply before semantic drift or WAL
+  acknowledgement;
+- sustained capture/apply meets a declared source-WAL retention and p95 lag SLO,
+  and overload applies backpressure or stops without unbounded process/control
+  metadata growth;
+- after the source write fence, the consumer reaches the declared final LSN and
+  all G0 count/checksum/NULL/key/spatial/sample oracles pass after independent
+  target reopen;
+- the measured write-freeze and client-switch window meets its committed budget,
+  and rollback before source retirement requires no reverse replication; and
+- credentials, WAL payloads, row values, and object paths are absent from iroh
+  control messages, logs, metrics, and public migration reports.
+
 ## M7 — dataset lifecycle 1.x
 
 **Outcome:** operators can stage, validate, publish, protect, roll back, and retire
@@ -635,7 +770,8 @@ Exit gates:
 - Martin/MVT beyond a measured release need.
 - Multi-modal COG, point-cloud, CAD/BIM, or reality-capture product claims.
 - Billion-row scheduled, 10 TB, or trillion-class claims.
-- Branch/merge and CDC row functions.
+- Branch/merge and general CDC row functions outside the bounded G1 PostGIS
+  source-migration contract.
 - A QuackGIS DuckDB extension without an accepted, benchmarked proposal.
 - An out-of-process engine split that cannot serve the attached official DuckLake
   data plane through the existing Rust policy and transaction boundary.
@@ -660,6 +796,8 @@ Exit gates:
 | shared service credential broadens impact | bind it to one role/pool/worker assignment, enforce per-credential limits, audit every session, and support immediate revocation |
 | client grows into a second control plane | bootstrap alone chooses/fences workers and signs leases; client has no gossip, pool list, scoring, policy, or replay logic |
 | client and worker transport implementations drift | one shared relay/framing/lease/proof/compression/limits module and cross-endpoint conformance tests |
+| offline migration silently loses PostGIS semantics | classify every source object/type/geometry/security feature before copy; reject unsupported keys/CRS/dimensions/DDL; require exact post-reopen checksums and a complete report |
+| logical migration duplicates or loses changes | bind slot snapshot to source identity/start LSN; require source replica identity; apply idempotent LSN batches; checkpoint only after commit reconciliation; fail on DDL/slot/timeline drift |
 | scale language outruns evidence | publish exact rows/bytes/files/hardware/cost and distinguish routine from stress runs |
 
 ## Scope boundaries

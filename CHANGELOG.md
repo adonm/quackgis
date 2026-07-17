@@ -387,6 +387,11 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 
 - DuckDB and official DuckLake are unconditional and are the sole engine/storage
   authority for new roots.
+- The forward roadmap now separates G0 offline PostGIS snapshot migration from G1
+  online logical catch-up/cutover. Offline migration uses complete preflight and
+  packaged-client COPY; online migration waits for M6 durable control/storage,
+  uses source-LSN idempotent batches, and makes no distributed exactly-once,
+  dual-write, reverse-replication, or implicit DDL claim.
 - Project direction now prioritizes bounded streaming, cancellation, admission,
   bulk ingest, focused named clients, and measured spatial performance before
   shared or broad compatibility claims.
