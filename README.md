@@ -111,6 +111,18 @@ exact extent, spatial viewport identification, and an offscreen rendered-image
 oracle. OGR-created tables, authoritative CRS metadata, direct QGIS table open
 without real keys, and packaged resource/hosted-relay qualification remain open.
 
+The first G0 offline PostGIS migration slice is also executable. A dedicated
+operator-side client exact-pins PostgreSQL/PostGIS, inventories one read-only
+repeatable-read snapshot, classifies the maintained selected-schema inventory,
+and streams the maintained scalar plus 2D SRID-0 Point/NULL set through bounded pgwire COPY into
+one target transaction. Canonical complete-row/per-column checksums pass again on
+a fresh target connection. The actual-process smoke excludes a concurrent source
+commit, proves conversion failure leaves zero target tables, and rejects keys
+before target access. This is not yet a release migration claim: packaged
+tiny-client evidence, isolated staging/promotion, target runtime digests,
+role/grant mapping, broader types/spatial semantics, and named post-migration
+clients remain open.
+
 TLS remains optional for local development. Set `QUACKGIS_TLS_MODE=required` with
 `QUACKGIS_TLS_CERT` and `QUACKGIS_TLS_KEY` to fail closed on plaintext startup.
 The actual-process TLS profile verifies encrypted SCRAM, hostname/trust checking,
@@ -183,6 +195,7 @@ mise exec -- just duckdb-current-benchmark
 mise exec -- just duckdb-runtime-static-check
 mise exec -- just duckdb-recovery-smoke
 mise exec -- just duckdb-mixed-release-smoke
+mise exec -- just postgis-migration-smoke
 mise exec -- just iroh-protocol-test
 mise exec -- just iroh-direct-smoke
 mise exec -- just iroh-custom-relay-smoke
@@ -222,6 +235,8 @@ Read:
 - [docs/DUCKDB_ROADMAP_ALIGNMENT.md](./docs/DUCKDB_ROADMAP_ALIGNMENT.md) —
   conditional adoption/deletion gates for upstream DuckDB and DuckLake work.
 - [docs/OPERATIONS.md](./docs/OPERATIONS.md) — local runtime and security baseline.
+- [docs/POSTGIS_MIGRATION.md](./docs/POSTGIS_MIGRATION.md) — first offline
+  snapshot configuration, trust boundary, report states, and current limits.
 - [docs/IROH_TRANSPORT.md](./docs/IROH_TRANSPORT.md) — implemented I0 protocol,
   lease, key-proof, relay, and transport boundaries.
 - [docs/QUICKSTART.md](./docs/QUICKSTART.md) — guided setup.

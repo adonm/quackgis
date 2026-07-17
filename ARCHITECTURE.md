@@ -48,6 +48,7 @@ capability is implemented in the current preview.
 | Rust pgwire edge | protocol state, TLS/SCRAM, target PostgreSQL-facing roles/session/catalog projection, parsed policy, COPY framing, PostgreSQL types/errors, connection lifecycle | SQL planning, spatial kernels, table data, an independent user-schema authority |
 | DuckDB | SQL planning, vectorized execution, exact spatial operations, transactions, resource/spill behavior | PostgreSQL protocol or identity policy |
 | official DuckLake | catalog, snapshots, Parquet publication, maintenance primitives | client compatibility or authorization |
+| `quackgis-migrate` preview | pinned PostGIS source identity/inventory, fail-closed type/object disposition, one repeatable-read source snapshot, bounded pgwire COPY forwarding, canonical verification, path-free report | source credentials in workers, DuckDB/ADBC/object-store access, private DuckLake metadata, implicit DDL/security conversion, online replication or cutover authority |
 | planned QuackGIS control metadata | local compatibility identity through supported DuckDB/DuckLake transactions; shared users, credentials, roles, policy, pools, assignments, and security/configuration epochs in a protected PostgreSQL control database | user table definitions/data, SQL planning, independent snapshot publication |
 | `vendor/arrow-pg` | Arrow field/row encoding and maintained WKB wire identity | planning, catalogs, DataFusion support |
 | optional future QuackGIS DuckDB extension | measured vectorized functions unavailable through native SQL/macros | pgwire, auth, policy, COPY, catalogs, snapshots, DuckLake writes |
@@ -103,13 +104,41 @@ queries will be implemented at this boundary before mutable role DDL or RLS is
 considered. Cleanup on commit, rollback, cancellation, disconnect, and native
 connection reuse is part of the target security contract.
 
+### Offline migration
+
+The G0 migrator is an operator-side client, not a worker capability. It alone
+opens the pinned PostgreSQL/PostGIS source and holds source credentials. A
+read-only repeatable-read transaction starts before identity/inventory and remains
+open through source COPY and checksum verification; the worker sees only ordinary
+pgwire target DDL/COPY/verification through the configured target listener. The
+migrator has no DuckDB, ADBC, object-store, or private DuckLake metadata access.
+
+Source catalogs, identifiers, defaults, and rows are untrusted migration input.
+Configuration and inventory counts are bounded, identifiers are quoted, and only
+classified release types plus literal defaults can produce target SQL. Every
+item returned by the maintained table/column/constraint/object/security inventory
+gets an explicit migrate/map/reject disposition. One target transaction contains all table creation, COPY, and
+comments, so a pre-commit conversion failure rolls back the whole prepared set.
+Commit response loss is indeterminate rather than retried; after successful commit
+a fresh target connection must reproduce count, NULL, complete-row, and
+per-column canonical multiset checksums.
+
+The current actual-process smoke reaches QuackGIS directly on development
+loopback. The CLI can use TLS/mTLS and is intended to point at the packaged tiny
+client, but that package path, isolated staging-root promotion, target runtime
+digests, role/grant application, and named post-migration clients remain G0 gates.
+A `verified` report means snapshot data is prepared for an operator decision, not
+that clients were atomically cut over or PostGIS can be retired. See
+[docs/POSTGIS_MIGRATION.md](./docs/POSTGIS_MIGRATION.md).
+
 ### SQL admission
 
 Standalone `sqlparser` parses exactly one general statement. The only batch path
 accepts at most eight simple-protocol statements and requires every member to be a
 strict maintained session `SET`; it emits one completion per member and never
-reaches ADBC. The general allowlist admits bounded query, create-table, insert,
-update, delete, simple transaction, and maintained SET/SHOW shapes. An AST relation
+reaches ADBC. The general allowlist admits bounded query, create-table, owner-only
+table/column comment, insert, update, delete, simple transaction, and maintained
+SET/SHOW shapes. An AST relation
 visitor maps PostgreSQL `public` to DuckLake `quackgis.main` before execution while
 policy sees the original target. Unsupported shapes fail closed. COPY uses parsed
 one-/two-/three-part identifiers and dedicated protocol state.

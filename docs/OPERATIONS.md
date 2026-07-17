@@ -185,6 +185,28 @@ and extended-protocol invocation fail closed. The operation uses maintenance-cla
 admission, the fixed native worker pool, typed DuckLake SQL construction, and a
 redacted success/failure audit event.
 
+## Offline PostGIS snapshot
+
+`quackgis-migrate` is an operator-side preview client for the first G0 snapshot
+slice. The maintained actual-process gate is:
+
+```sh
+mise exec -- just postgis-migration-smoke
+```
+
+The recipe owns a digest-pinned PostgreSQL 18/PostGIS 3.6 source and a fresh
+QuackGIS target, proves concurrent writes stay outside the held repeatable-read
+snapshot, verifies release scalars plus Point/NULL WKB after reconnect, and proves
+both preflight rejection and transactional rollback leave no target publication.
+It pulls the pinned source image and therefore is not part of network-independent
+`just ci`.
+
+For operator configuration, TLS/password-file handling, accepted type mappings,
+checksum/report semantics, and explicit open gates, see
+[POSTGIS_MIGRATION.md](./POSTGIS_MIGRATION.md). Until staging promotion and the
+packaged tiny-client gate land, use a fresh isolated target root and treat even a
+`verified` report as prepared data requiring a separate cutover decision.
+
 ## Storage authority
 
 Startup atomically creates `_quackgis/storage-authority-v1` below the local data

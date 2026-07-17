@@ -331,14 +331,28 @@ unless a focused test says otherwise.
   aliases, Float16/fixed-binary lists, WKB, fixed binary, NULLs, invalid JSON, and
   nested error propagation. Unsupported list layouts fail during schema mapping;
   broader generated temporal/decimal/dictionary/nested coverage remains open.
-- Shared PostgreSQL/object-storage DuckLake, multi-writer recovery, migration,
-  production packaging, soak, and disaster-recovery evidence remain open.
-- No maintained PostGIS migration tool or logical replication consumer exists yet.
-  G0 targets a fail-closed repeatable-read offline snapshot through the packaged
-  tiny client. G1 waits for M6 and uses PostgreSQL logical decoding with durable
-  source-LSN/idempotent-batch reconciliation; physical streaming, dual-write,
-  reverse replication, implicit DDL/RLS/role migration, and `pg_dump` fidelity are
-  not planned first-release claims.
+- Shared PostgreSQL/object-storage DuckLake, multi-writer recovery, production
+  packaging, soak, and disaster-recovery evidence remain open.
+- The maintained `quackgis-migrate` preview implements the first G0 snapshot
+  slice. It exact-pins PostgreSQL/PostGIS, inventories one read-only
+  repeatable-read transaction, emits migrate/map/reject dispositions for every
+  item in its maintained selected-schema inventory, and accepts only the
+  maintained scalar set plus
+  2D SRID-0 Point/NULL WKB. Literal defaults, NOT NULL, and comments are retained;
+  identity/generated columns, keys, other constraints, RLS, triggers, partitioned
+  tables, geography, nonzero/mixed SRID, Z/M, and other geometry families reject.
+  Source COPY chunks stream into one QuackGIS target transaction and exact
+  canonical row/column checksums pass again on a fresh target connection. The
+  registered actual-process smoke proves concurrent source writes stay outside
+  the snapshot, failed conversion leaves zero target tables, and key rejection
+  occurs before target access. Packaged tiny-client evidence, automatic isolated
+  staging/promotion, target runtime-digest binding, role/grant application,
+  broader types/spatial semantics, and copied-data named-client gates remain
+  open; see [POSTGIS_MIGRATION.md](./POSTGIS_MIGRATION.md).
+- No logical replication consumer exists. G1 waits for M6 and uses PostgreSQL
+  logical decoding with durable source-LSN/idempotent-batch reconciliation;
+  physical streaming, dual-write, reverse replication, implicit DDL/RLS/role
+  migration, and `pg_dump` fidelity are not planned first-release claims.
 - Forced drain of an explicit uncommitted transaction has process-level evidence:
   same-path restart preserves the committed row, exposes none of the uncommitted
   row, and accepts a new write. A separate clean actual-process gate stops at an

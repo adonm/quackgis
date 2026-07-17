@@ -7,6 +7,21 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 
 ### Added
 
+- The first executable G0 offline PostGIS migration slice adds a dedicated
+  `quackgis-migrate` client with exact PostgreSQL/PostGIS version pins, bounded
+  selected-schema inventory, complete migrate/map/reject dispositions, one
+  read-only repeatable-read source snapshot, and bounded source-to-target pgwire
+  COPY. All target DDL/COPY/comments share one transaction; canonical complete-
+  row and per-column checksums pass before commit and on a fresh target session.
+  The digest-pinned actual-process smoke proves 100,002 snapshot rows exclude a
+  concurrent source commit, release scalars plus Point/NULL WKB survive, invalid
+  data leaves zero target tables, and key semantics reject before target access.
+  TLS/mTLS and owner-only password files are supported; packaged tiny-client,
+  staging promotion, target runtime digests, role/grant application, broader
+  spatial/key support, and named post-migration clients remain open.
+- Owner-authorized `COMMENT ON TABLE` and `COMMENT ON COLUMN` now pass the pgwire
+  structural admission boundary; all other comment targets and non-owner roles
+  fail closed.
 - Pinned offscreen QGIS 3.44.11 now qualifies expression and provider subset
   filters, exact extent, a spatial viewport identify request, and a 128×128
   rendered Point image through the packaged query layer. The pgwire edge

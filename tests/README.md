@@ -13,6 +13,14 @@ duration-controlled M5 read/COPY/mutation/cancel/compaction/restart oracle;
 smoke/local use the same implementation, while reference mode requires exactly
 24 hours.
 
+`scripts/postgis_migration_smoke.py` owns the first G0 actual-process source-to-
+target gate and runs through `just postgis-migration-smoke`. It uses a digest-
+pinned PostgreSQL 18/PostGIS 3.6 source plus a fresh actual QuackGIS process,
+checks repeatable-read exclusion under a concurrent source write, exact
+scalar/Point/NULL checksums after target reconnect, all-table rollback on invalid
+input, and pre-target key rejection. This is direct-loopback functional evidence;
+the packaged tiny-client and release staging/cutover gates remain open.
+
 `iroh_direct::duckdb_pgwire_oracles_pass_through_local_iroh` owns the first native
 I0 direct-path smoke. It uses real bootstrap, worker, and tiny-client endpoints
 and proves typed/spatial query, COPY, rollback, cancellation/quarantine, and fresh
