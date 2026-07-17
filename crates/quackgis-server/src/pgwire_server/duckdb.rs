@@ -4568,8 +4568,8 @@ pg_catalog.array_to_string(c.reloptions || array(SELECT 'toast.' || x FROM \
 pg_catalog.unnest(tc.reloptions) x), ', '), c.reltablespace, \
 CASE WHEN c.reloftype = 0 THEN '' ELSE c.reloftype::pg_catalog.regtype::pg_catalog.text END, \
 c.relpersistence, c.relreplident, am.amname FROM pg_catalog.pg_class c \
-LEFT JOIN pg_catalog.pg_class tc ON c.reltoastrelid = tc.oid \
-LEFT JOIN pg_catalog.pg_am am ON c.relam = am.oid WHERE c.oid = 0";
+LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid) \
+LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid) WHERE c.oid = 0";
 
 fn is_psql_relation_properties_query(statement: &Statement) -> bool {
     is_psql_catalog_query(statement, PSQL_RELATION_PROPERTIES_QUERY, "c", "oid")
@@ -7471,8 +7471,19 @@ mod tests {
             );
         }
 
-        let psql_relation_properties =
-            PSQL_RELATION_PROPERTIES_QUERY.replace("WHERE c.oid = 0", "WHERE c.oid = '100000'");
+        let psql_relation_properties = "SELECT c.relchecks, c.relkind, c.relhasindex, \
+            c.relhasrules, c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, \
+            false AS relhasoids, c.relispartition, pg_catalog.array_to_string(\
+            c.reloptions || array(select 'toast.' || x from \
+            pg_catalog.unnest(tc.reloptions) x), ', '), c.reltablespace, \
+            CASE WHEN c.reloftype = 0 THEN '' ELSE \
+            c.reloftype::pg_catalog.regtype::pg_catalog.text END, \
+            c.relpersistence, c.relreplident, am.amname \
+            FROM pg_catalog.pg_class c \
+            LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid) \
+            LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid) \
+            WHERE c.oid = '100000'"
+            .to_owned();
         let relation_properties = validate_statement_with_catalog_identity(
             &psql_relation_properties,
             ProtocolMode::Extended,

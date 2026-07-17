@@ -687,8 +687,8 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
          c.reloftype::pg_catalog.regtype::pg_catalog.text END, \
          c.relpersistence, c.relreplident, am.amname \
          FROM pg_catalog.pg_class c \
-         LEFT JOIN pg_catalog.pg_class tc ON c.reltoastrelid = tc.oid \
-         LEFT JOIN pg_catalog.pg_am am ON c.relam = am.oid \
+         LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid) \
+         LEFT JOIN pg_catalog.pg_am am ON (c.relam = am.oid) \
          WHERE c.oid = '{relation_oid}'"
     );
     let psql_properties = client
