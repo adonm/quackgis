@@ -18,9 +18,9 @@ CREATE OR REPLACE MACRO quackgis_st_asbinary(g, byte_order) AS
          ELSE error('QuackGIS ST_AsBinary supports NDR byte order only') END;
 CREATE OR REPLACE MACRO quackgis_st_ashexewkb(g) AS hex(ST_AsWKB(g));
 CREATE OR REPLACE MACRO quackgis_geometry_type(g) AS
-    upper(CAST(ST_GeometryType(g) AS VARCHAR));
+    upper(CAST(ST_GeometryType(ST_GeomFromWKB(CAST(g AS BLOB))) AS VARCHAR));
 CREATE OR REPLACE MACRO quackgis_st_geometry_type(g) AS
-    CASE upper(CAST(ST_GeometryType(g) AS VARCHAR))
+    CASE upper(CAST(ST_GeometryType(ST_GeomFromWKB(CAST(g AS BLOB))) AS VARCHAR))
         WHEN 'POINT' THEN 'ST_Point'
         WHEN 'LINESTRING' THEN 'ST_LineString'
         WHEN 'POLYGON' THEN 'ST_Polygon'
@@ -28,7 +28,7 @@ CREATE OR REPLACE MACRO quackgis_st_geometry_type(g) AS
         WHEN 'MULTILINESTRING' THEN 'ST_MultiLineString'
         WHEN 'MULTIPOLYGON' THEN 'ST_MultiPolygon'
         WHEN 'GEOMETRYCOLLECTION' THEN 'ST_GeometryCollection'
-        ELSE 'ST_' || CAST(ST_GeometryType(g) AS VARCHAR)
+        ELSE 'ST_' || CAST(ST_GeometryType(ST_GeomFromWKB(CAST(g AS BLOB))) AS VARCHAR)
     END;
 CREATE OR REPLACE MACRO quackgis_st_curvetoline(g) AS g;
 CREATE OR REPLACE MACRO quackgis_st_hasarc(g) AS false;
@@ -38,6 +38,9 @@ CREATE OR REPLACE MACRO quackgis_st_srid(g) AS
                   ST_CRS(ST_GeomFromWKB(CAST(g AS BLOB))),
                   '^EPSG:([0-9]+)$', 1) AS INTEGER), 0)
     END;
+CREATE OR REPLACE MACRO quackgis_st_zmflag(g) AS
+    CASE WHEN g IS NULL THEN NULL
+         ELSE ST_ZMFlag(ST_GeomFromWKB(CAST(g AS BLOB))) END;
 CREATE OR REPLACE MACRO quackgis_st_extent(g) AS
     replace(CAST(ST_Extent(ST_Extent_Agg(ST_GeomFromWKB(CAST(g AS BLOB)))) AS VARCHAR),
             ', ', ',');
@@ -132,6 +135,8 @@ fn rewrite_function_name(identifier: &str) -> Option<&'static str> {
         Some("quackgis_st_hasarc")
     } else if identifier.eq_ignore_ascii_case("st_srid") {
         Some("quackgis_st_srid")
+    } else if identifier.eq_ignore_ascii_case("st_zmflag") {
+        Some("quackgis_st_zmflag")
     } else if identifier.eq_ignore_ascii_case("st_extent") {
         Some("quackgis_st_extent")
     } else if identifier.eq_ignore_ascii_case("st_3dextent") {
@@ -267,6 +272,7 @@ mod tests {
             ("GeometryType(g)", "quackgis_geometry_type(g)"),
             ("ST_CurveToLine(g)", "quackgis_st_curvetoline(g)"),
             ("ST_HasArc(g)", "quackgis_st_hasarc(g)"),
+            ("ST_Zmflag(g)", "quackgis_st_zmflag(g)"),
         ] {
             assert_eq!(rewrite_postgis_sql(source), target);
         }

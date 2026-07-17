@@ -2213,7 +2213,6 @@ fn unsupported_spatial_function(statement: &Statement) -> Option<&'static str> {
         ("st_coorddim", "ST_CoordDim"),
         ("st_geometryn", "ST_GeometryN"),
         ("st_asewkt", "ST_AsEWKT"),
-        ("st_zmflag", "ST_Zmflag"),
         ("st_xmax", "ST_XMax"),
         ("st_ymax", "ST_YMax"),
         ("st_setsrid", "ST_SetSRID"),
@@ -4554,11 +4553,37 @@ fn catalog_query_shape_supported(statement: &Statement) -> bool {
         };
         catalog_expression_hint(expression, &aliases).is_none()
             && !supported_catalog_boolean_expression(expression, &aliases)
+            && !supported_catalog_projection_expression(expression, &aliases)
             && expression_contains_catalog_column(expression, &aliases)
     }) {
         return false;
     }
     aliases.len() == relation_count
+}
+
+fn supported_catalog_projection_expression(
+    expression: &Expr,
+    aliases: &HashMap<String, &'static str>,
+) -> bool {
+    let Expr::Function(function) = expression else {
+        return false;
+    };
+    if !pg_function_name_matches(&function.name, "upper")
+        || function.uses_odbc_syntax
+        || !matches!(function.parameters, FunctionArguments::None)
+        || function.filter.is_some()
+        || function.null_treatment.is_some()
+        || function.over.is_some()
+        || !function.within_group.is_empty()
+    {
+        return false;
+    }
+    matches!(&function.args, FunctionArguments::List(arguments)
+        if arguments.duplicate_treatment.is_none()
+            && arguments.clauses.is_empty()
+            && matches!(arguments.args.as_slice(),
+                [FunctionArg::Unnamed(FunctionArgExpr::Expr(argument))]
+                    if catalog_expression_hint(argument, aliases).is_some()))
 }
 
 const PSQL_RELATION_PROPERTIES_QUERY: &str = "SELECT c.relchecks, c.relkind, \
@@ -7229,7 +7254,6 @@ mod tests {
                 "ST_MakeEnvelope(..., SRID)",
                 "SELECT ST_MakeEnvelope(0, 0, 1, 1, 4326)",
             ),
-            ("ST_Zmflag", "SELECT ST_Zmflag(ST_Point(1, 2))"),
             ("ST_XMax", "SELECT ST_XMax(ST_Extent(geom)) FROM points"),
             ("ST_YMax", "SELECT ST_YMax(ST_Extent(geom)) FROM points"),
             ("Find_SRID", "SELECT Find_SRID('public', 'points', 'geom')"),
@@ -7246,6 +7270,7 @@ mod tests {
             "SELECT 1 /* ST_CoordDim(g) */",
             "SELECT ST_Dimension(ST_Point(1, 2))",
             "SELECT ST_SRID('POINT EMPTY'::GEOMETRY)",
+            "SELECT ST_Zmflag(ST_Point(1, 2))",
             "SELECT ST_Extent(geom) FROM points",
             "SELECT ST_3DExtent(geom) FROM points",
             "SELECT postgis_geos_version(), postgis_proj_version()",
@@ -7257,6 +7282,22 @@ mod tests {
 
     #[test]
     fn spatial_type_catalog_relations_are_structurally_rewritten() {
+        let qgis_geometry_metadata = validate_statement_with_catalog_identity(
+            "SELECT upper(type), srid, coord_dimension FROM geometry_columns \
+             WHERE f_table_name = 'points' AND f_geometry_column = 'geom_wkb' \
+               AND f_table_schema = 'public'",
+            ProtocolMode::Extended,
+            true,
+            None,
+            None,
+        )
+        .expect("QGIS geometry metadata projection");
+        assert!(
+            qgis_geometry_metadata
+                .sql
+                .contains("quackgis_pg_catalog.geometry_columns")
+        );
+
         let lookup = validate_statement(
             "SELECT t.typname, t.typtype, t.typelem, r.rngsubtype, t.typbasetype, \
              n.nspname, t.typrelid FROM pg_catalog.pg_type t \
