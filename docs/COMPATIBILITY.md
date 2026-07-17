@@ -331,8 +331,12 @@ unless a focused test says otherwise.
   production packaging, soak, and disaster-recovery evidence remain open.
 - Forced drain of an explicit uncommitted transaction has process-level evidence:
   same-path restart preserves the committed row, exposes none of the uncommitted
-  row, and accepts a new write. General write/commit interruption, relocated
-  recovery, and release-catalog recovery timing remain open.
+  row, and accepts a new write. A separate clean actual-process gate stops at an
+  exact scalar/WKB checkpoint, checksum-backs up three durable files, writes 25
+  later rows only to the discarded original, deletes both paths, restores to the
+  exact paths, becomes queryable within the 60-second budget, and accepts a new
+  write. General write/commit interruption, online/relocated recovery,
+  cross-version upgrade, disaster recovery, and release-scale timing remain open.
 
 See [DUCKDB_SPATIAL_GAP_LEDGER.md](./DUCKDB_SPATIAL_GAP_LEDGER.md) and
 [ENGINE_CAPABILITY_LEDGER.md](./ENGINE_CAPABILITY_LEDGER.md) for detailed gaps.

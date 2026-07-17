@@ -259,12 +259,33 @@ mise exec -- just duckdb-termination-profile \
 
 The clean smoke run on source `59c1a381` terminated in 122 ms and became queryable
 after restart in 135 ms, below the 60-second M5 budget. The reduced fixture does
-not establish release-catalog recovery timing, relocated recovery, or general write/commit
-interruption behavior.
+not establish release-catalog recovery timing, relocated recovery, or general
+write/commit interruption behavior.
+
+## Offline recovery profile
+
+The actual-process recovery profile commits a declared 100-row checkpoint with ID
+sum 5,050 and 2,100 WKB bytes, stops the server, and creates a checksum-verified
+offline backup. It then restarts the original, commits 25 later rows, stops,
+deletes both catalog and data paths, restores to the exact original paths, and
+starts a third server. The oracle requires the exact checkpoint, zero later rows,
+and a successful post-recovery write.
+
+```sh
+mise exec -- just duckdb-recovery-profile \
+  level=local out=.tmp/duckdb-recovery/local.json
+```
+
+The clean smoke on source `aba25e5` backed up three files totaling 3,684,192
+bytes in 40.25 ms, restored them in 42.84 ms, and became queryable in 131.74 ms,
+below the 60-second M5 recovery budget. This is a reduced functional checkpoint
+and operator-procedure gate, not release-catalog, online, relocated,
+point-in-time, cross-version, or disaster-recovery evidence.
 
 ## Next profiles
 
 E1's result, cancellation, transport, mixed-class, and COPY reference budgets now
 pass, and M4's complete mixed-shape analytical workload passes twice at both 10M
-and 100M. Next profiles belong to M5: packaged I0 resources/hosted relay,
-recovery/upgrade, mixed release workload, and soak.
+and 100M. M5's reduced actual-process recovery gate now passes. Next profiles are
+packaged I0 resources/hosted relay, cross-version upgrade, mixed release workload,
+and soak.

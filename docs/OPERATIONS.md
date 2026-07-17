@@ -292,9 +292,19 @@ during copying, and publishes through a staging directory. Restore verifies the
 complete file set and every SHA-256 before creating targets, refuses existing or
 relocated targets, publishes the catalog last, and removes partial output on
 failure. `just duckdb-adbc-storage-test` deletes the originals, restores, reopens,
-and verifies the exact latest snapshot ID and table count/sum. This is functional
-offline recovery evidence, not an online snapshot, point-in-time, relocated,
-shared-storage, rolling-upgrade, or automated disaster-recovery claim.
+and verifies the exact latest snapshot ID and table count/sum.
+
+`just duckdb-recovery-profile` adds the operator-path process gate. It starts the
+actual server, commits a 100-row checkpoint with exact ID sum and WKB byte count,
+stops for backup, restarts and writes 25 rows after the checkpoint, stops again,
+deletes both durable paths, restores to the exact paths, and starts a third time.
+The restored server must expose exactly the checkpoint, none of the discarded
+later rows, and accept a new write within the 60-second restart budget. The clean
+source-`aba25e5` smoke backed up three files (3,684,192 bytes), copied them in
+40.25 ms, restored them in 42.84 ms, and became queryable in 131.74 ms. This is
+functional offline checkpoint recovery evidence, not an online snapshot,
+point-in-time, relocated, release-scale, shared-storage, cross-version upgrade,
+or automated disaster-recovery claim.
 
 The maintained pgwire workflow creates eight deliberately fragmented COPY files,
 runs official `ducklake_merge_adjacent_files`, requires the active file count to

@@ -250,6 +250,11 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 - Checksummed offline local backup/restore with symlink/source-change rejection,
   exact-path enforcement, staged publication, and native snapshot/count recovery
   evidence.
+- Actual-process offline recovery profiling now checkpoints exact scalar/WKB
+  state, stops for a checksum backup, writes later rows only to the original,
+  deletes both durable paths, restores to the exact paths, and requires the
+  checkpoint with no later rows plus a post-recovery write. The clean smoke
+  restores three files and becomes queryable in 131.74 ms.
 - Periodic aggregate DuckDB tracked-memory and temporary-storage samples with
   current/high-water gauges and sampler health counters.
 - Structural compatibility for maintained PostgreSQL session settings,
