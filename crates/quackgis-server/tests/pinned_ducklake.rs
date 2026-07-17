@@ -689,7 +689,7 @@ async fn prove_registry_catalog_pgwire(storage: Arc<DuckDbAdbcStorage>) {
          FROM pg_catalog.pg_class c \
          LEFT JOIN pg_catalog.pg_class tc ON c.reltoastrelid = tc.oid \
          LEFT JOIN pg_catalog.pg_am am ON c.relam = am.oid \
-         WHERE c.oid = {relation_oid}"
+         WHERE c.oid = '{relation_oid}'"
     );
     let psql_properties = client
         .prepare(&psql_properties_sql)

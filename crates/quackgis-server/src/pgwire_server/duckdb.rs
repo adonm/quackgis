@@ -4588,8 +4588,11 @@ fn is_psql_relation_properties_query(statement: &Statement) -> bool {
     let Expr::Value(value) = right.as_ref() else {
         return false;
     };
-    let Value::Number(relation_oid, false) = &value.value else {
-        return false;
+    let relation_oid = match &value.value {
+        Value::Number(relation_oid, false) | Value::SingleQuotedString(relation_oid) => {
+            relation_oid
+        }
+        _ => return false,
     };
     if relation_oid
         .parse::<u32>()
@@ -7434,7 +7437,7 @@ mod tests {
         }
 
         let psql_relation_properties =
-            PSQL_RELATION_PROPERTIES_QUERY.replace("WHERE c.oid = 0", "WHERE c.oid = 100000");
+            PSQL_RELATION_PROPERTIES_QUERY.replace("WHERE c.oid = 0", "WHERE c.oid = '100000'");
         let relation_properties = validate_statement_with_catalog_identity(
             &psql_relation_properties,
             ProtocolMode::Extended,
