@@ -339,8 +339,11 @@ unless a focused test says otherwise.
   exact scalar/WKB checkpoint, checksum-backs up three durable files, writes 25
   later rows only to the discarded original, deletes both paths, restores to the
   exact paths, becomes queryable within the 60-second budget, and accepts a new
-  write. General write/commit interruption, online/relocated recovery,
-  cross-version upgrade, disaster recovery, and release-scale timing remain open.
+  write. Backup format v2 embeds the selected DuckDB/library/DuckLake/Spatial
+  identity without local artifact paths; restore rejects a different runtime
+  before creating either target. General write/commit interruption,
+  online/relocated recovery, cross-version upgrade, disaster recovery, and
+  release-scale timing remain open.
 
 See [DUCKDB_SPATIAL_GAP_LEDGER.md](./DUCKDB_SPATIAL_GAP_LEDGER.md) and
 [ENGINE_CAPABILITY_LEDGER.md](./ENGINE_CAPABILITY_LEDGER.md) for detailed gaps.

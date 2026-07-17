@@ -78,7 +78,8 @@ The release packet must include:
   incompressible shapes, bytes saved, codec CPU/latency, raw-path overhead,
   bounded decode failures, and proof that authentication/control traffic and
   cross-session dictionaries are never compressed;
-- backup/restore and upgrade/rollback transcripts;
+- backup/restore and upgrade/rollback transcripts, including the format-v2
+  backup's runtime identity and deliberate matching bundle selection;
 - TLS/auth/secret-rotation evidence;
 - authenticator/JWT role-mapping, request-context cleanup, multi-replica REST,
   cache-invalidation, and credential-rotation evidence;

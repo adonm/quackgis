@@ -279,32 +279,42 @@ The maintained local procedure is offline and exact-path only:
 
 1. stop QuackGIS and confirm the process has exited;
 2. create a checksum manifest and copy all durable files, excluding the spill
-   directory:
+   directory. Select the exact runtime manifest used by the stopped server:
 
    ```sh
    mise exec -- just duckdb-local-backup \
      catalog=.tmp/duckdb-server/catalog.ducklake \
      data=.tmp/duckdb-server/data \
-     out=/path/on-independent-storage/quackgis-backup
+     out=/path/on-independent-storage/quackgis-backup \
+     runtime_manifest=/path/to/artifact-manifest.json
    ```
 
 3. retain the entire backup directory without adding files; and
 4. after removing or moving both failed original paths, restore to those exact
-   paths:
+   paths with the runtime selected for reopening:
 
    ```sh
    mise exec -- just duckdb-local-restore \
      backup=/path/on-independent-storage/quackgis-backup \
      catalog=.tmp/duckdb-server/catalog.ducklake \
-     data=.tmp/duckdb-server/data
+     data=.tmp/duckdb-server/data \
+     runtime_manifest=/path/to/artifact-manifest.json
    ```
 
-Backup requires the authority marker, rejects symlinks and source changes detected
-during copying, and publishes through a staging directory. Restore verifies the
-complete file set and every SHA-256 before creating targets, refuses existing or
-relocated targets, publishes the catalog last, and removes partial output on
-failure. `just duckdb-adbc-storage-test` deletes the originals, restores, reopens,
-and verifies the exact latest snapshot ID and table count/sum.
+Local development defaults `runtime_manifest` to `.tmp/duckdb/manifest.json` or
+`QUACKGIS_DUCKDB_MANIFEST`. Release procedures must pass the packaged
+`artifact-manifest.json`. Backup format v2 embeds only its bounded DuckDB version,
+platform, source SHA when present, and library/DuckLake/Spatial digests; local
+artifact paths are excluded. Restore verifies the complete file set, every file
+SHA-256, and exact runtime identity before creating targets. A mismatch fails
+closed, allowing an operator to select a qualified older bundle deliberately
+instead of accidentally opening the catalog under a different runtime.
+
+Backup also requires the authority marker, rejects symlinks and source changes
+detected during copying, and publishes through a staging directory. Restore
+refuses existing or relocated targets, publishes the catalog last, and removes
+partial output on failure. `just duckdb-adbc-storage-test` deletes the originals,
+restores, reopens, and verifies the exact latest snapshot ID and table count/sum.
 
 `just duckdb-recovery-profile` adds the operator-path process gate. It starts the
 actual server, commits a 100-row checkpoint with exact ID sum and WKB byte count,
@@ -312,11 +322,12 @@ stops for backup, restarts and writes 25 rows after the checkpoint, stops again,
 deletes both durable paths, restores to the exact paths, and starts a third time.
 The restored server must expose exactly the checkpoint, none of the discarded
 later rows, and accept a new write within the 60-second restart budget. The clean
-source-`aba25e5` smoke backed up three files (3,684,192 bytes), copied them in
-40.25 ms, restored them in 42.84 ms, and became queryable in 131.74 ms. This is
-functional offline checkpoint recovery evidence, not an online snapshot,
-point-in-time, relocated, release-scale, shared-storage, cross-version upgrade,
-or automated disaster-recovery claim.
+source-`3bbd11e` format-v2 smoke backed up three files (3,684,192 bytes), copied
+them in 36.39 ms, restored them in 40.04 ms, and became queryable in 116.51 ms.
+The unit gate independently rejects a different runtime identity before creating
+either target. This is functional offline checkpoint recovery evidence, not an
+online snapshot, point-in-time, relocated, release-scale, shared-storage,
+cross-version upgrade, or automated disaster-recovery claim.
 
 The maintained pgwire workflow creates eight deliberately fragmented COPY files,
 runs official `ducklake_merge_adjacent_files`, requires the active file count to

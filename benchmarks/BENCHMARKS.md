@@ -290,20 +290,22 @@ write/commit interruption behavior.
 
 The actual-process recovery profile commits a declared 100-row checkpoint with ID
 sum 5,050 and 2,100 WKB bytes, stops the server, and creates a checksum-verified
-offline backup. It then restarts the original, commits 25 later rows, stops,
-deletes both catalog and data paths, restores to the exact original paths, and
-starts a third server. The oracle requires the exact checkpoint, zero later rows,
-and a successful post-recovery write.
+offline backup bound to the selected DuckDB/library/DuckLake/Spatial runtime
+identity. It then restarts the original, commits 25 later rows, stops, deletes both
+catalog and data paths, restores to the exact original paths under the same
+runtime, and starts a third server. The oracle requires the exact checkpoint,
+zero later rows, and a successful post-recovery write. A focused unit gate rejects
+a mismatched runtime before either restore target is created.
 
 ```sh
 mise exec -- just duckdb-recovery-profile \
   level=local out=.tmp/duckdb-recovery/local.json
 ```
 
-The clean smoke on source `aba25e5` backed up three files totaling 3,684,192
-bytes in 40.25 ms, restored them in 42.84 ms, and became queryable in 131.74 ms,
-below the 60-second M5 recovery budget. This is a reduced functional checkpoint
-and operator-procedure gate, not release-catalog, online, relocated,
+The clean format-v2 smoke on source `3bbd11e` backed up three files totaling
+3,684,192 bytes in 36.39 ms, restored them in 40.04 ms, and became queryable in
+116.51 ms, below the 60-second M5 recovery budget. This is a reduced functional
+checkpoint and operator-procedure gate, not release-catalog, online, relocated,
 point-in-time, cross-version, or disaster-recovery evidence.
 
 ## Next profiles

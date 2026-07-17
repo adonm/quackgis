@@ -23,7 +23,7 @@ Disposition:
 | Arrow result encoding | Rust edge | one ADBC batch at a time; configured ceiling/metrics; clean 1M/10M BIGINT and 1M nullable VARCHAR/BLOB reference RSS/exact-value profiles | maximum driver-batch/additional type shapes and type fuzzing |
 | COPY FROM STDIN | Rust edge + native ingest | pre-body frontend-frame ceiling; incremental bounded chunks/rows/Arrow batches; >20 MiB/220k-row stream; atomic malformed/cancel/disconnect/timeout behavior; scalar/NULL/WKB reopen; classified spatial fields accept GDAL's bounded plain PostGIS EWKB hex while ordinary binary remains strict `bytea`; packaged OGR COPY; compaction; clean 10M reference at 126 MiB RSS delta and 0.528 pgwire/direct ratio | dependency-limited idle-wait error delivery remains documented |
 | transactions/session isolation | native + Rust ownership | commit/rollback/disconnect workflow; failed `25P02`; cancellable pre-commit writes; non-cancellable commit with indeterminate-failure classification | commit response-loss reconciliation and soak |
-| local official DuckLake | native | create/ingest/query/snapshot/merge/reopen plus checksummed offline exact-path backup/restore | online/relocated recovery, upgrade, and soak |
+| local official DuckLake | native | create/ingest/query/snapshot/merge/reopen plus runtime-bound checksummed offline exact-path backup/restore | online/relocated recovery, upgrade, and soak |
 | shared DuckLake | blocked | startup fails closed | after Local 1.0: official managed profile evidence |
 | storage authority | Rust edge | local marker tests | shared credentials/authority design |
 | WKB/EWKB transport | native + Rust encoding | exact WKB ingest/query/reopen; geometry text emits bare EWKB hex, binary emits raw WKB, and QGIS NDR serialization normalizes maintained BLOB/native geometry | authoritative EWKB/SRID metadata and broader client matrix |
@@ -48,7 +48,7 @@ Disposition:
 | runtime packaging | native artifacts + Rust | static verified image contract | clean-room image run, upgrade matrix |
 | query/ingest observability | partial | process/auth/admission/cancel counters, COPY rows/bytes/batches/duration/commit latency, sampled native memory/spill | profile evidence |
 | health/readiness | Rust edge + native probe | process liveness separated from pgwire bind and local DuckLake read/write capacity; the probe reads snapshots, syncs/removes a 4 KiB root file, rolls unique internal DuckLake DDL back, and proves zero table/file/snapshot residue; explicit drain/failure states | remote dependency probes and latency SLOs |
-| backup/restore/upgrade | partial | checksummed offline exact-path backup/restore plus restart/reopen | online/relocated production recovery, upgrade/rollback, and release-catalog timing |
+| backup/restore/upgrade | partial | format-v2 runtime-bound checksummed offline exact-path backup/restore plus actual-process restart/reopen | online/relocated production recovery, upgrade/rollback, and release-catalog timing |
 
 ## Maintenance rule
 
