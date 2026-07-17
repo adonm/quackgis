@@ -2088,7 +2088,7 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
         .await
         .expect("insert spatial aggregate fixture");
     let spatial_cases = executable_spatial_cases();
-    assert_eq!(spatial_cases.len(), 43, "executable spatial ledger count");
+    assert_eq!(spatial_cases.len(), 44, "executable spatial ledger count");
     for (name, sql, expected) in spatial_cases {
         let row = client
             .query_one(&sql, &[])
@@ -2104,7 +2104,7 @@ async fn pgwire_reads_writes_and_isolates_duckdb_sessions() {
         );
     }
     let unsupported_spatial = unsupported_spatial_cases();
-    assert_eq!(unsupported_spatial.len(), 14, "unsupported spatial cases");
+    assert_eq!(unsupported_spatial.len(), 13, "unsupported spatial cases");
     for (name, sql, expected) in unsupported_spatial {
         for error in [
             client

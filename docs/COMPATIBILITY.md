@@ -130,7 +130,7 @@ The required real-driver workflow proves:
   explicitly configured identity; arbitrary procedures remain unsupported;
 - Arrow result encoding for maintained scalar types, with generated WKB payload/
   null and fixed-binary properties; and
-- 43 curated spatial cases sent with their original PostGIS spelling through the
+- 44 curated spatial cases sent with their original PostGIS spelling through the
   real server, using DuckDB Spatial plus bounded QuackGIS rewrites/macros.
 
 Run the evidence:
@@ -172,8 +172,8 @@ function spellings without touching quoted SQL text or comments:
   `postgis_proj_version()` → compatibility/runtime markers.
 
 The 57-case ledger currently classifies 31 native DuckDB cases, five rewrites,
-seven macros, nine Rust/catalog-edge gaps, and five extension candidates. The first
-43 execute through pgwire; the remaining 14 have ledger-pinned `0A000` behavior
+eight macros, eight Rust/catalog-edge gaps, and five extension candidates. The first
+44 execute through pgwire; the remaining 13 have ledger-pinned `0A000` behavior
 through simple and extended protocol. SRID assignment/preservation, geography,
 authoritative subtype/dimension/CRS metadata, PostGIS box wire identity, general
 `ST_GeometryN`, `Find_SRID`, MVT, and broad PostGIS catalog surfaces remain open

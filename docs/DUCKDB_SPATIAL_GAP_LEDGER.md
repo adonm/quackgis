@@ -19,8 +19,8 @@ in required pull-request CI.
 |---|---:|---|
 | Native DuckDB spatial | 31 | The maintained SQL executes directly with the expected scalar result. |
 | Mechanical SQL rewrite | 5 | A recorded DuckDB SQL spelling produces the same maintained result. |
-| QuackGIS macro | 7 | A small explicit compatibility expression is required and executable. |
-| Rust pgwire/catalog edge | 9 | SRID assignment, EWKB identity, or catalog behavior remains owned by the compatibility edge; each currently returns a ledger-pinned `0A000`. |
+| QuackGIS macro | 8 | A small explicit compatibility expression is required and executable. |
+| Rust pgwire/catalog edge | 8 | SRID assignment, EWKB identity, or catalog behavior remains owned by the compatibility edge; each currently returns a ledger-pinned `0A000`. |
 | Extension candidate | 5 | `ST_NDims`/`ST_CoordDim` and `ST_GeometryN` family gaps return ledger-pinned `0A000` errors until a real macro/extension implementation is promoted. |
 | Explicit unsupported | 0 | No case in the current claimed subset is intentionally dropped. |
 
@@ -33,17 +33,17 @@ document a loss. WKT whitespace is normalized; WKB/EWKB hex is compared exactly.
 
 This closes classification for the current 57-case subset. The pinned CLI probe
 executes the classified DuckDB expressions, while `duckdb-pgwire-workflow-test`
-sends all 43 original PostGIS expressions through the server-owned rewrite/macro
+sends all 44 original PostGIS expressions through the server-owned rewrite/macro
 edge with maintained scalar results. The pgwire test reads this ledger and the
-curated regress source so the lists cannot drift silently. All 14 non-executable
+curated regress source so the lists cannot drift silently. All 13 non-executable
 cases pass through simple and extended pgwire to prove ledger-pinned errors and
 session reuse. The maintained workflow also proves explicit/implicit relational
 namespace/type/range/collation rows, profile/QGIS-required built-ins with complete
 references, all seven custom lookup result types, and geometry RowDescription
 binary WKB, text hex-WKB, and NULL behavior with `tokio-postgres`. Implementing the
-nine Rust-edge semantics and broader user-object catalog discovery remains M3 work.
-Geography has the same catalog and wire-identity fixture as geometry; captured GIS
-traces are oracles but do not yet execute end to end against QuackGIS.
+eight Rust-edge semantics and broader user-object catalog discovery remains M3 work.
+Geography has the same catalog and wire-identity fixture as geometry; packaged OGR
+and QGIS read slices pass while broader captured GIS workflows remain oracles.
 
 The traced compatibility lane separately supports empty/native geometry CRS
 readback through `ST_SRID`, generic role-filtered `geometry_columns`, a typed but

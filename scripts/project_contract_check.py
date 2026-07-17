@@ -20,8 +20,8 @@ EXECUTABLE = {"native_duckdb", "sql_rewrite", "quackgis_macro"}
 EXPECTED_COUNTS = {
     "native_duckdb": 31,
     "sql_rewrite": 5,
-    "quackgis_macro": 7,
-    "rust_edge": 9,
+    "quackgis_macro": 8,
+    "rust_edge": 8,
     "extension_candidate": 5,
 }
 POSTGRESQL_PROFILE = ROOT / "tests/fixtures/postgresql18_compatibility_profile.json"
@@ -84,8 +84,8 @@ def check_spatial_ledger(errors: list[str]) -> None:
     if counts != Counter(EXPECTED_COUNTS):
         errors.append(f"spatial dispositions are {dict(counts)}, expected {EXPECTED_COUNTS}")
     executable = sum(counts[name] for name in EXECUTABLE)
-    if executable != 43:
-        errors.append(f"spatial ledger has {executable} executable cases, expected 43")
+    if executable != 44:
+        errors.append(f"spatial ledger has {executable} executable cases, expected 44")
     if len(names) != len(set(names)):
         errors.append("spatial ledger contains duplicate case names")
     if set(names) != set(fixture_names):
@@ -96,10 +96,10 @@ def check_spatial_ledger(errors: list[str]) -> None:
 
 def check_claim_text(errors: list[str]) -> None:
     required = {
-        "README.md": "43 curated spatial cases",
-        "ROADMAP.md": "43 native/rewrite/macro cases",
-        "docs/ROADMAP_STATUS.md": "43 original PostGIS expressions",
-        "docs/COMPATIBILITY.md": "43 curated spatial cases",
+        "README.md": "44 curated spatial cases",
+        "ROADMAP.md": "44 native/rewrite/macro cases",
+        "docs/ROADMAP_STATUS.md": "44 original PostGIS expressions",
+        "docs/COMPATIBILITY.md": "44 curated spatial cases",
         "docs/PROJECT_DIRECTION.md": "Forty-three native, rewrite, or macro spatial cases",
     }
     for relative, phrase in required.items():
@@ -388,7 +388,7 @@ def main() -> int:
         print("\n".join(errors), file=sys.stderr)
         return 1
     print(
-        "project_contract_check_ok markdown=tracked spatial=57 executable=43 "
+        "project_contract_check_ok markdown=tracked spatial=57 executable=44 "
         "postgresql_profile=pg18-column-core-v1"
     )
     return 0
