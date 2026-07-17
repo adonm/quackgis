@@ -673,11 +673,12 @@ duckdb-runtime-static-check:
 # Assemble a verified Linux x86_64 DuckDB runtime context under ignored .tmp.
 duckdb-runtime-context:
     cargo build -p quackgis-server --release
+    cargo build -p quackgis-migrate --release
     cargo build -p quackgis-rest --release
     cargo build -p quackgis-edge --release --bins
     @duckdb_path="$(mise exec -- which duckdb)"; dirty_flag=""; \
     if [ "${QUACKGIS_ALLOW_DIRTY_RUNTIME:-0}" = 1 ]; then dirty_flag="--allow-dirty"; fi; \
-    python3 scripts/prepare_duckdb_runtime.py $dirty_flag --server target/release/quackgis-server --rest target/release/quackgis-rest --edge-bin-dir target/release --duckdb-bin "$duckdb_path" --ducklake-extension '{{pinned_ducklake_extension}}'
+    python3 scripts/prepare_duckdb_runtime.py $dirty_flag --server target/release/quackgis-server --migrate target/release/quackgis-migrate --rest target/release/quackgis-rest --edge-bin-dir target/release --duckdb-bin "$duckdb_path" --ducklake-extension '{{pinned_ducklake_extension}}'
 
 # Build the immutable local DuckDB evaluation runtime image.
 duckdb-runtime-image: duckdb-runtime-static-check duckdb-runtime-context
@@ -688,7 +689,7 @@ duckdb-runtime-image: duckdb-runtime-static-check duckdb-runtime-context
 duckdb-runtime-offline-smoke: duckdb-runtime-image
     @set -eu; \
     engine="$(CONTAINER_ENGINE='{{container_engine}}' python3 scripts/project_doctor.py --container-engine)"; \
-    for binary in quackgis-rest quackgis-bootstrap quackgis-worker-edge quackgis-client quackgis-keygen; do \
+    for binary in quackgis-migrate quackgis-rest quackgis-bootstrap quackgis-worker-edge quackgis-client quackgis-keygen; do \
       "$engine" run --rm --network none --entrypoint "/usr/local/bin/$binary" {{duckdb_runtime_image}} --version; \
     done; \
     "$engine" run --rm --network none --entrypoint /usr/local/bin/duckdb {{duckdb_runtime_image}} -unsigned -csv -noheader :memory: -c "LOAD spatial; LOAD ducklake; SELECT ST_AsText(ST_Point(1, 2));"; \

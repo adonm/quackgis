@@ -3,6 +3,7 @@
 
 FROM registry.fedoraproject.org/fedora-minimal@sha256:cabc9f4e7442ec0fef46fb40e4626f3e58a8863fb408d821840a3df5e3d885f8
 COPY quackgis-server /usr/local/bin/quackgis-server
+COPY quackgis-migrate /usr/local/bin/quackgis-migrate
 COPY quackgis-rest /usr/local/bin/quackgis-rest
 COPY quackgis-bootstrap /usr/local/bin/quackgis-bootstrap
 COPY quackgis-worker-edge /usr/local/bin/quackgis-worker-edge

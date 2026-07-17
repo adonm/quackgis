@@ -12,6 +12,7 @@ import sys
 
 EXPECTED_COPIES = {
     "COPY quackgis-server /usr/local/bin/quackgis-server",
+    "COPY quackgis-migrate /usr/local/bin/quackgis-migrate",
     "COPY quackgis-rest /usr/local/bin/quackgis-rest",
     "COPY quackgis-bootstrap /usr/local/bin/quackgis-bootstrap",
     "COPY quackgis-worker-edge /usr/local/bin/quackgis-worker-edge",

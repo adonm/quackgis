@@ -45,6 +45,7 @@ def require_hash(path: Path, expected: str) -> None:
 
 def prepare(
     server: Path,
+    migrate: Path,
     rest: Path,
     edge_bin_dir: Path,
     duckdb_bin: Path,
@@ -65,11 +66,14 @@ def prepare(
     ]
     if (
         not server.is_file()
+        or not migrate.is_file()
         or not rest.is_file()
         or not duckdb_bin.is_file()
         or any(not binary.is_file() for binary in edge_binaries)
     ):
-        raise ValueError("server, edge, and DuckDB CLI binaries must be regular files")
+        raise ValueError(
+            "server, migrator, REST, edge, and DuckDB CLI binaries must be regular files"
+        )
     version = subprocess.run(
         [str(duckdb_bin), "--version"], text=True, capture_output=True, check=True
     ).stdout.strip()
@@ -102,6 +106,7 @@ def prepare(
     target_extensions = out / "duckdb-home" / ".duckdb" / "extensions" / f"v{VERSION}" / "linux_amd64"
     target_extensions.mkdir(parents=True)
     shutil.copy2(server, out / "quackgis-server")
+    shutil.copy2(migrate, out / "quackgis-migrate")
     shutil.copy2(rest, out / "quackgis-rest")
     for binary in edge_binaries:
         shutil.copy2(binary, out / binary.name)
@@ -150,6 +155,7 @@ def prepare(
             "spatial.duckdb_extension": EXPECTED["spatial.duckdb_extension"],
             "duckdb": sha256(duckdb_bin),
             "quackgis-server": sha256(server),
+            "quackgis-migrate": sha256(migrate),
             "quackgis-rest": sha256(rest),
             **{binary.name: sha256(binary) for binary in edge_binaries},
             "licenses/LICENSE": sha256(licenses / "LICENSE"),
@@ -248,6 +254,7 @@ def source_state_sha256(status: bytes, diff: bytes, untracked: bytes, root: Path
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--server", type=Path, required=True)
+    parser.add_argument("--migrate", type=Path, required=True)
     parser.add_argument("--rest", type=Path, required=True)
     parser.add_argument("--edge-bin-dir", type=Path, required=True)
     parser.add_argument("--duckdb-bin", type=Path, required=True)
@@ -263,6 +270,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         manifest = prepare(
             args.server.resolve(),
+            args.migrate.resolve(),
             args.rest.resolve(),
             args.edge_bin_dir.resolve(),
             args.duckdb_bin.resolve(),
