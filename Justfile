@@ -14,6 +14,7 @@ duckdb_home := env_var_or_default("DUCKDB_HOME", ".tmp/duckdb/home")
 duckdb_adbc_driver := env_var_or_default("QUACKGIS_DUCKDB_ADBC_DRIVER", ".tmp/duckdb/v" + duckdb_version + "/lib/libduckdb.so")
 pinned_ducklake_extension := env_var_or_default("QUACKGIS_DUCKLAKE_EXTENSION", ".tmp/ref/quackgis-ducklake/build/release/extension/ducklake/ducklake.duckdb_extension")
 pinned_ducklake_extension_sha256 := env_var_or_default("QUACKGIS_DUCKLAKE_EXTENSION_SHA256", "046e73c864b4403e73beddc39addc72a370dfbe633e2287181a1c0cdd37b5b94")
+duckdb_manifest := env_var_or_default("QUACKGIS_DUCKDB_MANIFEST", ".tmp/duckdb/manifest.json")
 ref_qgis_url := env_var_or_default("REF_QGIS_URL", "https://github.com/qgis/QGIS")
 ref_qgis_branch := env_var_or_default("REF_QGIS_BRANCH", "release-3_44")
 ref_duckdb_url := env_var_or_default("REF_DUCKDB_URL", "https://github.com/duckdb/duckdb")
@@ -469,12 +470,12 @@ duckdb-spatial-scan-smoke:
     just duckdb-spatial-scan-profile level=smoke rows=100000 out=.tmp/duckdb-spatial-scan/smoke-r100k.json
 
 # Create an offline, exact-path local DuckLake backup with a checksum manifest.
-duckdb-local-backup catalog=catalog data=data out=".tmp/duckdb-backup":
-    python3 scripts/duckdb_local_backup.py backup --catalog "{{catalog}}" --data-root "{{data}}" --destination "{{out}}"
+duckdb-local-backup catalog=catalog data=data out=".tmp/duckdb-backup" runtime_manifest=duckdb_manifest:
+    python3 scripts/duckdb_local_backup.py backup --catalog "{{catalog}}" --data-root "{{data}}" --destination "{{out}}" --runtime-manifest "{{runtime_manifest}}"
 
 # Restore a verified local DuckLake backup to its exact original paths.
-duckdb-local-restore backup catalog=catalog data=data:
-    python3 scripts/duckdb_local_backup.py restore --backup "{{backup}}" --catalog "{{catalog}}" --data-root "{{data}}"
+duckdb-local-restore backup catalog=catalog data=data runtime_manifest=duckdb_manifest:
+    python3 scripts/duckdb_local_backup.py restore --backup "{{backup}}" --catalog "{{catalog}}" --data-root "{{data}}" --runtime-manifest "{{runtime_manifest}}"
 
 # Compatibility alias for the original read-only checkpoint recipe.
 duckdb-pgwire-read-test: duckdb-pgwire-workflow-test

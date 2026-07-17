@@ -912,6 +912,7 @@ async fn offline_recovery_profile() {
     let catalog = temp.path().join("catalog.ducklake");
     let data = temp.path().join("data");
     let backup = temp.path().join("checkpoint-backup");
+    let runtime_manifest = profile_runtime_manifest_path();
 
     let first_port = unused_local_port().await;
     let mut first_server = spawn_profile_server(&driver, &catalog, &data, first_port);
@@ -965,6 +966,8 @@ async fn offline_recovery_profile() {
         .arg(&data)
         .arg("--destination")
         .arg(&backup)
+        .arg("--runtime-manifest")
+        .arg(&runtime_manifest)
         .output()
         .expect("run recovery backup");
     let backup_ms = backup_started.elapsed().as_secs_f64() * 1000.0;
@@ -1029,6 +1032,8 @@ async fn offline_recovery_profile() {
         .arg(&catalog)
         .arg("--data-root")
         .arg(&data)
+        .arg("--runtime-manifest")
+        .arg(&runtime_manifest)
         .output()
         .expect("run recovery restore");
     let restore_ms = restore_started.elapsed().as_secs_f64() * 1000.0;
@@ -3875,6 +3880,14 @@ fn copy_text_chunk(start: u64, rows: u64, max_bytes: usize) -> (String, u64) {
 
 fn process_rss_bytes() -> Option<u64> {
     process_rss_bytes_for(std::process::id())
+}
+
+fn profile_runtime_manifest_path() -> PathBuf {
+    std::env::var_os("QUACKGIS_DUCKDB_MANIFEST")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.tmp/duckdb/manifest.json")
+        })
 }
 
 fn process_rss_bytes_for(pid: u32) -> Option<u64> {

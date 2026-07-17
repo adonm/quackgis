@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import sys
@@ -17,8 +18,10 @@ from pathlib import Path
 
 
 MANIFEST_NAME = "manifest.json"
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
 AUTHORITY_MARKER = Path("_quackgis/storage-authority-v1")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
+GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
 class BackupError(RuntimeError):
@@ -62,6 +65,71 @@ def _source_files(catalog: Path, data_root: Path) -> list[tuple[Path, Path]]:
     return files
 
 
+def _runtime_identity(runtime_manifest: Path) -> dict[str, object]:
+    runtime_manifest = _absolute(runtime_manifest, must_exist=True)
+    _require_regular(runtime_manifest, "runtime manifest")
+    try:
+        value = json.loads(runtime_manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise BackupError(f"cannot read runtime manifest {runtime_manifest}: {error}") from error
+    if not isinstance(value, dict):
+        raise BackupError("runtime manifest root must be an object")
+
+    duckdb_version = value.get("duckdb_version")
+    platform = value.get("platform")
+    if not isinstance(duckdb_version, str) or not duckdb_version:
+        raise BackupError("runtime manifest is missing duckdb_version")
+    if not isinstance(platform, str) or not platform:
+        raise BackupError("runtime manifest is missing platform")
+
+    if isinstance(value.get("libduckdb"), dict):
+        library_digest = value["libduckdb"].get("sha256")
+        extension_entries = value.get("extensions")
+        if not isinstance(extension_entries, list):
+            raise BackupError("runtime manifest extensions must be a list")
+        extensions = {}
+        for entry in extension_entries:
+            if not isinstance(entry, dict):
+                raise BackupError("runtime manifest contains an invalid extension")
+            name = entry.get("name")
+            digest = entry.get("sha256")
+            if not isinstance(name, str) or not name:
+                raise BackupError("runtime manifest extension is missing its name")
+            if name in extensions:
+                raise BackupError(f"runtime manifest repeats extension {name}")
+            if not SHA256.fullmatch(str(digest or "")):
+                raise BackupError(f"runtime manifest {name} digest must be SHA-256")
+            extensions[name] = digest
+    else:
+        artifacts = value.get("artifacts")
+        if not isinstance(artifacts, dict):
+            raise BackupError("runtime manifest is missing artifacts")
+        library_digest = artifacts.get("libduckdb.so")
+        extensions = {
+            "ducklake": artifacts.get("ducklake.duckdb_extension"),
+            "spatial": artifacts.get("spatial.duckdb_extension"),
+        }
+
+    if not SHA256.fullmatch(str(library_digest or "")):
+        raise BackupError("runtime manifest libduckdb digest must be SHA-256")
+    for name in ("ducklake", "spatial"):
+        if not SHA256.fullmatch(str(extensions.get(name) or "")):
+            raise BackupError(f"runtime manifest {name} digest must be SHA-256")
+    source_sha = value.get("source_sha")
+    if source_sha is not None and not GIT_SHA.fullmatch(str(source_sha)):
+        raise BackupError("runtime manifest source_sha must be a full Git SHA")
+
+    identity: dict[str, object] = {
+        "duckdb_version": duckdb_version,
+        "platform": platform,
+        "libduckdb_sha256": library_digest,
+        "extensions": {name: extensions[name] for name in sorted(extensions)},
+    }
+    if source_sha is not None:
+        identity["source_sha"] = source_sha
+    return identity
+
+
 def _copy_with_digest(source: Path, destination: Path) -> tuple[int, str]:
     before = source.stat()
     digest = hashlib.sha256()
@@ -82,7 +150,9 @@ def _copy_with_digest(source: Path, destination: Path) -> tuple[int, str]:
     return size, digest.hexdigest()
 
 
-def create_backup(catalog: Path, data_root: Path, destination: Path) -> dict[str, object]:
+def create_backup(
+    catalog: Path, data_root: Path, destination: Path, runtime_manifest: Path
+) -> dict[str, object]:
     catalog = _absolute(catalog, must_exist=True)
     data_root = _absolute(data_root, must_exist=True)
     destination = _absolute(destination, must_exist=False)
@@ -92,6 +162,7 @@ def create_backup(catalog: Path, data_root: Path, destination: Path) -> dict[str
         raise BackupError("backup destination cannot be inside the DuckLake data root")
     if not destination.parent.is_dir():
         raise BackupError(f"backup destination parent does not exist: {destination.parent}")
+    runtime = _runtime_identity(runtime_manifest)
 
     staging = destination.with_name(f".{destination.name}.tmp-{uuid.uuid4().hex}")
     entries: list[dict[str, object]] = []
@@ -106,6 +177,7 @@ def create_backup(catalog: Path, data_root: Path, destination: Path) -> dict[str
             "created_at": datetime.now(timezone.utc).isoformat(),
             "source_catalog": str(catalog),
             "source_data_root": str(data_root),
+            "runtime": runtime,
             "files": entries,
         }
         manifest_path = staging / MANIFEST_NAME
@@ -129,8 +201,13 @@ def _load_and_verify(backup: Path) -> dict[str, object]:
         manifest = json.loads((backup / MANIFEST_NAME).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise BackupError(f"cannot read backup manifest: {error}") from error
-    if manifest.get("format") != "quackgis-local-backup" or manifest.get("version") != 1:
+    if (
+        manifest.get("format") != "quackgis-local-backup"
+        or manifest.get("version") != MANIFEST_VERSION
+    ):
         raise BackupError("unsupported local backup manifest")
+    if not isinstance(manifest.get("runtime"), dict):
+        raise BackupError("backup manifest has no runtime identity")
     entries = manifest.get("files")
     if not isinstance(entries, list) or not entries:
         raise BackupError("backup manifest has no files")
@@ -163,9 +240,13 @@ def _load_and_verify(backup: Path) -> dict[str, object]:
     return manifest
 
 
-def restore_backup(backup: Path, catalog: Path, data_root: Path) -> dict[str, object]:
+def restore_backup(
+    backup: Path, catalog: Path, data_root: Path, runtime_manifest: Path
+) -> dict[str, object]:
     backup = _absolute(backup, must_exist=True)
     manifest = _load_and_verify(backup)
+    if manifest["runtime"] != _runtime_identity(runtime_manifest):
+        raise BackupError("backup runtime identity does not match the selected runtime")
     catalog = _absolute(catalog, must_exist=False)
     data_root = _absolute(data_root, must_exist=False)
     if str(catalog) != manifest.get("source_catalog") or str(data_root) != manifest.get(
@@ -212,10 +293,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     backup.add_argument("--catalog", type=Path, required=True)
     backup.add_argument("--data-root", type=Path, required=True)
     backup.add_argument("--destination", type=Path, required=True)
+    backup.add_argument("--runtime-manifest", type=Path, required=True)
     restore = subparsers.add_parser("restore")
     restore.add_argument("--backup", type=Path, required=True)
     restore.add_argument("--catalog", type=Path, required=True)
     restore.add_argument("--data-root", type=Path, required=True)
+    restore.add_argument("--runtime-manifest", type=Path, required=True)
     return parser.parse_args(argv)
 
 
@@ -223,9 +306,19 @@ def main(argv: list[str]) -> int:
     arguments = parse_args(argv)
     try:
         if arguments.command == "backup":
-            manifest = create_backup(arguments.catalog, arguments.data_root, arguments.destination)
+            manifest = create_backup(
+                arguments.catalog,
+                arguments.data_root,
+                arguments.destination,
+                arguments.runtime_manifest,
+            )
         else:
-            manifest = restore_backup(arguments.backup, arguments.catalog, arguments.data_root)
+            manifest = restore_backup(
+                arguments.backup,
+                arguments.catalog,
+                arguments.data_root,
+                arguments.runtime_manifest,
+            )
     except (BackupError, OSError, ValueError) as error:
         print(f"duckdb_local_backup_error: {error}", file=sys.stderr)
         return 1

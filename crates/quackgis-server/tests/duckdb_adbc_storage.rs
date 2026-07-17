@@ -737,6 +737,11 @@ fn offline_backup_restores_exact_catalog_snapshot() {
     std::fs::create_dir(&data_path).expect("data path");
     let catalog_path = temp.path().join("catalog.ducklake");
     let backup_path = temp.path().join("backup");
+    let runtime_manifest = std::env::var_os("QUACKGIS_DUCKDB_MANIFEST")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.tmp/duckdb/manifest.json")
+        });
     let config = DuckDbAdbcConfig {
         driver_path: driver.into(),
         database_uri: ":memory:".to_owned(),
@@ -771,6 +776,8 @@ fn offline_backup_restores_exact_catalog_snapshot() {
         .arg(&data_path)
         .arg("--destination")
         .arg(&backup_path)
+        .arg("--runtime-manifest")
+        .arg(&runtime_manifest)
         .status()
         .expect("run local backup");
     assert!(backup.success());
@@ -785,6 +792,8 @@ fn offline_backup_restores_exact_catalog_snapshot() {
         .arg(&catalog_path)
         .arg("--data-root")
         .arg(&data_path)
+        .arg("--runtime-manifest")
+        .arg(&runtime_manifest)
         .status()
         .expect("run local restore");
     assert!(restore.success());
