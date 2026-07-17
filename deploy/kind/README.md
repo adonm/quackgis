@@ -81,6 +81,7 @@ wait for the complete packaged path:
 ```sh
 mise exec -- just kind-up-local
 mise exec -- just kind-client-gates
+mise exec -- just kind-qgis-gate
 mise exec -- just kind-restart-gate
 mise exec -- just kind-secret-rotation-gate
 mise exec -- just kind-rest-jwt-rotation-gate
@@ -121,6 +122,12 @@ tokens, and denies an old-key token against each replacement Pod. This is a
 bounded replacement operation after rollout, not a zero-downtime multi-key
 overlap contract. Failed rotation keeps previous owner-only material under
 `.tmp/kind/` for explicit recovery rather than silently deleting it.
+
+`kind-qgis-gate` runs the normal client/REST matrix first, then starts the
+separately pinned QGIS 3.44.11 image. Its read-only query layer proves exact
+fields, Point/NULL values, expression and subset filters, extent, a spatial
+viewport identify request, and non-empty offscreen rendering. The QGIS image is
+not part of normal topology startup.
 
 Delete the disposable node when finished. This deletes its node-local PV data by
 design even though the Kubernetes PV reclaim policy is `Retain`:

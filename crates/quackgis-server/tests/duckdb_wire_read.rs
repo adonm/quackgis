@@ -396,6 +396,17 @@ async fn qgis_read_only_binary_cursor_batches_are_exact_and_enforced() {
         )
         .await
         .expect("seed exact QGIS cursor fixture");
+    client
+        .batch_execute("CREATE TABLE quackgis.main.trace_qgis_filter(id BIGINT, geom_wkb BLOB)")
+        .await
+        .expect("create QGIS viewport fixture");
+    client
+        .batch_execute(
+            "INSERT INTO quackgis.main.trace_qgis_filter VALUES \
+             (7, ST_AsWKB(ST_Point(1, 2))), (8, ST_AsWKB(ST_Point(20, 30)))",
+        )
+        .await
+        .expect("seed QGIS viewport fixture");
     let unsupported_byte_order = client
         .simple_query("SELECT st_asbinary(ST_Point(1, 2), 'XDR')")
         .await
@@ -499,6 +510,37 @@ async fn qgis_read_only_binary_cursor_batches_are_exact_and_enforced() {
     .await;
     assert_eq!(raw_command_tags(&commit), vec!["CLOSE CURSOR", "COMMIT"]);
     assert_eq!(raw_ready_status(&commit), b'I');
+
+    let viewport = raw_pgwire_query_messages(
+        &mut raw,
+        "BEGIN READ ONLY; DECLARE qgis_viewport BINARY CURSOR FOR \
+         SELECT st_asbinary(\"geom_wkb\",'NDR'), \"id\" \
+         FROM (SELECT id, geom_wkb FROM public.trace_qgis_filter) AS \"subQuery_0\" \
+         WHERE \"geom_wkb\" && st_makeenvelope(0,1,2,3,0)",
+    )
+    .await;
+    assert_eq!(raw_command_tags(&viewport), vec!["BEGIN", "DECLARE CURSOR"]);
+    assert_eq!(raw_ready_status(&viewport), b'T');
+    let viewport_fetch =
+        raw_pgwire_query_messages(&mut raw, "FETCH FORWARD 2000 FROM qgis_viewport").await;
+    assert_eq!(raw_command_tags(&viewport_fetch), vec!["FETCH 1"]);
+    let viewport_row = viewport_fetch
+        .iter()
+        .find(|message| message.kind == b'D')
+        .expect("QGIS viewport binary row");
+    assert_eq!(
+        raw_data_row(&viewport_row.body),
+        vec![
+            Some(point_wkb(1.0, 2.0)),
+            Some(7_i64.to_be_bytes().to_vec()),
+        ]
+    );
+    let viewport_close = raw_pgwire_query_messages(&mut raw, "CLOSE qgis_viewport; COMMIT").await;
+    assert_eq!(
+        raw_command_tags(&viewport_close),
+        vec!["CLOSE CURSOR", "COMMIT"]
+    );
+    assert_eq!(raw_ready_status(&viewport_close), b'I');
 
     let begin_rollback = raw_pgwire_query_messages(
         &mut raw,

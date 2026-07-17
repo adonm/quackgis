@@ -44,7 +44,20 @@ spec:
               cp /etc/quackgis/tls/tls.key "$HOME/.postgresql/postgresql.key"
               chmod 600 "$HOME/.postgresql/postgresql.key"
               python3 - <<'PY'
-              from qgis.core import Qgis, QgsApplication, QgsDataSourceUri, QgsFeatureRequest, QgsVectorLayer
+              from qgis.PyQt.QtCore import QSize
+              from qgis.PyQt.QtGui import QColor
+              from qgis.core import (
+                  Qgis,
+                  QgsApplication,
+                  QgsDataSourceUri,
+                  QgsFeatureRequest,
+                  QgsMapRendererParallelJob,
+                  QgsMapSettings,
+                  QgsMarkerSymbol,
+                  QgsRectangle,
+                  QgsSingleSymbolRenderer,
+                  QgsVectorLayer,
+              )
 
               assert Qgis.QGIS_VERSION == "3.44.11-Solothurn", Qgis.QGIS_VERSION
               app = QgsApplication([], False)
@@ -82,9 +95,65 @@ spec:
                       for feature in features
                   )
                   assert values == [(1, "one", "Point (1 2)"), (2, None, None)], values
+                  extent = layer.extent()
+                  extent_values = (
+                      extent.xMinimum(),
+                      extent.yMinimum(),
+                      extent.xMaximum(),
+                      extent.yMaximum(),
+                  )
+                  assert extent_values == (1.0, 2.0, 1.0, 2.0), extent_values
+
+                  filtered = list(
+                      layer.getFeatures(
+                          QgsFeatureRequest().setFilterExpression('"id" = 1')
+                      )
+                  )
+                  assert len(filtered) == 1 and filtered[0]["name"] == "one", filtered
+                  assert layer.setSubsetString('"id" = 1')
+                  subset = list(layer.getFeatures())
+                  assert len(subset) == 1 and subset[0]["id"] == 1, subset
+                  assert layer.setSubsetString("")
+
+                  identified = list(
+                      layer.getFeatures(
+                          QgsFeatureRequest().setFilterRect(QgsRectangle(0, 1, 2, 3))
+                      )
+                  )
+                  identified_values = [
+                      (feature["id"], feature.geometry().asWkt())
+                      for feature in identified
+                  ]
+                  assert identified_values == [(1, "Point (1 2)")], identified_values
+
+                  layer.setRenderer(
+                      QgsSingleSymbolRenderer(
+                          QgsMarkerSymbol.createSimple(
+                              {"name": "circle", "color": "255,0,0", "size": "8"}
+                          )
+                      )
+                  )
+                  settings = QgsMapSettings()
+                  settings.setLayers([layer])
+                  settings.setExtent(QgsRectangle(0, 1, 2, 3))
+                  settings.setOutputSize(QSize(128, 128))
+                  settings.setBackgroundColor(QColor("white"))
+                  renderer = QgsMapRendererParallelJob(settings)
+                  renderer.start()
+                  renderer.waitForFinished()
+                  image = renderer.renderedImage()
+                  assert not image.isNull()
+                  assert renderer.errors() == [], renderer.errors()
+                  nonwhite_pixels = sum(
+                      image.pixelColor(x, y) != QColor("white")
+                      for x in range(image.width())
+                      for y in range(image.height())
+                  )
+                  assert nonwhite_pixels > 0, nonwhite_pixels
                   print(
-                      "qgis_query_layer_ok version=%s rows=2 geometry=point-null key=id"
-                      % Qgis.QGIS_VERSION
+                      "qgis_query_layer_ok version=%s rows=2 geometry=point-null key=id "
+                      "filter=true identify=true extent=1,2,1,2 render_pixels=%d"
+                      % (Qgis.QGIS_VERSION, nonwhite_pixels)
                   )
               finally:
                   app.exitQgis()

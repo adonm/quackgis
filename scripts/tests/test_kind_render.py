@@ -130,6 +130,10 @@ def main() -> None:
         assert "ogr_copy_write_ok" in clients
         assert "PG_USE_COPY YES" in clients
         assert "qgis_query_layer_ok" in qgis
+        assert "QgsMapRendererParallelJob" in qgis
+        assert "setFilterExpression" in qgis
+        assert "setFilterRect" in qgis
+        assert "render_pixels" in qgis
         assert "3.44.11-Solothurn" in qgis
         assert "public.kind_psycopg_points" in qgis
         assert "QgsDataSourceUri.SslVerifyFull" in qgis

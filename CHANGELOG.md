@@ -7,6 +7,12 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 
 ### Added
 
+- Pinned offscreen QGIS 3.44.11 now qualifies expression and provider subset
+  filters, exact extent, a spatial viewport identify request, and a 128×128
+  rendered Point image through the packaged query layer. The pgwire edge
+  structurally converts only QGIS's literal SRID-0 `geom_wkb &&
+  ST_MakeEnvelope(...)` shape to an exact DuckDB `ST_Intersects` predicate;
+  dynamic/nonzero-SRID/non-WKB and generic overlap shapes fail closed.
 - Pinned GDAL/OGR 3.11.5 now authors a bounded text COPY into a predeclared
   official-DuckLake table through the packaged mutual-TLS tiny client, then a
   fresh psycopg connection verifies exact scalar, Point, and NULL values. The

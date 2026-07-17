@@ -792,8 +792,14 @@ QGIS read-only/binary cursor start, `FETCH FORWARD 2000`, and close/commit shape
 it verifies binary raw WKB/BIGINT/text/NULL values, close/rollback, failed-declare
 status, and read-only `25006` cleanup. The pinned identity lane also executes the
 captured QGIS `attribute_structure` query with exact default/comment/empty-index
-semantics. Direct ordinary-table open remains blocked on real primary/unique-key
-support; broader filter, identify, extent, and render workflows remain C6 work.
+semantics. The same pinned query layer now proves an attribute expression
+request, provider subset filtering, exact Point extent, spatial viewport
+identification, and a non-empty 128×128 offscreen render. The viewport SQL
+compatibility rule accepts only QGIS's literal SRID-0 envelope over the maintained
+WKB column and rewrites the bbox overlap to exact `ST_Intersects`;
+dynamic/nonzero-SRID/non-WKB overlap shapes fail closed. Direct ordinary-table
+open remains blocked on real primary/unique-key support, and authoritative CRS
+behavior remains C6 work.
 
 ### H1 — migrate and package role-aware REST
 

@@ -1983,6 +1983,13 @@ fn validate_statement_with_catalog_identity(
         ));
     }
     let mut statement = statements.pop().expect("one parsed statement");
+    rewrite_qgis_spatial_filter(&mut statement);
+    if contains_postgresql_overlap(&statement) {
+        return Err(user_error(
+            "0A000",
+            "PostGIS && is supported only for a QGIS WKB viewport envelope",
+        ));
+    }
     let psql_relation_properties = is_psql_relation_properties_query(&statement);
     let psql_column_properties = is_psql_column_properties_query(&statement);
     let psql_incoming_foreign_keys = is_psql_incoming_foreign_keys_query(&statement);
@@ -2213,6 +2220,133 @@ fn validate_statement_with_catalog_identity(
         role_command,
         request_command,
     })
+}
+
+fn rewrite_qgis_spatial_filter(statement: &mut Statement) {
+    let _: ControlFlow<()> = visit_expressions_mut(statement, |expression| {
+        let replacement = match expression {
+            Expr::BinaryOp {
+                left,
+                op: BinaryOperator::PGOverlap,
+                right,
+            } if qgis_wkb_column(left) => qgis_viewport_envelope(right).map(|envelope| {
+                private_function(
+                    "ST_Intersects",
+                    vec![
+                        private_scalar_function("ST_GeomFromWKB", *left.clone()),
+                        envelope,
+                    ],
+                )
+            }),
+            _ => None,
+        };
+        if let Some(replacement) = replacement {
+            *expression = replacement;
+        }
+        ControlFlow::Continue(())
+    });
+}
+
+fn qgis_wkb_column(expression: &Expr) -> bool {
+    let column = match expression {
+        Expr::Identifier(column) => Some(column),
+        Expr::CompoundIdentifier(parts) => parts.last(),
+        _ => None,
+    };
+    column.is_some_and(|column| {
+        ["geom_wkb", "wkb_geom", "wkb_geometry"]
+            .iter()
+            .any(|name| pg_identifier_matches(column, name))
+    })
+}
+
+fn qgis_viewport_envelope(expression: &Expr) -> Option<Expr> {
+    let Expr::Function(function) = expression else {
+        return None;
+    };
+    let FunctionArguments::List(arguments) = &function.args else {
+        return None;
+    };
+    if !pg_function_name_matches(&function.name, "st_makeenvelope")
+        || function.uses_odbc_syntax
+        || !matches!(function.parameters, FunctionArguments::None)
+        || arguments.duplicate_treatment.is_some()
+        || !arguments.clauses.is_empty()
+        || arguments.args.len() != 5
+        || function.filter.is_some()
+        || function.null_treatment.is_some()
+        || function.over.is_some()
+        || !function.within_group.is_empty()
+    {
+        return None;
+    }
+    let values = arguments
+        .args
+        .iter()
+        .map(|argument| match argument {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(expression)) => {
+                finite_numeric_literal(expression)
+            }
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if values[4] != 0.0 {
+        return None;
+    }
+    let mut normalized = function.clone();
+    let FunctionArguments::List(arguments) = &mut normalized.args else {
+        unreachable!("validated function argument list")
+    };
+    arguments.args.pop();
+    Some(Expr::Function(normalized))
+}
+
+fn finite_numeric_literal(expression: &Expr) -> Option<f64> {
+    let raw = match expression {
+        Expr::Value(value) => match &value.value {
+            Value::Number(raw, false) => Some((raw.as_str(), 1.0)),
+            _ => None,
+        },
+        Expr::UnaryOp { op, expr } => {
+            let sign = match op {
+                sqlparser::ast::UnaryOperator::Plus => 1.0,
+                sqlparser::ast::UnaryOperator::Minus => -1.0,
+                _ => return None,
+            };
+            match expr.as_ref() {
+                Expr::Value(value) => match &value.value {
+                    Value::Number(raw, false) => Some((raw.as_str(), sign)),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        _ => None,
+    }?;
+    raw.0
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+        .map(|value| value * raw.1)
+}
+
+fn contains_postgresql_overlap(statement: &Statement) -> bool {
+    let mut overlap = false;
+    let _: ControlFlow<()> = visit_expressions(statement, |expression| {
+        if matches!(
+            expression,
+            Expr::BinaryOp {
+                op: BinaryOperator::PGOverlap,
+                ..
+            }
+        ) {
+            overlap = true;
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    overlap
 }
 
 fn unsupported_spatial_function(statement: &Statement) -> Option<&'static str> {
@@ -7516,6 +7650,33 @@ mod tests {
         ] {
             validate_statement(sql, ProtocolMode::Simple)
                 .unwrap_or_else(|error| panic!("supported SQL {sql}: {error}"));
+        }
+    }
+
+    #[test]
+    fn qgis_viewport_overlap_is_narrowly_rewritten() {
+        let validated = validate_statement(
+            "SELECT id FROM (SELECT id, geom_wkb FROM public.points) AS subQuery_0 \
+             WHERE geom_wkb && ST_MakeEnvelope(-1.5, 0, 2, +3.5, 0)",
+            ProtocolMode::Extended,
+        )
+        .expect("QGIS viewport filter");
+        assert!(validated.sql.contains("ST_Intersects"), "{}", validated.sql);
+        assert!(validated.sql.contains("ST_GeomFromWKB(geom_wkb)"));
+        assert!(validated.sql.contains("ST_MakeEnvelope(-1.5, 0, 2, +3.5)"));
+        assert!(!validated.sql.contains("&&"));
+
+        for unsupported in [
+            "SELECT id FROM points WHERE payload && ST_MakeEnvelope(0, 0, 1, 1, 0)",
+            "SELECT id FROM points WHERE geom_wkb && ST_MakeEnvelope(0, 0, 1, 1, 4326)",
+            "SELECT id FROM points WHERE geom_wkb && ST_MakeEnvelope(0, 0, width, 1, 0)",
+            "SELECT ARRAY[1] && ARRAY[1]",
+        ] {
+            let error = match validate_statement(unsupported, ProtocolMode::Extended) {
+                Ok(_) => panic!("unsupported overlap shape: {unsupported}"),
+                Err(error) => error,
+            };
+            assert!(error.to_string().contains("QGIS WKB viewport"), "{error}");
         }
     }
 

@@ -106,8 +106,10 @@ Point/NULL readback after reconnect. Both REST Pods independently pass
 reader/denied OpenAPI and exact data gates; the Service survives one Pod deletion,
 core replacement recovers, and old authenticator/JWT credentials are denied after
 replacement. The owned identity artifact removes the catalog-artifact schedule
-blocker. OGR-created tables, authoritative CRS metadata, broader QGIS workflows,
-and packaged resource/hosted-relay qualification remain open.
+blocker. The pinned QGIS query layer also passes expression/subset filtering,
+exact extent, spatial viewport identification, and an offscreen rendered-image
+oracle. OGR-created tables, authoritative CRS metadata, direct QGIS table open
+without real keys, and packaged resource/hosted-relay qualification remain open.
 
 TLS remains optional for local development. Set `QUACKGIS_TLS_MODE=required` with
 `QUACKGIS_TLS_CERT` and `QUACKGIS_TLS_KEY` to fail closed on plaintext startup.

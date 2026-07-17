@@ -48,6 +48,8 @@ and QGIS read slices pass while broader captured GIS workflows remain oracles.
 The traced compatibility lane separately supports empty/native geometry CRS
 readback through `ST_SRID`, generic role-filtered `geometry_columns`, a typed but
 empty `spatial_ref_sys`, DuckDB-backed version probes, and textual 2D/3D extents.
-Those focused surfaces do not make the ledger's `ST_SetSRID`, five-argument
-`ST_MakeEnvelope`, `Find_SRID`, authoritative CRS, or PostGIS box-type gaps
-implicitly supported.
+The QGIS query-layer gate also removes the fifth argument only from its exact
+literal SRID-0 maintained-WKB viewport overlap and replaces that overlap with an
+exact `ST_Intersects` predicate. Standalone or nonzero-SRID five-argument
+`ST_MakeEnvelope`, `ST_SetSRID`, `Find_SRID`, authoritative CRS, and PostGIS
+box-type gaps remain unsupported.

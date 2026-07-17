@@ -136,6 +136,10 @@ def check_templates() -> None:
         "name: quackgis-qgis",
         "3.44.11-Solothurn",
         "qgis_query_layer_ok",
+        "QgsMapRendererParallelJob",
+        "setFilterExpression",
+        "setFilterRect",
+        "render_pixels",
         "QgsDataSourceUri.SslVerifyFull",
         "public.kind_psycopg_points",
     ]:
