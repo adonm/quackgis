@@ -1,0 +1,139 @@
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: List
+items:
+  - apiVersion: batch/v1
+    kind: Job
+    metadata:
+      name: quackgis-migration-psql
+      namespace: quackgis
+    spec:
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 600
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext: &pod_security
+            fsGroup: 65532
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: psql
+              image: "@@CLIENT_IMAGE@@"
+              imagePullPolicy: IfNotPresent
+              command: ["/bin/sh", "-ceu"]
+              args:
+                - |-
+                  test "$(psql -XAt -v ON_ERROR_STOP=1 -c 'SELECT count(*)::BIGINT, sum(id)::BIGINT FROM public.kind_migration_readings')" = '10002|50025003'
+                  test "$(psql -XAt -v ON_ERROR_STOP=1 -c 'SELECT count(*)::BIGINT, count(geom_wkb)::BIGINT, sum(octet_length(geom_wkb))::BIGINT FROM public.kind_migration_places')" = '2|1|21'
+                  psql -X -v ON_ERROR_STOP=1 -c '\d+ public.kind_migration_places'
+                  echo migration_psql_ok rows=10004 report_match=counts,point-null
+              env: &pg_environment
+                - name: PGHOST
+                  value: quackgis-migration.quackgis.svc.cluster.local
+                - name: PGPORT
+                  value: "5432"
+                - name: PGDATABASE
+                  value: quackgis
+                - name: PGUSER
+                  value: migration_operator
+                - name: PGSSLMODE
+                  value: verify-full
+                - name: PGSSLROOTCERT
+                  value: /tls/ca.crt
+                - name: PGSSLCERT
+                  value: /tls/tls.crt
+                - name: PGSSLKEY
+                  value: /tls/tls.key
+              securityContext: &client_security
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+                runAsNonRoot: true
+                runAsUser: 65532
+                runAsGroup: 65532
+                seccompProfile:
+                  type: RuntimeDefault
+              volumeMounts: &tls_mounts
+                - name: tls
+                  mountPath: /tls
+                  readOnly: true
+          volumes: &tls_volume
+            - name: tls
+              secret:
+                secretName: quackgis-kind-migration-tls
+                defaultMode: 288
+  - apiVersion: batch/v1
+    kind: Job
+    metadata:
+      name: quackgis-migration-psycopg
+      namespace: quackgis
+    spec:
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 600
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext: *pod_security
+          containers:
+            - name: psycopg
+              image: "@@CLIENT_IMAGE@@"
+              imagePullPolicy: IfNotPresent
+              command: ["python3", "-c"]
+              args:
+                - |-
+                  import psycopg
+                  with psycopg.connect("") as connection:
+                      aggregate = connection.execute("SELECT count(*)::BIGINT, sum(id)::BIGINT FROM public.kind_migration_readings").fetchone()
+                      rows = connection.execute("SELECT id, label, amount, observed_on, observed_at, payload, CASE WHEN geom_wkb IS NULL THEN NULL ELSE ST_AsText(ST_GeomFromWKB(geom_wkb)) END FROM public.kind_migration_places ORDER BY id").fetchall()
+                  assert aggregate == (10002, 50025003), aggregate
+                  assert rows[0][0] == 1 and str(rows[0][2]) == "1.25", rows[0]
+                  assert str(rows[0][3]) == "2026-07-18", rows[0]
+                  assert str(rows[0][4]) == "2026-07-18 01:02:03.123456", rows[0]
+                  assert bytes(rows[0][5]) == b"\x00\xff" and rows[0][6] == "POINT (1 2)", rows[0]
+                  assert rows[1][0:2] == (2, None) and str(rows[1][2]) == "2.50", rows[1]
+                  assert rows[1][3:] == (None, None, None, None), rows[1]
+                  print("migration_psycopg_ok rows=10004 scalars=true point-null=true report_match=true")
+              env: *pg_environment
+              securityContext: *client_security
+              volumeMounts: *tls_mounts
+          volumes: *tls_volume
+  - apiVersion: batch/v1
+    kind: Job
+    metadata:
+      name: quackgis-migration-ogr
+      namespace: quackgis
+    spec:
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 600
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext: *pod_security
+          containers:
+            - name: ogr
+              image: "@@CLIENT_IMAGE@@"
+              imagePullPolicy: IfNotPresent
+              command: ["/bin/sh", "-ceu"]
+              args:
+                - |-
+                  output_dir="$(mktemp -d)"
+                  trap 'rm -rf "$output_dir"' EXIT
+                  ogr2ogr -f GeoJSON "$output_dir/migration.geojson" \
+                    "PG:host=quackgis-migration.quackgis.svc.cluster.local port=5432 dbname=quackgis user=migration_operator sslmode=verify-full sslrootcert=/tls/ca.crt sslcert=/tls/tls.crt sslkey=/tls/tls.key" \
+                    -sql 'SELECT id, label, ST_GeomFromWKB(geom_wkb) AS "ST_AsEWKB" FROM public.kind_migration_places ORDER BY id'
+                  python3 - "$output_dir/migration.geojson" <<'PY'
+                  import json
+                  import sys
+                  with open(sys.argv[1], encoding="utf-8") as source:
+                      features = json.load(source)["features"]
+                  assert [feature["properties"]["id"] for feature in features] == [1, 2], features
+                  assert features[0]["geometry"] == {"type": "Point", "coordinates": [1.0, 2.0]}, features
+                  assert features[1]["geometry"] is None and features[1]["properties"]["label"] is None, features
+                  print("migration_ogr_ok rows=2 geometry=point-null report_match=true")
+                  PY
+              env: *pg_environment
+              securityContext: *client_security
+              volumeMounts: *tls_mounts
+          volumes: *tls_volume

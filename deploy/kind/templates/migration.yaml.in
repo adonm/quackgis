@@ -40,6 +40,30 @@ data:
         }
       ]
     }
+  staging-reset.json: |
+    {
+      "format_version": 1,
+      "source": {
+        "postgres_version_num": 180004,
+        "postgis_version": "3.6.4"
+      },
+      "source_schemas": ["public", "survey"],
+      "tables": [
+        {
+          "source_schema": "public",
+          "source_table": "source_places",
+          "target_schema": "main",
+          "target_table": "g0stage__kind_migration_places",
+          "column_mappings": {"location": "geom_wkb"}
+        },
+        {
+          "source_schema": "survey",
+          "source_table": "source_readings",
+          "target_schema": "main",
+          "target_table": "g0stage__kind_migration_readings"
+        }
+      ]
+    }
   50_fixture.sql: |
     CREATE SCHEMA survey;
     CREATE TABLE public.source_places (
@@ -138,22 +162,20 @@ spec:
         - name: cleanup-configured-targets
           image: "@@RUNTIME_IMAGE@@"
           imagePullPolicy: IfNotPresent
-          command: ["/usr/local/bin/quackgis-migrate"]
+          command: ["/bin/sh", "-ceu"]
           args:
-            - cleanup
-            - --config
-            - /config/migration.json
-            - --out
-            - /work/cleanup-report.json
-            - --confirm-drop-configured-targets
-            - --target-url
-            - postgresql://migration_operator@quackgis-migration.quackgis.svc.cluster.local:5432/quackgis
-            - --target-ca
-            - /tls/ca.crt
-            - --target-client-cert
-            - /tls/tls.crt
-            - --target-client-key
-            - /tls/tls.key
+            - |-
+              for scope in migration staging-reset; do
+                /usr/local/bin/quackgis-migrate reset-configured-targets \
+                  --config "/config/${scope}.json" \
+                  --out "/work/${scope}-reset-report.json" \
+                  --confirm-drop-configured-targets \
+                  --target-url postgresql://migration_operator@quackgis-migration.quackgis.svc.cluster.local:5432/quackgis \
+                  --target-ca /tls/ca.crt \
+                  --target-client-cert /tls/tls.crt \
+                  --target-client-key /tls/tls.key
+              done
+              echo kind_postgis_migration_reset_ok scopes=release,staging
           securityContext: &migration_security
             allowPrivilegeEscalation: false
             capabilities:
@@ -168,6 +190,10 @@ spec:
             - name: config
               mountPath: /config/migration.json
               subPath: migration.json
+              readOnly: true
+            - name: config
+              mountPath: /config/staging-reset.json
+              subPath: staging-reset.json
               readOnly: true
             - name: tls
               mountPath: /tls/ca.crt
@@ -228,17 +254,50 @@ spec:
               /usr/local/bin/quackgis-migrate run \
                 --config /config/migration.json \
                 --out /work/migration-report.json \
+                --staging-id g0stage \
                 --source-url postgresql://postgres@127.0.0.1:5432/fixture \
                 --allow-plaintext-loopback \
                 --target-url postgresql://migration_operator@quackgis-migration.quackgis.svc.cluster.local:5432/quackgis \
                 --target-ca /tls/ca.crt \
                 --target-client-cert /tls/tls.crt \
-                --target-client-key /tls/tls.key
+                --target-client-key /tls/tls.key \
+                --runtime-manifest /opt/quackgis/artifact-manifest.json \
+                --target-runtime-image '@@RUNTIME_IMAGE@@'
+              report_sha256="$(sha256sum /work/migration-report.json | cut -d' ' -f1)"
+              /usr/local/bin/quackgis-migrate verify \
+                --report /work/migration-report.json \
+                --report-sha256 "$report_sha256" \
+                --out /work/verification-report.json \
+                --target-url postgresql://migration_operator@quackgis-migration.quackgis.svc.cluster.local:5432/quackgis \
+                --target-ca /tls/ca.crt \
+                --target-client-cert /tls/tls.crt \
+                --target-client-key /tls/tls.key \
+                --runtime-manifest /opt/quackgis/artifact-manifest.json \
+                --target-runtime-image '@@RUNTIME_IMAGE@@'
+              verification_sha256="$(sha256sum /work/verification-report.json | cut -d' ' -f1)"
+              /usr/local/bin/quackgis-migrate promote \
+                --report /work/migration-report.json \
+                --report-sha256 "$report_sha256" \
+                --verification-report /work/verification-report.json \
+                --verification-report-sha256 "$verification_sha256" \
+                --out /work/promotion-report.json \
+                --confirm-promote \
+                --target-url postgresql://migration_operator@quackgis-migration.quackgis.svc.cluster.local:5432/quackgis \
+                --target-ca /tls/ca.crt \
+                --target-client-cert /tls/tls.crt \
+                --target-client-key /tls/tls.key \
+                --runtime-manifest /opt/quackgis/artifact-manifest.json \
+                --target-runtime-image '@@RUNTIME_IMAGE@@'
               grep -F '"state": "verified"' /work/migration-report.json
+              grep -F '"staging_id": "g0stage"' /work/migration-report.json
+              grep -F '"target_runtime_image_sha256":' /work/migration-report.json
+              grep -F '"source_dirty": false' /work/migration-report.json
+              grep -F '"state": "verified"' /work/verification-report.json
+              grep -F '"state": "promoted"' /work/promotion-report.json
               grep -F '"source_identity": "public.source_places"' /work/migration-report.json
               grep -F '"source_identity": "survey.source_readings"' /work/migration-report.json
               grep -F '"rows": 10002' /work/migration-report.json
-              echo kind_postgis_migration_ok role=migration_operator ingress=mtls_iroh rows=10004
+              echo kind_postgis_migration_ok role=migration_operator ingress=mtls_iroh rows=10004 lifecycle=run,verify,promote runtime=bound
           securityContext: *migration_security
           volumeMounts: *migration_mounts
       volumes:

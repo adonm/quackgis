@@ -112,7 +112,18 @@ def main() -> None:
         seed = (output / "rest-seed.yaml").read_text(encoding="utf-8")
         qgis = (output / "qgis.yaml").read_text(encoding="utf-8")
         migration = (output / "migration.yaml").read_text(encoding="utf-8")
-        assert "@@" not in rendered + clients + rest + seed + qgis + migration
+        migration_clients = (output / "migration-clients.yaml").read_text(encoding="utf-8")
+        migration_qgis = (output / "migration-qgis.yaml").read_text(encoding="utf-8")
+        assert "@@" not in (
+            rendered
+            + clients
+            + rest
+            + seed
+            + qgis
+            + migration
+            + migration_clients
+            + migration_qgis
+        )
         assert digest in rendered
         assert "Ym9vdHN0cmFwLXNlY3JldA==" in rendered
         assert '"listen": "0.0.0.0:5432"' in rendered
@@ -172,6 +183,15 @@ def main() -> None:
         assert "restartPolicy: Always" in migration
         assert "postgis/postgis@sha256:" in migration
         assert "bWlncmF0aW9uLWNsaWVudC5jcnQ=" in migration
+        assert "reset-configured-targets" in migration
+        assert "--staging-id g0stage" in migration
+        assert "--runtime-manifest /opt/quackgis/artifact-manifest.json" in migration
+        assert "migration_psql_ok" in migration_clients
+        assert "migration_psycopg_ok" in migration_clients
+        assert "migration_ogr_ok" in migration_clients
+        assert "migration_operator" in migration_clients
+        assert "migration_qgis_ok" in migration_qgis
+        assert "QgsMapRendererParallelJob" in migration_qgis
         first_core = rendered
         first_rest = rest
         jwt_secret.write_text("different-bounded-jwt-secret-value", encoding="utf-8")
@@ -198,6 +218,8 @@ def main() -> None:
         assert stat.S_IMODE((output / "rest.yaml").stat().st_mode) == 0o600
         assert stat.S_IMODE((output / "rest-seed.yaml").stat().st_mode) == 0o600
         assert stat.S_IMODE((output / "migration.yaml").stat().st_mode) == 0o600
+        assert stat.S_IMODE((output / "migration-clients.yaml").stat().st_mode) == 0o600
+        assert stat.S_IMODE((output / "migration-qgis.yaml").stat().st_mode) == 0o600
     print("kind_render_test_ok")
 
 

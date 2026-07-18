@@ -68,6 +68,12 @@ EXPECTED_PLACEHOLDERS = {
         "@@MIGRATION_CLIENT_TLS_CERTIFICATE@@",
         "@@MIGRATION_CLIENT_TLS_PRIVATE_KEY@@",
     },
+    "migration-clients.yaml.in": {
+        "@@CLIENT_IMAGE@@",
+    },
+    "migration-qgis.yaml.in": {
+        "@@QGIS_IMAGE@@",
+    },
 }
 
 
@@ -87,6 +93,10 @@ def check_templates() -> None:
     seed = (TEMPLATES / "rest-seed.yaml.in").read_text(encoding="utf-8")
     qgis = (TEMPLATES / "qgis.yaml.in").read_text(encoding="utf-8")
     migration = (TEMPLATES / "migration.yaml.in").read_text(encoding="utf-8")
+    migration_clients = (TEMPLATES / "migration-clients.yaml.in").read_text(
+        encoding="utf-8"
+    )
+    migration_qgis = (TEMPLATES / "migration-qgis.yaml.in").read_text(encoding="utf-8")
     for required in [
         "kind: StatefulSet",
         "replicas: 1",
@@ -170,9 +180,35 @@ def check_templates() -> None:
         "cleanup-configured-targets",
         "kind_postgis_migration_ok",
         "kind_migration_public_certificate_denied",
+        "reset-configured-targets",
+        "--staging-id g0stage",
+        "--runtime-manifest /opt/quackgis/artifact-manifest.json",
+        '"state": "promoted"',
     ]:
         if required not in migration:
             raise ValueError(f"migration template is missing {required!r}")
+    for required in [
+        "quackgis-migration-psql",
+        "migration_psql_ok",
+        "quackgis-migration-psycopg",
+        "migration_psycopg_ok",
+        "quackgis-migration-ogr",
+        "migration_ogr_ok",
+        "quackgis-migration.quackgis.svc.cluster.local",
+        "migration_operator",
+    ]:
+        if required not in migration_clients:
+            raise ValueError(f"migration client template is missing {required!r}")
+    for required in [
+        "quackgis-migration-qgis",
+        "migration_qgis_ok",
+        "3.44.11-Solothurn",
+        "QgsMapRendererParallelJob",
+        "quackgis-migration.quackgis.svc.cluster.local",
+        "migration_operator",
+    ]:
+        if required not in migration_qgis:
+            raise ValueError(f"migration QGIS template is missing {required!r}")
     if core.count("publishNotReadyAddresses: true") != 1:
         raise ValueError("only the internal edge Service may publish unready addresses")
     forbidden = ["datafusion", "sedona", "linkerd", "minio", "postgresql"]
@@ -258,6 +294,8 @@ def render(args: argparse.Namespace) -> None:
         ("clients.yaml.in", "clients.yaml"),
         ("qgis.yaml.in", "qgis.yaml"),
         ("migration.yaml.in", "migration.yaml"),
+        ("migration-clients.yaml.in", "migration-clients.yaml"),
+        ("migration-qgis.yaml.in", "migration-qgis.yaml"),
     ]:
         text = (TEMPLATES / source_name).read_text(encoding="utf-8")
         for marker, value in substitutions.items():

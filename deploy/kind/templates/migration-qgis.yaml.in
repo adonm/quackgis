@@ -1,0 +1,146 @@
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: quackgis-migration-qgis
+  namespace: quackgis
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: qgis
+          image: "@@QGIS_IMAGE@@"
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-ceu"]
+          args:
+            - |-
+              export HOME=/tmp/qgis-migration-home
+              export QT_QPA_PLATFORM=offscreen
+              mkdir -p "$HOME/.postgresql"
+              cp /tls/ca.crt "$HOME/.postgresql/root.crt"
+              cp /tls/tls.crt "$HOME/.postgresql/postgresql.crt"
+              cp /tls/tls.key "$HOME/.postgresql/postgresql.key"
+              chmod 600 "$HOME/.postgresql/postgresql.key"
+              python3 - <<'PY'
+              from qgis.PyQt.QtCore import QSize
+              from qgis.PyQt.QtGui import QColor
+              from qgis.core import (
+                  Qgis,
+                  QgsApplication,
+                  QgsDataSourceUri,
+                  QgsFeatureRequest,
+                  QgsMapRendererParallelJob,
+                  QgsMapSettings,
+                  QgsMarkerSymbol,
+                  QgsRectangle,
+                  QgsSingleSymbolRenderer,
+                  QgsVectorLayer,
+              )
+
+              assert Qgis.QGIS_VERSION == "3.44.11-Solothurn", Qgis.QGIS_VERSION
+              app = QgsApplication([], False)
+              app.initQgis()
+              try:
+                  uri = QgsDataSourceUri()
+                  uri.setConnection(
+                      "quackgis-migration.quackgis.svc.cluster.local",
+                      "5432",
+                      "quackgis",
+                      "migration_operator",
+                      "",
+                      QgsDataSourceUri.SslVerifyFull,
+                  )
+                  uri.setUseEstimatedMetadata(True)
+                  uri.setDataSource(
+                      "",
+                      "(SELECT id, label, geom_wkb FROM public.kind_migration_places)",
+                      "geom_wkb",
+                      "",
+                      "id",
+                  )
+                  layer = QgsVectorLayer(uri.uri(False), "kind_migration_places", "postgres")
+                  assert layer.isValid(), layer.error().message()
+                  assert [field.name() for field in layer.fields()] == ["id", "label"]
+                  assert layer.featureCount() == 2
+                  features = sorted(layer.getFeatures(), key=lambda feature: feature["id"])
+                  assert features[0]["id"] == 1 and features[0].geometry().asWkt() == "Point (1 2)"
+                  assert features[1]["id"] == 2 and not features[1].hasGeometry()
+                  extent = layer.extent()
+                  assert (
+                      extent.xMinimum(), extent.yMinimum(),
+                      extent.xMaximum(), extent.yMaximum(),
+                  ) == (1.0, 2.0, 1.0, 2.0)
+                  filtered = list(
+                      layer.getFeatures(QgsFeatureRequest().setFilterExpression('"id" = 1'))
+                  )
+                  assert len(filtered) == 1 and filtered[0]["id"] == 1
+                  identified = list(
+                      layer.getFeatures(
+                          QgsFeatureRequest().setFilterRect(QgsRectangle(0, 1, 2, 3))
+                      )
+                  )
+                  assert len(identified) == 1 and identified[0]["id"] == 1
+                  layer.setRenderer(
+                      QgsSingleSymbolRenderer(
+                          QgsMarkerSymbol.createSimple(
+                              {"name": "circle", "color": "0,0,255", "size": "8"}
+                          )
+                      )
+                  )
+                  settings = QgsMapSettings()
+                  settings.setLayers([layer])
+                  settings.setExtent(QgsRectangle(0, 1, 2, 3))
+                  settings.setOutputSize(QSize(128, 128))
+                  settings.setBackgroundColor(QColor("white"))
+                  renderer = QgsMapRendererParallelJob(settings)
+                  renderer.start()
+                  renderer.waitForFinished()
+                  image = renderer.renderedImage()
+                  assert not image.isNull() and renderer.errors() == []
+                  nonwhite = sum(
+                      image.pixelColor(x, y) != QColor("white")
+                      for x in range(image.width())
+                      for y in range(image.height())
+                  )
+                  assert nonwhite > 0
+                  print(
+                      "migration_qgis_ok version=%s rows=2 geometry=point-null "
+                      "filter=true identify=true render_pixels=%d report_match=true"
+                      % (Qgis.QGIS_VERSION, nonwhite)
+                  )
+              finally:
+                  app.exitQgis()
+              PY
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: quackgis-kind-migration-tls
+            defaultMode: 288

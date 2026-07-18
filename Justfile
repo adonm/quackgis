@@ -612,9 +612,11 @@ kind-client-gates:
     done; \
     deploy/kind/rest-gates.sh
 
-# Run the packaged offline PostGIS migrator through its dedicated mTLS/iroh lease.
+# Stage, report-bind, promote, restart, and qualify packaged PostGIS migration data.
 kind-postgis-migration-gate: kind-client-gates
     @set -eu; export KUBECONFIG="${KUBECONFIG:-$PWD/.tmp/kind/kubeconfig}"; \
+    kubectl delete -f .tmp/kind/rendered/migration-qgis.yaml --ignore-not-found --wait=true >/dev/null; \
+    kubectl delete -f .tmp/kind/rendered/migration-clients.yaml --ignore-not-found --wait=true >/dev/null; \
     kubectl delete -f .tmp/kind/rendered/migration.yaml --ignore-not-found --wait=true >/dev/null; \
     kubectl apply -f .tmp/kind/rendered/migration.yaml; \
     if ! kubectl -n quackgis wait --for=condition=complete job/quackgis-migration-public-cert-denied --timeout=2m; then \
@@ -625,7 +627,19 @@ kind-postgis-migration-gate: kind-client-gates
     fi; \
     kubectl -n quackgis logs job/quackgis-migration-public-cert-denied; \
     kubectl -n quackgis logs job/quackgis-postgis-migration -c cleanup-configured-targets; \
-    kubectl -n quackgis logs job/quackgis-postgis-migration -c migrate
+    kubectl -n quackgis logs job/quackgis-postgis-migration -c migrate; \
+    start="$(date +%s%3N)"; \
+    kubectl -n quackgis rollout restart statefulset/quackgis; \
+    kubectl -n quackgis rollout status statefulset/quackgis --timeout=3m; \
+    end="$(date +%s%3N)"; printf 'kind_migration_restart_ok elapsed_ms=%s\n' "$((end-start))"; \
+    kubectl apply -f .tmp/kind/rendered/migration-clients.yaml; \
+    kubectl apply -f .tmp/kind/rendered/migration-qgis.yaml; \
+    for job in quackgis-migration-psql quackgis-migration-psycopg quackgis-migration-ogr quackgis-migration-qgis; do \
+      if ! kubectl -n quackgis wait --for=condition=complete "job/$job" --timeout=5m; then \
+        kubectl -n quackgis logs "job/$job" --all-containers=true || true; exit 1; \
+      fi; \
+      kubectl -n quackgis logs "job/$job" --all-containers=true; \
+    done
 
 # Run the normal copied-data matrix, then qualify the pinned headless QGIS provider.
 kind-qgis-gate: kind-client-gates

@@ -181,7 +181,9 @@ data:
         {"table": "kind_ogr_points", "role": "postgres"},
         {"table": "kind_rest_points", "role": "postgres"},
         {"table": "kind_migration_places", "role": "migration_operator"},
-        {"table": "kind_migration_readings", "role": "migration_operator"}
+        {"table": "kind_migration_readings", "role": "migration_operator"},
+        {"table": "g0stage__kind_migration_places", "role": "migration_operator"},
+        {"table": "g0stage__kind_migration_readings", "role": "migration_operator"}
       ],
       "table_grants": [
         {"table": "kind_rest_points", "role": "rest_reader", "privileges": ["SELECT"]}
