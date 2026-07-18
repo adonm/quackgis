@@ -1,12 +1,14 @@
 # Minimal DuckDB-only Kind topology
 
 This directory owns the K0 packaged functional boundary. One StatefulSet Pod runs
-exactly one complete QuackGIS server, one iroh worker edge, one bootstrap, and one
-mutual-TLS `postgres` tiny-client bridge. The complete server binds role-catalog
+exactly one complete QuackGIS server, one iroh worker edge, one bootstrap, one
+mutual-TLS `postgres` tiny-client bridge, and one separately authenticated
+`migration_operator` tiny-client bridge. The complete server binds role-catalog
 edge-preauthenticated pgwire only to `127.0.0.1:5434`; it is not a Service
-endpoint. Bootstrap maps two distinct proven credentials to exact signed leases:
-the existing client credential to `postgres` and a REST service credential to
-`authenticator`. Clients never request a role. The worker requires the startup
+endpoint. Bootstrap maps three distinct proven credentials to exact signed leases:
+the existing client credential to `postgres`, a REST service credential to
+`authenticator`, and a migration credential to `migration_operator`. Clients never
+request a role. The worker requires the startup
 user to equal the lease, and the loopback server rejects unknown or `NOLOGIN`
 users before `AuthenticationOk`.
 
@@ -27,6 +29,16 @@ refused. REST gates address each Pod independently, require two ready
 EndpointSlice addresses, prove reader/denied OpenAPI and direct-request behavior,
 and delete one Pod while the Service remains available. There is no service mesh,
 PostgreSQL, MinIO, DataFusion, or Sedona service.
+
+The migration bridge has its own Service, credential, transport key, and client
+CA. Its immutable role owns only the maintained migration fixture targets. The
+ordinary K0 client certificate is not signed by the migration CA and is denied at
+the TLS boundary; the migration certificate is not trusted by the ordinary
+pgwire bridge. `kind-postgis-migration-gate` starts a digest-pinned PostGIS native
+sidecar only inside an optional Job, runs the non-root migrator from the immutable
+runtime image, and moves 10,004 exact scalar/Point/NULL rows through mTLS, iroh,
+the common policy edge, ADBC, and DuckLake. The source sidecar and plaintext
+loopback source trust are absent from normal K0 startup.
 
 The psycopg 3.2.13 Job is a copied-data gate rather than a scalar connection
 smoke. It creates or reuses one client-neutral table, clears it, streams two rows
@@ -81,6 +93,7 @@ wait for the complete packaged path:
 ```sh
 mise exec -- just kind-up-local
 mise exec -- just kind-client-gates
+mise exec -- just kind-postgis-migration-gate
 mise exec -- just kind-qgis-gate
 mise exec -- just kind-restart-gate
 mise exec -- just kind-secret-rotation-gate
@@ -92,8 +105,8 @@ mise exec -- just kind-rest-jwt-rotation-gate
 loads them with `kind load image-archive`, reads the resulting CRI repository
 manifest digests from each Kind node, installs matching containerd digest aliases,
 and deploys only those immutable references. The runtime image contains the
-provenance-pinned DuckDB bundle plus the server, REST, bootstrap, worker, client,
-and keygen binaries. The archive path avoids Kind's `load docker-image` assumption
+provenance-pinned DuckDB bundle plus the server, migrator, REST, bootstrap,
+worker, client, and keygen binaries. The archive path avoids Kind's `load docker-image` assumption
 that a Docker CLI exists when Podman is selected. `imagePullPolicy: IfNotPresent`
 keeps node-local images offline after loading. Cluster access is isolated in
 `.tmp/kind/kubeconfig`. An existing healthy `quackgis` cluster is reused; an

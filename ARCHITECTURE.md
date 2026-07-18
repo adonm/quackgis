@@ -123,11 +123,15 @@ Commit response loss is indeterminate rather than retried; after successful comm
 a fresh target connection must reproduce count, NULL, complete-row, and
 per-column canonical multiset checksums.
 
-The current actual-process smoke reaches QuackGIS directly on development
-loopback. The CLI can use TLS/mTLS and is intended to point at the packaged tiny
-client, but that package path, isolated staging-root promotion, target runtime
-digests, role/grant application, and named post-migration clients remain G0 gates.
-A `verified` report means snapshot data is prepared for an operator decision, not
+The direct actual-process smoke reaches QuackGIS on development loopback. The
+separate packaged gate executes the provenance-pinned migrator as a non-root Job,
+uses a distinct `migration_operator` credential/lease and migration-only client
+CA, traverses the mutual-TLS tiny client and iroh worker, and rejects the ordinary
+K0 client certificate. The source PostGIS sidecar exists only in that Job's network
+namespace. Isolated staging-root promotion, runtime identity in the report,
+role/grant application, restart verification, and named post-migration clients
+remain G0 gates. A `verified` report means snapshot data is prepared for an
+operator decision, not
 that clients were atomically cut over or PostGIS can be retired. See
 [docs/POSTGIS_MIGRATION.md](./docs/POSTGIS_MIGRATION.md).
 
@@ -137,8 +141,8 @@ Standalone `sqlparser` parses exactly one general statement. The only batch path
 accepts at most eight simple-protocol statements and requires every member to be a
 strict maintained session `SET`; it emits one completion per member and never
 reaches ADBC. The general allowlist admits bounded query, create-table, owner-only
-table/column comment, insert, update, delete, simple transaction, and maintained
-SET/SHOW shapes. An AST relation
+table/column comment and single-table drop, insert, update, delete, simple
+transaction, and maintained SET/SHOW shapes. An AST relation
 visitor maps PostgreSQL `public` to DuckLake `quackgis.main` before execution while
 policy sees the original target. Unsupported shapes fail closed. COPY uses parsed
 one-/two-/three-part identifiers and dedicated protocol state.

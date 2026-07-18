@@ -18,8 +18,12 @@ target gate and runs through `just postgis-migration-smoke`. It uses a digest-
 pinned PostgreSQL 18/PostGIS 3.6 source plus a fresh actual QuackGIS process,
 checks repeatable-read exclusion under a concurrent source write, exact
 scalar/Point/NULL checksums after target reconnect, all-table rollback on invalid
-input, and pre-target key rejection. This is direct-loopback functional evidence;
-the packaged tiny-client and release staging/cutover gates remain open.
+input, pre-target key rejection, and explicit configured-target cleanup. The
+separate `just kind-postgis-migration-gate` executes the immutable migrator through
+a dedicated migration certificate, credential-bound `migration_operator` lease,
+mutual-TLS tiny client, and iroh worker; it verifies 10,004 rows and denies the
+ordinary K0 certificate. Release staging/promotion, runtime identity in the
+report, restart verification, and named-client gates remain open.
 
 `iroh_direct::duckdb_pgwire_oracles_pass_through_local_iroh` owns the first native
 I0 direct-path smoke. It uses real bootstrap, worker, and tiny-client endpoints

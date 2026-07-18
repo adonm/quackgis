@@ -6,11 +6,12 @@ transaction, classifies the maintained inventory categories across selected
 schemas, streams accepted tables through PostgreSQL text COPY to QuackGIS, and verifies canonical source and
 target checksums before one target transaction commits.
 
-This is executable preview evidence, not a complete migration product. In
-particular, automatic staging-root promotion, packaged tiny-client evidence,
-runtime-digest binding, role/grant application, keys, nonzero CRS, geography,
-non-Point geometry, named-client post-migration gates, and operator cutover remain
-open.
+This is executable preview evidence, not a complete migration product. The
+provenance-pinned runtime now includes the migrator and a packaged Kind gate uses
+a dedicated credential, role, client CA, and mutual-TLS iroh tiny client.
+Automatic staging-root promotion, runtime identity inside the report, role/grant
+application, restart verification, keys, nonzero CRS, geography, non-Point
+geometry, named-client post-migration gates, and operator cutover remain open.
 
 ## Maintained smoke
 
@@ -29,6 +30,23 @@ actual QuackGIS/DuckLake server, and runs three cases:
 
 The smoke uses plaintext only on literal loopback addresses. It is not the
 release-network contract.
+
+The packaged target-path gate is separate because it pulls an external pinned
+PostGIS fixture image:
+
+```sh
+mise exec -- just kind-up-local
+mise exec -- just kind-postgis-migration-gate
+```
+
+The normal K0 client/REST and direct-worker denial matrix runs first. An optional
+Job then starts digest-pinned PostgreSQL 18.4/PostGIS 3.6.4 as a native sidecar,
+executes the non-root migrator from the immutable runtime image, and transfers
+10,002 scalar rows plus two Point/NULL rows through a credential-bound
+`migration_operator` lease. The migration Service trusts a separate migration
+client CA: the ordinary K0 client certificate is explicitly denied. The PostGIS
+sidecar and source trust mode exist only inside this one Job's network namespace;
+they are absent from normal topology startup.
 
 ## Configuration
 
@@ -110,11 +128,13 @@ reject the selected table.
 
 ## Copy and verification
 
-Configure the target URL to the local packaged tiny-client listener in a release
-setup. The target connection supports a CA and paired client certificate/key:
+Configure the target URL to the dedicated packaged tiny-client listener. Its
+credential is mapped to a bounded operator-provisioned LOGIN role and its client
+certificate should come from a migration-only CA. The target connection supports
+a CA and paired client certificate/key:
 
 ```sh
-export QUACKGIS_MIGRATE_TARGET_URL='postgresql://postgres@127.0.0.1:5432/quackgis'
+export QUACKGIS_MIGRATE_TARGET_URL='postgresql://migration_operator@127.0.0.1:5432/quackgis'
 export QUACKGIS_MIGRATE_TARGET_CA=/run/secrets/tiny-client-ca.crt
 export QUACKGIS_MIGRATE_TARGET_CLIENT_CERT=/run/secrets/migration.crt
 export QUACKGIS_MIGRATE_TARGET_CLIENT_KEY=/run/secrets/migration.key
@@ -153,6 +173,25 @@ is prepared for operator cutover; it does not claim an atomic release promotion.
 Use a fresh isolated target root for this preview, keep PostGIS as the rollback
 source, and do not direct clients to the target until separate cutover checks pass.
 
+## Explicit cleanup
+
+Cleanup is a separate destructive command and requires an explicit confirmation.
+It drops only the exact target tables named by the validated configuration, in
+one target transaction, and writes a path-free cleanup report:
+
+```sh
+mise exec -- cargo run -p quackgis-migrate -- cleanup \
+  --config migration.json \
+  --out cleanup-report.json \
+  --confirm-drop-configured-targets
+```
+
+`DROP TABLE` admission is limited to one configured table at a time and requires
+the same exact ownership decision as creation/comments. Views, multiple targets,
+`CASCADE`, and non-owner roles fail closed. The packaged gate runs cleanup first
+so it is repeatable. This is not report-bound release rollback or staging
+promotion; those remain separate G0 work.
+
 ## Security boundary
 
 The source database and its catalogs are untrusted migration input. Identifiers
@@ -160,6 +199,12 @@ are always quoted, only classified column expressions are generated, arbitrary
 source defaults are not executed, and source credentials remain in the migrator.
 The QuackGIS worker receives only ordinary target pgwire traffic and never receives
 the source URL, password, TLS key, or direct DuckDB/DuckLake credentials.
+
+K0 maps a separate iroh credential only to `migration_operator`, whose immutable
+role configuration owns only the two maintained migration fixture targets. A
+separate tiny-client listener trusts only migration-client certificates. The
+ordinary client certificate cannot connect to that listener, and the migration
+certificate is not trusted by the ordinary pgwire listener.
 
 TLS is required unless the operator explicitly enables plaintext for a literal
 loopback TCP or Unix-socket host. Password files must be non-symlink, owner-only,

@@ -194,18 +194,28 @@ slice. The maintained actual-process gate is:
 mise exec -- just postgis-migration-smoke
 ```
 
-The recipe owns a digest-pinned PostgreSQL 18/PostGIS 3.6 source and a fresh
-QuackGIS target, proves concurrent writes stay outside the held repeatable-read
-snapshot, verifies release scalars plus Point/NULL WKB after reconnect, and proves
-both preflight rejection and transactional rollback leave no target publication.
-It pulls the pinned source image and therefore is not part of network-independent
+The direct recipe owns a digest-pinned PostgreSQL 18/PostGIS 3.6 source and a
+fresh QuackGIS target, proves concurrent writes stay outside the held repeatable-
+read snapshot, verifies release scalars plus Point/NULL WKB after reconnect, and
+proves both preflight rejection and transactional rollback leave no target
+publication. The packaged follow-up is:
+
+```sh
+mise exec -- just kind-up-local
+mise exec -- just kind-postgis-migration-gate
+```
+
+It runs the immutable migrator through a dedicated migration certificate,
+credential-bound `migration_operator` lease, mutual-TLS tiny client, and iroh
+worker, verifies 10,004 rows, and denies the ordinary K0 certificate. Both recipes
+pull the pinned source image and therefore are not part of network-independent
 `just ci`.
 
 For operator configuration, TLS/password-file handling, accepted type mappings,
-checksum/report semantics, and explicit open gates, see
-[POSTGIS_MIGRATION.md](./POSTGIS_MIGRATION.md). Until staging promotion and the
-packaged tiny-client gate land, use a fresh isolated target root and treat even a
-`verified` report as prepared data requiring a separate cutover decision.
+checksum/report semantics, explicit configured-target cleanup, and open gates,
+see [POSTGIS_MIGRATION.md](./POSTGIS_MIGRATION.md). Until staging promotion lands,
+use a fresh isolated target root and treat even a `verified` report as prepared
+data requiring a separate cutover decision.
 
 ## Storage authority
 

@@ -345,10 +345,14 @@ unless a focused test says otherwise.
   canonical row/column checksums pass again on a fresh target connection. The
   registered actual-process smoke proves concurrent source writes stay outside
   the snapshot, failed conversion leaves zero target tables, and key rejection
-  occurs before target access. Packaged tiny-client evidence, automatic isolated
-  staging/promotion, target runtime-digest binding, role/grant application,
-  broader types/spatial semantics, and copied-data named-client gates remain
-  open; see [POSTGIS_MIGRATION.md](./POSTGIS_MIGRATION.md).
+  occurs before target access. The provenance-pinned runtime now packages the
+  migrator; a separate Kind gate transfers 10,004 exact rows through a dedicated
+  `migration_operator` credential, migration-only client CA, mutual-TLS tiny
+  client, and iroh worker, denies the ordinary K0 client certificate, and proves
+  explicit configured-target cleanup. Automatic isolated staging/promotion,
+  report-bound target runtime identity, role/grant application, restart
+  verification, broader types/spatial semantics, and copied-data named-client
+  gates remain open; see [POSTGIS_MIGRATION.md](./POSTGIS_MIGRATION.md).
 - No logical replication consumer exists. G1 waits for M6 and uses PostgreSQL
   logical decoding with durable source-LSN/idempotent-batch reconciliation;
   physical streaming, dual-write, reverse replication, implicit DDL/RLS/role

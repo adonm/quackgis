@@ -118,10 +118,13 @@ and streams the maintained scalar plus 2D SRID-0 Point/NULL set through bounded 
 one target transaction. Canonical complete-row/per-column checksums pass again on
 a fresh target connection. The actual-process smoke excludes a concurrent source
 commit, proves conversion failure leaves zero target tables, and rejects keys
-before target access. This is not yet a release migration claim: packaged
-tiny-client evidence, isolated staging/promotion, target runtime digests,
-role/grant mapping, broader types/spatial semantics, and named post-migration
-clients remain open.
+before target access. The provenance-pinned runtime now packages the migrator;
+a separate Kind gate moves 10,004 exact rows through a dedicated
+`migration_operator` credential, migration-only client CA, mutual-TLS tiny client,
+and iroh worker while rejecting the ordinary K0 client certificate. This is not
+yet a release migration claim: isolated staging/promotion, report-bound runtime
+digests, role/grant mapping, restart verification, broader types/spatial
+semantics, and named post-migration clients remain open.
 
 TLS remains optional for local development. Set `QUACKGIS_TLS_MODE=required` with
 `QUACKGIS_TLS_CERT` and `QUACKGIS_TLS_KEY` to fail closed on plaintext startup.
@@ -196,6 +199,7 @@ mise exec -- just duckdb-runtime-static-check
 mise exec -- just duckdb-recovery-smoke
 mise exec -- just duckdb-mixed-release-smoke
 mise exec -- just postgis-migration-smoke
+mise exec -- just kind-postgis-migration-gate
 mise exec -- just iroh-protocol-test
 mise exec -- just iroh-direct-smoke
 mise exec -- just iroh-custom-relay-smoke

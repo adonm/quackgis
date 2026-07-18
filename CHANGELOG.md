@@ -16,9 +16,14 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   The digest-pinned actual-process smoke proves 100,002 snapshot rows exclude a
   concurrent source commit, release scalars plus Point/NULL WKB survive, invalid
   data leaves zero target tables, and key semantics reject before target access.
-  TLS/mTLS and owner-only password files are supported; packaged tiny-client,
-  staging promotion, target runtime digests, role/grant application, broader
-  spatial/key support, and named post-migration clients remain open.
+  TLS/mTLS and owner-only password files are supported. The provenance-pinned
+  runtime packages the migrator, and a Kind gate moves 10,004 exact rows through
+  a dedicated `migration_operator` credential, migration-only client CA,
+  mutual-TLS tiny client, and iroh worker while denying the ordinary K0 client
+  certificate. Explicit configured-target cleanup is owner-authorized and
+  transactional. Staging promotion, report-bound target runtime digests,
+  role/grant application, restart verification, broader spatial/key support, and
+  named post-migration clients remain open.
 - Owner-authorized `COMMENT ON TABLE` and `COMMENT ON COLUMN` now pass the pgwire
   structural admission boundary; all other comment targets and non-owner roles
   fail closed.
