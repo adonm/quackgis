@@ -356,8 +356,9 @@ unless a focused test says otherwise.
   immutable target roles/grants without copying credentials or executing role
   DDL. Atomic path-free progress checkpoints expose bounded preflight, per-table,
   16 MiB transfer, commit-boundary, rollback, and terminal state without becoming
-  a resume or promotion token. Richer spatial report dimensions and broader
-  types/spatial semantics remain open; see
+  a resume or promotion token. Maintained Point reports now include family, SRID,
+  dimensions, structural WKB validity, empty/invalid counts, and finite extents.
+  Broader semantic validity and types/spatial semantics remain open; see
   [POSTGIS_MIGRATION.md](./POSTGIS_MIGRATION.md).
 - No logical replication consumer exists. G1 waits for M6 and uses PostgreSQL
   logical decoding with durable source-LSN/idempotent-batch reconciliation;

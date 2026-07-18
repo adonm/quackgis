@@ -419,6 +419,23 @@ INSERT INTO public.bad_dates VALUES (1, 'infinity');
             raise RuntimeError("explicit source role/grant mapping was not reported exactly")
         if evidence["public.places"]["rows"] != 2:
             raise RuntimeError("Point/NULL fixture row count changed")
+        geometry_column = next(
+            column
+            for column in evidence["public.places"]["columns"]
+            if column["source_name"] == "location"
+        )
+        spatial_report = geometry_column["spatial"]
+        if spatial_report != {
+            "geometry_family": "Point",
+            "srid": 0,
+            "dimensions": 2,
+            "non_null_count": 1,
+            "structurally_valid_count": 1,
+            "empty_count": 0,
+            "invalid_count": 0,
+            "finite_extent": {"min_x": "1", "min_y": "2", "max_x": "1", "max_y": "2"},
+        }:
+            raise RuntimeError(f"spatial verification report differs: {spatial_report}")
         if evidence["survey.readings"]["rows"] != 100_002:
             raise RuntimeError("repeatable-read snapshot admitted the concurrent source write")
         source_count = source_psql(
@@ -777,6 +794,7 @@ INSERT INTO public.bad_dates VALUES (1, 'infinity');
             "mapped_roles": 1,
             "mapped_grants": 1,
             "progress_sequence": progress["sequence"],
+            "spatial_extent": "1,2,1,2",
             "failure_state": failure["state"],
             "rejection_state": rejection["state"],
             "cleanup_targets": len(cleanup["dropped_configured_targets"]),

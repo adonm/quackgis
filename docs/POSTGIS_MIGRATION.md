@@ -15,8 +15,10 @@ credential, role, client CA, and mutual-TLS iroh tiny client. Exact source roles
 and grants can be mapped to independently provisioned immutable target policy;
 passwords and role DDL are never copied. Atomic bounded progress checkpoints
 cover preflight, per-table transfer/verification, commit, and terminal decisions.
-Richer spatial report dimensions, keys, nonzero CRS, geography, non-Point
-geometry, and general operator cutover remain open.
+Maintained Point columns report family, SRID, dimensions, structural WKB validity,
+empty/invalid counts, and finite 2D extents. Semantic validity for broader
+families, keys, nonzero CRS, geography, non-Point geometry, and general operator
+cutover remain open.
 
 ## Maintained smoke
 
@@ -198,6 +200,13 @@ staging-to-release mappings, explicit role/grant mappings, migrator/artifact/sou
 digests, durations, all mappings/rejections, errors, and the final decision. It contains no
 connection URL, password, certificate path, local target path, or row value. A
 fresh target pgwire connection recomputes all checksums and counts after commit.
+
+Each accepted geometry column also records its declared `Point` family, SRID 0,
+two dimensions, non-NULL count, canonical NDR Point WKB structural-validity,
+empty/invalid counts, and a finite 2D extent encoded as coordinate strings. These
+summaries are recomputed from the same source/target canonical bytes and compared
+on reconnect; no geometry value or sample enters the report. Structural validity
+means the maintained 21-byte NDR Point shape, not a general `ST_IsValid` claim.
 
 `--progress-out` atomically replaces one owner-only path-free JSON checkpoint.
 Its monotonic sequence and phase record bounded source/target identities, selected

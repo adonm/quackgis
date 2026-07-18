@@ -17,10 +17,11 @@ pub use inventory::{
 };
 pub use migration::{
     CleanupReport, ColumnVerification, MigrationProgress, MigrationReport, MigrationState,
-    ProgressPhase, ProgressTable, PromotionReport, PromotionState, StagingCleanupReport,
-    StagingPlan, StagingTarget, TableTransfer, TargetIdentity, VerificationReport,
-    VerificationState, build_staging_config, cleanup_configured_targets, cleanup_staging,
-    promote_migration_report, run_migration, verify_migration_report,
+    ProgressPhase, ProgressTable, PromotionReport, PromotionState, SpatialExtent,
+    SpatialVerification, StagingCleanupReport, StagingPlan, StagingTarget, TableTransfer,
+    TargetIdentity, VerificationReport, VerificationState, build_staging_config,
+    cleanup_configured_targets, cleanup_staging, promote_migration_report, run_migration,
+    verify_migration_report,
 };
 pub use plan::{
     Action, ColumnPlan, Disposition, ObjectPlan, PreflightReport, PreflightStatus, TablePlan,

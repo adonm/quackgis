@@ -250,6 +250,28 @@ pub struct ColumnVerification {
     pub target_name: String,
     pub null_count: u64,
     pub checksum: String,
+    #[serde(default)]
+    pub spatial: Option<SpatialVerification>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SpatialVerification {
+    pub geometry_family: String,
+    pub srid: i32,
+    pub dimensions: u8,
+    pub non_null_count: u64,
+    pub structurally_valid_count: u64,
+    pub empty_count: u64,
+    pub invalid_count: u64,
+    pub finite_extent: Option<SpatialExtent>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SpatialExtent {
+    pub min_x: String,
+    pub min_y: String,
+    pub max_x: String,
+    pub max_y: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1088,6 +1110,7 @@ async fn prepare_target(
                     target_name: column.target_name.clone().expect("ready target column"),
                     null_count: checksum.null_count,
                     checksum: checksum.checksum,
+                    spatial: checksum.spatial,
                 })
                 .collect(),
             duration_ms: millis(started.elapsed()),
@@ -1119,7 +1142,9 @@ where
                 .iter()
                 .zip(&transfer.columns)
                 .any(|(actual, expected)| {
-                    actual.null_count != expected.null_count || actual.checksum != expected.checksum
+                    actual.null_count != expected.null_count
+                        || actual.checksum != expected.checksum
+                        || actual.spatial != expected.spatial
                 })
         {
             bail!(
@@ -1282,6 +1307,7 @@ struct TableChecksums {
 struct ChecksumValue {
     null_count: u64,
     checksum: String,
+    spatial: Option<SpatialVerification>,
 }
 
 async fn checksum_table<C>(
@@ -1313,6 +1339,11 @@ where
     let mut column_accumulators = (0..table.columns.len())
         .map(|_| MultisetChecksum::default())
         .collect::<Vec<_>>();
+    let mut spatial_accumulators = table
+        .columns
+        .iter()
+        .map(|column| is_geometry_column(column).then(SpatialAccumulator::default))
+        .collect::<Vec<_>>();
     while let Some(row) = rows.next().await {
         let row = row?;
         let mut canonical_row = Vec::new();
@@ -1323,6 +1354,9 @@ where
                 .map(|raw| canonicalize(raw, column))
                 .transpose()?;
             column_accumulators[index].update(value.as_deref());
+            if let Some(spatial) = &mut spatial_accumulators[index] {
+                spatial.update(value.as_deref());
+            }
             append_canonical(&mut canonical_row, value.as_deref());
         }
         table_accumulator.update(Some(&canonical_row));
@@ -1331,9 +1365,11 @@ where
         table_checksum: table_accumulator.finish(),
         columns: column_accumulators
             .into_iter()
-            .map(|accumulator| ChecksumValue {
+            .zip(spatial_accumulators)
+            .map(|(accumulator, spatial)| ChecksumValue {
                 null_count: accumulator.null_count,
                 checksum: accumulator.finish(),
+                spatial: spatial.map(SpatialAccumulator::finish),
             })
             .collect(),
     })
@@ -1357,6 +1393,80 @@ fn canonical_text_expression(column: &ColumnPlan, side: ChecksumSide) -> String 
         }
         _ => format!("CAST({identifier} AS TEXT)"),
     }
+}
+
+fn is_geometry_column(column: &ColumnPlan) -> bool {
+    column.source_type.starts_with("geometry(") || column.source_type == "geometry"
+}
+
+#[derive(Default)]
+struct SpatialAccumulator {
+    non_null_count: u64,
+    structurally_valid_count: u64,
+    empty_count: u64,
+    invalid_count: u64,
+    extent: Option<(f64, f64, f64, f64)>,
+}
+
+impl SpatialAccumulator {
+    fn update(&mut self, canonical_hex: Option<&[u8]>) {
+        let Some(canonical_hex) = canonical_hex else {
+            return;
+        };
+        self.non_null_count = self.non_null_count.saturating_add(1);
+        let Ok(wkb) = hex::decode(canonical_hex) else {
+            self.invalid_count = self.invalid_count.saturating_add(1);
+            return;
+        };
+        let Some((x, y)) = parse_ndr_point(&wkb) else {
+            self.invalid_count = self.invalid_count.saturating_add(1);
+            return;
+        };
+        self.structurally_valid_count = self.structurally_valid_count.saturating_add(1);
+        if x.is_nan() && y.is_nan() {
+            self.empty_count = self.empty_count.saturating_add(1);
+            return;
+        }
+        if !x.is_finite() || !y.is_finite() {
+            return;
+        }
+        self.extent = Some(
+            self.extent
+                .map_or((x, y, x, y), |(min_x, min_y, max_x, max_y)| {
+                    (min_x.min(x), min_y.min(y), max_x.max(x), max_y.max(y))
+                }),
+        );
+    }
+
+    fn finish(self) -> SpatialVerification {
+        SpatialVerification {
+            geometry_family: "Point".to_owned(),
+            srid: 0,
+            dimensions: 2,
+            non_null_count: self.non_null_count,
+            structurally_valid_count: self.structurally_valid_count,
+            empty_count: self.empty_count,
+            invalid_count: self.invalid_count,
+            finite_extent: self
+                .extent
+                .map(|(min_x, min_y, max_x, max_y)| SpatialExtent {
+                    min_x: min_x.to_string(),
+                    min_y: min_y.to_string(),
+                    max_x: max_x.to_string(),
+                    max_y: max_y.to_string(),
+                }),
+        }
+    }
+}
+
+fn parse_ndr_point(wkb: &[u8]) -> Option<(f64, f64)> {
+    if wkb.len() != 21 || wkb[0] != 1 || u32::from_le_bytes(wkb[1..5].try_into().ok()?) != 1 {
+        return None;
+    }
+    Some((
+        f64::from_le_bytes(wkb[5..13].try_into().ok()?),
+        f64::from_le_bytes(wkb[13..21].try_into().ok()?),
+    ))
 }
 
 fn canonicalize(raw: &str, column: &ColumnPlan) -> Result<Vec<u8>> {
@@ -1650,5 +1760,31 @@ mod tests {
         assert_eq!(checkpoint.current_wire_bytes, PROGRESS_WIRE_INTERVAL);
         assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn summarizes_canonical_point_wkb_without_row_values() {
+        let mut spatial = SpatialAccumulator::default();
+        let mut point = vec![1];
+        point.extend_from_slice(&1_u32.to_le_bytes());
+        point.extend_from_slice(&1.25_f64.to_le_bytes());
+        point.extend_from_slice(&(-2.5_f64).to_le_bytes());
+        spatial.update(Some(hex::encode(point).as_bytes()));
+        spatial.update(None);
+        spatial.update(Some(b"00"));
+        let summary = spatial.finish();
+        assert_eq!(summary.geometry_family, "Point");
+        assert_eq!(summary.non_null_count, 2);
+        assert_eq!(summary.structurally_valid_count, 1);
+        assert_eq!(summary.invalid_count, 1);
+        assert_eq!(
+            summary.finite_extent,
+            Some(SpatialExtent {
+                min_x: "1.25".to_owned(),
+                min_y: "-2.5".to_owned(),
+                max_x: "1.25".to_owned(),
+                max_y: "-2.5".to_owned(),
+            })
+        );
     }
 }

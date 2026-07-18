@@ -31,8 +31,10 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   credentials and role DDL remain excluded. An optional atomic path-free progress
   checkpoint records bounded preflight totals, per-table transfer/verification,
   16 MiB wire progress, commit-boundary state, rollback, and terminal decisions;
-  it is neither a resume nor promotion token. Richer spatial report dimensions
-  and broader spatial/key support remain open.
+  it is neither a resume nor promotion token. Maintained Point columns now report
+  family, SRID, dimensions, structural NDR WKB validity, empty/invalid counts,
+  and finite 2D extents without row samples. Broader semantic validity and
+  spatial/key support remain open.
 - Owner-authorized `COMMENT ON TABLE` and `COMMENT ON COLUMN` now pass the pgwire
   structural admission boundary; all other comment targets and non-owner roles
   fail closed.
