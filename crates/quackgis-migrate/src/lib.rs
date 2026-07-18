@@ -7,6 +7,7 @@ pub mod inventory;
 pub mod migration;
 pub mod plan;
 pub mod report;
+pub mod runtime;
 pub mod source;
 
 pub use config::{MigrationConfig, SourceRequirements, TableMapping};
@@ -15,11 +16,15 @@ pub use inventory::{
     SourceObject, SourceObjectKind, SourceRole, SourceTable,
 };
 pub use migration::{
-    CleanupReport, ColumnVerification, MigrationReport, MigrationState, TableTransfer,
-    TargetIdentity, cleanup_configured_targets, run_migration,
+    CleanupReport, ColumnVerification, MigrationReport, MigrationState, PromotionReport,
+    PromotionState, StagingCleanupReport, StagingPlan, StagingTarget, TableTransfer,
+    TargetIdentity, VerificationReport, VerificationState, build_staging_config,
+    cleanup_configured_targets, cleanup_staging, promote_migration_report, run_migration,
+    verify_migration_report,
 };
 pub use plan::{
     Action, ColumnPlan, Disposition, ObjectPlan, PreflightReport, PreflightStatus, TablePlan,
     build_preflight,
 };
+pub use runtime::{RuntimeIdentity, RuntimeIdentityOptions, collect_runtime_identity};
 pub use source::begin_source_snapshot;

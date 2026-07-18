@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -163,6 +164,10 @@ def migration_environment(
         }
     )
     return env
+
+
+def sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def main() -> int:
@@ -489,7 +494,7 @@ INSERT INTO public.bad_dates VALUES (1, 'infinity');
         cleaned = run(
             [
                 str(migrate_bin),
-                "cleanup",
+                "reset-configured-targets",
                 "--config",
                 str(config),
                 "--out",
@@ -519,6 +524,182 @@ INSERT INTO public.bad_dates VALUES (1, 'infinity');
                 f"configured-target cleanup left table residue: {cleanup_residue}"
             )
 
+        def staged_run(report_file: Path, application_name: str) -> dict[str, object]:
+            result = run(
+                [
+                    str(migrate_bin),
+                    "run",
+                    "--config",
+                    str(config),
+                    "--out",
+                    str(report_file),
+                    "--staging-id",
+                    "g0stage",
+                    "--allow-plaintext-loopback",
+                    "--allow-plaintext-target-loopback",
+                ],
+                env=migration_environment(
+                    source_port, target_port, password_file, application_name
+                ),
+                check=False,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"staged migration failed: {result.stderr}")
+            return json.loads(report_file.read_text(encoding="utf-8"))
+
+        staged_report_1_path = work / "staged-report-1.json"
+        staged_report_1 = staged_run(staged_report_1_path, "g0-staged-1")
+        staged_digest_1 = sha256(staged_report_1_path)
+        wrong_digest = "0" * 64
+        wrong_verify = run(
+            [
+                str(migrate_bin),
+                "verify",
+                "--report",
+                str(staged_report_1_path),
+                "--report-sha256",
+                wrong_digest,
+                "--out",
+                str(work / "must-not-verify.json"),
+                "--allow-plaintext-target-loopback",
+            ],
+            env=migration_environment(source_port, 1, password_file, "g0-wrong-report"),
+            check=False,
+        )
+        if wrong_verify.returncode == 0 or (work / "must-not-verify.json").exists():
+            raise RuntimeError("wrong report digest did not reject before target access")
+
+        staged_verify_1_path = work / "staged-verify-1.json"
+        verified_1 = run(
+            [
+                str(migrate_bin),
+                "verify",
+                "--report",
+                str(staged_report_1_path),
+                "--report-sha256",
+                staged_digest_1,
+                "--out",
+                str(staged_verify_1_path),
+                "--allow-plaintext-target-loopback",
+            ],
+            env=migration_environment(source_port, target_port, password_file, "g0-verify-1"),
+            check=False,
+        )
+        staged_verify_1 = json.loads(staged_verify_1_path.read_text(encoding="utf-8"))
+        if verified_1.returncode != 0 or staged_verify_1["state"] != "verified":
+            raise RuntimeError(f"standalone staging verification failed: {verified_1.stderr}")
+
+        staged_cleanup_path = work / "staged-cleanup.json"
+        staged_cleanup = run(
+            [
+                str(migrate_bin),
+                "cleanup",
+                "--report",
+                str(staged_report_1_path),
+                "--report-sha256",
+                staged_digest_1,
+                "--out",
+                str(staged_cleanup_path),
+                "--confirm-cleanup-staging",
+                "--allow-plaintext-target-loopback",
+            ],
+            env=migration_environment(source_port, target_port, password_file, "g0-stage-cleanup"),
+            check=False,
+        )
+        cleanup_stage = json.loads(staged_cleanup_path.read_text(encoding="utf-8"))
+        if staged_cleanup.returncode != 0 or cleanup_stage["dropped_staging_targets"] != [
+            "main.g0stage__migrated_places",
+            "main.g0stage__migrated_readings",
+        ]:
+            raise RuntimeError(f"report-bound staging cleanup failed: {staged_cleanup.stderr}")
+        lifecycle_residue = target_psql(
+            engine,
+            args.postgis_image,
+            target_port,
+            "SELECT count(*)::BIGINT FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name IN "
+            "('migrated_places','migrated_readings',"
+            "'g0stage__migrated_places','g0stage__migrated_readings');",
+        )
+        if lifecycle_residue != "0":
+            raise RuntimeError("cleanup exposed a release or retained staging residue")
+
+        staged_report_2_path = work / "staged-report-2.json"
+        staged_report_2 = staged_run(staged_report_2_path, "g0-staged-2")
+        checksums_1 = {
+            table["source_identity"]: table["table_checksum"]
+            for table in staged_report_1["tables"]
+        }
+        checksums_2 = {
+            table["source_identity"]: table["table_checksum"]
+            for table in staged_report_2["tables"]
+        }
+        if checksums_1 != checksums_2:
+            raise RuntimeError("fresh staging retry produced different canonical checksums")
+        staged_digest_2 = sha256(staged_report_2_path)
+        staged_verify_2_path = work / "staged-verify-2.json"
+        verified_2 = run(
+            [
+                str(migrate_bin),
+                "verify",
+                "--report",
+                str(staged_report_2_path),
+                "--report-sha256",
+                staged_digest_2,
+                "--out",
+                str(staged_verify_2_path),
+                "--allow-plaintext-target-loopback",
+            ],
+            env=migration_environment(source_port, target_port, password_file, "g0-verify-2"),
+            check=False,
+        )
+        if verified_2.returncode != 0:
+            raise RuntimeError(f"retry staging verification failed: {verified_2.stderr}")
+        verification_digest_2 = sha256(staged_verify_2_path)
+        promotion_path = work / "promotion-report.json"
+        promoted = run(
+            [
+                str(migrate_bin),
+                "promote",
+                "--report",
+                str(staged_report_2_path),
+                "--report-sha256",
+                staged_digest_2,
+                "--verification-report",
+                str(staged_verify_2_path),
+                "--verification-report-sha256",
+                verification_digest_2,
+                "--out",
+                str(promotion_path),
+                "--confirm-promote",
+                "--allow-plaintext-target-loopback",
+            ],
+            env=migration_environment(source_port, target_port, password_file, "g0-promote"),
+            check=False,
+        )
+        promotion = json.loads(promotion_path.read_text(encoding="utf-8"))
+        if promoted.returncode != 0 or promotion["state"] != "promoted":
+            raise RuntimeError(f"explicit promotion failed: {promoted.stderr}")
+        promoted_state = target_psql(
+            engine,
+            args.postgis_image,
+            target_port,
+            "SELECT count(*)::BIGINT, sum(id)::BIGINT FROM public.migrated_readings;",
+        )
+        promoted_staging_residue = target_psql(
+            engine,
+            args.postgis_image,
+            target_port,
+            "SELECT count(*)::BIGINT FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name IN "
+            "('g0stage__migrated_places','g0stage__migrated_readings');",
+        )
+        if promoted_state != "100003|5000450003" or promoted_staging_residue != "0":
+            raise RuntimeError(
+                "promoted release or staging cleanup differs: "
+                f"{promoted_state}/{promoted_staging_residue}"
+            )
+
         summary = {
             "postgres_version_num": postgres_version,
             "postgis_version": postgis_version,
@@ -529,6 +710,8 @@ INSERT INTO public.bad_dates VALUES (1, 'infinity');
             "failure_state": failure["state"],
             "rejection_state": rejection["state"],
             "cleanup_targets": len(cleanup["dropped_configured_targets"]),
+            "staging_retry": "identical",
+            "promotion_state": promotion["state"],
         }
         print(json.dumps(summary, sort_keys=True))
         return 0

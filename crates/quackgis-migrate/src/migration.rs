@@ -16,6 +16,7 @@ use crate::connect::{ConnectionOptions, connect};
 use crate::plan::{
     Action, ColumnPlan, PreflightReport, PreflightStatus, TablePlan, build_preflight,
 };
+use crate::runtime::RuntimeIdentity;
 use crate::source::{begin_source_snapshot, quote_identifier};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -39,9 +40,47 @@ pub struct TargetIdentity {
 pub struct MigrationReport {
     pub format_version: u32,
     pub state: MigrationState,
+    pub runtime: RuntimeIdentity,
+    pub staging: Option<StagingPlan>,
     pub preflight: PreflightReport,
     pub target: Option<TargetIdentity>,
     pub tables: Vec<TableTransfer>,
+    pub duration_ms: u64,
+    pub errors: Vec<String>,
+    pub final_decision: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct StagingPlan {
+    pub staging_id: String,
+    pub targets: Vec<StagingTarget>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct StagingTarget {
+    pub source_identity: String,
+    pub staging_schema: String,
+    pub staging_table: String,
+    pub release_schema: String,
+    pub release_table: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationState {
+    Rejected,
+    Failed,
+    Verified,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct VerificationReport {
+    pub format_version: u32,
+    pub state: VerificationState,
+    pub input_report_sha256: String,
+    pub runtime: RuntimeIdentity,
+    pub target: Option<TargetIdentity>,
+    pub verified_targets: Vec<String>,
     pub duration_ms: u64,
     pub errors: Vec<String>,
     pub final_decision: String,
@@ -72,6 +111,41 @@ pub struct CleanupReport {
     pub format_version: u32,
     pub target: TargetIdentity,
     pub dropped_configured_targets: Vec<String>,
+    pub duration_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromotionState {
+    Rejected,
+    FailedRolledBack,
+    CommitIndeterminate,
+    CommittedUnverified,
+    Promoted,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PromotionReport {
+    pub format_version: u32,
+    pub state: PromotionState,
+    pub input_report_sha256: String,
+    pub verification_report_sha256: String,
+    pub runtime: RuntimeIdentity,
+    pub target: Option<TargetIdentity>,
+    pub promoted_targets: Vec<String>,
+    pub removed_staging_targets: Vec<String>,
+    pub duration_ms: u64,
+    pub errors: Vec<String>,
+    pub final_decision: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct StagingCleanupReport {
+    pub format_version: u32,
+    pub input_report_sha256: String,
+    pub runtime: RuntimeIdentity,
+    pub target: TargetIdentity,
+    pub dropped_staging_targets: Vec<String>,
     pub duration_ms: u64,
 }
 
@@ -118,6 +192,8 @@ pub async fn run_migration(
     config: &MigrationConfig,
     source_options: &ConnectionOptions,
     target_options: &ConnectionOptions,
+    runtime: RuntimeIdentity,
+    staging: Option<StagingPlan>,
 ) -> Result<MigrationReport> {
     let started = Instant::now();
     let mut source_client = connect(source_options)
@@ -128,8 +204,10 @@ pub async fn run_migration(
     if preflight.status == PreflightStatus::Rejected {
         source.rollback().await?;
         return Ok(MigrationReport {
-            format_version: 1,
+            format_version: 2,
             state: MigrationState::Rejected,
+            runtime,
+            staging,
             preflight,
             target: None,
             tables: vec![],
@@ -158,8 +236,10 @@ pub async fn run_migration(
                 errors.push(format!("target rollback failed: {rollback_error}"));
             }
             return Ok(MigrationReport {
-                format_version: 1,
+                format_version: 2,
                 state: MigrationState::FailedRolledBack,
+                runtime,
+                staging,
                 preflight,
                 target: Some(target_identity),
                 tables: vec![],
@@ -173,8 +253,10 @@ pub async fn run_migration(
     if let Err(error) = target.commit().await {
         source.rollback().await?;
         return Ok(MigrationReport {
-            format_version: 1,
+            format_version: 2,
             state: MigrationState::CommitIndeterminate,
+            runtime,
+            staging,
             preflight,
             target: Some(target_identity),
             tables: transfers,
@@ -192,8 +274,10 @@ pub async fn run_migration(
         Err(error) => {
             source.rollback().await?;
             return Ok(MigrationReport {
-                format_version: 1,
+                format_version: 2,
                 state: MigrationState::CommittedUnverified,
+                runtime,
+                staging,
                 preflight,
                 target: Some(target_identity),
                 tables: transfers,
@@ -203,12 +287,14 @@ pub async fn run_migration(
             });
         }
     };
-    let verification = verify_fresh_target(&fresh_target, &preflight, &transfers).await;
+    let verification = verify_target(&fresh_target, &preflight, &transfers).await;
     source.rollback().await?;
     match verification {
         Ok(()) => Ok(MigrationReport {
-            format_version: 1,
+            format_version: 2,
             state: MigrationState::Verified,
+            runtime,
+            staging,
             preflight,
             target: Some(target_identity),
             tables: transfers,
@@ -217,8 +303,10 @@ pub async fn run_migration(
             final_decision: "verified_snapshot_prepared_for_operator_cutover".to_owned(),
         }),
         Err(error) => Ok(MigrationReport {
-            format_version: 1,
+            format_version: 2,
             state: MigrationState::CommittedUnverified,
+            runtime,
+            staging,
             preflight,
             target: Some(target_identity),
             tables: transfers,
@@ -227,6 +315,538 @@ pub async fn run_migration(
             final_decision: "committed_but_reconciliation_required".to_owned(),
         }),
     }
+}
+
+pub fn build_staging_config(
+    config: &MigrationConfig,
+    staging_id: &str,
+) -> Result<(MigrationConfig, StagingPlan)> {
+    if staging_id.is_empty()
+        || staging_id.len() > 24
+        || !staging_id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        || !staging_id
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_lowercase)
+    {
+        bail!(
+            "staging ID must contain 1 to 24 lowercase ASCII letters, digits, or underscores and start with a letter"
+        );
+    }
+    let mut staged = config.clone();
+    let mut targets = Vec::with_capacity(staged.tables.len());
+    for table in &mut staged.tables {
+        let release_table = table.target_table.clone();
+        let staging_table = format!("{staging_id}__{release_table}");
+        if staging_table.len() > 63 {
+            bail!("staging target identifier exceeds PostgreSQL's 63-byte limit");
+        }
+        targets.push(StagingTarget {
+            source_identity: format!("{}.{}", table.source_schema, table.source_table),
+            staging_schema: table.target_schema.clone(),
+            staging_table: staging_table.clone(),
+            release_schema: table.target_schema.clone(),
+            release_table,
+        });
+        table.target_table = staging_table;
+    }
+    staged.validate()?;
+    Ok((
+        staged,
+        StagingPlan {
+            staging_id: staging_id.to_owned(),
+            targets,
+        },
+    ))
+}
+
+pub async fn verify_migration_report(
+    report: &MigrationReport,
+    input_report_sha256: String,
+    target_options: &ConnectionOptions,
+    runtime: RuntimeIdentity,
+) -> VerificationReport {
+    let started = Instant::now();
+    let rejected = |error: String, runtime: RuntimeIdentity| VerificationReport {
+        format_version: 1,
+        state: VerificationState::Rejected,
+        input_report_sha256: input_report_sha256.clone(),
+        runtime,
+        target: None,
+        verified_targets: vec![],
+        duration_ms: millis(started.elapsed()),
+        errors: vec![error],
+        final_decision: "rejected_before_target_access".to_owned(),
+    };
+    if report.format_version != 2
+        || report.state != MigrationState::Verified
+        || report.staging.is_none()
+    {
+        return rejected(
+            "input must be a format-2 verified staging migration report".to_owned(),
+            runtime,
+        );
+    }
+    if let Err(error) = verify_runtime_binding(&report.runtime, &runtime) {
+        return rejected(format!("runtime binding rejected: {error:#}"), runtime);
+    }
+    let target = match connect(target_options).await {
+        Ok(target) => target,
+        Err(error) => {
+            return VerificationReport {
+                format_version: 1,
+                state: VerificationState::Failed,
+                input_report_sha256,
+                runtime,
+                target: None,
+                verified_targets: vec![],
+                duration_ms: millis(started.elapsed()),
+                errors: vec![format!("connect fresh target for verification: {error:#}")],
+                final_decision: "verification_failed".to_owned(),
+            };
+        }
+    };
+    let identity = match inspect_target_identity(&target).await {
+        Ok(identity) => identity,
+        Err(error) => {
+            return VerificationReport {
+                format_version: 1,
+                state: VerificationState::Failed,
+                input_report_sha256,
+                runtime,
+                target: None,
+                verified_targets: vec![],
+                duration_ms: millis(started.elapsed()),
+                errors: vec![format!("read target identity: {error:#}")],
+                final_decision: "verification_failed".to_owned(),
+            };
+        }
+    };
+    if report.target.as_ref() != Some(&identity) {
+        return VerificationReport {
+            format_version: 1,
+            state: VerificationState::Rejected,
+            input_report_sha256,
+            runtime,
+            target: Some(identity),
+            verified_targets: vec![],
+            duration_ms: millis(started.elapsed()),
+            errors: vec!["target identity differs from the migration report".to_owned()],
+            final_decision: "rejected_wrong_target".to_owned(),
+        };
+    }
+    match verify_target(&target, &report.preflight, &report.tables).await {
+        Ok(()) => VerificationReport {
+            format_version: 1,
+            state: VerificationState::Verified,
+            input_report_sha256,
+            runtime,
+            target: Some(identity),
+            verified_targets: report
+                .tables
+                .iter()
+                .map(|table| table.target_identity.clone())
+                .collect(),
+            duration_ms: millis(started.elapsed()),
+            errors: vec![],
+            final_decision: "verified_staging_ready_for_explicit_promotion".to_owned(),
+        },
+        Err(error) => VerificationReport {
+            format_version: 1,
+            state: VerificationState::Failed,
+            input_report_sha256,
+            runtime,
+            target: Some(identity),
+            verified_targets: vec![],
+            duration_ms: millis(started.elapsed()),
+            errors: vec![format!("staging verification failed: {error:#}")],
+            final_decision: "verification_failed".to_owned(),
+        },
+    }
+}
+
+pub async fn promote_migration_report(
+    report: &MigrationReport,
+    input_report_sha256: String,
+    verification: &VerificationReport,
+    verification_report_sha256: String,
+    target_options: &ConnectionOptions,
+    runtime: RuntimeIdentity,
+) -> PromotionReport {
+    let started = Instant::now();
+    let failure = PromotionFailureContext {
+        input_report_sha256: &input_report_sha256,
+        verification_report_sha256: &verification_report_sha256,
+        started,
+    };
+    let rejected = |error: String, runtime: RuntimeIdentity| PromotionReport {
+        format_version: 1,
+        state: PromotionState::Rejected,
+        input_report_sha256: input_report_sha256.clone(),
+        verification_report_sha256: verification_report_sha256.clone(),
+        runtime,
+        target: None,
+        promoted_targets: vec![],
+        removed_staging_targets: vec![],
+        duration_ms: millis(started.elapsed()),
+        errors: vec![error],
+        final_decision: "rejected_before_target_mutation".to_owned(),
+    };
+    if report.format_version != 2
+        || report.state != MigrationState::Verified
+        || report.staging.is_none()
+    {
+        return rejected(
+            "input must be a format-2 verified staging migration report".to_owned(),
+            runtime,
+        );
+    }
+    if verification.format_version != 1
+        || verification.state != VerificationState::Verified
+        || verification.input_report_sha256 != input_report_sha256
+        || verification.target != report.target
+    {
+        return rejected(
+            "verification report is not a verified binding to the migration report and target"
+                .to_owned(),
+            runtime,
+        );
+    }
+    if let Err(error) = verify_runtime_binding(&report.runtime, &runtime)
+        .and_then(|()| verify_runtime_binding(&verification.runtime, &runtime))
+    {
+        return rejected(format!("runtime binding rejected: {error:#}"), runtime);
+    }
+    let (release_preflight, release_transfers) = match release_plan(report) {
+        Ok(plan) => plan,
+        Err(error) => return rejected(format!("invalid staging plan: {error:#}"), runtime),
+    };
+    let mut target_client = match connect(target_options).await {
+        Ok(target) => target,
+        Err(error) => {
+            return promotion_failure(
+                &failure,
+                PromotionState::Rejected,
+                runtime,
+                None,
+                format!("connect promotion target: {error:#}"),
+                "rejected_before_target_mutation",
+            );
+        }
+    };
+    let connected_target = match inspect_target_identity(&target_client).await {
+        Ok(identity) => identity,
+        Err(error) => {
+            return promotion_failure(
+                &failure,
+                PromotionState::Rejected,
+                runtime,
+                None,
+                format!("read promotion target identity: {error:#}"),
+                "rejected_before_target_mutation",
+            );
+        }
+    };
+    if report.target.as_ref() != Some(&connected_target) {
+        return promotion_failure(
+            &failure,
+            PromotionState::Rejected,
+            runtime,
+            Some(connected_target),
+            "promotion target identity differs from the migration report".to_owned(),
+            "rejected_wrong_target",
+        );
+    }
+    let transaction = match target_client.transaction().await {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            return promotion_failure(
+                &failure,
+                PromotionState::Rejected,
+                runtime,
+                Some(connected_target),
+                format!("begin promotion transaction: {error}"),
+                "rejected_before_target_mutation",
+            );
+        }
+    };
+    let prepared = async {
+        verify_target(&transaction, &report.preflight, &report.tables).await?;
+        let staging_tables = selected_tables(&report.preflight);
+        let release_tables = selected_tables(&release_preflight);
+        for ((staging, release), expected) in staging_tables
+            .iter()
+            .zip(&release_tables)
+            .zip(&release_transfers)
+        {
+            transaction
+                .batch_execute(&create_table_sql(release)?)
+                .await
+                .with_context(|| {
+                    format!("create fresh release table {}", target_identity(release))
+                })?;
+            let columns = release
+                .columns
+                .iter()
+                .map(|column| {
+                    quote_identifier(
+                        column
+                            .target_name
+                            .as_deref()
+                            .expect("ready release target column"),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let copied = transaction
+                .execute(
+                    &format!(
+                        "INSERT INTO {} ({columns}) SELECT {columns} FROM {}",
+                        qualified_target(release),
+                        qualified_target(staging)
+                    ),
+                    &[],
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "copy verified staging table {} into release table {}",
+                        target_identity(staging),
+                        target_identity(release)
+                    )
+                })?;
+            if copied != expected.rows {
+                bail!(
+                    "promotion row count differs for {}",
+                    target_identity(release)
+                );
+            }
+            apply_comments(&transaction, release).await?;
+        }
+        verify_target(&transaction, &release_preflight, &release_transfers).await?;
+        for staging in staging_tables {
+            transaction
+                .batch_execute(&format!("DROP TABLE {}", qualified_target(staging)))
+                .await
+                .with_context(|| {
+                    format!("remove promoted staging table {}", target_identity(staging))
+                })?;
+        }
+        Result::<()>::Ok(())
+    }
+    .await;
+    if let Err(error) = prepared {
+        let rollback_error = transaction.rollback().await.err();
+        let mut message = format!("promotion failed: {error:#}");
+        if let Some(rollback_error) = rollback_error {
+            message.push_str(&format!("; promotion rollback failed: {rollback_error}"));
+        }
+        return promotion_failure(
+            &failure,
+            PromotionState::FailedRolledBack,
+            runtime,
+            Some(connected_target),
+            message,
+            "staging_retained_release_not_published",
+        );
+    }
+    if let Err(error) = transaction.commit().await {
+        return promotion_failure(
+            &failure,
+            PromotionState::CommitIndeterminate,
+            runtime,
+            Some(connected_target),
+            format!("promotion commit response was not successful: {error}"),
+            "operator_reconciliation_required",
+        );
+    }
+    drop(target_client);
+    let fresh_target = match connect(target_options).await {
+        Ok(target) => target,
+        Err(error) => {
+            return promotion_failure(
+                &failure,
+                PromotionState::CommittedUnverified,
+                runtime,
+                Some(connected_target),
+                format!("fresh post-promotion target connection failed: {error:#}"),
+                "promoted_but_reconciliation_required",
+            );
+        }
+    };
+    if let Err(error) = verify_target(&fresh_target, &release_preflight, &release_transfers).await {
+        return promotion_failure(
+            &failure,
+            PromotionState::CommittedUnverified,
+            runtime,
+            Some(connected_target),
+            format!("fresh post-promotion verification failed: {error:#}"),
+            "promoted_but_reconciliation_required",
+        );
+    }
+    PromotionReport {
+        format_version: 1,
+        state: PromotionState::Promoted,
+        input_report_sha256,
+        verification_report_sha256,
+        runtime,
+        target: Some(connected_target),
+        promoted_targets: release_transfers
+            .iter()
+            .map(|table| table.target_identity.clone())
+            .collect(),
+        removed_staging_targets: report
+            .tables
+            .iter()
+            .map(|table| table.target_identity.clone())
+            .collect(),
+        duration_ms: millis(started.elapsed()),
+        errors: vec![],
+        final_decision: "promoted_and_verified_after_reconnect".to_owned(),
+    }
+}
+
+pub async fn cleanup_staging(
+    report: &MigrationReport,
+    input_report_sha256: String,
+    target_options: &ConnectionOptions,
+    runtime: RuntimeIdentity,
+) -> Result<StagingCleanupReport> {
+    let started = Instant::now();
+    if report.format_version != 2
+        || report.state != MigrationState::Verified
+        || report.staging.is_none()
+    {
+        bail!("cleanup requires a format-2 verified staging migration report");
+    }
+    verify_runtime_binding(&report.runtime, &runtime)?;
+    let mut target_client = connect(target_options)
+        .await
+        .context("connect target for report-bound staging cleanup")?;
+    let connected_target = inspect_target_identity(&target_client).await?;
+    if report.target.as_ref() != Some(&connected_target) {
+        bail!("cleanup target identity differs from the migration report");
+    }
+    let target = target_client
+        .transaction()
+        .await
+        .context("begin report-bound staging cleanup transaction")?;
+    let mut dropped = Vec::with_capacity(report.tables.len());
+    for table in selected_tables(&report.preflight) {
+        target
+            .batch_execute(&format!("DROP TABLE IF EXISTS {}", qualified_target(table)))
+            .await
+            .with_context(|| format!("drop staging target {}", target_identity(table)))?;
+        dropped.push(target_identity(table));
+    }
+    target
+        .commit()
+        .await
+        .context("commit report-bound staging cleanup")?;
+    Ok(StagingCleanupReport {
+        format_version: 1,
+        input_report_sha256,
+        runtime,
+        target: connected_target,
+        dropped_staging_targets: dropped,
+        duration_ms: millis(started.elapsed()),
+    })
+}
+
+struct PromotionFailureContext<'a> {
+    input_report_sha256: &'a str,
+    verification_report_sha256: &'a str,
+    started: Instant,
+}
+
+fn promotion_failure(
+    context: &PromotionFailureContext<'_>,
+    state: PromotionState,
+    runtime: RuntimeIdentity,
+    target: Option<TargetIdentity>,
+    error: String,
+    final_decision: &str,
+) -> PromotionReport {
+    PromotionReport {
+        format_version: 1,
+        state,
+        input_report_sha256: context.input_report_sha256.to_owned(),
+        verification_report_sha256: context.verification_report_sha256.to_owned(),
+        runtime,
+        target,
+        promoted_targets: vec![],
+        removed_staging_targets: vec![],
+        duration_ms: millis(context.started.elapsed()),
+        errors: vec![error],
+        final_decision: final_decision.to_owned(),
+    }
+}
+
+fn release_plan(report: &MigrationReport) -> Result<(PreflightReport, Vec<TableTransfer>)> {
+    let staging = report
+        .staging
+        .as_ref()
+        .ok_or_else(|| anyhow!("migration report has no staging plan"))?;
+    let mut release = report.preflight.clone();
+    let mut seen = Vec::new();
+    for table in release.tables.iter_mut().filter(|table| {
+        table.target_table.is_some()
+            && table.disposition.action != Action::Reject
+            && table.blockers.is_empty()
+    }) {
+        let source = source_identity(table);
+        let mapping = staging
+            .targets
+            .iter()
+            .find(|mapping| mapping.source_identity == source)
+            .ok_or_else(|| anyhow!("staging mapping is missing {source}"))?;
+        if table.target_schema.as_deref() != Some(&mapping.staging_schema)
+            || table.target_table.as_deref() != Some(&mapping.staging_table)
+        {
+            bail!("staging mapping does not match preflight target for {source}");
+        }
+        table.target_schema = Some(mapping.release_schema.clone());
+        table.target_table = Some(mapping.release_table.clone());
+        seen.push(source);
+    }
+    if seen.len() != staging.targets.len() || seen.len() != report.tables.len() {
+        bail!("staging mapping cardinality differs from verified tables");
+    }
+    let transfers = report
+        .tables
+        .iter()
+        .map(|table| {
+            let mapping = staging
+                .targets
+                .iter()
+                .find(|mapping| mapping.source_identity == table.source_identity)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "staging mapping is missing transfer {}",
+                        table.source_identity
+                    )
+                })?;
+            if table.target_identity
+                != format!("{}.{}", mapping.staging_schema, mapping.staging_table)
+            {
+                bail!("staging mapping does not match verified transfer target");
+            }
+            let mut transfer = table.clone();
+            transfer.target_identity =
+                format!("{}.{}", mapping.release_schema, mapping.release_table);
+            Ok(transfer)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok((release, transfers))
+}
+
+fn verify_runtime_binding(expected: &RuntimeIdentity, actual: &RuntimeIdentity) -> Result<()> {
+    if expected != actual {
+        bail!("runtime identity differs from the migration report");
+    }
+    Ok(())
 }
 
 async fn inspect_target_identity(client: &Client) -> Result<TargetIdentity> {
@@ -296,11 +916,14 @@ async fn prepare_target(
     Ok(transfers)
 }
 
-async fn verify_fresh_target(
-    target: &Client,
+async fn verify_target<C>(
+    target: &C,
     preflight: &PreflightReport,
     expected: &[TableTransfer],
-) -> Result<()> {
+) -> Result<()>
+where
+    C: GenericClient + Sync,
+{
     let selected = selected_tables(preflight);
     if selected.len() != expected.len() {
         bail!("fresh target verification table count changed");
@@ -718,6 +1341,8 @@ fn millis(duration: std::time::Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{SourceRequirements, TableMapping};
+    use std::collections::BTreeMap;
 
     fn column(source_type: &str) -> ColumnPlan {
         ColumnPlan {
@@ -783,5 +1408,34 @@ mod tests {
             180_004
         );
         assert!(postgres_version_num("DuckDB v1.5.4").is_err());
+    }
+
+    #[test]
+    fn derives_bounded_fresh_staging_targets() {
+        let config = MigrationConfig {
+            format_version: 1,
+            source: SourceRequirements {
+                postgres_version_num: 180_004,
+                postgis_version: "3.6.4".to_owned(),
+            },
+            source_schemas: vec!["public".to_owned()],
+            tables: vec![TableMapping {
+                source_schema: "public".to_owned(),
+                source_table: "places".to_owned(),
+                target_schema: "main".to_owned(),
+                target_table: "places".to_owned(),
+                column_mappings: BTreeMap::new(),
+            }],
+        };
+        let (staged, plan) = build_staging_config(&config, "release_1").unwrap();
+        assert_eq!(staged.tables[0].target_table, "release_1__places");
+        assert_eq!(plan.targets[0].release_table, "places");
+        assert_eq!(plan.targets[0].staging_table, "release_1__places");
+        assert_eq!(config.tables[0].target_table, "places");
+        assert!(build_staging_config(&config, "../unsafe").is_err());
+
+        let mut long = config;
+        long.tables[0].target_table = "x".repeat(63);
+        assert!(build_staging_config(&long, "release").is_err());
     }
 }

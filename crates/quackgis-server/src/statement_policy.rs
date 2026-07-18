@@ -296,8 +296,14 @@ struct ReadTargets {
 
 fn read_targets(statement: &Statement) -> ReadTargets {
     let mut targets = ReadTargets::default();
-    if let Statement::Query(query) = statement {
-        collect_query_targets(query, &mut targets);
+    match statement {
+        Statement::Query(query) => collect_query_targets(query, &mut targets),
+        Statement::Insert(insert) => {
+            if let Some(source) = &insert.source {
+                collect_query_targets(source, &mut targets);
+            }
+        }
+        _ => {}
     }
     targets.tables.sort();
     targets.tables.dedup();
@@ -579,7 +585,11 @@ mod tests {
                 "schema_grants": [
                     {"schema": "public", "role": "PUBLIC", "privileges": ["USAGE"]}
                 ],
-                "table_owners": [{"table": "places", "role": "owner"}],
+                "table_owners": [
+                    {"table": "places", "role": "owner"},
+                    {"table": "staging_places", "role": "owner"},
+                    {"table": "other_staging", "role": "other"}
+                ],
                 "table_grants": []
             }"#,
         )
@@ -589,6 +599,7 @@ mod tests {
             "COMMENT ON TABLE public.places IS 'table comment'",
             "COMMENT ON COLUMN public.places.label IS 'column comment'",
             "DROP TABLE IF EXISTS public.places",
+            "INSERT INTO public.places SELECT * FROM public.staging_places",
         ] {
             let statement = Parser::parse_sql(&PostgreSqlDialect {}, sql)
                 .unwrap()
@@ -604,6 +615,16 @@ mod tests {
         .unwrap()
         .remove(0);
         assert!(authorize_statement(&auth, Some("owner"), Some("owner"), &role_comment).is_err());
+
+        let unauthorized_source = Parser::parse_sql(
+            &PostgreSqlDialect {},
+            "INSERT INTO public.places SELECT * FROM public.other_staging",
+        )
+        .unwrap()
+        .remove(0);
+        assert!(
+            authorize_statement(&auth, Some("owner"), Some("owner"), &unauthorized_source).is_err()
+        );
 
         for sql in [
             "DROP VIEW public.places",
