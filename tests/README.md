@@ -25,9 +25,11 @@ a dedicated migration certificate, credential-bound `migration_operator` lease,
 mutual-TLS tiny client, and iroh worker; it verifies 10,004 rows and denies the
 ordinary K0 certificate. The gate now uses fresh staging, exact report-bound
 verification and promotion, clean runtime manifest/source/image identity, a full
-K0 restart, and psql/psycopg/OGR/QGIS promoted-data reads. Explicit source
-role/grant mappings, progress checkpoints, and richer spatial report dimensions
-remain open.
+K0 restart, and psql/psycopg/OGR/QGIS promoted-data reads. The same gates now
+assert exact source role/grant mappings, bounded progress terminal/rollback/
+rejection state, and Point family/SRID/dimensions, structural WKB validity,
+empty/invalid counts, and finite extents. Broader semantic validity and
+interruption/resource scale remain open.
 
 `iroh_direct::duckdb_pgwire_oracles_pass_through_local_iroh` owns the first native
 I0 direct-path smoke. It uses real bootstrap, worker, and tiny-client endpoints

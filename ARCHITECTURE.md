@@ -131,9 +131,13 @@ K0 client certificate. The source PostGIS sidecar exists only in that Job's netw
 namespace. A bounded fresh staging namespace, exact report/verification hashes,
 runtime manifest/source/image identity, one transactional promotion, target
 restart, and promoted-data psql/psycopg/OGR/QGIS reads pass. Explicit source
-role/grant mappings, progress checkpoints, and richer spatial report dimensions
-remain G0 gates. A `verified` migration report means staging data is prepared for
-an explicit promotion decision, not
+owner/grantee and table/column grant mappings now bind inventory to independently
+provisioned immutable target policy without role DDL or credentials. Atomic
+bounded progress covers preflight through terminal decisions, and Point reports
+carry family/SRID/dimensions, structural WKB validity, empty/invalid counts, and
+finite extents. Broader semantic validity, interruption/resource qualification,
+and type/geometry support remain G0 gates. A `verified` migration report means
+staging data is prepared for an explicit promotion decision, not
 that clients were atomically cut over or PostGIS can be retired. See
 [docs/POSTGIS_MIGRATION.md](./docs/POSTGIS_MIGRATION.md).
 
