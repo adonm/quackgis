@@ -20,10 +20,14 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   runtime packages the migrator, and a Kind gate moves 10,004 exact rows through
   a dedicated `migration_operator` credential, migration-only client CA,
   mutual-TLS tiny client, and iroh worker while denying the ordinary K0 client
-  certificate. Explicit configured-target cleanup is owner-authorized and
-  transactional. Staging promotion, report-bound target runtime digests,
-  role/grant application, restart verification, broader spatial/key support, and
-  named post-migration clients remain open.
+  certificate. Runs now use a bounded fresh staging namespace; exact SHA-256-bound
+  verification gates one explicit atomic promotion, and report-bound cleanup can
+  remove staging without naming release tables. Reports bind the migrator,
+  artifact manifest, clean source SHA, and immutable target image digest. The
+  packaged gate promotes, restarts K0, and passes pinned psql, psycopg, OGR, and
+  QGIS reads against the promoted 10,004 rows. Explicit source role/grant mapping,
+  progress checkpoints, richer spatial report dimensions, and broader
+  spatial/key support remain open.
 - Owner-authorized `COMMENT ON TABLE` and `COMMENT ON COLUMN` now pass the pgwire
   structural admission boundary; all other comment targets and non-owner roles
   fail closed.

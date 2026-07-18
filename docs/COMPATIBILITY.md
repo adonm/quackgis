@@ -349,10 +349,12 @@ unless a focused test says otherwise.
   migrator; a separate Kind gate transfers 10,004 exact rows through a dedicated
   `migration_operator` credential, migration-only client CA, mutual-TLS tiny
   client, and iroh worker, denies the ordinary K0 client certificate, and proves
-  explicit configured-target cleanup. Automatic isolated staging/promotion,
-  report-bound target runtime identity, role/grant application, restart
-  verification, broader types/spatial semantics, and copied-data named-client
-  gates remain open; see [POSTGIS_MIGRATION.md](./POSTGIS_MIGRATION.md).
+  report-bound staging cleanup. Fresh staging, exact SHA-256-bound re-verification,
+  atomic promotion, runtime manifest/source/image identity, K0 restart, and
+  promoted-data psql/psycopg/OGR/QGIS gates pass. Explicit source role/grant
+  mapping, progress checkpoints, richer spatial report dimensions, and broader
+  types/spatial semantics remain open; see
+  [POSTGIS_MIGRATION.md](./POSTGIS_MIGRATION.md).
 - No logical replication consumer exists. G1 waits for M6 and uses PostgreSQL
   logical decoding with durable source-LSN/idempotent-batch reconciliation;
   physical streaming, dual-write, reverse replication, implicit DDL/RLS/role

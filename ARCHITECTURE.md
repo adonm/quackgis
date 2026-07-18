@@ -128,10 +128,12 @@ separate packaged gate executes the provenance-pinned migrator as a non-root Job
 uses a distinct `migration_operator` credential/lease and migration-only client
 CA, traverses the mutual-TLS tiny client and iroh worker, and rejects the ordinary
 K0 client certificate. The source PostGIS sidecar exists only in that Job's network
-namespace. Isolated staging-root promotion, runtime identity in the report,
-role/grant application, restart verification, and named post-migration clients
-remain G0 gates. A `verified` report means snapshot data is prepared for an
-operator decision, not
+namespace. A bounded fresh staging namespace, exact report/verification hashes,
+runtime manifest/source/image identity, one transactional promotion, target
+restart, and promoted-data psql/psycopg/OGR/QGIS reads pass. Explicit source
+role/grant mappings, progress checkpoints, and richer spatial report dimensions
+remain G0 gates. A `verified` migration report means staging data is prepared for
+an explicit promotion decision, not
 that clients were atomically cut over or PostGIS can be retired. See
 [docs/POSTGIS_MIGRATION.md](./docs/POSTGIS_MIGRATION.md).
 

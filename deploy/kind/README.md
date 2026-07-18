@@ -37,8 +37,12 @@ the TLS boundary; the migration certificate is not trusted by the ordinary
 pgwire bridge. `kind-postgis-migration-gate` starts a digest-pinned PostGIS native
 sidecar only inside an optional Job, runs the non-root migrator from the immutable
 runtime image, and moves 10,004 exact scalar/Point/NULL rows through mTLS, iroh,
-the common policy edge, ADBC, and DuckLake. The source sidecar and plaintext
-loopback source trust are absent from normal K0 startup.
+the common policy edge, ADBC, and DuckLake. The Job uses fresh `g0stage__*` tables,
+binds run and verification reports by SHA-256 plus clean manifest/source/image
+identity, and promotes in one transaction. The gate restarts the complete core Pod
+before pinned psql, psycopg, OGR, and QGIS match the promoted data through the
+migration bridge. The source sidecar and plaintext loopback source trust are absent
+from normal K0 startup.
 
 The psycopg 3.2.13 Job is a copied-data gate rather than a scalar connection
 smoke. It creates or reuses one client-neutral table, clears it, streams two rows

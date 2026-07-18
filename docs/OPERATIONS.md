@@ -207,15 +207,17 @@ mise exec -- just kind-postgis-migration-gate
 
 It runs the immutable migrator through a dedicated migration certificate,
 credential-bound `migration_operator` lease, mutual-TLS tiny client, and iroh
-worker, verifies 10,004 rows, and denies the ordinary K0 certificate. Both recipes
-pull the pinned source image and therefore are not part of network-independent
-`just ci`.
+worker, stages and report-binds 10,004 rows, promotes once, restarts K0, and runs
+pinned psql/psycopg/OGR/QGIS against the promoted data. It also denies the
+ordinary K0 certificate. Both recipes pull the pinned source image and therefore
+are not part of network-independent `just ci`.
 
 For operator configuration, TLS/password-file handling, accepted type mappings,
-checksum/report semantics, explicit configured-target cleanup, and open gates,
-see [POSTGIS_MIGRATION.md](./POSTGIS_MIGRATION.md). Until staging promotion lands,
-use a fresh isolated target root and treat even a `verified` report as prepared
-data requiring a separate cutover decision.
+checksum/report semantics, exact-report staging cleanup and promotion, and open
+gates, see [POSTGIS_MIGRATION.md](./POSTGIS_MIGRATION.md). A `verified` migration
+report authorizes no mutation by itself; promotion still requires the exact
+migration and verification digests plus explicit confirmation. Keep PostGIS as
+the rollback source until a separate retirement decision.
 
 ## Storage authority
 

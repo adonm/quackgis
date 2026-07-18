@@ -7,11 +7,14 @@ schemas, streams accepted tables through PostgreSQL text COPY to QuackGIS, and v
 target checksums before one target transaction commits.
 
 This is executable preview evidence, not a complete migration product. The
-provenance-pinned runtime now includes the migrator and a packaged Kind gate uses
-a dedicated credential, role, client CA, and mutual-TLS iroh tiny client.
-Automatic staging-root promotion, runtime identity inside the report, role/grant
-application, restart verification, keys, nonzero CRS, geography, non-Point
-geometry, named-client post-migration gates, and operator cutover remain open.
+provenance-pinned runtime includes the migrator; reports bind the executable,
+artifact manifest, clean source SHA, and immutable target runtime image digest.
+Fresh staging, exact-report verification, explicit atomic promotion, restart
+verification, and psql/psycopg/OGR/QGIS qualification pass through a dedicated
+credential, role, client CA, and mutual-TLS iroh tiny client. Explicit source
+role/grant mappings, bounded progress checkpoints, richer spatial report
+dimensions, keys, nonzero CRS, geography, non-Point geometry, and general
+operator cutover remain open.
 
 ## Maintained smoke
 
@@ -20,13 +23,17 @@ mise exec -- just postgis-migration-smoke
 ```
 
 The recipe pulls the digest-pinned PostgreSQL 18/PostGIS 3.6 image, starts a fresh
-actual QuackGIS/DuckLake server, and runs three cases:
+actual QuackGIS/DuckLake server, and runs these cases:
 
 1. copy release scalars plus Point/NULL WKB while a concurrent source write commits
    outside the held snapshot;
 2. reject an invalid target date and prove the complete target DDL/COPY transaction
    leaves no tables; and
-3. reject a primary-key source before attempting to reach an unavailable target.
+3. reject a primary-key source before attempting to reach an unavailable target;
+4. reject a wrong report digest before target access, verify and clean an exact
+   staged report, retry into a fresh stage with identical checksums, and atomically
+   promote only the second verified report; and
+5. prove the promoted release has 100,003 rows and no staging-table residue.
 
 The smoke uses plaintext only on literal loopback addresses. It is not the
 release-network contract.
@@ -42,11 +49,17 @@ mise exec -- just kind-postgis-migration-gate
 The normal K0 client/REST and direct-worker denial matrix runs first. An optional
 Job then starts digest-pinned PostgreSQL 18.4/PostGIS 3.6.4 as a native sidecar,
 executes the non-root migrator from the immutable runtime image, and transfers
-10,002 scalar rows plus two Point/NULL rows through a credential-bound
-`migration_operator` lease. The migration Service trusts a separate migration
-client CA: the ordinary K0 client certificate is explicitly denied. The PostGIS
-sidecar and source trust mode exist only inside this one Job's network namespace;
-they are absent from normal topology startup.
+10,002 scalar rows plus two Point/NULL rows into a fresh `g0stage__*` namespace
+through a credential-bound `migration_operator` lease. The Job hashes the
+path-free migration report, reverifies that exact digest, hashes the verification
+report, and promotes only that exact pair in one transaction. Its report records
+the clean source and artifact identities plus target runtime image digest. The
+gate restarts the complete K0 Pod, then pinned psql 18.3, psycopg 3.2.13, GDAL/OGR
+3.11.5, and QGIS 3.44.11 recheck promoted counts, release scalars, Point/NULL,
+extent/filter/identify, and rendering through the same migration Service. The
+ordinary K0 client certificate is explicitly denied. The PostGIS sidecar and
+source trust mode exist only inside this one Job's network namespace; they are
+absent from normal topology startup.
 
 ## Configuration
 
@@ -141,7 +154,10 @@ export QUACKGIS_MIGRATE_TARGET_CLIENT_KEY=/run/secrets/migration.key
 
 mise exec -- cargo run -p quackgis-migrate -- run \
   --config migration.json \
-  --out migration-report.json
+  --out migration-report.json \
+  --staging-id release_1 \
+  --runtime-manifest /opt/quackgis/artifact-manifest.json \
+  --target-runtime-image registry.example/quackgis@sha256:0000000000000000000000000000000000000000000000000000000000000000
 ```
 
 The migrator holds the source snapshot from identity/preflight through final COPY
@@ -154,7 +170,8 @@ For each table, source and target rows are normalized by type and accumulated in
 order-independent SHA-256 multiset checksums for the complete row and every
 column. The report records row and NULL counts, wire bytes and wire SHA-256, table
 and column checksums, source snapshot identity, target PostgreSQL profile identity,
-durations, all mappings/rejections, errors, and the final decision. It contains no
+staging-to-release mappings, migrator/artifact/source/image digests, durations,
+all mappings/rejections, errors, and the final decision. It contains no
 connection URL, password, certificate path, local target path, or row value. A
 fresh target pgwire connection recomputes all checksums and counts after commit.
 
@@ -168,29 +185,65 @@ Report states are operationally significant:
 | `committed_unverified` | commit succeeded but fresh-session verification failed |
 | `verified` | fresh-session counts and every canonical checksum match |
 
-Only `verified` exits successfully. Even then, `final_decision` says the snapshot
-is prepared for operator cutover; it does not claim an atomic release promotion.
-Use a fresh isolated target root for this preview, keep PostGIS as the rollback
-source, and do not direct clients to the target until separate cutover checks pass.
+Only `verified` exits `run` successfully. Even then, `final_decision` says the
+snapshot is prepared for explicit promotion; release names are still absent.
+
+Bind each next operation to the exact report bytes, not merely a filename:
+
+```sh
+report_sha256=$(sha256sum migration-report.json | cut -d' ' -f1)
+mise exec -- cargo run -p quackgis-migrate -- verify \
+  --report migration-report.json \
+  --report-sha256 "$report_sha256" \
+  --out verification-report.json \
+  --runtime-manifest /opt/quackgis/artifact-manifest.json \
+  --target-runtime-image registry.example/quackgis@sha256:0000000000000000000000000000000000000000000000000000000000000000
+
+verification_sha256=$(sha256sum verification-report.json | cut -d' ' -f1)
+mise exec -- cargo run -p quackgis-migrate -- promote \
+  --report migration-report.json \
+  --report-sha256 "$report_sha256" \
+  --verification-report verification-report.json \
+  --verification-report-sha256 "$verification_sha256" \
+  --out promotion-report.json \
+  --confirm-promote \
+  --runtime-manifest /opt/quackgis/artifact-manifest.json \
+  --target-runtime-image registry.example/quackgis@sha256:0000000000000000000000000000000000000000000000000000000000000000
+```
+
+`verify` requires the same runtime and target identity and recomputes every count,
+NULL count, and checksum on a new connection. `promote` rejects any mismatched
+report, verification, runtime, or target before mutation. It reverifies staging
+inside one target transaction, creates absent release tables, copies and verifies
+them, removes staging, commits once, reconnects, and verifies release names again.
+Failure before commit retains verified staging and publishes no release;
+response-loss is `commit_indeterminate`, and post-commit verification failure is
+`committed_unverified`. Keep PostGIS as the rollback source until a separate
+operator retirement decision.
 
 ## Explicit cleanup
 
 Cleanup is a separate destructive command and requires an explicit confirmation.
-It drops only the exact target tables named by the validated configuration, in
-one target transaction, and writes a path-free cleanup report:
+It accepts only an exact verified migration report and drops only that report's
+staging targets in one transaction. Release targets are never cleanup inputs:
 
 ```sh
 mise exec -- cargo run -p quackgis-migrate -- cleanup \
-  --config migration.json \
+  --report migration-report.json \
+  --report-sha256 "$report_sha256" \
   --out cleanup-report.json \
-  --confirm-drop-configured-targets
+  --confirm-cleanup-staging \
+  --runtime-manifest /opt/quackgis/artifact-manifest.json \
+  --target-runtime-image registry.example/quackgis@sha256:0000000000000000000000000000000000000000000000000000000000000000
 ```
 
 `DROP TABLE` admission is limited to one configured table at a time and requires
 the same exact ownership decision as creation/comments. Views, multiple targets,
-`CASCADE`, and non-owner roles fail closed. The packaged gate runs cleanup first
-so it is repeatable. This is not report-bound release rollback or staging
-promotion; those remain separate G0 work.
+`CASCADE`, and non-owner roles fail closed. `reset-configured-targets` is a
+separately named preview/test operation requiring
+`--confirm-drop-configured-targets`; the repeatable Kind fixture uses it to remove
+only its statically owned release and staging tables before a new oracle. It is
+not release rollback and is not part of the operator promotion path.
 
 ## Security boundary
 
@@ -201,7 +254,8 @@ The QuackGIS worker receives only ordinary target pgwire traffic and never recei
 the source URL, password, TLS key, or direct DuckDB/DuckLake credentials.
 
 K0 maps a separate iroh credential only to `migration_operator`, whose immutable
-role configuration owns only the two maintained migration fixture targets. A
+role configuration owns only the two maintained release and two staging fixture
+targets. A
 separate tiny-client listener trusts only migration-client certificates. The
 ordinary client certificate cannot connect to that listener, and the migration
 certificate is not trusted by the ordinary pgwire listener.

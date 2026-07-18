@@ -121,10 +121,12 @@ commit, proves conversion failure leaves zero target tables, and rejects keys
 before target access. The provenance-pinned runtime now packages the migrator;
 a separate Kind gate moves 10,004 exact rows through a dedicated
 `migration_operator` credential, migration-only client CA, mutual-TLS tiny client,
-and iroh worker while rejecting the ordinary K0 client certificate. This is not
-yet a release migration claim: isolated staging/promotion, report-bound runtime
-digests, role/grant mapping, restart verification, broader types/spatial
-semantics, and named post-migration clients remain open.
+and iroh worker while rejecting the ordinary K0 client certificate. Fresh staging,
+exact-report verification, atomic promotion, manifest/source/image digest binding,
+K0 restart, and pinned psql/psycopg/OGR/QGIS reads over the promoted rows pass.
+This is not yet a release migration claim: explicit source role/grant mapping,
+bounded progress checkpoints, richer spatial report dimensions, and broader
+types/spatial semantics remain open.
 
 TLS remains optional for local development. Set `QUACKGIS_TLS_MODE=required` with
 `QUACKGIS_TLS_CERT` and `QUACKGIS_TLS_KEY` to fail closed on plaintext startup.
