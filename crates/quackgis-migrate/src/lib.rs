@@ -10,7 +10,7 @@ pub mod report;
 pub mod runtime;
 pub mod source;
 
-pub use config::{MigrationConfig, SourceRequirements, TableMapping};
+pub use config::{GrantMapping, MigrationConfig, SourceRequirements, TableMapping};
 pub use inventory::{
     ConstraintKind, SourceColumn, SourceConstraint, SourceGrant, SourceIdentity, SourceInventory,
     SourceObject, SourceObjectKind, SourceRole, SourceTable,

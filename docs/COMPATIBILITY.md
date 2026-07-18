@@ -351,8 +351,10 @@ unless a focused test says otherwise.
   client, and iroh worker, denies the ordinary K0 client certificate, and proves
   report-bound staging cleanup. Fresh staging, exact SHA-256-bound re-verification,
   atomic promotion, runtime manifest/source/image identity, K0 restart, and
-  promoted-data psql/psycopg/OGR/QGIS gates pass. Explicit source role/grant
-  mapping, progress checkpoints, richer spatial report dimensions, and broader
+  promoted-data psql/psycopg/OGR/QGIS gates pass. Exact inventoried source roles
+  and maintained table/column grants can now map to independently provisioned
+  immutable target roles/grants without copying credentials or executing role
+  DDL. Progress checkpoints, richer spatial report dimensions, and broader
   types/spatial semantics remain open; see
   [POSTGIS_MIGRATION.md](./POSTGIS_MIGRATION.md).
 - No logical replication consumer exists. G1 waits for M6 and uses PostgreSQL

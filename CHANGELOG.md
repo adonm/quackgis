@@ -25,9 +25,11 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   remove staging without naming release tables. Reports bind the migrator,
   artifact manifest, clean source SHA, and immutable target image digest. The
   packaged gate promotes, restarts K0, and passes pinned psql, psycopg, OGR, and
-  QGIS reads against the promoted 10,004 rows. Explicit source role/grant mapping,
-  progress checkpoints, richer spatial report dimensions, and broader
-  spatial/key support remain open.
+  QGIS reads against the promoted 10,004 rows. Exact source owner/grantee roles
+  and maintained table/column grants can now map to independently provisioned
+  immutable target policy; missing configured mappings fail preflight, while
+  credentials and role DDL remain excluded. Progress checkpoints, richer spatial
+  report dimensions, and broader spatial/key support remain open.
 - Owner-authorized `COMMENT ON TABLE` and `COMMENT ON COLUMN` now pass the pgwire
   structural admission boundary; all other comment targets and non-owner roles
   fail closed.

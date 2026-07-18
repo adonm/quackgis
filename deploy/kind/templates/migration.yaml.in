@@ -24,6 +24,17 @@ data:
         "postgis_version": "3.6.4"
       },
       "source_schemas": ["public", "survey"],
+      "role_mappings": {"source_reader": "reader"},
+      "grant_mappings": [
+        {
+          "source_role": "source_reader",
+          "source_schema": "public",
+          "source_table": "source_places",
+          "source_column": "location",
+          "privilege": "SELECT",
+          "target_role": "reader"
+        }
+      ],
       "tables": [
         {
           "source_schema": "public",
@@ -88,6 +99,8 @@ data:
     FROM generate_series(1, 10002) AS values(value);
     CREATE VIEW public.source_place_view AS SELECT id, label FROM public.source_places;
     CREATE SEQUENCE survey.unsupported_sequence;
+    CREATE ROLE source_reader;
+    GRANT SELECT(location) ON public.source_places TO source_reader;
 ---
 apiVersion: batch/v1
 kind: Job
@@ -297,7 +310,9 @@ spec:
               grep -F '"source_identity": "public.source_places"' /work/migration-report.json
               grep -F '"source_identity": "survey.source_readings"' /work/migration-report.json
               grep -F '"rows": 10002' /work/migration-report.json
-              echo kind_postgis_migration_ok role=migration_operator ingress=mtls_iroh rows=10004 lifecycle=run,verify,promote runtime=bound
+              grep -F '"target_identity": "reader"' /work/migration-report.json
+              grep -F '"target_identity": "reader:main.g0stage__kind_migration_places.geom_wkb"' /work/migration-report.json
+              echo kind_postgis_migration_ok role=migration_operator ingress=mtls_iroh rows=10004 mapped_roles=1 mapped_grants=1 lifecycle=run,verify,promote runtime=bound
           securityContext: *migration_security
           volumeMounts: *migration_mounts
       volumes:

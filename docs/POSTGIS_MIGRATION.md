@@ -11,10 +11,11 @@ provenance-pinned runtime includes the migrator; reports bind the executable,
 artifact manifest, clean source SHA, and immutable target runtime image digest.
 Fresh staging, exact-report verification, explicit atomic promotion, restart
 verification, and psql/psycopg/OGR/QGIS qualification pass through a dedicated
-credential, role, client CA, and mutual-TLS iroh tiny client. Explicit source
-role/grant mappings, bounded progress checkpoints, richer spatial report
-dimensions, keys, nonzero CRS, geography, non-Point geometry, and general
-operator cutover remain open.
+credential, role, client CA, and mutual-TLS iroh tiny client. Exact source roles
+and grants can be mapped to independently provisioned immutable target policy;
+passwords and role DDL are never copied. Bounded progress checkpoints, richer
+spatial report dimensions, keys, nonzero CRS, geography, non-Point geometry, and
+general operator cutover remain open.
 
 ## Maintained smoke
 
@@ -74,6 +75,17 @@ an explicit source scope and source-to-target table list:
     "postgis_version": "3.6.4"
   },
   "source_schemas": ["public", "survey"],
+  "role_mappings": {"source_reader": "reader"},
+  "grant_mappings": [
+    {
+      "source_role": "source_reader",
+      "source_schema": "public",
+      "source_table": "places",
+      "source_column": "location",
+      "privilege": "SELECT",
+      "target_role": "reader"
+    }
+  ],
   "tables": [
     {
       "source_schema": "public",
@@ -102,6 +114,16 @@ triggers, extensions, owner roles, and visible table/column grants in the select
 schemas. Unselected objects remain in the report with a `reject` disposition; they
 do not become implicit migration input. Inventory cardinalities have explicit
 table/column/constraint/object/role/grant ceilings.
+
+`role_mappings` maps an exact inventoried source owner/grantee role to an existing
+target role. `grant_mappings` then accepts only an exact inventoried `SELECT`,
+`INSERT`, `UPDATE`, or `DELETE` grant on a selected table or column, derives its
+target object through the table/column mappings, and requires the same target
+role. A configured role or grant absent from the held snapshot rejects preflight.
+Unmapped source roles/grants remain explicit `reject` dispositions. These fields
+do not create roles, copy passwords, or execute `GRANT`: operators provision the
+target's immutable role policy separately, and the path-free report records the
+source-to-target decision for audit.
 
 ## Preflight
 
@@ -170,8 +192,8 @@ For each table, source and target rows are normalized by type and accumulated in
 order-independent SHA-256 multiset checksums for the complete row and every
 column. The report records row and NULL counts, wire bytes and wire SHA-256, table
 and column checksums, source snapshot identity, target PostgreSQL profile identity,
-staging-to-release mappings, migrator/artifact/source/image digests, durations,
-all mappings/rejections, errors, and the final decision. It contains no
+staging-to-release mappings, explicit role/grant mappings, migrator/artifact/source/image
+digests, durations, all mappings/rejections, errors, and the final decision. It contains no
 connection URL, password, certificate path, local target path, or row value. A
 fresh target pgwire connection recomputes all checksums and counts after commit.
 

@@ -1426,6 +1426,8 @@ mod tests {
                 target_table: "places".to_owned(),
                 column_mappings: BTreeMap::new(),
             }],
+            role_mappings: BTreeMap::new(),
+            grant_mappings: vec![],
         };
         let (staged, plan) = build_staging_config(&config, "release_1").unwrap();
         assert_eq!(staged.tables[0].target_table, "release_1__places");

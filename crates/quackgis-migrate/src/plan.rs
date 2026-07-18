@@ -7,8 +7,10 @@ use sqlparser::ast::{Expr, SelectItem, SetExpr, Statement, UnaryOperator, ValueW
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 
-use crate::config::{MigrationConfig, TableMapping};
-use crate::inventory::{ConstraintKind, SourceColumn, SourceInventory, SourceObjectKind};
+use crate::config::{GrantMapping, MigrationConfig, TableMapping};
+use crate::inventory::{
+    ConstraintKind, SourceColumn, SourceGrant, SourceInventory, SourceObjectKind,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -73,6 +75,7 @@ pub struct ColumnPlan {
 pub struct ObjectPlan {
     pub identity: String,
     pub kind: String,
+    pub target_identity: Option<String>,
     pub disposition: Disposition,
 }
 
@@ -125,6 +128,7 @@ pub fn build_preflight(config: &MigrationConfig, inventory: SourceInventory) -> 
         .map(|object| ObjectPlan {
             identity: format!("{}.{}", object.schema, object.name),
             kind: format!("{:?}", object.kind).to_lowercase(),
+            target_identity: None,
             disposition: reject(match object.kind {
                 SourceObjectKind::Extension => "extensions are not copied implicitly",
                 SourceObjectKind::View => "views are not copied implicitly",
@@ -140,24 +144,67 @@ pub fn build_preflight(config: &MigrationConfig, inventory: SourceInventory) -> 
             }),
         })
         .collect();
+    let mut seen_grants = HashSet::new();
     let grants = inventory
         .grants
         .iter()
-        .map(|grant| ObjectPlan {
-            identity: format!("{}:{}", grant.object_identity, grant.grantee),
-            kind: grant.privilege.to_ascii_lowercase(),
-            disposition: reject("source grants require an explicit target role/grant mapping"),
+        .map(|grant| {
+            let mapping = config.grant_mappings.iter().find(|mapping| {
+                mapping.source_role == grant.grantee
+                    && mapping.source_schema == grant.schema
+                    && mapping.source_table == grant.table
+                    && mapping.source_column == grant.column
+                    && mapping.privilege.eq_ignore_ascii_case(&grant.privilege)
+            });
+            if let Some(mapping) = mapping {
+                seen_grants.insert(mapping);
+            }
+            grant_plan(config, grant, mapping)
         })
         .collect();
+    for mapping in &config.grant_mappings {
+        if !seen_grants.contains(mapping) {
+            errors.push(format!(
+                "configured source grant {} was not found",
+                grant_identity(
+                    &mapping.source_role,
+                    &mapping.source_schema,
+                    &mapping.source_table,
+                    mapping.source_column.as_deref(),
+                    &mapping.privilege,
+                )
+            ));
+        }
+    }
+    let mut seen_roles = HashSet::new();
     let roles = inventory
         .roles
         .iter()
-        .map(|role| ObjectPlan {
-            identity: role.name.clone(),
-            kind: if role.login { "login_role" } else { "role" }.to_owned(),
-            disposition: reject("roles and passwords are not copied implicitly"),
+        .map(|role| {
+            let target = config.role_mappings.get(&role.name);
+            if target.is_some() {
+                seen_roles.insert(role.name.as_str());
+            }
+            ObjectPlan {
+                identity: role.name.clone(),
+                kind: if role.login { "login_role" } else { "role" }.to_owned(),
+                target_identity: target.cloned(),
+                disposition: target.map_or_else(
+                    || reject("roles and passwords are not copied implicitly"),
+                    |target| {
+                        map(&format!(
+                            "source role maps explicitly to configured target role {target:?}; credentials are excluded"
+                        ))
+                    },
+                ),
+            }
         })
         .collect();
+    for source in config.role_mappings.keys() {
+        if !seen_roles.contains(source.as_str()) {
+            errors.push(format!("configured source role {source:?} was not found"));
+        }
+    }
     let status = if errors.is_empty()
         && tables
             .iter()
@@ -178,6 +225,64 @@ pub fn build_preflight(config: &MigrationConfig, inventory: SourceInventory) -> 
         grants,
         errors,
     }
+}
+
+fn grant_plan(
+    config: &MigrationConfig,
+    grant: &SourceGrant,
+    mapping: Option<&GrantMapping>,
+) -> ObjectPlan {
+    let identity = grant_identity(
+        &grant.grantee,
+        &grant.schema,
+        &grant.table,
+        grant.column.as_deref(),
+        &grant.privilege,
+    );
+    let Some(mapping) = mapping else {
+        return ObjectPlan {
+            identity,
+            kind: grant.privilege.to_ascii_lowercase(),
+            target_identity: None,
+            disposition: reject("source grant is not copied without an explicit target mapping"),
+        };
+    };
+    let table = config
+        .table_mapping(&grant.schema, &grant.table)
+        .expect("validated grant mapping references a selected table");
+    let target_column = grant.column.as_ref().map(|column| {
+        table
+            .column_mappings
+            .get(column)
+            .cloned()
+            .unwrap_or_else(|| column.clone())
+    });
+    let target_object = match target_column {
+        Some(column) => format!("{}.{}.{}", table.target_schema, table.target_table, column),
+        None => format!("{}.{}", table.target_schema, table.target_table),
+    };
+    ObjectPlan {
+        identity,
+        kind: grant.privilege.to_ascii_lowercase(),
+        target_identity: Some(format!("{}:{target_object}", mapping.target_role)),
+        disposition: map(
+            "source grant maps explicitly to an operator-provisioned immutable target grant",
+        ),
+    }
+}
+
+fn grant_identity(
+    role: &str,
+    schema: &str,
+    table: &str,
+    column: Option<&str>,
+    privilege: &str,
+) -> String {
+    let object = column.map_or_else(
+        || format!("{schema}.{table}"),
+        |column| format!("{schema}.{table}.{column}"),
+    );
+    format!("{role}:{privilege}:{object}")
 }
 
 fn build_table_plan(
@@ -480,9 +585,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::config::TableMapping;
+    use crate::config::{GrantMapping, TableMapping};
     use crate::inventory::{
-        SourceColumn, SourceConstraint, SourceIdentity, SourceInventory, SourceObject,
+        SourceColumn, SourceConstraint, SourceGrant, SourceIdentity, SourceInventory, SourceObject,
         SourceObjectKind, SourceRole, SourceTable,
     };
 
@@ -562,6 +667,8 @@ mod tests {
                 target_table: "places_copy".to_owned(),
                 column_mappings: BTreeMap::from([("location".to_owned(), "geom_wkb".to_owned())]),
             }],
+            role_mappings: BTreeMap::new(),
+            grant_mappings: vec![],
         }
     }
 
@@ -708,5 +815,66 @@ mod tests {
                 .iter()
                 .any(|table| { table.source_table == "other" && table.target_table.is_none() })
         );
+    }
+
+    #[test]
+    fn maps_only_exact_configured_roles_and_grants() {
+        let mut config = config();
+        config
+            .role_mappings
+            .insert("source_reader".to_owned(), "reader".to_owned());
+        config.grant_mappings.push(GrantMapping {
+            source_role: "source_reader".to_owned(),
+            source_schema: "public".to_owned(),
+            source_table: "places".to_owned(),
+            source_column: Some("location".to_owned()),
+            privilege: "SELECT".to_owned(),
+            target_role: "reader".to_owned(),
+        });
+        let report = build_preflight(
+            &config,
+            SourceInventory {
+                identity: identity(),
+                tables: vec![table()],
+                objects: vec![],
+                roles: vec![SourceRole {
+                    name: "source_reader".to_owned(),
+                    login: true,
+                }],
+                grants: vec![SourceGrant {
+                    grantee: "source_reader".to_owned(),
+                    schema: "public".to_owned(),
+                    table: "places".to_owned(),
+                    column: Some("location".to_owned()),
+                    privilege: "SELECT".to_owned(),
+                }],
+            },
+        );
+        assert_eq!(report.status, PreflightStatus::Ready);
+        assert_eq!(report.roles[0].disposition.action, Action::Map);
+        assert_eq!(report.roles[0].target_identity.as_deref(), Some("reader"));
+        assert_eq!(report.grants[0].disposition.action, Action::Map);
+        assert_eq!(
+            report.grants[0].target_identity.as_deref(),
+            Some("reader:main.places_copy.geom_wkb")
+        );
+
+        let mut missing = config;
+        missing.grant_mappings[0].privilege = "UPDATE".to_owned();
+        let report = build_preflight(
+            &missing,
+            SourceInventory {
+                identity: identity(),
+                tables: vec![table()],
+                objects: vec![],
+                roles: vec![SourceRole {
+                    name: "source_reader".to_owned(),
+                    login: true,
+                }],
+                grants: vec![],
+            },
+        );
+        assert_eq!(report.status, PreflightStatus::Rejected);
+        assert!(report.errors[0].contains("source grant"));
     }
 }

@@ -125,6 +125,8 @@ def write_config(
     postgres_version: int,
     postgis_version: str,
     tables: list[dict[str, object]],
+    role_mappings: dict[str, str] | None = None,
+    grant_mappings: list[dict[str, object]] | None = None,
 ) -> None:
     path.write_text(
         json.dumps(
@@ -136,6 +138,8 @@ def write_config(
                 },
                 "source_schemas": ["public", "survey"],
                 "tables": tables,
+                "role_mappings": role_mappings or {},
+                "grant_mappings": grant_mappings or [],
             },
             indent=2,
         )
@@ -256,6 +260,8 @@ SELECT value, value % 2 = 0, (value % 100)::REAL / 4
 FROM generate_series(1, 100002) AS values(value);
 CREATE VIEW public.place_view AS SELECT id, label FROM public.places;
 CREATE SEQUENCE survey.unsupported_sequence;
+CREATE ROLE source_reader;
+GRANT SELECT(location) ON public.places TO source_reader;
 CREATE TABLE public.keyed(id INTEGER PRIMARY KEY);
 CREATE TABLE public.bad_dates(id INTEGER, observed_on DATE);
 INSERT INTO public.bad_dates VALUES (1, 'infinity');
@@ -311,7 +317,23 @@ INSERT INTO public.bad_dates VALUES (1, 'infinity');
         ]
         config = work / "migration.json"
         report_path = work / "migration-report.json"
-        write_config(config, postgres_version, postgis_version, tables)
+        write_config(
+            config,
+            postgres_version,
+            postgis_version,
+            tables,
+            {"source_reader": "reader"},
+            [
+                {
+                    "source_role": "source_reader",
+                    "source_schema": "public",
+                    "source_table": "places",
+                    "source_column": "location",
+                    "privilege": "SELECT",
+                    "target_role": "reader",
+                }
+            ],
+        )
 
         inserted = threading.Event()
         watcher_error: list[str] = []
@@ -369,6 +391,18 @@ INSERT INTO public.bad_dates VALUES (1, 'infinity');
         if report["state"] != "verified":
             raise RuntimeError(f"migration did not verify: {report['errors']}")
         evidence = {table["source_identity"]: table for table in report["tables"]}
+        mapped_roles = {role["identity"]: role for role in report["preflight"]["roles"]}
+        mapped_grants = report["preflight"]["grants"]
+        if (
+            mapped_roles["source_reader"]["target_identity"] != "reader"
+            or mapped_roles["source_reader"]["disposition"]["action"] != "map"
+            or not any(
+                grant["target_identity"] == "reader:main.migrated_places.geom_wkb"
+                and grant["disposition"]["action"] == "map"
+                for grant in mapped_grants
+            )
+        ):
+            raise RuntimeError("explicit source role/grant mapping was not reported exactly")
         if evidence["public.places"]["rows"] != 2:
             raise RuntimeError("Point/NULL fixture row count changed")
         if evidence["survey.readings"]["rows"] != 100_002:
@@ -707,6 +741,8 @@ INSERT INTO public.bad_dates VALUES (1, 'infinity');
             "snapshot_rows": evidence["survey.readings"]["rows"],
             "source_rows_after_concurrent_write": int(source_count),
             "wire_bytes": sum(table["wire_bytes"] for table in report["tables"]),
+            "mapped_roles": 1,
+            "mapped_grants": 1,
             "failure_state": failure["state"],
             "rejection_state": rejection["state"],
             "cleanup_targets": len(cleanup["dropped_configured_targets"]),

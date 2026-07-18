@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAX_SCHEMAS: usize = 64;
 const MAX_TABLES: usize = 1024;
+const MAX_ROLE_MAPPINGS: usize = 4096;
+const MAX_GRANT_MAPPINGS: usize = 65_536;
 const MAX_IDENTIFIER_BYTES: usize = 63;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -18,6 +20,10 @@ pub struct MigrationConfig {
     pub source: SourceRequirements,
     pub source_schemas: Vec<String>,
     pub tables: Vec<TableMapping>,
+    #[serde(default)]
+    pub role_mappings: BTreeMap<String, String>,
+    #[serde(default)]
+    pub grant_mappings: Vec<GrantMapping>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -36,6 +42,18 @@ pub struct TableMapping {
     pub target_table: String,
     #[serde(default)]
     pub column_mappings: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantMapping {
+    pub source_role: String,
+    pub source_schema: String,
+    pub source_table: String,
+    #[serde(default)]
+    pub source_column: Option<String>,
+    pub privilege: String,
+    pub target_role: String,
 }
 
 impl MigrationConfig {
@@ -80,6 +98,12 @@ impl MigrationConfig {
         }
         if self.tables.is_empty() || self.tables.len() > MAX_TABLES {
             bail!("tables must contain between 1 and {MAX_TABLES} entries");
+        }
+        if self.role_mappings.len() > MAX_ROLE_MAPPINGS {
+            bail!("role_mappings cannot contain more than {MAX_ROLE_MAPPINGS} entries");
+        }
+        if self.grant_mappings.len() > MAX_GRANT_MAPPINGS {
+            bail!("grant_mappings cannot contain more than {MAX_GRANT_MAPPINGS} entries");
         }
 
         let mut schemas = HashSet::new();
@@ -131,6 +155,56 @@ impl MigrationConfig {
                 }
             }
         }
+        for (source, target) in &self.role_mappings {
+            validate_identifier(source, "source role")?;
+            validate_identifier(target, "target role")?;
+        }
+        let mut grants = HashSet::new();
+        for grant in &self.grant_mappings {
+            validate_identifier(&grant.source_role, "grant source role")?;
+            validate_identifier(&grant.source_schema, "grant source schema")?;
+            validate_identifier(&grant.source_table, "grant source table")?;
+            if let Some(column) = &grant.source_column {
+                validate_identifier(column, "grant source column")?;
+            }
+            validate_identifier(&grant.target_role, "grant target role")?;
+            let privilege = grant.privilege.to_ascii_uppercase();
+            if !matches!(
+                privilege.as_str(),
+                "SELECT" | "INSERT" | "UPDATE" | "DELETE"
+            ) {
+                bail!(
+                    "grant privilege {:?} is outside the maintained SELECT/INSERT/UPDATE/DELETE set",
+                    grant.privilege
+                );
+            }
+            let Some(target_role) = self.role_mappings.get(&grant.source_role) else {
+                bail!(
+                    "grant source role {:?} has no explicit role mapping",
+                    grant.source_role
+                );
+            };
+            if target_role != &grant.target_role {
+                bail!(
+                    "grant target role {:?} differs from role_mappings target {:?}",
+                    grant.target_role,
+                    target_role
+                );
+            }
+            if self
+                .table_mapping(&grant.source_schema, &grant.source_table)
+                .is_none()
+            {
+                bail!(
+                    "grant mapping references unselected source table {}.{}",
+                    grant.source_schema,
+                    grant.source_table
+                );
+            }
+            if !grants.insert(grant.clone()) {
+                bail!("grant_mappings contains a duplicate entry");
+            }
+        }
         Ok(())
     }
 
@@ -171,6 +245,8 @@ mod tests {
                 target_table: "places".to_owned(),
                 column_mappings: BTreeMap::from([("location".to_owned(), "geom_wkb".to_owned())]),
             }],
+            role_mappings: BTreeMap::new(),
+            grant_mappings: vec![],
         }
     }
 
@@ -200,6 +276,31 @@ mod tests {
         invalid.tables[0]
             .column_mappings
             .insert("label".to_owned(), "geom_wkb".to_owned());
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn validates_explicit_role_and_grant_mappings() {
+        let mut mapped = config();
+        mapped
+            .role_mappings
+            .insert("source_reader".to_owned(), "reader".to_owned());
+        mapped.grant_mappings.push(GrantMapping {
+            source_role: "source_reader".to_owned(),
+            source_schema: "public".to_owned(),
+            source_table: "places".to_owned(),
+            source_column: Some("label".to_owned()),
+            privilege: "select".to_owned(),
+            target_role: "reader".to_owned(),
+        });
+        mapped.validate().expect("explicit role and grant mapping");
+
+        let mut invalid = mapped.clone();
+        invalid.grant_mappings[0].target_role = "editor".to_owned();
+        assert!(invalid.validate().is_err());
+
+        let mut invalid = mapped;
+        invalid.grant_mappings[0].privilege = "TRIGGER".to_owned();
         assert!(invalid.validate().is_err());
     }
 }

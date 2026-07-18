@@ -342,9 +342,17 @@ async fn inspect_roles(
         .query(
             "SELECT DISTINCT r.rolname, r.rolcanlogin \
              FROM pg_catalog.pg_roles r \
-             JOIN pg_catalog.pg_class c ON c.relowner = r.oid \
-             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-             WHERE n.nspname = ANY($1::TEXT[]) ORDER BY r.rolname LIMIT 4097",
+             WHERE r.oid IN ( \
+                 SELECT c.relowner FROM pg_catalog.pg_class c \
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE n.nspname = ANY($1::TEXT[]) \
+             ) OR r.rolname IN ( \
+                 SELECT grantee FROM information_schema.role_table_grants \
+                 WHERE table_schema = ANY($1::TEXT[]) \
+                 UNION \
+                 SELECT grantee FROM information_schema.role_column_grants \
+                 WHERE table_schema = ANY($1::TEXT[]) \
+             ) ORDER BY r.rolname LIMIT 4097",
             &[&config.source_schemas],
         )
         .await
@@ -365,7 +373,7 @@ async fn inspect_grants(
 ) -> Result<Vec<SourceGrant>> {
     let mut grants = transaction
         .query(
-            "SELECT grantee, table_schema || '.' || table_name, privilege_type \
+            "SELECT grantee, table_schema, table_name, privilege_type \
              FROM information_schema.role_table_grants \
              WHERE table_schema = ANY($1::TEXT[]) \
              ORDER BY table_schema, table_name, grantee, privilege_type LIMIT 65537",
@@ -376,14 +384,16 @@ async fn inspect_grants(
         .into_iter()
         .map(|row| SourceGrant {
             grantee: row.get(0),
-            object_identity: row.get(1),
-            privilege: row.get(2),
+            schema: row.get(1),
+            table: row.get(2),
+            column: None,
+            privilege: row.get(3),
         })
         .collect::<Vec<_>>();
     enforce_limit("source grants", grants.len(), MAX_SOURCE_GRANTS)?;
     for row in transaction
         .query(
-            "SELECT grantee, table_schema || '.' || table_name || '.' || column_name, privilege_type \
+            "SELECT grantee, table_schema, table_name, column_name, privilege_type \
              FROM information_schema.role_column_grants \
              WHERE table_schema = ANY($1::TEXT[]) \
              ORDER BY table_schema, table_name, column_name, grantee, privilege_type \
@@ -395,8 +405,10 @@ async fn inspect_grants(
     {
         grants.push(SourceGrant {
             grantee: row.get(0),
-            object_identity: row.get(1),
-            privilege: row.get(2),
+            schema: row.get(1),
+            table: row.get(2),
+            column: Some(row.get(3)),
+            privilege: row.get(4),
         });
         enforce_limit("source grants", grants.len(), MAX_SOURCE_GRANTS)?;
     }

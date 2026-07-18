@@ -124,7 +124,9 @@ a separate Kind gate moves 10,004 exact rows through a dedicated
 and iroh worker while rejecting the ordinary K0 client certificate. Fresh staging,
 exact-report verification, atomic promotion, manifest/source/image digest binding,
 K0 restart, and pinned psql/psycopg/OGR/QGIS reads over the promoted rows pass.
-This is not yet a release migration claim: explicit source role/grant mapping,
+Exact inventoried source roles and maintained table/column grants now map
+explicitly to independently provisioned immutable target policy without copying
+credentials or executing role DDL. This is not yet a release migration claim:
 bounded progress checkpoints, richer spatial report dimensions, and broader
 types/spatial semantics remain open.
 

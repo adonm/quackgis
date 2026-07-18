@@ -104,6 +104,8 @@ pub struct SourceRole {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SourceGrant {
     pub grantee: String,
-    pub object_identity: String,
+    pub schema: String,
+    pub table: String,
+    pub column: Option<String>,
     pub privilege: String,
 }
