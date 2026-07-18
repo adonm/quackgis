@@ -317,6 +317,7 @@ INSERT INTO public.bad_dates VALUES (1, 'infinity');
         ]
         config = work / "migration.json"
         report_path = work / "migration-report.json"
+        progress_path = work / "migration-progress.json"
         write_config(
             config,
             postgres_version,
@@ -374,6 +375,8 @@ INSERT INTO public.bad_dates VALUES (1, 'infinity');
                 str(config),
                 "--out",
                 str(report_path),
+                "--progress-out",
+                str(progress_path),
                 "--allow-plaintext-loopback",
                 "--allow-plaintext-target-loopback",
             ],
@@ -388,8 +391,19 @@ INSERT INTO public.bad_dates VALUES (1, 'infinity');
         if watcher_error or not inserted.is_set():
             raise RuntimeError(f"concurrent source writer failed: {watcher_error}")
         report = json.loads(report_path.read_text(encoding="utf-8"))
+        progress = json.loads(progress_path.read_text(encoding="utf-8"))
         if report["state"] != "verified":
             raise RuntimeError(f"migration did not verify: {report['errors']}")
+        if (
+            progress["phase"] != "verified"
+            or progress["sequence"] < 10
+            or progress["tables_total"] != 2
+            or progress["rows_total"] != 100_004
+            or len(progress["completed_tables"]) != 2
+            or progress["final_decision"]
+            != "verified_snapshot_prepared_for_operator_cutover"
+        ):
+            raise RuntimeError(f"migration progress checkpoint differs: {progress}")
         evidence = {table["source_identity"]: table for table in report["tables"]}
         mapped_roles = {role["identity"]: role for role in report["preflight"]["roles"]}
         mapped_grants = report["preflight"]["grants"]
@@ -436,6 +450,7 @@ INSERT INTO public.bad_dates VALUES (1, 'infinity');
 
         failure_config = work / "failure.json"
         failure_report = work / "failure-report.json"
+        failure_progress = work / "failure-progress.json"
         write_config(
             failure_config,
             postgres_version,
@@ -464,6 +479,8 @@ INSERT INTO public.bad_dates VALUES (1, 'infinity');
                 str(failure_config),
                 "--out",
                 str(failure_report),
+                "--progress-out",
+                str(failure_progress),
                 "--allow-plaintext-loopback",
                 "--allow-plaintext-target-loopback",
             ],
@@ -471,7 +488,13 @@ INSERT INTO public.bad_dates VALUES (1, 'infinity');
             check=False,
         )
         failure = json.loads(failure_report.read_text(encoding="utf-8"))
-        if failed.returncode == 0 or failure["state"] != "failed_rolled_back":
+        failed_checkpoint = json.loads(failure_progress.read_text(encoding="utf-8"))
+        if (
+            failed.returncode == 0
+            or failure["state"] != "failed_rolled_back"
+            or failed_checkpoint["phase"] != "failed_rolled_back"
+            or failed_checkpoint["final_decision"] != "not_published"
+        ):
             raise RuntimeError("malformed source value did not fail and roll back migration")
         residue = target_psql(
             engine,
@@ -486,6 +509,7 @@ INSERT INTO public.bad_dates VALUES (1, 'infinity');
 
         reject_config = work / "reject.json"
         reject_report = work / "reject-report.json"
+        reject_progress = work / "reject-progress.json"
         write_config(
             reject_config,
             postgres_version,
@@ -508,6 +532,8 @@ INSERT INTO public.bad_dates VALUES (1, 'infinity');
                 str(reject_config),
                 "--out",
                 str(reject_report),
+                "--progress-out",
+                str(reject_progress),
                 "--allow-plaintext-loopback",
                 "--allow-plaintext-target-loopback",
             ],
@@ -515,8 +541,15 @@ INSERT INTO public.bad_dates VALUES (1, 'infinity');
             check=False,
         )
         rejection = json.loads(reject_report.read_text(encoding="utf-8"))
+        rejected_checkpoint = json.loads(reject_progress.read_text(encoding="utf-8"))
         if rejected.returncode == 0 or rejection["state"] != "rejected":
             raise RuntimeError("unsupported primary key did not reject before target access")
+        if (
+            rejected_checkpoint["phase"] != "rejected"
+            or rejected_checkpoint["target"] is not None
+            or rejected_checkpoint["final_decision"] != "rejected_before_target_mutation"
+        ):
+            raise RuntimeError("preflight rejection progress checkpoint differs")
         if not any(
             "PrimaryKey" in blocker
             for table in rejection["preflight"]["tables"]
@@ -743,6 +776,7 @@ INSERT INTO public.bad_dates VALUES (1, 'infinity');
             "wire_bytes": sum(table["wire_bytes"] for table in report["tables"]),
             "mapped_roles": 1,
             "mapped_grants": 1,
+            "progress_sequence": progress["sequence"],
             "failure_state": failure["state"],
             "rejection_state": rejection["state"],
             "cleanup_targets": len(cleanup["dropped_configured_targets"]),

@@ -13,9 +13,10 @@ Fresh staging, exact-report verification, explicit atomic promotion, restart
 verification, and psql/psycopg/OGR/QGIS qualification pass through a dedicated
 credential, role, client CA, and mutual-TLS iroh tiny client. Exact source roles
 and grants can be mapped to independently provisioned immutable target policy;
-passwords and role DDL are never copied. Bounded progress checkpoints, richer
-spatial report dimensions, keys, nonzero CRS, geography, non-Point geometry, and
-general operator cutover remain open.
+passwords and role DDL are never copied. Atomic bounded progress checkpoints
+cover preflight, per-table transfer/verification, commit, and terminal decisions.
+Richer spatial report dimensions, keys, nonzero CRS, geography, non-Point
+geometry, and general operator cutover remain open.
 
 ## Maintained smoke
 
@@ -177,6 +178,7 @@ export QUACKGIS_MIGRATE_TARGET_CLIENT_KEY=/run/secrets/migration.key
 mise exec -- cargo run -p quackgis-migrate -- run \
   --config migration.json \
   --out migration-report.json \
+  --progress-out migration-progress.json \
   --staging-id release_1 \
   --runtime-manifest /opt/quackgis/artifact-manifest.json \
   --target-runtime-image registry.example/quackgis@sha256:0000000000000000000000000000000000000000000000000000000000000000
@@ -196,6 +198,25 @@ staging-to-release mappings, explicit role/grant mappings, migrator/artifact/sou
 digests, durations, all mappings/rejections, errors, and the final decision. It contains no
 connection URL, password, certificate path, local target path, or row value. A
 fresh target pgwire connection recomputes all checksums and counts after commit.
+
+`--progress-out` atomically replaces one owner-only path-free JSON checkpoint.
+Its monotonic sequence and phase record bounded source/target identities, selected
+table/row/estimated-byte totals, the current source/target, in-flight wire bytes
+at 16 MiB intervals, and one row/wire/checksum summary per completed table. It
+records `commit_started` before the non-cancellable boundary and distinguishes
+`commit_indeterminate`, `committed_unverified`, rollback, rejection, and verified
+terminal decisions. With at most 1,024 selected tables and no rows, credentials,
+URLs, or local paths, checkpoint size is independent of dataset cardinality.
+
+The checkpoint is reconciliation evidence, not a resume token or promotion
+authorization. Interruption before commit leaves the target transaction
+unpublished; retry uses a fresh staging ID. A checkpoint at or after
+`commit_started` requires target reconciliation. Only an exact complete migration
+report followed by `verify` can authorize `promote`.
+If a post-commit checkpoint replacement fails, the last durable checkpoint stays
+at `commit_started` (or another conservative post-boundary phase) while migration
+continues to emit its authoritative report; the stale checkpoint never converts
+an uncertain commit into a safe retry.
 
 Report states are operationally significant:
 

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -19,6 +20,8 @@ use crate::plan::{
 use crate::runtime::RuntimeIdentity;
 use crate::source::{begin_source_snapshot, quote_identifier};
 
+const PROGRESS_WIRE_INTERVAL: u64 = 16 * 1024 * 1024;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MigrationState {
@@ -27,6 +30,149 @@ pub enum MigrationState {
     CommitIndeterminate,
     CommittedUnverified,
     Verified,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressPhase {
+    ConnectingSource,
+    PreflightComplete,
+    Rejected,
+    TargetTransactionStarted,
+    TableCopyStarted,
+    TableCopyInProgress,
+    TableVerified,
+    CommitStarted,
+    CommitIndeterminate,
+    Committed,
+    CommittedUnverified,
+    FailedRolledBack,
+    Verified,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MigrationProgress {
+    pub format_version: u32,
+    pub sequence: u64,
+    pub phase: ProgressPhase,
+    pub source: Option<crate::inventory::SourceIdentity>,
+    pub target: Option<TargetIdentity>,
+    pub tables_total: u64,
+    pub rows_total: u64,
+    pub estimated_bytes_total: u64,
+    pub current_source: Option<String>,
+    pub current_target: Option<String>,
+    pub current_wire_bytes: u64,
+    pub completed_tables: Vec<ProgressTable>,
+    pub final_decision: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProgressTable {
+    pub source_identity: String,
+    pub target_identity: String,
+    pub rows: u64,
+    pub wire_bytes: u64,
+    pub table_checksum: String,
+}
+
+struct ProgressWriter {
+    path: Option<PathBuf>,
+    checkpoint: MigrationProgress,
+    next_wire_checkpoint: u64,
+}
+
+impl ProgressWriter {
+    fn new(path: Option<&Path>) -> Self {
+        Self {
+            path: path.map(Path::to_path_buf),
+            checkpoint: MigrationProgress {
+                format_version: 1,
+                sequence: 0,
+                phase: ProgressPhase::ConnectingSource,
+                source: None,
+                target: None,
+                tables_total: 0,
+                rows_total: 0,
+                estimated_bytes_total: 0,
+                current_source: None,
+                current_target: None,
+                current_wire_bytes: 0,
+                completed_tables: vec![],
+                final_decision: None,
+            },
+            next_wire_checkpoint: PROGRESS_WIRE_INTERVAL,
+        }
+    }
+
+    fn publish(&mut self, phase: ProgressPhase, final_decision: Option<&str>) -> Result<()> {
+        self.checkpoint.sequence = self
+            .checkpoint
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("migration progress sequence overflow"))?;
+        self.checkpoint.phase = phase;
+        self.checkpoint.final_decision = final_decision.map(str::to_owned);
+        if let Some(path) = &self.path {
+            crate::report::write_json_atomic(path, &self.checkpoint)
+                .context("publish migration progress checkpoint")?;
+        }
+        Ok(())
+    }
+
+    fn preflight(&mut self, preflight: &PreflightReport) -> Result<()> {
+        let selected = selected_tables(preflight);
+        self.checkpoint.source = Some(preflight.source.clone());
+        self.checkpoint.tables_total = u64::try_from(selected.len())?;
+        self.checkpoint.rows_total = selected.iter().try_fold(0_u64, |total, table| {
+            total
+                .checked_add(table.row_count)
+                .ok_or_else(|| anyhow!("migration progress row total overflow"))
+        })?;
+        self.checkpoint.estimated_bytes_total =
+            selected.iter().try_fold(0_u64, |total, table| {
+                total
+                    .checked_add(table.estimated_bytes)
+                    .ok_or_else(|| anyhow!("migration progress byte total overflow"))
+            })?;
+        self.publish(ProgressPhase::PreflightComplete, None)
+    }
+
+    fn set_target(&mut self, target: &TargetIdentity) -> Result<()> {
+        self.checkpoint.target = Some(target.clone());
+        self.publish(ProgressPhase::TargetTransactionStarted, None)
+    }
+
+    fn begin_table(&mut self, table: &TablePlan) -> Result<()> {
+        self.checkpoint.current_source = Some(source_identity(table));
+        self.checkpoint.current_target = Some(target_identity(table));
+        self.checkpoint.current_wire_bytes = 0;
+        self.next_wire_checkpoint = PROGRESS_WIRE_INTERVAL;
+        self.publish(ProgressPhase::TableCopyStarted, None)
+    }
+
+    fn copy_bytes(&mut self, wire_bytes: u64) -> Result<()> {
+        self.checkpoint.current_wire_bytes = wire_bytes;
+        if wire_bytes < self.next_wire_checkpoint {
+            return Ok(());
+        }
+        self.next_wire_checkpoint = wire_bytes
+            .checked_add(PROGRESS_WIRE_INTERVAL)
+            .ok_or_else(|| anyhow!("migration progress byte interval overflow"))?;
+        self.publish(ProgressPhase::TableCopyInProgress, None)
+    }
+
+    fn complete_table(&mut self, transfer: &TableTransfer) -> Result<()> {
+        self.checkpoint.current_wire_bytes = transfer.wire_bytes;
+        self.checkpoint.completed_tables.push(ProgressTable {
+            source_identity: transfer.source_identity.clone(),
+            target_identity: transfer.target_identity.clone(),
+            rows: transfer.rows,
+            wire_bytes: transfer.wire_bytes,
+            table_checksum: transfer.table_checksum.clone(),
+        });
+        self.publish(ProgressPhase::TableVerified, None)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -194,15 +340,23 @@ pub async fn run_migration(
     target_options: &ConnectionOptions,
     runtime: RuntimeIdentity,
     staging: Option<StagingPlan>,
+    progress_path: Option<&Path>,
 ) -> Result<MigrationReport> {
     let started = Instant::now();
+    let mut progress = ProgressWriter::new(progress_path);
+    progress.publish(ProgressPhase::ConnectingSource, None)?;
     let mut source_client = connect(source_options)
         .await
         .context("connect migration source")?;
     let (source, inventory) = begin_source_snapshot(&mut source_client, config).await?;
     let preflight = build_preflight(config, inventory);
+    progress.preflight(&preflight)?;
     if preflight.status == PreflightStatus::Rejected {
         source.rollback().await?;
+        progress.publish(
+            ProgressPhase::Rejected,
+            Some("rejected_before_target_mutation"),
+        )?;
         return Ok(MigrationReport {
             format_version: 2,
             state: MigrationState::Rejected,
@@ -225,7 +379,8 @@ pub async fn run_migration(
         .transaction()
         .await
         .context("begin atomic target migration transaction")?;
-    let prepared = prepare_target(&source, &target, &preflight).await;
+    progress.set_target(&target_identity)?;
+    let prepared = prepare_target(&source, &target, &preflight, &mut progress).await;
     let transfers = match prepared {
         Ok(transfers) => transfers,
         Err(error) => {
@@ -235,6 +390,7 @@ pub async fn run_migration(
             if let Some(rollback_error) = rollback_error {
                 errors.push(format!("target rollback failed: {rollback_error}"));
             }
+            progress.publish(ProgressPhase::FailedRolledBack, Some("not_published"))?;
             return Ok(MigrationReport {
                 format_version: 2,
                 state: MigrationState::FailedRolledBack,
@@ -250,8 +406,13 @@ pub async fn run_migration(
         }
     };
 
+    progress.publish(ProgressPhase::CommitStarted, None)?;
     if let Err(error) = target.commit().await {
         source.rollback().await?;
+        let _ = progress.publish(
+            ProgressPhase::CommitIndeterminate,
+            Some("operator_reconciliation_required"),
+        );
         return Ok(MigrationReport {
             format_version: 2,
             state: MigrationState::CommitIndeterminate,
@@ -267,12 +428,17 @@ pub async fn run_migration(
             final_decision: "operator_reconciliation_required".to_owned(),
         });
     }
+    let _ = progress.publish(ProgressPhase::Committed, None);
 
     drop(target_client);
     let fresh_target = match connect(target_options).await {
         Ok(target) => target,
         Err(error) => {
             source.rollback().await?;
+            let _ = progress.publish(
+                ProgressPhase::CommittedUnverified,
+                Some("committed_but_reconciliation_required"),
+            );
             return Ok(MigrationReport {
                 format_version: 2,
                 state: MigrationState::CommittedUnverified,
@@ -290,30 +456,42 @@ pub async fn run_migration(
     let verification = verify_target(&fresh_target, &preflight, &transfers).await;
     source.rollback().await?;
     match verification {
-        Ok(()) => Ok(MigrationReport {
-            format_version: 2,
-            state: MigrationState::Verified,
-            runtime,
-            staging,
-            preflight,
-            target: Some(target_identity),
-            tables: transfers,
-            duration_ms: millis(started.elapsed()),
-            errors: vec![],
-            final_decision: "verified_snapshot_prepared_for_operator_cutover".to_owned(),
-        }),
-        Err(error) => Ok(MigrationReport {
-            format_version: 2,
-            state: MigrationState::CommittedUnverified,
-            runtime,
-            staging,
-            preflight,
-            target: Some(target_identity),
-            tables: transfers,
-            duration_ms: millis(started.elapsed()),
-            errors: vec![format!("fresh target verification failed: {error:#}")],
-            final_decision: "committed_but_reconciliation_required".to_owned(),
-        }),
+        Ok(()) => {
+            let _ = progress.publish(
+                ProgressPhase::Verified,
+                Some("verified_snapshot_prepared_for_operator_cutover"),
+            );
+            Ok(MigrationReport {
+                format_version: 2,
+                state: MigrationState::Verified,
+                runtime,
+                staging,
+                preflight,
+                target: Some(target_identity),
+                tables: transfers,
+                duration_ms: millis(started.elapsed()),
+                errors: vec![],
+                final_decision: "verified_snapshot_prepared_for_operator_cutover".to_owned(),
+            })
+        }
+        Err(error) => {
+            let _ = progress.publish(
+                ProgressPhase::CommittedUnverified,
+                Some("committed_but_reconciliation_required"),
+            );
+            Ok(MigrationReport {
+                format_version: 2,
+                state: MigrationState::CommittedUnverified,
+                runtime,
+                staging,
+                preflight,
+                target: Some(target_identity),
+                tables: transfers,
+                duration_ms: millis(started.elapsed()),
+                errors: vec![format!("fresh target verification failed: {error:#}")],
+                final_decision: "committed_but_reconciliation_required".to_owned(),
+            })
+        }
     }
 }
 
@@ -866,6 +1044,7 @@ async fn prepare_target(
     source: &Transaction<'_>,
     target: &Transaction<'_>,
     preflight: &PreflightReport,
+    progress: &mut ProgressWriter,
 ) -> Result<Vec<TableTransfer>> {
     let selected = selected_tables(preflight);
     for table in &selected {
@@ -878,7 +1057,8 @@ async fn prepare_target(
     let mut transfers = Vec::with_capacity(selected.len());
     for table in selected {
         let started = Instant::now();
-        let (rows, wire_bytes, wire_sha256) = copy_table(source, target, table).await?;
+        progress.begin_table(table)?;
+        let (rows, wire_bytes, wire_sha256) = copy_table(source, target, table, progress).await?;
         if rows != table.row_count {
             bail!(
                 "target COPY row count {rows} differs from snapshot inventory {} for {}",
@@ -892,7 +1072,7 @@ async fn prepare_target(
         if source_checksums != target_checksums {
             bail!("canonical checksums differ for {}", source_identity(table));
         }
-        transfers.push(TableTransfer {
+        let transfer = TableTransfer {
             source_identity: source_identity(table),
             target_identity: target_identity(table),
             rows,
@@ -911,7 +1091,9 @@ async fn prepare_target(
                 })
                 .collect(),
             duration_ms: millis(started.elapsed()),
-        });
+        };
+        progress.complete_table(&transfer)?;
+        transfers.push(transfer);
     }
     Ok(transfers)
 }
@@ -1035,6 +1217,7 @@ async fn copy_table(
     source: &Transaction<'_>,
     target: &Transaction<'_>,
     table: &TablePlan,
+    progress: &mut ProgressWriter,
 ) -> Result<(u64, u64, String)> {
     let source_expressions = table
         .columns
@@ -1075,6 +1258,7 @@ async fn copy_table(
         bytes = bytes
             .checked_add(u64::try_from(chunk.len())?)
             .ok_or_else(|| anyhow!("COPY byte count overflow"))?;
+        progress.copy_bytes(bytes)?;
         hasher.update(&chunk);
         input.send(chunk).await?;
     }
@@ -1439,5 +1623,32 @@ mod tests {
         let mut long = config;
         long.tables[0].target_table = "x".repeat(63);
         assert!(build_staging_config(&long, "release").is_err());
+    }
+
+    #[test]
+    fn progress_checkpoints_are_atomic_and_wire_bounded() {
+        let directory =
+            std::env::temp_dir().join(format!("quackgis-migrate-progress-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("progress.json");
+        let mut progress = ProgressWriter::new(Some(&path));
+        progress
+            .publish(ProgressPhase::ConnectingSource, None)
+            .unwrap();
+        progress.copy_bytes(PROGRESS_WIRE_INTERVAL - 1).unwrap();
+        let checkpoint: MigrationProgress =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(checkpoint.sequence, 1);
+        assert_eq!(checkpoint.phase, ProgressPhase::ConnectingSource);
+
+        progress.copy_bytes(PROGRESS_WIRE_INTERVAL).unwrap();
+        let checkpoint: MigrationProgress =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(checkpoint.sequence, 2);
+        assert_eq!(checkpoint.phase, ProgressPhase::TableCopyInProgress);
+        assert_eq!(checkpoint.current_wire_bytes, PROGRESS_WIRE_INTERVAL);
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -54,6 +54,8 @@ struct RunArgs {
     out: PathBuf,
     #[arg(long)]
     staging_id: Option<String>,
+    #[arg(long, env = "QUACKGIS_MIGRATE_PROGRESS_OUT")]
+    progress_out: Option<PathBuf>,
     #[command(flatten)]
     source: SourceConnectionArgs,
     #[command(flatten)]
@@ -273,6 +275,7 @@ async fn run(args: RunArgs) -> Result<()> {
         &args.target.options(),
         args.runtime.collect()?,
         staging,
+        args.progress_out.as_deref(),
     )
     .await?;
     write_json_atomic(&args.out, &report)?;

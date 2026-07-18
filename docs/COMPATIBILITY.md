@@ -354,7 +354,9 @@ unless a focused test says otherwise.
   promoted-data psql/psycopg/OGR/QGIS gates pass. Exact inventoried source roles
   and maintained table/column grants can now map to independently provisioned
   immutable target roles/grants without copying credentials or executing role
-  DDL. Progress checkpoints, richer spatial report dimensions, and broader
+  DDL. Atomic path-free progress checkpoints expose bounded preflight, per-table,
+  16 MiB transfer, commit-boundary, rollback, and terminal state without becoming
+  a resume or promotion token. Richer spatial report dimensions and broader
   types/spatial semantics remain open; see
   [POSTGIS_MIGRATION.md](./POSTGIS_MIGRATION.md).
 - No logical replication consumer exists. G1 waits for M6 and uses PostgreSQL

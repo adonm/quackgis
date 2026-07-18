@@ -126,9 +126,11 @@ exact-report verification, atomic promotion, manifest/source/image digest bindin
 K0 restart, and pinned psql/psycopg/OGR/QGIS reads over the promoted rows pass.
 Exact inventoried source roles and maintained table/column grants now map
 explicitly to independently provisioned immutable target policy without copying
-credentials or executing role DDL. This is not yet a release migration claim:
-bounded progress checkpoints, richer spatial report dimensions, and broader
-types/spatial semantics remain open.
+credentials or executing role DDL. Atomic bounded progress checkpoints expose
+preflight, per-table transfer/verification, commit-boundary, rollback, and final
+state without becoming a resume or promotion token. This is not yet a release
+migration claim: richer spatial report dimensions and broader types/spatial
+semantics remain open.
 
 TLS remains optional for local development. Set `QUACKGIS_TLS_MODE=required` with
 `QUACKGIS_TLS_CERT` and `QUACKGIS_TLS_KEY` to fail closed on plaintext startup.
