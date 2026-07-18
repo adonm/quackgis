@@ -111,7 +111,8 @@ def main() -> None:
         rest = (output / "rest.yaml").read_text(encoding="utf-8")
         seed = (output / "rest-seed.yaml").read_text(encoding="utf-8")
         qgis = (output / "qgis.yaml").read_text(encoding="utf-8")
-        assert "@@" not in rendered + clients + rest + seed + qgis
+        migration = (output / "migration.yaml").read_text(encoding="utf-8")
+        assert "@@" not in rendered + clients + rest + seed + qgis + migration
         assert digest in rendered
         assert "Ym9vdHN0cmFwLXNlY3JldA==" in rendered
         assert '"listen": "0.0.0.0:5432"' in rendered
@@ -162,6 +163,15 @@ def main() -> None:
         assert "quackgis-direct-denied" in clients
         assert "quackgis-plaintext-denied" in clients
         assert "quackgis-uncredentialed-denied" in clients
+        assert "quackgis-postgis-migration" in migration
+        assert "/usr/local/bin/quackgis-migrate" in migration
+        assert "migration_operator" in migration
+        assert "cleanup-configured-targets" in migration
+        assert "kind_postgis_migration_ok" in migration
+        assert "kind_migration_public_certificate_denied" in migration
+        assert "restartPolicy: Always" in migration
+        assert "postgis/postgis@sha256:" in migration
+        assert "bWlncmF0aW9uLWNsaWVudC5jcnQ=" in migration
         first_core = rendered
         first_rest = rest
         jwt_secret.write_text("different-bounded-jwt-secret-value", encoding="utf-8")
@@ -187,6 +197,7 @@ def main() -> None:
         assert stat.S_IMODE((output / "clients.yaml").stat().st_mode) == 0o600
         assert stat.S_IMODE((output / "rest.yaml").stat().st_mode) == 0o600
         assert stat.S_IMODE((output / "rest-seed.yaml").stat().st_mode) == 0o600
+        assert stat.S_IMODE((output / "migration.yaml").stat().st_mode) == 0o600
     print("kind_render_test_ok")
 
 

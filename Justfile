@@ -612,6 +612,21 @@ kind-client-gates:
     done; \
     deploy/kind/rest-gates.sh
 
+# Run the packaged offline PostGIS migrator through its dedicated mTLS/iroh lease.
+kind-postgis-migration-gate: kind-client-gates
+    @set -eu; export KUBECONFIG="${KUBECONFIG:-$PWD/.tmp/kind/kubeconfig}"; \
+    kubectl delete -f .tmp/kind/rendered/migration.yaml --ignore-not-found --wait=true >/dev/null; \
+    kubectl apply -f .tmp/kind/rendered/migration.yaml; \
+    if ! kubectl -n quackgis wait --for=condition=complete job/quackgis-migration-public-cert-denied --timeout=2m; then \
+      kubectl -n quackgis logs job/quackgis-migration-public-cert-denied --all-containers=true || true; exit 1; \
+    fi; \
+    if ! kubectl -n quackgis wait --for=condition=complete job/quackgis-postgis-migration --timeout=8m; then \
+      kubectl -n quackgis logs job/quackgis-postgis-migration --all-containers=true || true; exit 1; \
+    fi; \
+    kubectl -n quackgis logs job/quackgis-migration-public-cert-denied; \
+    kubectl -n quackgis logs job/quackgis-postgis-migration -c cleanup-configured-targets; \
+    kubectl -n quackgis logs job/quackgis-postgis-migration -c migrate
+
 # Run the normal copied-data matrix, then qualify the pinned headless QGIS provider.
 kind-qgis-gate: kind-client-gates
     @set -eu; export KUBECONFIG="${KUBECONFIG:-$PWD/.tmp/kind/kubeconfig}"; \

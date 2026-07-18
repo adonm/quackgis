@@ -61,6 +61,13 @@ EXPECTED_PLACEHOLDERS = {
         "@@CLIENT_TLS_CERTIFICATE@@",
         "@@CLIENT_TLS_PRIVATE_KEY@@",
     },
+    "migration.yaml.in": {
+        "@@RUNTIME_IMAGE@@",
+        "@@CLIENT_IMAGE@@",
+        "@@TLS_CA_CERTIFICATE@@",
+        "@@MIGRATION_CLIENT_TLS_CERTIFICATE@@",
+        "@@MIGRATION_CLIENT_TLS_PRIVATE_KEY@@",
+    },
 }
 
 
@@ -79,6 +86,7 @@ def check_templates() -> None:
     rest = (TEMPLATES / "rest.yaml.in").read_text(encoding="utf-8")
     seed = (TEMPLATES / "rest-seed.yaml.in").read_text(encoding="utf-8")
     qgis = (TEMPLATES / "qgis.yaml.in").read_text(encoding="utf-8")
+    migration = (TEMPLATES / "migration.yaml.in").read_text(encoding="utf-8")
     for required in [
         "kind: StatefulSet",
         "replicas: 1",
@@ -152,6 +160,19 @@ def check_templates() -> None:
     ]:
         if required not in qgis:
             raise ValueError(f"QGIS template is missing {required!r}")
+    for required in [
+        "name: quackgis-postgis-migration",
+        "/usr/local/bin/quackgis-migrate",
+        "migration_operator",
+        "quackgis-migration.quackgis.svc.cluster.local",
+        "postgis/postgis@sha256:3813864c8321c36dbbf6e9cfd27926006923d9afe41ca5e5294092833b7f2ca1",
+        "restartPolicy: Always",
+        "cleanup-configured-targets",
+        "kind_postgis_migration_ok",
+        "kind_migration_public_certificate_denied",
+    ]:
+        if required not in migration:
+            raise ValueError(f"migration template is missing {required!r}")
     if core.count("publishNotReadyAddresses: true") != 1:
         raise ValueError("only the internal edge Service may publish unready addresses")
     forbidden = ["datafusion", "sedona", "linkerd", "minio", "postgresql"]
@@ -207,6 +228,12 @@ def render(args: argparse.Namespace) -> None:
         "@@MIGRATION_TRANSPORT_SECRET_KEY@@": encoded(edge_dir / "migration-transport.key"),
         "@@REST_CREDENTIAL_SECRET_KEY@@": encoded(edge_dir / "rest-credential.key"),
         "@@MIGRATION_TLS_CA_CERTIFICATE@@": encoded(tls_dir / "migration-ca.crt"),
+        "@@MIGRATION_CLIENT_TLS_CERTIFICATE@@": encoded(
+            tls_dir / "migration-client.crt"
+        ),
+        "@@MIGRATION_CLIENT_TLS_PRIVATE_KEY@@": encoded(
+            tls_dir / "migration-client.key"
+        ),
         "@@JWT_SECRET@@": encoded(args.jwt_secret_file.resolve()),
         "@@BOOTSTRAP_PUBLIC_KEY@@": public_key(
             args.bootstrap_public_key, "--bootstrap-public-key"
@@ -230,6 +257,7 @@ def render(args: argparse.Namespace) -> None:
         ("rest.yaml.in", "rest.yaml"),
         ("clients.yaml.in", "clients.yaml"),
         ("qgis.yaml.in", "qgis.yaml"),
+        ("migration.yaml.in", "migration.yaml"),
     ]:
         text = (TEMPLATES / source_name).read_text(encoding="utf-8")
         for marker, value in substitutions.items():

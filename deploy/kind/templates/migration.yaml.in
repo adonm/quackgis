@@ -1,0 +1,260 @@
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: Secret
+metadata:
+  name: quackgis-kind-migration-tls
+  namespace: quackgis
+type: kubernetes.io/tls
+data:
+  tls.crt: @@MIGRATION_CLIENT_TLS_CERTIFICATE@@
+  tls.key: @@MIGRATION_CLIENT_TLS_PRIVATE_KEY@@
+  ca.crt: @@TLS_CA_CERTIFICATE@@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: quackgis-kind-migration-fixture
+  namespace: quackgis
+data:
+  migration.json: |
+    {
+      "format_version": 1,
+      "source": {
+        "postgres_version_num": 180004,
+        "postgis_version": "3.6.4"
+      },
+      "source_schemas": ["public", "survey"],
+      "tables": [
+        {
+          "source_schema": "public",
+          "source_table": "source_places",
+          "target_schema": "main",
+          "target_table": "kind_migration_places",
+          "column_mappings": {"location": "geom_wkb"}
+        },
+        {
+          "source_schema": "survey",
+          "source_table": "source_readings",
+          "target_schema": "main",
+          "target_table": "kind_migration_readings"
+        }
+      ]
+    }
+  50_fixture.sql: |
+    CREATE SCHEMA survey;
+    CREATE TABLE public.source_places (
+      id BIGINT NOT NULL DEFAULT 7,
+      label TEXT,
+      amount NUMERIC(10,2) NOT NULL DEFAULT 12.34,
+      observed_on DATE,
+      observed_at TIMESTAMP(6),
+      payload BYTEA,
+      location geometry(Point, 0)
+    );
+    COMMENT ON TABLE public.source_places IS 'packaged migration fixture';
+    COMMENT ON COLUMN public.source_places.label IS 'display label';
+    INSERT INTO public.source_places VALUES
+      (1, E'one\\tline', 1.25, DATE '2026-07-18',
+       TIMESTAMP '2026-07-18 01:02:03.123456', decode('00ff','hex'),
+       ST_GeomFromText('POINT(1 2)', 0)),
+      (2, NULL, 2.50, NULL, NULL, NULL, NULL);
+    CREATE TABLE survey.source_readings(id INTEGER, enabled BOOLEAN, ratio REAL);
+    INSERT INTO survey.source_readings
+    SELECT value, value % 2 = 0, (value % 100)::REAL / 4
+    FROM generate_series(1, 10002) AS values(value);
+    CREATE VIEW public.source_place_view AS SELECT id, label FROM public.source_places;
+    CREATE SEQUENCE survey.unsupported_sequence;
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: quackgis-migration-public-cert-denied
+  namespace: quackgis
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: denial
+          image: "@@CLIENT_IMAGE@@"
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-ceu"]
+          args:
+            - >-
+              if PGCONNECT_TIMEOUT=3 PGSSLMODE=verify-full
+              PGSSLROOTCERT=/tls/ca.crt PGSSLCERT=/tls/tls.crt PGSSLKEY=/tls/tls.key
+              psql -h quackgis-migration.quackgis.svc.cluster.local -p 5432
+              -U migration_operator -d quackgis -c 'SELECT 1'; then
+                echo 'ordinary client certificate unexpectedly reached migration authority' >&2;
+                exit 1;
+              fi;
+              echo kind_migration_public_certificate_denied
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: quackgis-kind-client-tls
+            defaultMode: 288
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: quackgis-postgis-migration
+  namespace: quackgis
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: quackgis-postgis-migration
+    spec:
+      restartPolicy: Never
+      securityContext:
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: cleanup-configured-targets
+          image: "@@RUNTIME_IMAGE@@"
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/quackgis-migrate"]
+          args:
+            - cleanup
+            - --config
+            - /config/migration.json
+            - --out
+            - /work/cleanup-report.json
+            - --confirm-drop-configured-targets
+            - --target-url
+            - postgresql://migration_operator@quackgis-migration.quackgis.svc.cluster.local:5432/quackgis
+            - --target-ca
+            - /tls/ca.crt
+            - --target-client-cert
+            - /tls/tls.crt
+            - --target-client-key
+            - /tls/tls.key
+          securityContext: &migration_security
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts: &migration_mounts
+            - name: config
+              mountPath: /config/migration.json
+              subPath: migration.json
+              readOnly: true
+            - name: tls
+              mountPath: /tls/ca.crt
+              subPath: ca.crt
+              readOnly: true
+            - name: tls
+              mountPath: /tls/tls.crt
+              subPath: tls.crt
+              readOnly: true
+            - name: tls
+              mountPath: /tls/tls.key
+              subPath: tls.key
+              readOnly: true
+            - name: work
+              mountPath: /work
+        - name: postgis-source
+          restartPolicy: Always
+          image: "docker.io/postgis/postgis@sha256:3813864c8321c36dbbf6e9cfd27926006923d9afe41ca5e5294092833b7f2ca1"
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_HOST_AUTH_METHOD
+              value: trust
+            - name: POSTGRES_DB
+              value: fixture
+          startupProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ceu
+                - >-
+                  test "$(cat /proc/1/comm)" = postgres;
+                  psql -XAt -U postgres -d fixture -c
+                  "SELECT to_regclass('public.source_places') IS NOT NULL" | grep -qx t
+            periodSeconds: 1
+            timeoutSeconds: 1
+            failureThreshold: 120
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+          volumeMounts:
+            - name: source-init
+              mountPath: /docker-entrypoint-initdb.d/50_fixture.sql
+              subPath: 50_fixture.sql
+              readOnly: true
+            - name: source-data
+              mountPath: /var/lib/postgresql
+      containers:
+        - name: migrate
+          image: "@@RUNTIME_IMAGE@@"
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-ceu"]
+          args:
+            - |-
+              /usr/local/bin/quackgis-migrate run \
+                --config /config/migration.json \
+                --out /work/migration-report.json \
+                --source-url postgresql://postgres@127.0.0.1:5432/fixture \
+                --allow-plaintext-loopback \
+                --target-url postgresql://migration_operator@quackgis-migration.quackgis.svc.cluster.local:5432/quackgis \
+                --target-ca /tls/ca.crt \
+                --target-client-cert /tls/tls.crt \
+                --target-client-key /tls/tls.key
+              grep -F '"state": "verified"' /work/migration-report.json
+              grep -F '"source_identity": "public.source_places"' /work/migration-report.json
+              grep -F '"source_identity": "survey.source_readings"' /work/migration-report.json
+              grep -F '"rows": 10002' /work/migration-report.json
+              echo kind_postgis_migration_ok role=migration_operator ingress=mtls_iroh rows=10004
+          securityContext: *migration_security
+          volumeMounts: *migration_mounts
+      volumes:
+        - name: config
+          configMap:
+            name: quackgis-kind-migration-fixture
+            defaultMode: 292
+        - name: source-init
+          configMap:
+            name: quackgis-kind-migration-fixture
+            defaultMode: 292
+        - name: tls
+          secret:
+            secretName: quackgis-kind-migration-tls
+            defaultMode: 288
+        - name: work
+          emptyDir: {}
+        - name: source-data
+          emptyDir: {}
