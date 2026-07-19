@@ -113,7 +113,7 @@ until its own product decision and gates pass. M6/G1 remain behind Local 1.0.
 | Area | Current floor | Important limit |
 |---|---|---|
 | Engine/storage | pinned DuckDB 1.5.4 through ADBC and local DuckLake with one tracked read-only identity patch | local paths only; QuackGIS owns patch/ABI/upgrade qualification |
-| Native bundle | one validated authority exact-pins common sources, trees, core targets, patches, toolchain, selected artifacts, tests, outputs, and upstream adoption decisions; exact sources prepare without extension-owned core checkouts; one central DuckDB configuration loads DuckLake/Spatial tests and verifies the path-normalized merged vcpkg graph; all consumers use the authority, runtime manifests carry its linked digest, and deterministic SPDX/license outputs are packaged | central candidate artifacts are not yet built/accepted and current runtime bytes retain explicit legacy provenance; Spatial transitive licenses remain incomplete; N0 must finish the central tests, redistribution evidence, upgrade, recovery, and rollback before S0/Q0 |
+| Native bundle | one validated authority exact-pins common sources, trees, core targets, patches, executable toolchain, selected artifacts, tests, outputs, and upstream adoption decisions; authority `c6d896e…` emits dynamically loaded candidates and passes 143 DuckLake-function, 59 explicit overlapping patch, and 1,607 complete Spatial assertions; all consumers use linked authority and deterministic source/binary/patch SPDX | candidates remain `upstream-tested-unaccepted` and current runtime bytes retain legacy provenance; Spatial varies across clean builds, all seven candidate QuackGIS/package/lifecycle groups, pristine differential, license conclusions, upgrade, recovery, and rollback remain open before S0/Q0 |
 | Protocol | bounded simple/extended pgwire | narrow statements and parameter types |
 | Results | one driver Arrow batch at a time through pgwire with fail-closed byte ceiling; clean 1M/10M BIGINT and 1M nullable VARCHAR/BLOB reference profiles pass RSS and exact-value gates | maximum native-batch and additional type/shape RSS profiles open |
 | COPY | pre-body bounded pgwire frames, incremental bounded text decoding to one ADBC stream, atomic DuckLake publication, and a clean passing 10M RSS/throughput reference | total COPY remains unbounded while each frame/chunk/row/Arrow batch is bounded; idle clients observe cancellation when they resume or disconnect |
@@ -355,7 +355,8 @@ Exit gates:
   extension/core pins, verifies every patch hash, and fails on patch conflict or
   dirty/unrecognized source;
 - one build invocation emits candidate DuckDB library/CLI and DuckLake, Spatial,
-  and QuackGIS extensions against the same core and pinned dependency graph; any
+  and QuackGIS extensions against the same core and pinned dependency graph; two
+  clean cache-disabled invocations reproduce every selected artifact digest; any
   selected vendor-built signed binary is separately bound to that qualified
   source/ABI and tested as the exact runtime artifact;
 - upstream DuckLake/Spatial tests plus QuackGIS storage, identity, pgwire,

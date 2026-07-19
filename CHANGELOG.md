@@ -26,10 +26,25 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   newer upstream R-tree work before retaining local bbox machinery. The same
   authority now configures one DuckDB 1.5.4 CMake graph over prepared
   DuckLake/Spatial sources and verifies a normalized ten-entry merged vcpkg
-  dependency graph under pinned GCC/CMake/Ninja versions; generated candidate
-  binaries remain unaccepted until the full native and lifecycle matrix passes.
-  S0 then qualifies official CRS-aware geometry and DuckLake persistence before
-  any narrow type-fidelity patch; Q0 separately decides and proves validated keys before OGR-created tables
+  dependency graph under exact executable-digest-pinned GCC/G++/CMake/Ninja/Make.
+  Candidate DuckLake/Spatial files are `DONT_LINK`, so offline evidence must load
+  their exact custom paths before running every declared upstream group and patch
+  regression. They remain explicitly upstream-tested but unaccepted until the full
+  QuackGIS, package, license, and lifecycle matrix passes. Build reuse rejects
+  hidden/ignored/staged source, caller compiler/cache state, symlinked output, and
+  unverified bootstrap input. Bootstrap atomically publishes separately pinned
+  official DuckLake/Spatial development artifacts without conflating official
+  DuckLake with the patched runtime selection; SPDX models selected CLI/library/
+  extensions, upstream sources, and every patch separately, with unresolved
+  binary/patch/dependency conclusions release-blocking. Authority `c6d896e…` now
+  dynamically loads exact candidate files and passes 143 DuckLake-function, 59
+  separately enforced overlapping patch, and 1,607 complete Spatial assertions.
+  Candidate state remains `upstream-tested-unaccepted`: Spatial changed across
+  three clean builds while CLI/library/DuckLake/runner stayed stable, and all
+  seven QuackGIS candidate groups plus lifecycle/upgrade/rollback remain open.
+  S0 then qualifies official
+  CRS-aware geometry and DuckLake persistence before any narrow type-fidelity
+  patch; Q0 separately decides and proves validated keys before OGR-created tables
   or direct-table QGIS can be claimed. Metadata-only keys and a Spatial fork for
   PostgreSQL catalog presentation are explicitly rejected.
 - The first executable G0 offline PostGIS migration slice adds a dedicated

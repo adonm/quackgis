@@ -46,7 +46,7 @@ rewrite, or maintained side structure:
 2. search the exact sources for the required public function, type, lifecycle
    hook, planner behavior, or metadata surface;
 3. run the QuackGIS oracle unchanged against the unmodified release-matched
-   candidate;
+   candidate (still an open N0 acceptance step for the current bundle);
 4. adopt upstream behavior and delete overlapping local code when the oracle
    passes;
 5. if upstream is close but incomplete, prefer an upstream contribution and keep
@@ -55,10 +55,13 @@ rewrite, or maintained side structure:
    missing upstream capability, exact commits searched, requirement, tests,
    owner, and deletion plan.
 
-Local behavior is not kept merely because it already works. Every bundle update
-re-runs unmodified-versus-patched tests and patch deletion review. Metadata-only
-or unenforced upstream declarations are also not overclaimed: adoption still
-requires the product's correctness and lifecycle gates.
+Local behavior is not kept merely because it already works. Before a candidate is
+accepted, its update workflow must run the same oracle against unmodified and
+patched source and record patch deletion review. The current N0 preparer builds the
+patched candidate; the corresponding pristine differential run remains an open
+acceptance gate, not completed evidence. Metadata-only or unenforced upstream
+declarations are also not overclaimed: adoption still requires the product's
+correctness and lifecycle gates.
 
 ## Review on 2026-07-19
 

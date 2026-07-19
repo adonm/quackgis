@@ -38,6 +38,19 @@ def require_workspace_output(path: Path) -> Path:
     return resolved
 
 
+def require_owned_path(path: Path, owner: Path, label: str) -> None:
+    try:
+        relative = path.relative_to(owner)
+        path.resolve().relative_to(owner.resolve())
+    except ValueError as error:
+        raise ValueError(f"{label} escapes its preparation directory") from error
+    current = owner
+    for part in relative.parts:
+        current /= part
+        if current.is_symlink():
+            raise ValueError(f"{label} traverses a symlink: {current}")
+
+
 def component_owner(bundle: dict[str, Any], component: str) -> dict[str, Any]:
     return bundle["duckdb"] if component == "duckdb" else bundle["extensions"][component]
 
@@ -57,6 +70,23 @@ def validate_checkout(
         raise ValueError(f"prepared checkout origin drifted: {target}")
     if output(["git", "ls-files", "--others", "--exclude-standard"], cwd=target):
         raise ValueError(f"prepared checkout contains untracked files: {target}")
+    flagged = [
+        line
+        for line in output(["git", "ls-files", "-v"], cwd=target).splitlines()
+        if not line.startswith("H ")
+    ]
+    if flagged:
+        raise ValueError(
+            f"prepared checkout contains non-default index flags: {target}: {flagged[:5]}"
+        )
+    refreshed = subprocess.run(
+        ["git", "update-index", "--really-refresh"],
+        cwd=target,
+        check=False,
+        capture_output=True,
+    )
+    if refreshed.returncode != 0:
+        raise ValueError(f"prepared checkout tracked bytes differ from its index: {target}")
     unstaged = subprocess.run(
         ["git", "diff", "--quiet"], cwd=target, check=False
     ).returncode
@@ -160,6 +190,7 @@ def prepare(bundle: dict[str, Any], out: Path, root: Path = ROOT) -> dict[str, A
     marker = expected_marker(bundle, root)
     marker_path = out / MARKER
     sources = out / "sources"
+    require_owned_path(sources, out, "prepared sources")
     if out.exists():
         if out.is_symlink() or not marker_path.is_file() or marker_path.is_symlink():
             raise ValueError(

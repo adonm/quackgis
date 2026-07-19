@@ -81,9 +81,27 @@ class PrepareNativeBundleTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "result tree drifted"):
                 MODULE.validate_checkout(checkout, source, series)
 
+    def test_assume_unchanged_drift_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / ".tmp") as directory:
+            checkout, source, series = self.make_checkout(Path(directory))
+            git("update-index", "--assume-unchanged", "value.txt", cwd=checkout)
+            (checkout / "value.txt").write_text("hidden drift\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "non-default index flags"):
+                MODULE.validate_checkout(checkout, source, series)
+
     def test_output_outside_workspace_tmp_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "workspace .tmp"):
             MODULE.require_workspace_output(Path(tempfile.gettempdir()) / "native-bundle")
+
+    def test_symlinked_sources_parent_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT / ".tmp") as directory:
+            owner = Path(directory) / "bundle"
+            outside = Path(directory) / "outside"
+            owner.mkdir()
+            outside.mkdir()
+            (owner / "sources").symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "symlink|escapes"):
+                MODULE.require_owned_path(owner / "sources", owner, "prepared sources")
 
 
 if __name__ == "__main__":

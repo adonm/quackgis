@@ -4,15 +4,19 @@ The QuackGIS runtime bundle contains the following DuckDB artifacts:
 
 | Artifact | Upstream source | License |
 |---|---|---|
-| DuckDB CLI and shared library | <https://github.com/duckdb/duckdb> | MIT |
-| DuckDB Spatial extension | <https://github.com/duckdb/duckdb-spatial> | MIT |
-| DuckLake extension plus QuackGIS read-only identity patch | <https://github.com/duckdb/ducklake> and `patches/ducklake` | MIT |
+| DuckDB upstream source | <https://github.com/duckdb/duckdb> | MIT |
+| Selected DuckDB CLI and shared library | <https://github.com/duckdb/duckdb> | `NOASSERTION` pending bundled-component review |
+| DuckDB Spatial upstream source | <https://github.com/duckdb/duckdb-spatial> | MIT |
+| Selected Spatial binary with bundled dependencies | <https://github.com/duckdb/duckdb-spatial> | `NOASSERTION` pending complete dependency review |
+| DuckLake upstream source | <https://github.com/duckdb/ducklake> | MIT |
+| Selected patched DuckLake binary | <https://github.com/duckdb/ducklake> and `patches/ducklake` | `NOASSERTION` pending patch review |
+| QuackGIS read-only DuckLake identity patch | `patches/ducklake` | `NOASSERTION` pending explicit review |
 
 Exact selected native source and artifact SHA-256 values are recorded in
 `artifact-manifest.json` and its bundled SPDX 2.3 document. The generated
 `licenses/native-licenses.json` inventory is authoritative about completeness:
-`complete=false` and `local-evaluation-only` remain release blockers until all
-items below have exact concluded-license evidence.
+`complete=false` and `local-evaluation-only` remain release blockers until the
+patch and all items below have exact declared/concluded-license evidence.
 
 The Spatial binary also bundles third-party native libraries, including GEOS,
 GDAL, PROJ, OpenSSL, curl, expat, zlib, and SQLite. The repository-generated image

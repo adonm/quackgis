@@ -100,7 +100,9 @@ Exact behavior, trust boundaries, and lifecycle evidence are documented in
 `docs/PINNED_DUCKLAKE.md`. `native/upstream-review.json` records that both the
 selected DuckLake 1.5 tip and reviewed `main` still lack an equivalent public
 column-identity function; every moved ref requires this retain/delete decision to
-be revisited.
+be revisited. The generated license inventory records the local patch itself as
+`NOASSERTION`; explicit declared/concluded-license review is release-blocking and
+must not be conflated with upstream DuckLake's MIT license.
 
 Local 1.0 packages the accepted unsigned binary and passes its absolute immutable
 path plus exact SHA-256 to the server. This is a long-term support obligation:

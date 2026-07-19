@@ -45,11 +45,15 @@ The current runtime and completed N0 foundation slices prove part of this model:
 - `just native-bundle-configure` loads DuckLake and Spatial from those prepared
   trees into one central DuckDB CMake graph and verifies the normalized merged
   vcpkg dependency digest;
-- DuckDB 1.5.4 and the official Spatial artifact are checksum-pinned;
+- DuckDB 1.5.4 CLI/library and the official Spatial artifact are separately
+  checksum-pinned;
 - the common bundle and DuckLake series retain the current separately built
   artifact's exact source, patch, legacy vcpkg/tool, and digest provenance;
 - `scripts/build_pinned_ducklake.py` consumes that common authority to preserve
-  the current clone/check/patch/build/test reproduction path; and
+  the current clone/check/patch/build/test reproduction path;
+- development bootstrap separately pins and verifies official DuckLake and Spatial
+  extension hashes before use, without confusing official DuckLake with the
+  selected patched runtime artifact; and
 - runtime assembly verifies immutable native artifacts and performs no online
   extension installation.
 
@@ -64,7 +68,7 @@ manifest truthfully marks that accepted DuckLake artifact's build provenance as
 ## Source layout
 
 Upstream source trees and build products remain ignored workspace inputs under
-`.tmp/ref/`. QuackGIS tracks only manifests, patch queues, owned extension code,
+`.tmp/native-bundle/`. QuackGIS tracks only manifests, patch queues, owned extension code,
 build orchestration, tests, licenses, and accepted artifact digests:
 
 ```text
@@ -83,7 +87,6 @@ scripts/
   build_native_bundle.py
   check_native_upstreams.py
   prepare_native_bundle.py
-  build_native_bundle.py
   package_native_bundle.py
 ```
 
@@ -110,9 +113,14 @@ The preparer writes `.tmp/native-bundle/prepared-sources.json` and three checkou
 under `.tmp/native-bundle/sources/`. The record contains only bundle/source/patch
 identity, not host paths. A second run validates and reuses the exact prepared
 trees. A changed bundle, changed patch, wrong origin/commit/base tree, unexpected
-staged tree, unstaged edit, untracked file, symlink, partial checkout, or
+staged tree, unstaged edit, non-ignored untracked file, symlink, partial checkout, or
 unrecognized output directory fails closed. It never resets or repairs an
 existing tree; the operator must remove rejected workspace output explicitly.
+
+The central configurator additionally rejects ignored source-side inputs outside
+its owned `build`/cache output and requires DuckDB's ignored local extension config
+to be empty before deleting and recreating it. This closes the gap between Git's
+source-tree view and CMake inputs.
 
 DuckLake and Spatial's embedded DuckDB submodules are deliberately not
 initialized. `native/extension_config.cmake` points their prepared source into the
@@ -120,9 +128,10 @@ single prepared DuckDB checkout, preventing an extension-specific core build fro
 becoming an accidental second ABI.
 
 Runtime context assembly projects the bundle ID/manifest digest, a linked-authority
-digest covering the patch series, upstream review, and extension config, exact
-source/base/result trees, ordered patch identities, shared toolchain, and
-central-build options into `artifact-manifest.json`. The projection contains no
+digest covering the patch series, upstream review, extension config, and native
+prepare/build/package/bootstrap/runtime producer tools, exact source/base/result
+trees, ordered patch identities, shared toolchain, and central-build options into
+`artifact-manifest.json`. The projection contains no
 workspace paths. This binds backup/migration/package evidence to the native
 authority before the central artifact build is accepted.
 
@@ -137,17 +146,21 @@ mise exec -- just native-bundle-metadata
 It emits the manifest-declared `sbom.spdx.json` and
 `licenses/native-licenses.json`. Runtime context assembly generates the same bytes,
 hashes both into `artifact-manifest.json`, and the image copies them under
-`/opt/quackgis`. The SPDX 2.3 document describes the exact selected DuckDB library,
-DuckLake extension, and Spatial extension source/artifact digests. The license
-inventory records the DuckLake patch and selected source commits without local
-paths.
+`/opt/quackgis`. The SPDX 2.3 document models the exact selected CLI and library
+binary artifacts separately from exact upstream source packages and the QuackGIS
+DuckLake patch, with explicit `GENERATED_FROM` relationships; a source URL is never
+presented as the download location for different compiled bytes. The license
+inventory records selected artifact build provenance, the patch, and source
+commits without local paths. The patch license is `NOASSERTION` until an explicit
+review resolves it; it is not silently conflated with DuckLake's MIT license.
 
 This is deliberately fail-closed release evidence, not a false complete-license
 claim. The inventory has `complete=false`, keeps redistribution at
-`local-evaluation-only`, and lists every known Spatial bundled dependency as
-release-blocking until its exact version, source, concluded license, notice, and
-where applicable relinking material are attached. An N0 release cannot become
-accepted merely because an SPDX file exists.
+`local-evaluation-only`, and marks the selected DuckDB binary inventory, every
+local patch license, and all known Spatial bundled dependencies release-blocking
+until exact source, concluded licenses, notices, and where applicable relinking
+material are attached. An N0 release cannot become accepted merely because an
+SPDX file exists.
 
 ## Bundle authority
 
@@ -162,7 +175,7 @@ One machine-readable manifest records at least:
 - vcpkg, compiler, CMake, Ninja, platform, and build options;
 - whether Spatial networking and optional modules are enabled;
 - expected upstream and QuackGIS test groups;
-- accepted library and extension artifact SHA-256 values; and
+- accepted CLI, library, and extension artifact SHA-256 values; and
 - license/SBOM outputs.
 
 The preparer fails when a commit is not exact, extension/core pins disagree without
@@ -175,10 +188,13 @@ One central DuckDB checkout builds every extension through DuckDB's out-of-tree
 extension mechanism. Prepared local source directories are passed through
 `duckdb_extension_load(... SOURCE_DIR ...)`; they are not separately built against
 different embedded DuckDB submodules. A merged pinned vcpkg manifest supplies the
-combined DuckLake and Spatial native dependencies.
+combined DuckLake and Spatial native dependencies. Both are `DONT_LINK` candidates:
+the host CLI does not contain them, so the offline probe must load and identify the
+exact emitted files rather than succeeding through a statically linked copy.
 
-The central build emits candidate loadable DuckLake, Spatial, and QuackGIS
-artifacts plus the exact DuckDB library/CLI used for tests. A release may select
+The central build emits candidate loadable DuckLake and Spatial artifacts plus the
+exact DuckDB library/CLI used for tests. It emits a QuackGIS extension only when
+`quackgis_extension.enabled` selects owned additive native behavior. A release may select
 an exact vendor-built signed extension instead of its local candidate only when
 the manifest binds that binary to the qualified source/ABI and all runtime gates
 pass against those exact bytes. Static linking may be evaluated separately but
@@ -201,10 +217,54 @@ The path-free `.tmp/native-bundle/central-build-plan.json` binds that graph and
 toolchain to the complete native authority digest.
 
 `just native-bundle-build` continues from this graph, prepares only the exact
-vcpkg commit, and writes candidate artifact digests with state
-`built-unaccepted`. New bytes do not become runtime artifacts automatically: the
+vcpkg commit with complete history required by version resolution, regenerates the
+bootstrap executable through that pinned checkout's SHA-verified bootstrap, and
+writes candidate artifact digests with state `built-unaccepted`. New bytes do not become runtime artifacts automatically: the
 manifest's accepted digests and legacy provenance change only after upstream,
 QuackGIS, package, reopen, recovery, and rollback gates pass.
+
+The build environment is allowlisted: `CC`/`CXX`, CMake, Ninja, and Make are bound
+to manifest-pinned executable SHA-256 values and immutable acquisition identities;
+caller compiler/linker/CMake/vcpkg-cache flags are not inherited, binary caches are
+disabled, and download/build/package state is cleaned
+into owned workspace paths. The vcpkg index must equal the pinned `HEAD` tree and
+the bootstrap executable is regenerated through the checkout's SHA-verified
+bootstrap. Runtime manifests separate the provenance of currently selected
+legacy/vendor bytes from the unaccepted central candidate
+configuration so candidate settings are never presented as having produced
+selected artifacts. Destructive cleanup refuses symlinked or escaping paths.
+
+The current authority-bound central candidate completed and remains deliberately
+unaccepted (`authority_sha256=c6d896e33defd1e464202fdd4c685ca25cc18f0445efe8c68a4cd888d3f608d1`):
+
+| Candidate | SHA-256 |
+|---|---|
+| DuckDB CLI | `4eea469582c3a304b73f805bfd7518faed21183e4572a8c0594010522dbc6421` |
+| `libduckdb.so` | `21743840ca97f4abeec533283073ea5a06b85035e2b85ca76f14549793b11d71` |
+| DuckLake | `012cf950ec40af123dfd8d58338ea9f04173db5cb9b39bc2b3bdba253076fbf9` |
+| Spatial | `55496d8d2a93af2ee2e30632b72fb528fbafb7df191b50689c22b943d820ec19` |
+
+Run `just native-bundle-candidate-test` to rehash all four files and the test
+runner, revalidate actual tracked source bytes and index flags, require exact
+DuckDB 1.5.4 source identity, prove both candidate files load from custom paths,
+and execute every manifest-declared upstream group plus every patch regression.
+The plan state is `upstream-tested-unaccepted` and lists every still-pending
+QuackGIS test group; no runtime consumer uses these hashes until the remaining
+product, package, lifecycle, and upgrade matrix accepts them and updates the
+bundle.
+
+Current exact results are 143 assertions in the three DuckLake function cases,
+59 assertions in the separately enforced identity-patch case (which is also part
+of the function group), and 1,607 assertions in all 130 Spatial SQL cases. The
+test runner itself is pinned as
+`d73d25676c73b431d52b036e34cc2df7067fdcb06a1abd9304b28aacd2a2f83c`.
+
+Reproducibility is still an explicit N0 blocker. Three clean, cache-disabled runs
+with unchanged build-relevant sources/config/tool executables reproduced the CLI,
+library, DuckLake, and test-runner hashes exactly, but Spatial differed:
+`2430bfde…`, `1158cf4a…`, then current `55496d8d…`. Do not select the current
+Spatial candidate until the varying bytes are explained and eliminated (or a
+reviewed deterministic build rule is added) and two clean builds match.
 
 ## Upstream first
 

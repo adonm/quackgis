@@ -16,9 +16,16 @@
       "mode": "vendor-built",
       "archive_url": "https://github.com/duckdb/duckdb/releases/download/v1.5.4/libduckdb-linux-amd64.zip",
       "archive_sha256": "838d98a85e697bab9935010c88a8c67d3312ccedcab4cb4a0ba01da65113bb70",
-      "library_sha256": "d7f30ef2ef4b813edb94ce82906329cc689672624a4161617ea33431040ce174"
+      "library_sha256": "d7f30ef2ef4b813edb94ce82906329cc689672624a4161617ea33431040ce174",
+      "cli_archive_url": "https://github.com/duckdb/duckdb/releases/download/v1.5.4/duckdb_cli-linux-amd64.zip",
+      "cli_archive_sha256": "1f2fa724fb054b3dbe1a9cbd13de5b76997d850e7087ec762ba88db04e0180cf",
+      "cli_sha256": "c478c0f49f6755100d55dee32de485c0f00f3729b40b62658a83b0666b684707",
+      "official_extension_sha256": {
+        "ducklake": "00f72402c9c5d1f69c3329f38837f4abd100cddb7c69e76650f46bf35a17babe",
+        "spatial": "819a0fa94d2e8257371bb4d97f32c47586b42c85e24bab1bcbf8712a88b8ccfa"
+      }
     },
-    "license": "MIT"
+    "source_license": "MIT"
   },
   "extensions": {
     "ducklake": {
@@ -41,7 +48,7 @@
           "compiler": "gcc 15.2.1"
         }
       },
-      "license": "MIT"
+      "source_license": "MIT"
     },
     "spatial": {
       "source": {
@@ -68,7 +75,7 @@
         "SQLite",
         "zlib"
       ],
-      "license": "MIT plus bundled third-party dependencies"
+      "source_license": "MIT"
     }
   },
   "quackgis_extension": {
@@ -85,7 +92,22 @@
       "version": "16.1.1"
     },
     "cmake_version": "4.3.3",
-    "ninja_version": "1.13.2"
+    "ninja_version": "1.13.2",
+    "make_version": "4.4.1",
+    "executable_sha256": {
+      "gcc": "4454d3be038787a6fbac0a21faf76636242dc6f217d6d48ce672b09a8a3cc46b",
+      "g++": "dd73caf4bfe9ea85e9d411823868211ca81c30335c3b793560f7c6aabda631b3",
+      "cmake": "1dbfc5a9a87ad82bfa1adefdb206854bfbb37b8d48e9455ad6bba68634ceff7e",
+      "ninja": "607e668f90dd6cd82e1a42ae572647ad1b1fd43063964295b9547836d8c15d99",
+      "make": "25544ed459e6f5c79daf61383d7ef1c83cd9e77f2dfbe2bdbeaa8defec9d0bc9"
+    },
+    "acquisition": {
+      "gcc": "rpm:gcc-0:16.1.1-2.fc44.x86_64",
+      "g++": "rpm:gcc-c++-0:16.1.1-2.fc44.x86_64",
+      "cmake": "mise:aqua:Kitware/CMake@4.3.3",
+      "ninja": "mise:aqua:ninja-build/ninja@1.13.2",
+      "make": "rpm:make-1:4.4.1-12.fc44.x86_64"
+    }
   },
   "build": {
     "type": "Release",

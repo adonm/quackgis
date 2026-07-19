@@ -431,8 +431,9 @@ mise exec -- just duckdb-runtime-static-check
 ```
 
 The release/runtime image must package the exact verified `libduckdb.so`, signed
-`spatial` and `ducklake` extensions, and isolated DuckDB home. Bare Rust binaries
-without those artifacts are not runnable server distributions.
+vendor Spatial extension, checksum-pinned unsigned project-built DuckLake
+extension, and isolated DuckDB home. Bare Rust binaries without those artifacts
+are not runnable server distributions.
 
 The preview image binds pgwire to container loopback by default and does not
 publish a port. It is a verification artifact, not a production deployment.

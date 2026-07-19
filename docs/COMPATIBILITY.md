@@ -338,8 +338,17 @@ unless a focused test says otherwise.
   rechecks newer upstream R-tree work for deletion of local bbox machinery. The
   central configuration now verifies one DuckDB checkout loading prepared
   DuckLake/Spatial tests and one normalized merged vcpkg graph under the pinned
-  compiler/CMake/Ninja versions. Candidate artifact compilation/acceptance and the
-  upgrade/rollback matrix remain open. The current
+  compiler/CMake/Ninja/Make executable digests. Build inputs now reject ignored local CMake,
+  caller compiler/linker/cache flags, staged vcpkg drift, unverified bootstrap
+  executables, and symlinked cleanup; vcpkg binary caches are disabled and mutable
+  state is isolated/cleaned. Runtime provenance separates selected legacy/vendor
+  artifacts from unaccepted candidate settings, while SPDX separately identifies
+  the exact CLI/library, upstream sources, and the license-unresolved tracked patch.
+  Authority `c6d896e…` dynamically loads exact candidate files and passes 143
+  DuckLake-function, 59 separately enforced overlapping patch, and 1,607 complete
+  Spatial assertions before recording `upstream-tested-unaccepted`. It remains
+  unaccepted because Spatial changed across three clean builds, and pending the
+  complete QuackGIS, package, license, upgrade, and rollback matrix. The current
   source/artifact-pinned DuckLake lane remains the evidence floor until N0
   reproduces it. Authoritative CRS expansion belongs
   to S0 after official native/DuckLake lifecycle qualification; primary/unique

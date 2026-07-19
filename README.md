@@ -201,6 +201,8 @@ mise exec -- just ci
 mise exec -- just native-bundle-check
 mise exec -- just native-bundle-prepare
 mise exec -- just native-bundle-configure
+mise exec -- just native-bundle-build
+mise exec -- just native-bundle-candidate-test
 mise exec -- just native-bundle-metadata
 mise exec -- just native-upstream-check
 mise exec -- just duckdb-adbc-storage-test

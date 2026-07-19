@@ -26,6 +26,10 @@ class NativeBundleTests(unittest.TestCase):
             bundle["extensions"]["ducklake"]["duckdb_commit"],
             bundle["duckdb"]["source"]["commit"],
         )
+        self.assertEqual(
+            bundle["duckdb"]["artifact"]["cli_sha256"],
+            "c478c0f49f6755100d55dee32de485c0f00f3729b40b62658a83b0666b684707",
+        )
 
     def test_extension_core_mismatch_is_rejected(self) -> None:
         bundle = copy.deepcopy(MODULE.load_bundle())

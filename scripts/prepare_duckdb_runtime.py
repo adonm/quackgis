@@ -22,7 +22,7 @@ VERSION = BUNDLE["duckdb"]["version"]
 DUCKLAKE = BUNDLE["extensions"]["ducklake"]
 SPATIAL = BUNDLE["extensions"]["spatial"]
 DUCKLAKE_SERIES = native_bundle.validate_series(BUNDLE, "ducklake", REPO_ROOT)
-DUCKLAKE_PATCH = DUCKLAKE_SERIES["patches"][0]
+DUCKLAKE_PATCHES = DUCKLAKE_SERIES["patches"]
 EXPECTED = {
     "libduckdb.so": BUNDLE["duckdb"]["artifact"]["library_sha256"],
     "ducklake.duckdb_extension": DUCKLAKE["artifact"]["sha256"],
@@ -77,6 +77,7 @@ def prepare(
         raise ValueError(
             "server, migrator, REST, edge, and DuckDB CLI binaries must be regular files"
         )
+    require_hash(duckdb_bin, BUNDLE["duckdb"]["artifact"]["cli_sha256"])
     version = subprocess.run(
         [str(duckdb_bin), "--version"], text=True, capture_output=True, check=True
     ).stdout.strip()
@@ -91,10 +92,8 @@ def prepare(
     require_hash(library, EXPECTED[library.name])
     if ducklake_extension.is_symlink():
         raise ValueError("pinned DuckLake extension must not be a symlink")
-    require_hash(
-        REPO_ROOT / str(DUCKLAKE_PATCH["path"]),
-        str(DUCKLAKE_PATCH["sha256"]),
-    )
+    for patch in DUCKLAKE_PATCHES:
+        require_hash(REPO_ROOT / patch["path"], patch["sha256"])
     require_hash(ducklake_extension, EXPECTED["ducklake.duckdb_extension"])
     require_hash(spatial_extension, EXPECTED[spatial_extension.name])
 
@@ -104,24 +103,52 @@ def prepare(
             "refusing to package a dirty worktree; commit/stash changes or pass --allow-dirty for a non-release local artifact"
         )
 
-    if out.exists():
-        shutil.rmtree(out)
+    final_out = require_runtime_output(out)
+    partial_out = require_runtime_output(final_out.with_name(f".{final_out.name}.partial"))
+    if partial_out.exists() or partial_out.is_symlink():
+        raise ValueError(f"remove interrupted runtime output explicitly: {partial_out}")
+    partial_out.mkdir(parents=True)
+    out = partial_out
     target_extensions = out / "duckdb-home" / ".duckdb" / "extensions" / f"v{VERSION}" / "linux_amd64"
     target_extensions.mkdir(parents=True)
-    shutil.copy2(server, out / "quackgis-server")
-    shutil.copy2(migrate, out / "quackgis-migrate")
-    shutil.copy2(rest, out / "quackgis-rest")
+    staged_server = out / "quackgis-server"
+    staged_migrate = out / "quackgis-migrate"
+    staged_rest = out / "quackgis-rest"
+    staged_duckdb = out / "duckdb"
+    staged_library = out / "libduckdb.so"
+    staged_ducklake = target_extensions / "ducklake.duckdb_extension"
+    staged_spatial = target_extensions / spatial_extension.name
+    shutil.copy2(server, staged_server)
+    shutil.copy2(migrate, staged_migrate)
+    shutil.copy2(rest, staged_rest)
     for binary in edge_binaries:
         shutil.copy2(binary, out / binary.name)
-    shutil.copy2(duckdb_bin, out / "duckdb")
-    shutil.copy2(library, out / "libduckdb.so")
-    shutil.copy2(ducklake_extension, target_extensions / "ducklake.duckdb_extension")
-    shutil.copy2(spatial_extension, target_extensions / spatial_extension.name)
+    shutil.copy2(duckdb_bin, staged_duckdb)
+    shutil.copy2(library, staged_library)
+    shutil.copy2(ducklake_extension, staged_ducklake)
+    shutil.copy2(spatial_extension, staged_spatial)
+    staged_native_hashes = {
+        "duckdb": sha256(staged_duckdb),
+        "libduckdb.so": sha256(staged_library),
+        "ducklake.duckdb_extension": sha256(staged_ducklake),
+        "spatial.duckdb_extension": sha256(staged_spatial),
+    }
+    expected_native_hashes = {
+        "duckdb": BUNDLE["duckdb"]["artifact"]["cli_sha256"],
+        **EXPECTED,
+    }
+    if staged_native_hashes != expected_native_hashes:
+        raise ValueError(
+            "staged native runtime artifacts do not match the selected bundle: "
+            f"expected {expected_native_hashes}, got {staged_native_hashes}"
+        )
     licenses = out / "licenses"
     licenses.mkdir()
     for name in ("LICENSE", "NOTICE", "THIRD_PARTY_LICENSES.md"):
         shutil.copy2(REPO_ROOT / name, licenses / name)
-    metadata = package_native_bundle.write_metadata(BUNDLE, out)
+    metadata = package_native_bundle.write_metadata(
+        BUNDLE, out, context_is_unpublished=True
+    )
 
     manifest: dict[str, object] = {
         "duckdb_version": version,
@@ -132,36 +159,29 @@ def prepare(
             "ducklake": {
                 "revision": DUCKLAKE["source"]["commit"],
                 "source": f"https://github.com/duckdb/ducklake/tree/{DUCKLAKE['source']['commit']}",
-                "patch": DUCKLAKE_PATCH["path"],
-                "patch_sha256": DUCKLAKE_PATCH["sha256"],
-                "license": "MIT",
+                "patches": [
+                    {"path": patch["path"], "sha256": patch["sha256"]}
+                    for patch in DUCKLAKE_PATCHES
+                ],
+                "upstream_source_license": DUCKLAKE["source_license"],
+                "patch_license": "NOASSERTION",
+                "artifact_license": "NOASSERTION",
             },
             "spatial": {
                 "revision": SPATIAL["source"]["commit"],
                 "source": f"https://github.com/duckdb/duckdb-spatial/tree/{SPATIAL['source']['commit']}",
-                "license": "MIT plus bundled third-party dependencies",
+                "upstream_source_license": SPATIAL["source_license"],
+                "artifact_license": "NOASSERTION",
                 "redistribution": "local-evaluation-only",
-                "bundled_dependencies": [
-                    "GEOS",
-                    "GDAL",
-                    "PROJ",
-                    "OpenSSL",
-                    "curl",
-                    "expat",
-                    "zlib",
-                    "SQLite",
-                ],
+                "bundled_dependencies": SPATIAL["bundled_dependencies"],
             },
         },
         "artifacts": {
-            "libduckdb.so": EXPECTED["libduckdb.so"],
-            "ducklake.duckdb_extension": EXPECTED["ducklake.duckdb_extension"],
-            "spatial.duckdb_extension": EXPECTED["spatial.duckdb_extension"],
-            "duckdb": sha256(duckdb_bin),
-            "quackgis-server": sha256(server),
-            "quackgis-migrate": sha256(migrate),
-            "quackgis-rest": sha256(rest),
-            **{binary.name: sha256(binary) for binary in edge_binaries},
+            **staged_native_hashes,
+            "quackgis-server": sha256(staged_server),
+            "quackgis-migrate": sha256(staged_migrate),
+            "quackgis-rest": sha256(staged_rest),
+            **{binary.name: sha256(out / binary.name) for binary in edge_binaries},
             "licenses/LICENSE": sha256(licenses / "LICENSE"),
             "licenses/NOTICE": sha256(licenses / "NOTICE"),
             "licenses/THIRD_PARTY_LICENSES.md": sha256(
@@ -178,6 +198,7 @@ def prepare(
     (out / "artifact-manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
     )
+    publish_runtime_output(out, final_out)
     return manifest
 
 
@@ -209,9 +230,52 @@ def runtime_bundle_identity() -> dict[str, object]:
             "sha256": native_bundle.file_sha256(REPO_ROOT / BUNDLE["upstream_review"]),
         },
         "components": components,
-        "toolchain": BUNDLE["toolchain"],
-        "build": BUNDLE["build"],
+        "selected_artifacts": {
+            "duckdb": {
+                "source": BUNDLE["duckdb"]["source"],
+                "artifact": BUNDLE["duckdb"]["artifact"],
+            },
+            "ducklake": {
+                "source": DUCKLAKE["source"],
+                "artifact": DUCKLAKE["artifact"],
+            },
+            "spatial": {
+                "source": SPATIAL["source"],
+                "artifact": SPATIAL["artifact"],
+            },
+        },
+        "unaccepted_candidate_configuration": {
+            "toolchain": BUNDLE["toolchain"],
+            "build": BUNDLE["build"],
+        },
     }
+
+
+def require_runtime_output(path: Path) -> Path:
+    temporary_root = (REPO_ROOT / ".tmp").resolve()
+    lexical = Path(
+        os.path.abspath(path if path.is_absolute() else REPO_ROOT / path)
+    )
+    try:
+        relative = lexical.relative_to(temporary_root)
+        resolved = lexical.resolve()
+        resolved.relative_to(temporary_root)
+    except ValueError as error:
+        raise ValueError("runtime output must remain below workspace .tmp") from error
+    if not relative.parts:
+        raise ValueError("runtime output cannot be workspace .tmp itself")
+    current = temporary_root
+    for part in relative.parts:
+        current /= part
+        if current.is_symlink():
+            raise ValueError(f"runtime output traverses a symlink: {current}")
+    return resolved
+
+
+def publish_runtime_output(partial: Path, final: Path) -> None:
+    require_runtime_output(partial)
+    require_runtime_output(final)
+    native_bundle.publish_staged_directory(partial, final)
 
 
 def git_source() -> dict[str, object]:
@@ -224,6 +288,28 @@ def git_source() -> dict[str, object]:
     )
     if root_result.returncode != 0 or Path(root_result.stdout.strip()).resolve() != REPO_ROOT:
         raise ValueError("cannot establish QuackGIS repository provenance")
+    flags_result = subprocess.run(
+        ["git", "ls-files", "-v"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if flags_result.returncode != 0:
+        raise ValueError("cannot inspect QuackGIS source index flags")
+    flagged = [
+        line for line in flags_result.stdout.splitlines() if not line.startswith("H ")
+    ]
+    if flagged:
+        raise ValueError(f"QuackGIS source has non-default index flags: {flagged[:5]}")
+    refresh_result = subprocess.run(
+        ["git", "update-index", "--really-refresh"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=False,
+    )
+    if refresh_result.returncode not in {0, 1}:
+        raise ValueError("cannot refresh QuackGIS tracked source bytes")
     sha_result = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, capture_output=True, check=False
     )
@@ -318,7 +404,7 @@ def main(argv: list[str] | None = None) -> int:
             args.duckdb_bin.resolve(),
             args.ducklake_extension.resolve(),
             args.duckdb_root.resolve(),
-            args.out.resolve(),
+            args.out,
             allow_dirty=args.allow_dirty,
         )
     except (OSError, ValueError, subprocess.CalledProcessError) as error:

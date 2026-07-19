@@ -90,8 +90,10 @@ The release packet must include:
 
 - Artifacts identify exact QuackGIS source SHA and N0 bundle ID plus DuckDB,
   DuckLake, Spatial, QuackGIS-extension, patch, toolchain, build-option, license,
-  SBOM, and artifact digests. Before N0 closes, the current DuckLake pin and
-  separate official artifact identities remain explicit.
+  SBOM, and artifact digests. Two clean cache-disabled builds must reproduce every
+  selected digest; the current central Spatial candidate fails this gate and stays
+  unaccepted. Before N0 closes, the current DuckLake pin and separate official
+  artifact identities remain explicit.
 - Candidate review records the latest supported DuckDB release, current
   DuckDB-versioned DuckLake/Spatial tips, every local native capability's
   adopt/retain/delete disposition, and one deletion review per patch. A moved ref

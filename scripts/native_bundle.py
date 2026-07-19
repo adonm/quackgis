@@ -5,9 +5,12 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import json
+import os
 import re
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -18,6 +21,17 @@ BUNDLE_PATH = ROOT / "native/bundle.json"
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
 COMPONENTS = ("duckdb", "ducklake", "spatial")
+AUTHORITY_TOOLS = (
+    "scripts/native_bundle.py",
+    "scripts/prepare_native_bundle.py",
+    "scripts/build_native_bundle.py",
+    "scripts/package_native_bundle.py",
+    "scripts/check_native_upstreams.py",
+    "scripts/prepare_duckdb_runtime.py",
+    "scripts/bootstrap_duckdb.py",
+    "scripts/build_pinned_ducklake.py",
+    "Justfile",
+)
 
 
 def file_sha256(path: Path) -> str:
@@ -35,6 +49,39 @@ def canonical_sha256(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def publish_staged_directory(staged: Path, final: Path) -> None:
+    if staged.is_symlink() or not staged.is_dir():
+        raise ValueError("staged directory must be a non-symlink directory")
+    if final.is_symlink() or (final.exists() and not final.is_dir()):
+        raise ValueError("published directory must be absent or a non-symlink directory")
+    if not final.exists():
+        staged.rename(final)
+        return
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise ValueError("atomic directory exchange is unavailable on this platform")
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        -100,
+        os.fsencode(staged),
+        -100,
+        os.fsencode(final),
+        2,
+    )
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, "atomic directory exchange failed")
+    shutil.rmtree(staged)
+
+
 def authority_sha256(bundle: dict[str, Any], root: Path = ROOT) -> str:
     authority = {
         "manifest": bundle,
@@ -46,6 +93,9 @@ def authority_sha256(bundle: dict[str, Any], root: Path = ROOT) -> str:
         "extension_config_sha256": file_sha256(
             root / bundle["build"]["extension_config"]
         ),
+        "tool_sha256": {
+            path: file_sha256(root / path) for path in AUTHORITY_TOOLS
+        },
     }
     return canonical_sha256(authority)
 
@@ -162,28 +212,50 @@ def load_bundle(path: Path = BUNDLE_PATH, root: Path = ROOT) -> dict[str, Any]:
 
     duckdb = require_keys(
         bundle["duckdb"],
-        {"version", "release_tag", "source", "patch_series", "artifact", "license"},
+        {"version", "release_tag", "source", "patch_series", "artifact", "source_license"},
         "DuckDB bundle member",
     )
     if duckdb["release_tag"] != f"v{duckdb['version']}":
         raise ValueError("DuckDB release tag/version mismatch")
+    if not isinstance(duckdb["source_license"], str) or not duckdb["source_license"].strip():
+        raise ValueError("DuckDB source_license must be non-empty")
     duckdb_artifact = require_keys(
         duckdb["artifact"],
-        {"mode", "archive_url", "archive_sha256", "library_sha256"},
+        {
+            "mode",
+            "archive_url",
+            "archive_sha256",
+            "library_sha256",
+            "cli_archive_url",
+            "cli_archive_sha256",
+            "cli_sha256",
+            "official_extension_sha256",
+        },
         "DuckDB artifact",
     )
     if duckdb_artifact["mode"] != "vendor-built":
         raise ValueError("baseline DuckDB artifact mode must be vendor-built")
     require_hex(duckdb_artifact["archive_sha256"], HEX64, "DuckDB archive digest")
     require_hex(duckdb_artifact["library_sha256"], HEX64, "DuckDB library digest")
+    require_hex(duckdb_artifact["cli_archive_sha256"], HEX64, "DuckDB CLI archive digest")
+    require_hex(duckdb_artifact["cli_sha256"], HEX64, "DuckDB CLI digest")
+    official_extensions = require_keys(
+        duckdb_artifact["official_extension_sha256"],
+        {"ducklake", "spatial"},
+        "official bootstrap extension digests",
+    )
+    for name, digest in official_extensions.items():
+        require_hex(digest, HEX64, f"official {name} extension digest")
 
     extensions = require_keys(bundle["extensions"], {"ducklake", "spatial"}, "extensions")
     core_commit = duckdb["source"]["commit"]
     for name in ("ducklake", "spatial"):
-        expected = {"source", "duckdb_commit", "patch_series", "artifact", "license"}
+        expected = {"source", "duckdb_commit", "patch_series", "artifact", "source_license"}
         if name == "spatial":
             expected |= {"networking", "optional_modules", "bundled_dependencies"}
         extension = require_keys(extensions[name], expected, f"{name} bundle member")
+        if not isinstance(extension["source_license"], str) or not extension["source_license"].strip():
+            raise ValueError(f"{name} source_license must be non-empty")
         if extension["duckdb_commit"] != core_commit:
             raise ValueError(f"{name} targets a different DuckDB commit")
         artifact_fields = {"mode", "signed", "sha256"}
@@ -216,10 +288,34 @@ def load_bundle(path: Path = BUNDLE_PATH, root: Path = ROOT) -> dict[str, Any]:
         raise ValueError("this baseline must explicitly explain its disabled QuackGIS extension")
 
     toolchain = require_keys(
-        bundle["toolchain"], {"vcpkg", "compiler", "cmake_version", "ninja_version"}, "toolchain"
+        bundle["toolchain"],
+        {
+            "vcpkg",
+            "compiler",
+            "cmake_version",
+            "ninja_version",
+            "make_version",
+            "executable_sha256",
+            "acquisition",
+        },
+        "toolchain",
     )
     vcpkg = require_keys(toolchain["vcpkg"], {"url", "commit"}, "vcpkg")
     require_hex(vcpkg["commit"], HEX40, "vcpkg commit")
+    executable_sha256 = require_keys(
+        toolchain["executable_sha256"],
+        {"gcc", "g++", "cmake", "ninja", "make"},
+        "toolchain executable digests",
+    )
+    for name, digest in executable_sha256.items():
+        require_hex(digest, HEX64, f"{name} executable digest")
+    acquisition = require_keys(
+        toolchain["acquisition"],
+        set(executable_sha256),
+        "toolchain acquisition",
+    )
+    if not all(isinstance(value, str) and value.strip() for value in acquisition.values()):
+        raise ValueError("toolchain acquisition values must be non-empty strings")
     require_keys(toolchain["compiler"], {"family", "version"}, "compiler")
     build = require_keys(
         bundle["build"],
@@ -242,7 +338,12 @@ def load_bundle(path: Path = BUNDLE_PATH, root: Path = ROOT) -> dict[str, Any]:
 
     tests = require_keys(bundle["test_groups"], {"upstream", "quackgis"}, "test_groups")
     for name, values in tests.items():
-        if not isinstance(values, list) or not values or len(values) != len(set(values)):
+        if (
+            not isinstance(values, list)
+            or not values
+            or len(values) != len(set(values))
+            or not all(isinstance(value, str) and value.strip() for value in values)
+        ):
             raise ValueError(f"{name} test group must be a non-empty unique list")
     outputs = require_keys(
         bundle["outputs"],
