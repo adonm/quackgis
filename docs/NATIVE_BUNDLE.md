@@ -25,8 +25,16 @@ digests. Production does not follow branches or download extensions.
 
 ## Current and target state
 
-The current runtime already proves part of this model:
+The current runtime and first N0 authority slice prove part of this model:
 
+- `native/bundle.json` is the common candidate authority for exact DuckDB,
+  DuckLake, Spatial, shared toolchain, selected artifact, test-group, and output
+  identity;
+- `patches/{duckdb,ducklake,spatial}/series.json` provide ordered patch queues
+  with exact base and resulting Git trees; empty queues are explicit;
+- `just native-bundle-check` validates the closed manifest schema, common core
+  commit, patch paths/digests, source/tree pins, central-build declaration, and
+  path-free output contract in CI;
 - DuckDB 1.5.4 and the official Spatial artifact are checksum-pinned;
 - `patches/ducklake/pin.json` pins one DuckLake source, DuckDB submodule, patch,
   toolchain, and accepted artifact;
@@ -35,9 +43,11 @@ The current runtime already proves part of this model:
 - runtime assembly verifies immutable native artifacts and performs no online
   extension installation.
 
-N0 generalizes that DuckLake-only lane. Until N0 closes, the existing pin and
-commands remain the current supported development path; proposed bundle commands
-or manifests are not current evidence.
+The common manifest currently describes a candidate, not an accepted central
+build. Until the preparation/build/package and lifecycle matrices pass, the
+existing DuckLake command remains the supported artifact reproduction path. The
+next N0 slice must make all artifact consumers read the common authority and then
+retire the duplicated DuckLake pin rather than allowing two authorities to drift.
 
 ## Source layout
 
@@ -49,10 +59,6 @@ build orchestration, tests, licenses, and accepted artifact digests:
 native/
   bundle.json
   extension_config.cmake
-  quackgis/
-    CMakeLists.txt
-    src/
-    test/sql/
 patches/
   duckdb/
     series.json
@@ -65,6 +71,12 @@ scripts/
   build_native_bundle.py
   package_native_bundle.py
 ```
+
+The QuackGIS extension is explicitly disabled with a reason in the baseline
+candidate because its only selected native divergence is currently the DuckLake
+identity patch. When an additive function is selected, owned extension source and
+its digest become mandatory manifest members; an empty placeholder extension is
+not shipped merely to satisfy the layout.
 
 A release may publish checksum-pinned source archives for offline rebuilding. Full
 upstream Git histories, generated build trees, vcpkg caches, and large test data do

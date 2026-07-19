@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "component": "spatial",
+  "base_commit": "28db190f7184bcf61eb01d291e0cba79849bddb6",
+  "base_tree": "0e3168ebbeffe1ef318f12dba5c7389db1898ab7",
+  "result_tree": "0e3168ebbeffe1ef318f12dba5c7389db1898ab7",
+  "patches": []
+}

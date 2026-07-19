@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "bundle_id": "duckdb-1.5.4-linux-amd64-n0.1",
+  "status": "candidate",
+  "platform": "linux-amd64",
+  "duckdb": {
+    "version": "1.5.4",
+    "release_tag": "v1.5.4",
+    "source": {
+      "url": "https://github.com/duckdb/duckdb.git",
+      "commit": "08e34c447bae34eaee3723cac61f2878b6bdf787",
+      "tree": "33c1f40f6421fd8f79912a6ce96722feca538c61"
+    },
+    "patch_series": "patches/duckdb/series.json",
+    "artifact": {
+      "mode": "vendor-built",
+      "archive_url": "https://github.com/duckdb/duckdb/releases/download/v1.5.4/libduckdb-linux-amd64.zip",
+      "archive_sha256": "838d98a85e697bab9935010c88a8c67d3312ccedcab4cb4a0ba01da65113bb70",
+      "library_sha256": "d7f30ef2ef4b813edb94ce82906329cc689672624a4161617ea33431040ce174"
+    },
+    "license": "MIT"
+  },
+  "extensions": {
+    "ducklake": {
+      "source": {
+        "url": "https://github.com/duckdb/ducklake.git",
+        "commit": "84ef2d14a0161f6f6197d6c8d2b4dbc45bf40375",
+        "tree": "df4ef6652c07b898de7ed728d8e2af194b304f8c"
+      },
+      "duckdb_commit": "08e34c447bae34eaee3723cac61f2878b6bdf787",
+      "patch_series": "patches/ducklake/series.json",
+      "artifact": {
+        "mode": "project-built",
+        "signed": false,
+        "sha256": "046e73c864b4403e73beddc39addc72a370dfbe633e2287181a1c0cdd37b5b94"
+      },
+      "license": "MIT"
+    },
+    "spatial": {
+      "source": {
+        "url": "https://github.com/duckdb/duckdb-spatial.git",
+        "commit": "28db190f7184bcf61eb01d291e0cba79849bddb6",
+        "tree": "0e3168ebbeffe1ef318f12dba5c7389db1898ab7"
+      },
+      "duckdb_commit": "08e34c447bae34eaee3723cac61f2878b6bdf787",
+      "patch_series": "patches/spatial/series.json",
+      "artifact": {
+        "mode": "vendor-built",
+        "signed": true,
+        "sha256": "819a0fa94d2e8257371bb4d97f32c47586b42c85e24bab1bcbf8712a88b8ccfa"
+      },
+      "networking": true,
+      "optional_modules": [],
+      "bundled_dependencies": [
+        "curl",
+        "expat",
+        "GDAL",
+        "GEOS",
+        "OpenSSL",
+        "PROJ",
+        "SQLite",
+        "zlib"
+      ],
+      "license": "MIT plus bundled third-party dependencies"
+    }
+  },
+  "quackgis_extension": {
+    "enabled": false,
+    "reason": "No additive native behavior is selected in this baseline candidate; the owned DuckLake identity change remains an explicit patch."
+  },
+  "toolchain": {
+    "vcpkg": {
+      "url": "https://github.com/microsoft/vcpkg.git",
+      "commit": "84bab45d415d22042bd0b9081aea57f362da3f35"
+    },
+    "compiler": {
+      "family": "gcc",
+      "version": "15.2.1"
+    },
+    "cmake_version": "4.3.3",
+    "ninja_version": "1.13.2"
+  },
+  "build": {
+    "type": "Release",
+    "generator": "Ninja",
+    "central_duckdb_checkout": true,
+    "extension_config": "native/extension_config.cmake",
+    "runtime_online_install": false
+  },
+  "test_groups": {
+    "upstream": [
+      "ducklake-functions",
+      "spatial-complete"
+    ],
+    "quackgis": [
+      "duckdb-adbc-storage-test",
+      "duckdb-pinned-ducklake-test",
+      "duckdb-pgwire-workflow-test",
+      "duckdb-catalog-contract-test",
+      "postgis-migration-smoke",
+      "rest-postgrest-smoke",
+      "duckdb-runtime-offline-smoke"
+    ]
+  },
+  "outputs": {
+    "runtime_manifest": "artifact-manifest.json",
+    "sbom": "sbom.spdx.json",
+    "license_inventory": "licenses/native-licenses.json"
+  }
+}

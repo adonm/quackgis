@@ -198,6 +198,7 @@ SELECT ST_AsText(ST_GeomFromText('POINT(1 2)'));
 ```sh
 mise exec -- just check-fast
 mise exec -- just ci
+mise exec -- just native-bundle-check
 mise exec -- just duckdb-adbc-storage-test
 mise exec -- just duckdb-pgwire-workflow-test
 mise exec -- just duckdb-spatial-compat-probe

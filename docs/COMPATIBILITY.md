@@ -318,10 +318,14 @@ unless a focused test says otherwise.
   rejects those user-object catalogs explicitly. Runtime assembly packages the
   pinned artifact and configures its exact path/digest; the complete Kind
   named-client rerun remains open.
-- N0 now owns the next native change: one compatible DuckDB/DuckLake/Spatial/
-  QuackGIS bundle, ordered patch queues, central build, immutable artifacts, and
-  upgrade/rollback matrix. The current source/artifact-pinned DuckLake lane remains
-  the evidence floor until N0 reproduces it. Authoritative CRS expansion belongs
+- N0 now owns the next native change. Its first executable slice adds one closed
+  candidate manifest for exact compatible DuckDB/DuckLake/Spatial commits,
+  selected artifacts, shared toolchain/tests/outputs, and ordered digest-pinned
+  patch queues; `just native-bundle-check` enforces common core identity and exact
+  base/result trees in CI. Central source preparation/build, package SBOM/license
+  provenance, and the upgrade/rollback matrix remain open. The current
+  source/artifact-pinned DuckLake lane remains the evidence floor until N0
+  reproduces it. Authoritative CRS expansion belongs
   to S0 after official native/DuckLake lifecycle qualification; primary/unique
   claims and their dependent client features belong to Q0 after every-write and
   recovery enforcement. Neither changes this document's current generic SRID-0

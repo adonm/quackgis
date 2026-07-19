@@ -208,6 +208,10 @@ duckdb-bootstrap duckdb_bin=duckdb_bin:
 ducklake-pinned-source-check:
     python3 scripts/build_pinned_ducklake.py --check
 
+# Validate the common DuckDB/DuckLake/Spatial source, patch, toolchain, and artifact authority.
+native-bundle-check:
+    python3 scripts/native_bundle.py
+
 # Build and test the accepted DuckLake identity extension from tracked source pins.
 ducklake-pinned-build:
     mise x aqua:Kitware/CMake@4.3.3 aqua:ninja-build/ninja@1.13.2 -- python3 scripts/build_pinned_ducklake.py
@@ -510,7 +514,7 @@ check: fmt-check clippy test
 check-fast: fmt-check clippy test-fast
 
 # Run the same gate used by GitHub Actions CI.
-ci: check-fast project-contract-check duckdb-adbc-compile-check duckdb-adbc-storage-test duckdb-pgwire-workflow-test iroh-duckdb-smoke iroh-duckdb-relay-smoke iroh-transport-profile rest-postgrest-smoke duckdb-catalog-contract-test duckdb-catalog-identity-test duckdb-result-stream-smoke duckdb-wide-result-smoke duckdb-cancellation-smoke duckdb-mixed-concurrency-smoke duckdb-termination-smoke duckdb-recovery-smoke duckdb-mixed-release-smoke duckdb-tls-rotation-smoke duckdb-copy-smoke duckdb-spatial-scan-smoke evidence-manifest-check probe-static-check runtime-static-check kind-static-check
+ci: check-fast project-contract-check native-bundle-check duckdb-adbc-compile-check duckdb-adbc-storage-test duckdb-pgwire-workflow-test iroh-duckdb-smoke iroh-duckdb-relay-smoke iroh-transport-profile rest-postgrest-smoke duckdb-catalog-contract-test duckdb-catalog-identity-test duckdb-result-stream-smoke duckdb-wide-result-smoke duckdb-cancellation-smoke duckdb-mixed-concurrency-smoke duckdb-termination-smoke duckdb-recovery-smoke duckdb-mixed-release-smoke duckdb-tls-rotation-smoke duckdb-copy-smoke duckdb-spatial-scan-smoke evidence-manifest-check probe-static-check runtime-static-check kind-static-check
 
 # Run the dev QuackGIS server on QUACKGIS_HOST/QUACKGIS_PORT.
 server:
@@ -562,7 +566,8 @@ clean-dev:
 # Static validation for maintained helper scripts.
 probe-static-check:
     mkdir -p .tmp/pycache
-    PYTHONPYCACHEPREFIX=.tmp/pycache python3 -m py_compile scripts/*.py deploy/kind/render.py scripts/tests/test_build_pinned_ducklake.py scripts/tests/test_duckdb_authority_probe.py scripts/tests/test_duckdb_catalog_identity_probe.py scripts/tests/test_duckdb_engine_probe.py scripts/tests/test_duckdb_runtime_static_check.py scripts/tests/test_duckdb_spatial_compat_probe.py scripts/tests/test_evidence_manifest_check.py scripts/tests/test_kind_render.py scripts/tests/test_prepare_duckdb_runtime.py scripts/tests/test_project_doctor.py
+    PYTHONPYCACHEPREFIX=.tmp/pycache python3 -m py_compile scripts/*.py deploy/kind/render.py scripts/tests/test_build_pinned_ducklake.py scripts/tests/test_duckdb_authority_probe.py scripts/tests/test_duckdb_catalog_identity_probe.py scripts/tests/test_duckdb_engine_probe.py scripts/tests/test_duckdb_runtime_static_check.py scripts/tests/test_duckdb_spatial_compat_probe.py scripts/tests/test_evidence_manifest_check.py scripts/tests/test_kind_render.py scripts/tests/test_native_bundle.py scripts/tests/test_prepare_duckdb_runtime.py scripts/tests/test_project_doctor.py
+    python3 scripts/tests/test_native_bundle.py
     python3 scripts/tests/test_build_pinned_ducklake.py
     python3 scripts/tests/test_duckdb_authority_probe.py
     python3 scripts/tests/test_duckdb_catalog_identity_probe.py

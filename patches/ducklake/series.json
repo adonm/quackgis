@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "component": "ducklake",
+  "base_commit": "84ef2d14a0161f6f6197d6c8d2b4dbc45bf40375",
+  "base_tree": "df4ef6652c07b898de7ed728d8e2af194b304f8c",
+  "result_tree": "320558a798093870aec56a40eea8ab1b54891c1c",
+  "patches": [
+    {
+      "path": "patches/ducklake/ducklake-column-info.patch",
+      "sha256": "2ad65d0c8cb89e06b21866eb58fb2acabe8db320d2afb7c99fdf815a81a26d76",
+      "requirement": "Expose committed top-level DuckLake column identity without changing the writer path.",
+      "owner": "QuackGIS catalog compatibility",
+      "tests": [
+        "test/sql/functions/ducklake_column_info.test",
+        "just duckdb-pinned-ducklake-test"
+      ],
+      "upstream_or_deletion": "Delete when a version-matched official DuckLake API passes the identity lifecycle gate."
+    }
+  ]
+}
