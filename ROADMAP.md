@@ -123,3 +123,9 @@ Production TLS, browser integration, and real revision publication remain open.
 - multiple workers and assignment policy;
 - additional PostGIS predicate translation based on measured traces; and
 - optional Caddy shared-cache module after cache-key/security tests.
+
+The isolated `quackgis-multi` profile now proves the narrower feasibility case:
+two statically assigned, read-only workers and two edges can serve one frozen
+local DuckLake snapshot to four concurrent clients. Dynamic assignment,
+concurrent publication, remote shared catalogs/object storage, refresh, and
+failover remain post-first-release work.

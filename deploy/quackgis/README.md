@@ -40,7 +40,7 @@ The stack proves:
 - Caddy routes for OGC API Features, dynamic MVT/TileJSON, and an immutable
   PMTiles-backed revision fixture; and
 - build-time installation and SHA-256 verification of DuckDB 1.5.4, Quack,
-  HTTPFS, and Spatial artifacts. Runtime uses `LOAD`, not `INSTALL`.
+  HTTPFS, DuckLake, and Spatial artifacts. Runtime uses `LOAD`, not `INSTALL`.
 
 ## Run
 
@@ -68,6 +68,37 @@ Development endpoints:
   `http://127.0.0.1:8080/tiles/revision-f3f65093582c`.
 
 Quack, Martin, and `pg_featureserv` have no host-published ports.
+
+## Shared DuckLake fan-out validation
+
+An isolated profile validates read-only fan-out from one frozen DuckLake storage
+set:
+
+```sh
+just quackgis-multi-clean
+just quackgis-multi-up
+just quackgis-multi-smoke
+just quackgis-multi-down
+```
+
+`compose.multi.yaml` runs one short-lived DuckLake seed writer, then mounts the
+same catalog and Parquet volume read-only into two independent DuckDB/Quack
+workers. Each worker has its own iroh tunnel and PostgreSQL/PostGIS edge on host
+ports `55433` and `55434`. The smoke test proves:
+
+- both workers report the same catalog path, snapshot ID, row count, data-file
+  count, and exact data-file set;
+- the worker containers cannot write the shared volume;
+- both edges return the same native geometry, extent, and bbox result;
+- both plans contain worker-side bbox candidates and exact PostGIS rechecks; and
+- four simultaneous PostgreSQL sessions, two per edge, reach the assigned
+  workers and return the same DuckLake state.
+
+This is evidence for a published immutable/local revision. It does **not**
+validate concurrent DuckLake writers, a PostgreSQL DuckLake metadata catalog,
+object storage, snapshot refresh on long-lived workers, load balancing,
+failover, or an assignment scheduler. Those remain part of the post-Local-1.0
+shared-profile gate.
 
 ## Tracked patches
 

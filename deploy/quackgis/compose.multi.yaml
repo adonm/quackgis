@@ -1,0 +1,192 @@
+name: quackgis-multi
+
+services:
+  ducklake_seed:
+    image: quackgis-worker:1.5.4
+    build:
+      context: ./worker
+    command:
+      - /duckdb
+      - ":memory:"
+      - -init
+      - /config/seed.sql
+    volumes:
+      - ducklake-shared:/lake
+      - ./multi/seed.sql:/config/seed.sql:ro,Z
+    restart: "no"
+
+  worker_a:
+    image: quackgis-worker:1.5.4
+    stdin_open: true
+    command:
+      - /duckdb
+      - ":memory:"
+      - -init
+      - /config/worker.sql
+    environment:
+      QUACKGIS_WORKER_ID: worker-a
+    volumes:
+      - ducklake-shared:/lake:ro
+      - ./multi/worker.sql:/config/worker.sql:ro,z
+    depends_on:
+      ducklake_seed:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  worker_b:
+    image: quackgis-worker:1.5.4
+    stdin_open: true
+    command:
+      - /duckdb
+      - ":memory:"
+      - -init
+      - /config/worker.sql
+    environment:
+      QUACKGIS_WORKER_ID: worker-b
+    volumes:
+      - ducklake-shared:/lake:ro
+      - ./multi/worker.sql:/config/worker.sql:ro,z
+    depends_on:
+      ducklake_seed:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  iroh_server_a:
+    image: quackgis-iroh:0.39.0
+    build:
+      context: ./iroh
+      args:
+        DUMBPIPE_VERSION: 0.39.0
+    command: ["/usr/local/bin/listen.sh"]
+    user: "0:0"
+    environment:
+      IROH_SECRET: 401c2e3099b9f9dce897cd1eeaefb1d6a9beb6ffd50048d520be4a3b12416822
+      RUST_LOG: dumbpipe=info,iroh=info
+    network_mode: service:worker_a
+    volumes:
+      - iroh-ticket-a:/tunnel
+    depends_on:
+      - worker_a
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /tunnel/worker.ticket"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: unless-stopped
+
+  iroh_server_b:
+    image: quackgis-iroh:0.39.0
+    command: ["/usr/local/bin/listen.sh"]
+    user: "0:0"
+    environment:
+      IROH_SECRET: 90d664f88b3fc5a2477c8052c9d42826c848ab043f7557295cd71683fb9db6f7
+      RUST_LOG: dumbpipe=info,iroh=info
+    network_mode: service:worker_b
+    volumes:
+      - iroh-ticket-b:/tunnel
+    depends_on:
+      - worker_b
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /tunnel/worker.ticket"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: unless-stopped
+
+  postgres_a:
+    image: quackgis-postgres:latest
+    build:
+      context: ./postgres
+      args:
+        DUCKDB_FDW_COMMIT: 9354241029df691b695f15428082b7c5cd81e2c7
+        DUCKDB_VERSION: 1.5.4
+    environment:
+      HOME: /var/lib/postgresql
+      POSTGRES_DB: quackgis
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: quackgis-dev
+    volumes:
+      - postgres-a-data:/var/lib/postgresql
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/20_quackgis.sql:ro,z
+      - ./multi/postgres.sql:/docker-entrypoint-initdb.d/30_multi.sql:ro,z
+    ports:
+      - "55433:5432"
+    depends_on:
+      - worker_a
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$(psql -XAt -U postgres -d quackgis -c \"SELECT (to_regclass('remote.worker_identity_export') IS NOT NULL)::int\" 2>/dev/null)\" = 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  postgres_b:
+    image: quackgis-postgres:latest
+    environment:
+      HOME: /var/lib/postgresql
+      POSTGRES_DB: quackgis
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: quackgis-dev
+    volumes:
+      - postgres-b-data:/var/lib/postgresql
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/20_quackgis.sql:ro,z
+      - ./multi/postgres.sql:/docker-entrypoint-initdb.d/30_multi.sql:ro,z
+    ports:
+      - "55434:5432"
+    depends_on:
+      - worker_b
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$(psql -XAt -U postgres -d quackgis -c \"SELECT (to_regclass('remote.worker_identity_export') IS NOT NULL)::int\" 2>/dev/null)\" = 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  iroh_client_a:
+    image: quackgis-iroh:0.39.0
+    command: ["/usr/local/bin/connect.sh"]
+    environment:
+      IROH_SECRET: c418b3fdf4674fc1f4151145a7fb3809a34f1fe8ac65b96a7e2e995ee9b81ac1
+      RUST_LOG: dumbpipe=info,iroh=info
+    network_mode: service:postgres_a
+    volumes:
+      - iroh-ticket-a:/tunnel:ro
+    depends_on:
+      postgres_a:
+        condition: service_healthy
+      iroh_server_a:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "grep -aq dumbpipe /proc/1/cmdline"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: unless-stopped
+
+  iroh_client_b:
+    image: quackgis-iroh:0.39.0
+    command: ["/usr/local/bin/connect.sh"]
+    environment:
+      IROH_SECRET: 82a0bfe08371e63d14dec0b8ec54739c1a2484907f59b6319b2e24fc52ff1516
+      RUST_LOG: dumbpipe=info,iroh=info
+    network_mode: service:postgres_b
+    volumes:
+      - iroh-ticket-b:/tunnel:ro
+    depends_on:
+      postgres_b:
+        condition: service_healthy
+      iroh_server_b:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "grep -aq dumbpipe /proc/1/cmdline"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: unless-stopped
+
+volumes:
+  ducklake-shared:
+  postgres-a-data:
+  postgres-b-data:
+  iroh-ticket-a:
+  iroh-ticket-b:

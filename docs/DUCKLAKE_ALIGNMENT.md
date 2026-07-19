@@ -19,6 +19,19 @@ See [NATIVE_BUNDLE.md](./NATIVE_BUNDLE.md).
 
 Remote catalog URLs and URI data paths fail closed today.
 
+## Read-only fan-out evidence
+
+`deploy/quackgis/compose.multi.yaml` adds a separate fixture-scale validation
+profile for immutable local publication. One DuckDB process seeds an official
+DuckLake catalog and external Parquet data volume, exits, and two independent
+DuckDB/Quack workers attach that same storage `READ_ONLY`. Two PostgreSQL edges
+and four concurrent sessions prove equal snapshot, file-set, geometry, extent,
+and bounded-viewport results while the worker mounts reject writes.
+
+This does not change the current authority model and does not close the shared
+profile gate below. There is still one writer authority, and it is stopped
+before readers start.
+
 ## Interoperability contract
 
 A storage claim requires a version-matched independent DuckDB process to discover

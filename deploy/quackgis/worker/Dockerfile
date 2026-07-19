@@ -9,12 +9,14 @@ RUN apt-get update \
 COPY --from=duckdb /duckdb /duckdb
 
 RUN test "$(uname -m)" = x86_64 \
-    && /duckdb -c "INSTALL httpfs; INSTALL quack FROM core_nightly; LOAD quack; INSTALL spatial;" \
+    && /duckdb -c "INSTALL httpfs; INSTALL quack FROM core_nightly; LOAD quack; INSTALL ducklake; INSTALL spatial;" \
     && printf '%s  %s\n' \
         2e020c7e89b11364e413ddfab8b9ca870b1fc0a16eaf612c9445773ef68989ef \
         /root/.duckdb/extensions/v1.5.4/linux_amd64/httpfs.duckdb_extension \
         65d72788a701595f3cd263221b5a8d76c570312e9b8bd989a6b7e0b12c525ae0 \
         /root/.duckdb/extensions/v1.5.4/linux_amd64/quack.duckdb_extension \
+        00f72402c9c5d1f69c3329f38837f4abd100cddb7c69e76650f46bf35a17babe \
+        /root/.duckdb/extensions/v1.5.4/linux_amd64/ducklake.duckdb_extension \
         819a0fa94d2e8257371bb4d97f32c47586b42c85e24bab1bcbf8712a88b8ccfa \
         /root/.duckdb/extensions/v1.5.4/linux_amd64/spatial.duckdb_extension \
         | sha256sum --check --strict

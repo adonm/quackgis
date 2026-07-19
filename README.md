@@ -64,6 +64,20 @@ just quackgis-client-smoke
 just quackgis-down
 ```
 
+To validate one frozen DuckLake catalog/data volume through two read-only
+workers, two independent PostgreSQL edges, and four concurrent clients:
+
+```sh
+just quackgis-multi-clean
+just quackgis-multi-up
+just quackgis-multi-smoke
+just quackgis-multi-down
+```
+
+This fan-out profile is intentionally not a concurrent-writer, scheduler,
+failover, or shared remote-catalog claim. See
+[`deploy/quackgis/README.md`](deploy/quackgis/README.md).
+
 The stack requires Docker Compose or Podman with a Docker Compose provider.
 The first image build needs outbound access. DuckDB and extension artifacts are
 version/checksum-pinned into the built images; runtime containers do not install

@@ -53,6 +53,22 @@ quackgis-transport-smoke:
 quackgis-client-smoke:
     ./scripts/quackgis-client-smoke.sh
 
+# Build and start the isolated shared-DuckLake multi-worker validation profile.
+quackgis-multi-up:
+    ./scripts/quackgis-multi-compose.sh up -d --build
+
+# Verify two read-only workers and four clients see one DuckLake snapshot.
+quackgis-multi-smoke:
+    ./scripts/quackgis-multi-smoke.sh
+
+# Stop the shared-DuckLake validation profile while retaining its volumes.
+quackgis-multi-down:
+    ./scripts/quackgis-multi-compose.sh down
+
+# Stop the shared-DuckLake validation profile and delete its disposable volumes.
+quackgis-multi-clean:
+    ./scripts/quackgis-multi-compose.sh down --volumes
+
 # Stop and remove QuackGIS containers while retaining development volumes.
 quackgis-down:
     ./scripts/quackgis-compose.sh down
