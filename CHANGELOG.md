@@ -7,12 +7,16 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 
 ### Added
 
-- Native work is now ordered through N0, one planned manifest-driven
-  DuckDB/DuckLake/Spatial/QuackGIS bundle with exact compatible source commits,
+- Native work is now ordered through N0. One executable candidate
+  DuckDB/DuckLake/Spatial/QuackGIS bundle manifest pins exact compatible source commits,
   ordered digest-pinned patch queues, one central DuckDB build, an additive
   QuackGIS extension, upstream/product test matrices, immutable artifact trust,
-  licenses/SBOM, and upgrade/rollback evidence. The current DuckLake-only builder
-  remains authoritative until N0 reproduces it. S0 then qualifies official
+  licenses/SBOM, and upgrade/rollback evidence. Exact source preparation and
+  result-tree validation pass; bootstrap, the current DuckLake artifact builder,
+  runtime static checks, Rust digest assertions, and package assembly consume the
+  common authority, and runtime manifests carry path-free bundle/source/patch/
+  toolchain identity. The current artifact remains explicitly marked as a legacy
+  separate build until the central build reproduces it. S0 then qualifies official
   CRS-aware geometry and DuckLake persistence before any narrow type-fidelity
   patch; Q0 separately decides and proves validated keys before OGR-created tables
   or direct-table QGIS can be claimed. Metadata-only keys and a Spatial fork for

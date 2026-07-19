@@ -11,10 +11,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+import native_bundle
 
 ROOT = Path(__file__).resolve().parent.parent
-PIN_PATH = ROOT / "patches/ducklake/pin.json"
-SHA256 = "0123456789abcdef"
 
 
 def file_sha256(path: Path) -> str:
@@ -25,43 +24,30 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def load_pin(path: Path = PIN_PATH) -> dict[str, object]:
-    pin = json.loads(path.read_text(encoding="utf-8"))
-    required = {
-        "schema_version",
-        "upstream_url",
-        "upstream_commit",
-        "duckdb_commit",
-        "patch",
-        "patch_sha256",
-        "artifact_sha256",
-        "platform",
-        "vcpkg_url",
-        "vcpkg_commit",
-        "cmake_version",
-        "ninja_version",
+def load_authority(path: Path = native_bundle.BUNDLE_PATH) -> dict[str, object]:
+    bundle = native_bundle.load_bundle(path.resolve(), ROOT)
+    ducklake = bundle["extensions"]["ducklake"]
+    series = native_bundle.validate_series(bundle, "ducklake", ROOT)
+    if len(series["patches"]) != 1:
+        raise ValueError("legacy DuckLake builder requires exactly one tracked patch")
+    patch = series["patches"][0]
+    provenance = ducklake["artifact"]["build_provenance"]
+    if provenance["model"] != "legacy-separate":
+        raise ValueError("legacy DuckLake builder cannot reproduce a central-build artifact")
+    return {
+        "schema_version": 1,
+        "upstream_url": ducklake["source"]["url"],
+        "upstream_commit": ducklake["source"]["commit"],
+        "duckdb_commit": ducklake["duckdb_commit"],
+        "patch": patch["path"],
+        "patch_sha256": patch["sha256"],
+        "artifact_sha256": ducklake["artifact"]["sha256"],
+        "platform": bundle["platform"],
+        "vcpkg_url": bundle["toolchain"]["vcpkg"]["url"],
+        "vcpkg_commit": provenance["vcpkg_commit"],
+        "cmake_version": provenance["cmake_version"],
+        "ninja_version": provenance["ninja_version"],
     }
-    if set(pin) != required or pin["schema_version"] != 1:
-        raise ValueError("DuckLake pin has an unsupported or incomplete schema")
-    for name in [
-        "upstream_commit",
-        "duckdb_commit",
-        "vcpkg_commit",
-        "patch_sha256",
-        "artifact_sha256",
-    ]:
-        value = pin[name]
-        expected_length = 64 if name.endswith("sha256") else 40
-        if (
-            not isinstance(value, str)
-            or len(value) != expected_length
-            or any(character not in SHA256 for character in value)
-        ):
-            raise ValueError(f"DuckLake pin {name} is not lowercase hexadecimal")
-    patch = ROOT / str(pin["patch"])
-    if not patch.is_file() or file_sha256(patch) != pin["patch_sha256"]:
-        raise ValueError("tracked DuckLake patch is missing or its checksum drifted")
-    return pin
 
 
 def run(command: list[str], *, cwd: Path | None = None) -> None:
@@ -156,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--vcpkg", type=Path, default=ROOT / ".tmp/ref/vcpkg-pinned")
     args = parser.parse_args(argv)
     try:
-        pin = load_pin()
+        pin = load_authority()
         if args.check:
             print(
                 "pinned_ducklake_source_check_ok "

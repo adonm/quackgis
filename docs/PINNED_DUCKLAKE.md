@@ -21,7 +21,9 @@ the artifact and its parent directories read-only to the unprivileged process.
 
 ## Verified source and artifact
 
-`patches/ducklake/pin.json` is the machine-readable authority:
+`native/bundle.json` and `patches/ducklake/series.json` are the machine-readable
+authority. The former records source/core/artifact/toolchain identity; the latter
+records the ordered patch and exact base/result Git trees:
 
 | Input | Pin |
 |---|---|
@@ -33,7 +35,9 @@ the artifact and its parent directories read-only to the unprivileged process.
 The accepted artifact is built below
 `.tmp/ref/quackgis-ducklake/build/release/extension/ducklake/ducklake.duckdb_extension`.
 It was built with GCC 15.2.1, CMake 4.3.3, Ninja 1.13.2, and workspace-local
-vcpkg commit `f87344cac03158cbf1467264565f1fd36b382a24`. The binary digest is evidence
+vcpkg commit `f87344cac03158cbf1467264565f1fd36b382a24`. That legacy separate-build
+provenance remains explicit beside N0's shared candidate toolchain and cannot be
+promoted to an accepted N0 bundle. The binary digest is evidence
 for this artifact, not a promise that builds in different absolute paths or
 build environments are byte-reproducible.
 

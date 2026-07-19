@@ -16,15 +16,17 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
+import native_bundle
 
-VERSION = "1.5.4"
-PLATFORM = "linux-amd64"
+
+BUNDLE = native_bundle.load_bundle()
+DUCKDB = BUNDLE["duckdb"]
+VERSION = str(DUCKDB["version"])
+PLATFORM = str(BUNDLE["platform"])
 ARCHIVE_NAME = f"libduckdb-{PLATFORM}.zip"
-ARCHIVE_URL = (
-    f"https://github.com/duckdb/duckdb/releases/download/v{VERSION}/{ARCHIVE_NAME}"
-)
-ARCHIVE_SHA256 = "838d98a85e697bab9935010c88a8c67d3312ccedcab4cb4a0ba01da65113bb70"
-LIBRARY_SHA256 = "d7f30ef2ef4b813edb94ce82906329cc689672624a4161617ea33431040ce174"
+ARCHIVE_URL = str(DUCKDB["artifact"]["archive_url"])
+ARCHIVE_SHA256 = str(DUCKDB["artifact"]["archive_sha256"])
+LIBRARY_SHA256 = str(DUCKDB["artifact"]["library_sha256"])
 ARCHIVE_MEMBERS = ("libduckdb.so", "duckdb.h", "duckdb.hpp")
 EXTENSIONS = ("ducklake", "spatial")
 

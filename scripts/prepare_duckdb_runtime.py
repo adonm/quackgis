@@ -13,17 +13,19 @@ import subprocess
 import sys
 from pathlib import Path
 
+import native_bundle
 
-VERSION = "1.5.4"
-SPATIAL_REVISION = "28db190"
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DUCKLAKE_PIN = json.loads(
-    (REPO_ROOT / "patches/ducklake/pin.json").read_text(encoding="utf-8")
-)
+BUNDLE = native_bundle.load_bundle()
+VERSION = BUNDLE["duckdb"]["version"]
+DUCKLAKE = BUNDLE["extensions"]["ducklake"]
+SPATIAL = BUNDLE["extensions"]["spatial"]
+DUCKLAKE_SERIES = native_bundle.validate_series(BUNDLE, "ducklake", REPO_ROOT)
+DUCKLAKE_PATCH = DUCKLAKE_SERIES["patches"][0]
 EXPECTED = {
-    "libduckdb.so": "d7f30ef2ef4b813edb94ce82906329cc689672624a4161617ea33431040ce174",
-    "ducklake.duckdb_extension": DUCKLAKE_PIN["artifact_sha256"],
-    "spatial.duckdb_extension": "819a0fa94d2e8257371bb4d97f32c47586b42c85e24bab1bcbf8712a88b8ccfa",
+    "libduckdb.so": BUNDLE["duckdb"]["artifact"]["library_sha256"],
+    "ducklake.duckdb_extension": DUCKLAKE["artifact"]["sha256"],
+    "spatial.duckdb_extension": SPATIAL["artifact"]["sha256"],
 }
 
 
@@ -89,8 +91,8 @@ def prepare(
     if ducklake_extension.is_symlink():
         raise ValueError("pinned DuckLake extension must not be a symlink")
     require_hash(
-        REPO_ROOT / str(DUCKLAKE_PIN["patch"]),
-        str(DUCKLAKE_PIN["patch_sha256"]),
+        REPO_ROOT / str(DUCKLAKE_PATCH["path"]),
+        str(DUCKLAKE_PATCH["sha256"]),
     )
     require_hash(ducklake_extension, EXPECTED["ducklake.duckdb_extension"])
     require_hash(spatial_extension, EXPECTED[spatial_extension.name])
@@ -126,15 +128,15 @@ def prepare(
         "source": source,
         "extensions": {
             "ducklake": {
-                "revision": DUCKLAKE_PIN["upstream_commit"],
-                "source": f"https://github.com/duckdb/ducklake/tree/{DUCKLAKE_PIN['upstream_commit']}",
-                "patch": DUCKLAKE_PIN["patch"],
-                "patch_sha256": DUCKLAKE_PIN["patch_sha256"],
+                "revision": DUCKLAKE["source"]["commit"],
+                "source": f"https://github.com/duckdb/ducklake/tree/{DUCKLAKE['source']['commit']}",
+                "patch": DUCKLAKE_PATCH["path"],
+                "patch_sha256": DUCKLAKE_PATCH["sha256"],
                 "license": "MIT",
             },
             "spatial": {
-                "revision": SPATIAL_REVISION,
-                "source": f"https://github.com/duckdb/duckdb-spatial/tree/{SPATIAL_REVISION}",
+                "revision": SPATIAL["source"]["commit"],
+                "source": f"https://github.com/duckdb/duckdb-spatial/tree/{SPATIAL['source']['commit']}",
                 "license": "MIT plus bundled third-party dependencies",
                 "redistribution": "local-evaluation-only",
                 "bundled_dependencies": [
@@ -164,12 +166,39 @@ def prepare(
                 licenses / "THIRD_PARTY_LICENSES.md"
             ),
         },
+        "native_bundle": runtime_bundle_identity(),
         "runtime_install_allowed": False,
     }
     (out / "artifact-manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
     )
     return manifest
+
+
+def runtime_bundle_identity() -> dict[str, object]:
+    components = {}
+    for name in native_bundle.COMPONENTS:
+        owner = BUNDLE["duckdb"] if name == "duckdb" else BUNDLE["extensions"][name]
+        series = native_bundle.validate_series(BUNDLE, name, REPO_ROOT)
+        components[name] = {
+            "source_url": owner["source"]["url"],
+            "commit": owner["source"]["commit"],
+            "base_tree": owner["source"]["tree"],
+            "result_tree": series["result_tree"],
+            "patches": [
+                {"path": patch["path"], "sha256": patch["sha256"]}
+                for patch in series["patches"]
+            ],
+        }
+    return {
+        "schema_version": BUNDLE["schema_version"],
+        "bundle_id": BUNDLE["bundle_id"],
+        "bundle_sha256": native_bundle.canonical_sha256(BUNDLE),
+        "status": BUNDLE["status"],
+        "components": components,
+        "toolchain": BUNDLE["toolchain"],
+        "build": BUNDLE["build"],
+    }
 
 
 def git_source() -> dict[str, object]:

@@ -4,11 +4,11 @@
 
 from __future__ import annotations
 
-import json
 import pathlib
 import re
 import sys
 
+import native_bundle
 
 EXPECTED_COPIES = {
     "COPY quackgis-server /usr/local/bin/quackgis-server",
@@ -25,9 +25,8 @@ EXPECTED_COPIES = {
     "COPY licenses /opt/quackgis/licenses",
 }
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-PINNED_DUCKLAKE_SHA256 = json.loads(
-    (ROOT / "patches/ducklake/pin.json").read_text(encoding="utf-8")
-)["artifact_sha256"]
+BUNDLE = native_bundle.load_bundle()
+PINNED_DUCKLAKE_SHA256 = BUNDLE["extensions"]["ducklake"]["artifact"]["sha256"]
 FORBIDDEN = ("install ", "curl", "wget", "dnf", "apt-get", "apk ", "ADD ")
 
 

@@ -40,19 +40,20 @@ The current runtime and first N0 authority slice prove part of this model:
   patches in manifest order with `git apply --index`, and verifies each staged
   Git tree against the tracked result tree;
 - DuckDB 1.5.4 and the official Spatial artifact are checksum-pinned;
-- `patches/ducklake/pin.json` pins one DuckLake source, DuckDB submodule, patch,
-  toolchain, and accepted artifact;
-- `scripts/build_pinned_ducklake.py` clones, checks, patches, builds, and tests that
-  exact DuckLake source; and
+- the common bundle and DuckLake series retain the current separately built
+  artifact's exact source, patch, legacy vcpkg/tool, and digest provenance;
+- `scripts/build_pinned_ducklake.py` consumes that common authority to preserve
+  the current clone/check/patch/build/test reproduction path; and
 - runtime assembly verifies immutable native artifacts and performs no online
   extension installation.
 
 The common manifest currently describes a candidate, not an accepted central
-build. Clean common-source preparation now passes, but until the
-build/package and lifecycle matrices pass, the
+build. Clean common-source preparation now passes and all bootstrap, legacy
+builder, compile-time digest, static runtime, and runtime assembly consumers read
+the common authority. Until the central build/package and lifecycle matrices pass, the
 existing DuckLake command remains the supported artifact reproduction path. The
-next N0 slice must make all artifact consumers read the common authority and then
-retire the duplicated DuckLake pin rather than allowing two authorities to drift.
+manifest truthfully marks that accepted DuckLake artifact's build provenance as
+`legacy-separate`; an accepted N0 bundle is forbidden from retaining that model.
 
 ## Source layout
 
@@ -108,6 +109,12 @@ DuckLake and Spatial's embedded DuckDB submodules are deliberately not
 initialized. `native/extension_config.cmake` points their prepared source into the
 single prepared DuckDB checkout, preventing an extension-specific core build from
 becoming an accidental second ABI.
+
+Runtime context assembly projects the bundle ID/digest, exact source/base/result
+trees, ordered patch identities, shared toolchain, and central-build options into
+`artifact-manifest.json`. The projection contains no workspace paths. This binds
+backup/migration/package evidence to the native authority before the central
+artifact build is accepted.
 
 ## Bundle authority
 

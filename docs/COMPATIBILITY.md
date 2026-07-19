@@ -325,7 +325,10 @@ unless a focused test says otherwise.
   base/result trees in CI. `just native-bundle-prepare` now prepares those exact
   three source trees, applies the queue, verifies the staged result trees, and
   refuses dirty/unrecognized reuse without initializing per-extension DuckDB
-  submodules. The central build, package SBOM/license provenance, and the
+  submodules. Bootstrap, the current artifact builder, runtime static checks,
+  compile-time digest tests, and runtime assembly now consume that authority;
+  runtime manifests include its path-free source/patch/toolchain projection and
+  the duplicate DuckLake pin is gone. The central build, package SBOM/license files, and the
   upgrade/rollback matrix remain open. The current
   source/artifact-pinned DuckLake lane remains the evidence floor until N0
   reproduces it. Authoritative CRS expansion belongs

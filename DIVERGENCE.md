@@ -88,13 +88,15 @@ and unexplained edits are not vendored into QuackGIS.
 ### DuckLake column identity
 
 QuackGIS applies `patches/ducklake/ducklake-column-info.patch` to an exact
-DuckLake `v1.5-variegata` commit with an exact DuckDB `v1.5.4` submodule. The
+DuckLake `v1.5-variegata` commit targeting exact DuckDB `v1.5.4`. The
 read-only `ducklake_column_info(catalog)` function exposes current top-level
 base-table schema/table/column identities from the committed snapshot; it does
-not change DuckLake metadata or data writes. `patches/ducklake/pin.json` records
-the upstream, patch, DuckDB, vcpkg, build-tool, platform, and accepted artifact
-pins. `scripts/build_pinned_ducklake.py` validates and reproduces the source/build
-gate. Exact behavior, trust boundaries, and lifecycle evidence are documented in
+not change DuckLake metadata or data writes. `native/bundle.json` and
+`patches/ducklake/series.json` record the upstream/core trees, patch/result tree,
+legacy accepted-artifact build provenance, common candidate toolchain, platform,
+and accepted artifact digest. `scripts/build_pinned_ducklake.py` now consumes
+that common authority while preserving the current artifact reproduction gate.
+Exact behavior, trust boundaries, and lifecycle evidence are documented in
 `docs/PINNED_DUCKLAKE.md`.
 
 Local 1.0 packages the accepted unsigned binary and passes its absolute immutable

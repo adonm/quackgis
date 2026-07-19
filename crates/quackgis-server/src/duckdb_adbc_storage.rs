@@ -3103,12 +3103,12 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn supported_ducklake_digest_matches_the_tracked_artifact_pin() {
-        let pin: serde_json::Value =
-            serde_json::from_str(include_str!("../../../patches/ducklake/pin.json"))
-                .expect("tracked DuckLake pin");
+    fn supported_ducklake_digest_matches_the_native_bundle() {
+        let bundle: serde_json::Value =
+            serde_json::from_str(include_str!("../../../native/bundle.json"))
+                .expect("tracked native bundle");
         assert_eq!(
-            pin["artifact_sha256"].as_str(),
+            bundle["extensions"]["ducklake"]["artifact"]["sha256"].as_str(),
             Some(SUPPORTED_DUCKLAKE_EXTENSION_SHA256)
         );
     }

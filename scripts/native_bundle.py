@@ -170,9 +170,10 @@ def load_bundle(path: Path = BUNDLE_PATH, root: Path = ROOT) -> dict[str, Any]:
         extension = require_keys(extensions[name], expected, f"{name} bundle member")
         if extension["duckdb_commit"] != core_commit:
             raise ValueError(f"{name} targets a different DuckDB commit")
-        artifact = require_keys(
-            extension["artifact"], {"mode", "signed", "sha256"}, f"{name} artifact"
-        )
+        artifact_fields = {"mode", "signed", "sha256"}
+        if name == "ducklake":
+            artifact_fields.add("build_provenance")
+        artifact = require_keys(extension["artifact"], artifact_fields, f"{name} artifact")
         require_hex(artifact["sha256"], HEX64, f"{name} artifact digest")
         if artifact["mode"] not in {"vendor-built", "project-built"}:
             raise ValueError(f"{name} artifact mode is invalid")
@@ -180,6 +181,17 @@ def load_bundle(path: Path = BUNDLE_PATH, root: Path = ROOT) -> dict[str, Any]:
             raise ValueError(f"{name} signed flag must be boolean")
         if artifact["mode"] == "project-built" and artifact["signed"]:
             raise ValueError(f"project-built {name} cannot retain a vendor signature claim")
+        if name == "ducklake":
+            provenance = require_keys(
+                artifact["build_provenance"],
+                {"model", "vcpkg_commit", "cmake_version", "ninja_version", "compiler"},
+                "ducklake artifact build_provenance",
+            )
+            if provenance["model"] not in {"legacy-separate", "central"}:
+                raise ValueError("DuckLake artifact build model is invalid")
+            require_hex(provenance["vcpkg_commit"], HEX40, "DuckLake artifact vcpkg commit")
+            if bundle["status"] == "accepted" and provenance["model"] != "central":
+                raise ValueError("an accepted bundle cannot use legacy separate-build provenance")
 
     quackgis = require_keys(
         bundle["quackgis_extension"], {"enabled", "reason"}, "QuackGIS extension"
