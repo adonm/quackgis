@@ -33,19 +33,31 @@ default:
 quackgis-up:
     ./scripts/quackgis-compose.sh up -d --build
 
-# Verify exact remote rows and read-only role behavior through PostgreSQL.
+# Verify native remote geometry and read-only role behavior through PostgreSQL.
 quackgis-smoke:
     ./scripts/quackgis-smoke.sh
 
-# Print the current QGIS-shaped viewport plan and its explicit P2 blocker.
+# Verify the QGIS, feature-service, tile, and scalar-limit remote plans.
 quackgis-plan:
     ./scripts/quackgis-plan.sh
+
+# Verify OGC Features, dynamic MVT, and an immutable PMTiles-backed revision.
+quackgis-http-smoke:
+    ./scripts/quackgis-http-smoke.sh
+
+# Prove Quack is loopback-only and remote reads fail closed without iroh.
+quackgis-transport-smoke:
+    ./scripts/quackgis-transport-smoke.sh
+
+# Exercise a real GDAL/OGR bbox read and QGIS 3.44 PostgreSQL layer workflow.
+quackgis-client-smoke:
+    ./scripts/quackgis-client-smoke.sh
 
 # Stop and remove QuackGIS containers while retaining development volumes.
 quackgis-down:
     ./scripts/quackgis-compose.sh down
 
-# Stop the QuackGIS and delete its disposable data/extension volumes.
+# Stop QuackGIS and delete its disposable data, ticket, and Caddy volumes.
 quackgis-clean:
     ./scripts/quackgis-compose.sh down --volumes
 

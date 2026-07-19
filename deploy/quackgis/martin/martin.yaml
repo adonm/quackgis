@@ -1,0 +1,31 @@
+base_path: /tiles
+route_prefix: /tiles
+listen_addresses: 0.0.0.0:3000
+on_invalid: abort
+cache: disable
+
+pmtiles:
+  allow_http: false
+  sources:
+    revision-f3f65093582c: /data/pmtiles/test_fixture_1.pmtiles
+
+postgres:
+  connection_string: ${DATABASE_URL}
+  pool_size: 4
+  auto_publish: false
+  auto_bounds: skip
+  reload_interval: 0s
+  functions: {}
+  tables:
+    features:
+      schema: public
+      table: features
+      srid: 4326
+      geometry_column: geom
+      geometry_type: POINT
+      id_column: id
+      layer_id: features
+      bounds: [-123.10, 48.90, -122.90, 49.25]
+      properties:
+        id: int8
+        name: text

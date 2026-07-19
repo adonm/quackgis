@@ -1,0 +1,23 @@
+:8080 {
+	encode zstd gzip
+
+	redir /features /features/ 308
+	handle /features/* {
+		header Cache-Control "no-store"
+		reverse_proxy pg_featureserv:9000
+	}
+
+	redir /tiles /tiles/ 308
+	handle /tiles/revision-* {
+		header Cache-Control "public, max-age=31536000, immutable"
+		reverse_proxy martin:3000
+	}
+	handle /tiles/* {
+		header Cache-Control "no-store"
+		reverse_proxy martin:3000
+	}
+
+	handle {
+		respond "QuackGIS\n" 200
+	}
+}

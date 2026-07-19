@@ -35,8 +35,10 @@ Exit gates:
 - the PostgreSQL backend does not open worker files or object storage; and
 - reconnect and two concurrent readers pass.
 
-The initial `deploy/quackgis/` stack starts this work. Runtime extension downloads are
-development-only and block release packaging.
+The `deploy/quackgis/` stack now passes these fixture-scale gates, including two
+concurrent readers and reconnect through iroh. Exact source/image/artifact pins
+are tracked, and extension installation occurs at image build rather than
+runtime.
 
 ## P2 — geometry and viewport critical path
 
@@ -62,6 +64,10 @@ Exit gates:
 If this requires broad PostgreSQL/PostGIS emulation rather than a narrow FDW
 patch, stop and reevaluate `ogr_fdw` instead of rebuilding the old server.
 
+Fixture-scale native geometry, NULL/error handling, QGIS/GDAL/Martin/featureserv
+bbox translation, exact local recheck, and bounded extent metadata now pass.
+Representative 1M-feature row-group/scan-byte evidence remains the P2 exit gate.
+
 ## P3 — named client proof
 
 **Outcome:** the common live feature contract works with real clients.
@@ -72,6 +78,8 @@ patch, stop and reevaluate `ogr_fdw` instead of rebuilding the old server.
 - Read-only role denial for INSERT/UPDATE/DELETE and unsafe helper functions.
 
 QuackGIS supports GeoServer as an external client; it does not bundle GeoServer.
+QGIS 3.44.11 and GDAL/OGR viewport workflows pass in the development stack;
+external GeoServer qualification remains open.
 
 ## P4 — cacheable edge
 
@@ -91,6 +99,10 @@ Exit gates:
 - PMTiles requests require no PostgreSQL query;
 - authenticated responses are not shared-cacheable by default; and
 - QGIS and a browser client consume advertised endpoints.
+
+The development stack now serves bounded dynamic MVT/TileJSON, required OGC API
+Features, and one immutable PMTiles fixture with the intended cache policy.
+Production TLS, browser integration, and real revision publication remain open.
 
 ## P5 — QuackGIS package
 

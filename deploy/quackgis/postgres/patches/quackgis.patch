@@ -1,5 +1,5 @@
 diff --git a/connection.c b/connection.c
-index d4427cb..b00d3ae 100644
+index d4427cb..d0f37d6 100644
 --- a/connection.c
 +++ b/connection.c
 @@ -433,6 +433,7 @@ duckdb_get_connection(ForeignServer *server, bool truncatable)
@@ -19,7 +19,7 @@ index d4427cb..b00d3ae 100644
          }
  
          /* Quack mode: use in-memory DuckDB if no database specified */
-@@ -476,7 +479,8 @@ duckdb_get_connection(ForeignServer *server, bool truncatable)
+@@ -476,11 +479,11 @@ duckdb_get_connection(ForeignServer *server, bool truncatable)
          /* Quack proxy mode: load Quack extension and ATTACH remote */
          if (quack_host)
          {
@@ -28,8 +28,13 @@ index d4427cb..b00d3ae 100644
 +            char *quack_uri_lit;
              char *attach_sql;
  
-             duckdb_do_sql_command(entry->conn,
-@@ -492,9 +496,16 @@ duckdb_get_connection(ForeignServer *server, bool truncatable)
+-            duckdb_do_sql_command(entry->conn,
+-                "INSTALL quack FROM core_nightly; LOAD quack;", ERROR);
++            duckdb_do_sql_command(entry->conn, "LOAD quack;", ERROR);
+ 
+             if (quack_token)
+             {
+@@ -492,9 +495,16 @@ duckdb_get_connection(ForeignServer *server, bool truncatable)
                  pfree(secret_sql);
              }
  
@@ -48,8 +53,409 @@ index d4427cb..b00d3ae 100644
              pfree(attach_sql);
          }
  	}
+diff --git a/deparse.c b/deparse.c
+index a028716..4c0f8fb 100644
+--- a/deparse.c
++++ b/deparse.c
+@@ -13,10 +13,13 @@
+ #include "postgres.h"
+ #include "duckdb_fdw.h"
+ 
++#include <math.h>
++
+ #include "optimizer/tlist.h"
+ #include "optimizer/optimizer.h"
+ #include "optimizer/clauses.h"
+ #include "parser/parsetree.h"
++#include "parser/parse_func.h"
+ #include "utils/lsyscache.h"
+ 
+ #include "pgtime.h"
+@@ -24,13 +27,16 @@
+ #include "access/htup_details.h"
+ #include "access/sysattr.h"
+ #include "catalog/pg_aggregate.h"
++#include "catalog/pg_cast.h"
+ #include "catalog/pg_collation.h"
+ #include "catalog/pg_namespace.h"
+ #include "catalog/pg_operator.h"
+ #include "catalog/pg_proc.h"
+ #include "catalog/pg_type.h"
+ #include "commands/defrem.h"
++#include "commands/extension.h"
+ #include "nodes/nodeFuncs.h"
++#include "nodes/makefuncs.h"
+ #include "nodes/plannodes.h"
+ #include "optimizer/clauses.h"
+ #include "optimizer/tlist.h"
+@@ -162,6 +168,28 @@ static bool duckdb_contain_immutable_functions_walker(Node *node, void *context)
+ static bool duckdb_is_valid_type(Oid type);
+ static bool duckdb_is_builtin(Oid objectId);
+ 
++typedef struct DuckDBBboxClause
++{
++    Var *geom_var;
++    AttrNumber minx_attnum;
++    AttrNumber miny_attnum;
++    AttrNumber maxx_attnum;
++    AttrNumber maxy_attnum;
++    double xmin;
++    double ymin;
++    double xmax;
++    double ymax;
++} DuckDBBboxClause;
++
++static Oid duckdb_postgis_namespace_oid(void);
++static Oid duckdb_postgis_type_oid(const char *typname);
++static Oid duckdb_postgis_function_oid(Oid namespace_oid, const char *funcname,
++                                        int nargs, Oid *argtypes);
++static bool duckdb_match_bbox_clause(PlannerInfo *root, RelOptInfo *baserel,
++                                     Expr *expr, DuckDBBboxClause *bbox);
++static bool duckdb_deparse_bbox_clause(Expr *expr,
++                                       deparse_expr_cxt *context);
++
+ /*
+  * Append remote name of specified foreign table to buf.
+  * Use value of table_name FDW option (if any) instead of relation's name.
+@@ -278,6 +306,275 @@ duckdb_quote_identifier(const char *s, char q)
+ 	return result;
+ }
+ 
++static Oid
++duckdb_postgis_namespace_oid(void)
++{
++    Oid extension_oid = get_extension_oid("postgis", true);
++
++    if (!OidIsValid(extension_oid))
++        return InvalidOid;
++    return get_extension_schema(extension_oid);
++}
++
++static Oid
++duckdb_postgis_type_oid(const char *typname)
++{
++    Oid namespace_oid = duckdb_postgis_namespace_oid();
++
++    if (!OidIsValid(namespace_oid))
++        return InvalidOid;
++    return GetSysCacheOid2(TYPENAMENSP, Anum_pg_type_oid,
++                           CStringGetDatum(typname),
++                           ObjectIdGetDatum(namespace_oid));
++}
++
++static Oid
++duckdb_postgis_function_oid(Oid namespace_oid, const char *funcname,
++                            int nargs, Oid *argtypes)
++{
++    char *namespace_name;
++    List *qualified_name;
++    Oid function_oid;
++
++    namespace_name = get_namespace_name(namespace_oid);
++    if (namespace_name == NULL)
++        return InvalidOid;
++    qualified_name = list_make2(makeString(namespace_name),
++                                makeString(pstrdup(funcname)));
++    function_oid = LookupFuncName(qualified_name, nargs, argtypes, true);
++    list_free_deep(qualified_name);
++    return function_oid;
++}
++
++static bool
++duckdb_match_bbox_clause(PlannerInfo *root, RelOptInfo *baserel,
++                         Expr *expr, DuckDBBboxClause *bbox)
++{
++    OpExpr *op;
++    FuncExpr *function;
++    List *args;
++    Expr *left;
++    Expr *right;
++    Var *geom_var;
++    Const *geom_const;
++    HeapTuple operator_tuple;
++    Form_pg_operator operator_form;
++    HeapTuple function_tuple;
++    Form_pg_proc function_form;
++    Oid geometry_oid;
++    Oid box2d_oid;
++    Oid namespace_oid;
++    Oid argtypes[1];
++    Oid srid_function;
++    Oid typmod_srid_function;
++    HeapTuple cast_tuple;
++    Form_pg_cast cast_form;
++    Datum box_datum;
++    Oid box_output;
++    bool box_output_varlena;
++    char *box_text;
++    int parsed_length = 0;
++    int column_srid;
++    int constant_srid;
++    RangeTblEntry *rte;
++    DuckDBBboxClause matched;
++
++    if (root == NULL || baserel == NULL || expr == NULL ||
++        !IS_SIMPLE_REL(baserel))
++        return false;
++
++    geometry_oid = duckdb_postgis_type_oid("geometry");
++    namespace_oid = duckdb_postgis_namespace_oid();
++    if (!OidIsValid(geometry_oid) || !OidIsValid(namespace_oid))
++        return false;
++
++    if (IsA(expr, OpExpr))
++    {
++        op = (OpExpr *) expr;
++        operator_tuple = SearchSysCache1(OPEROID, ObjectIdGetDatum(op->opno));
++        if (!HeapTupleIsValid(operator_tuple))
++            return false;
++        operator_form = (Form_pg_operator) GETSTRUCT(operator_tuple);
++        if (strcmp(NameStr(operator_form->oprname), "&&") != 0 ||
++            operator_form->oprleft != geometry_oid ||
++            operator_form->oprright != geometry_oid)
++        {
++            ReleaseSysCache(operator_tuple);
++            return false;
++        }
++        ReleaseSysCache(operator_tuple);
++        args = op->args;
++    }
++    else if (IsA(expr, FuncExpr))
++    {
++        function = (FuncExpr *) expr;
++        function_tuple = SearchSysCache1(
++            PROCOID, ObjectIdGetDatum(function->funcid));
++        if (!HeapTupleIsValid(function_tuple))
++            return false;
++        function_form = (Form_pg_proc) GETSTRUCT(function_tuple);
++        if (strcmp(NameStr(function_form->proname), "st_intersects") != 0 ||
++            function_form->pronamespace != namespace_oid ||
++            function_form->pronargs != 2 ||
++            function_form->proargtypes.values[0] != geometry_oid ||
++            function_form->proargtypes.values[1] != geometry_oid)
++        {
++            ReleaseSysCache(function_tuple);
++            return false;
++        }
++        ReleaseSysCache(function_tuple);
++        args = function->args;
++    }
++    else
++        return false;
++
++    if (list_length(args) != 2)
++        return false;
++    left = (Expr *) linitial(args);
++    right = (Expr *) lsecond(args);
++    if (IsA(left, Var) && IsA(right, Const))
++    {
++        geom_var = (Var *) left;
++        geom_const = (Const *) right;
++    }
++    else if (IsA(left, Const) && IsA(right, Var))
++    {
++        geom_var = (Var *) right;
++        geom_const = (Const *) left;
++    }
++    else
++        return false;
++
++    if (geom_var->varlevelsup != 0 || geom_var->varattno <= 0 ||
++        !bms_is_member(geom_var->varno, baserel->relids) ||
++        geom_var->vartype != geometry_oid || geom_var->vartypmod < 0 ||
++        geom_const->constisnull || geom_const->consttype != geometry_oid)
++        return false;
++
++    rte = planner_rt_fetch(geom_var->varno, root);
++    if (rte->rtekind != RTE_RELATION || !OidIsValid(rte->relid) ||
++        get_atttype(rte->relid, geom_var->varattno) != geometry_oid)
++        return false;
++
++    matched.geom_var = geom_var;
++    matched.minx_attnum = get_attnum(rte->relid, "minx");
++    matched.miny_attnum = get_attnum(rte->relid, "miny");
++    matched.maxx_attnum = get_attnum(rte->relid, "maxx");
++    matched.maxy_attnum = get_attnum(rte->relid, "maxy");
++    if (matched.minx_attnum == InvalidAttrNumber ||
++        matched.miny_attnum == InvalidAttrNumber ||
++        matched.maxx_attnum == InvalidAttrNumber ||
++        matched.maxy_attnum == InvalidAttrNumber ||
++        get_atttype(rte->relid, matched.minx_attnum) != FLOAT8OID ||
++        get_atttype(rte->relid, matched.miny_attnum) != FLOAT8OID ||
++        get_atttype(rte->relid, matched.maxx_attnum) != FLOAT8OID ||
++        get_atttype(rte->relid, matched.maxy_attnum) != FLOAT8OID)
++        return false;
++
++    box2d_oid = duckdb_postgis_type_oid("box2d");
++    if (!OidIsValid(namespace_oid) || !OidIsValid(box2d_oid))
++        return false;
++
++    argtypes[0] = geometry_oid;
++    srid_function = duckdb_postgis_function_oid(
++        namespace_oid, "st_srid", 1, argtypes);
++    argtypes[0] = INT4OID;
++    typmod_srid_function = duckdb_postgis_function_oid(
++        namespace_oid, "postgis_typmod_srid", 1, argtypes);
++    if (!OidIsValid(srid_function) || !OidIsValid(typmod_srid_function))
++        return false;
++
++    column_srid = DatumGetInt32(OidFunctionCall1(
++        typmod_srid_function, Int32GetDatum(geom_var->vartypmod)));
++    constant_srid = DatumGetInt32(OidFunctionCall1(
++        srid_function, geom_const->constvalue));
++    if (column_srid <= 0 || constant_srid != column_srid)
++        return false;
++
++    cast_tuple = SearchSysCache2(CASTSOURCETARGET,
++                                 ObjectIdGetDatum(geometry_oid),
++                                 ObjectIdGetDatum(box2d_oid));
++    if (!HeapTupleIsValid(cast_tuple))
++        return false;
++    cast_form = (Form_pg_cast) GETSTRUCT(cast_tuple);
++    if (!OidIsValid(cast_form->castfunc))
++    {
++        ReleaseSysCache(cast_tuple);
++        return false;
++    }
++    box_datum = OidFunctionCall1(cast_form->castfunc, geom_const->constvalue);
++    ReleaseSysCache(cast_tuple);
++
++    getTypeOutputInfo(box2d_oid, &box_output, &box_output_varlena);
++    box_text = OidOutputFunctionCall(box_output, box_datum);
++    if (sscanf(box_text, "BOX(%lf %lf,%lf %lf)%n",
++               &matched.xmin, &matched.ymin,
++               &matched.xmax, &matched.ymax,
++               &parsed_length) != 4 ||
++        box_text[parsed_length] != '\0' ||
++        !isfinite(matched.xmin) || !isfinite(matched.ymin) ||
++        !isfinite(matched.xmax) || !isfinite(matched.ymax) ||
++        matched.xmin > matched.xmax || matched.ymin > matched.ymax)
++    {
++        pfree(box_text);
++        return false;
++    }
++    pfree(box_text);
++
++    if (bbox != NULL)
++        *bbox = matched;
++    return true;
++}
++
++static void
++duckdb_append_float8_literal(StringInfo buf, double value)
++{
++    Oid output_function;
++    bool output_varlena;
++    char *value_text;
++
++    getTypeOutputInfo(FLOAT8OID, &output_function, &output_varlena);
++    value_text = OidOutputFunctionCall(output_function, Float8GetDatum(value));
++    appendStringInfoString(buf, value_text);
++    pfree(value_text);
++}
++
++static bool
++duckdb_deparse_bbox_clause(Expr *expr, deparse_expr_cxt *context)
++{
++    DuckDBBboxClause bbox;
++    StringInfo buf = context->buf;
++    Index varno;
++
++    if (!duckdb_match_bbox_clause(context->root, context->scanrel,
++                                  expr, &bbox))
++        return false;
++
++    varno = bbox.geom_var->varno;
++    appendStringInfoString(buf, "((");
++    duckdb_deparse_column_ref(buf, varno, bbox.minx_attnum,
++                              context->root, false);
++    appendStringInfoString(buf, " <= ");
++    duckdb_append_float8_literal(buf, bbox.xmax);
++    appendStringInfoString(buf, ") AND (");
++    duckdb_deparse_column_ref(buf, varno, bbox.maxx_attnum,
++                              context->root, false);
++    appendStringInfoString(buf, " >= ");
++    duckdb_append_float8_literal(buf, bbox.xmin);
++    appendStringInfoString(buf, ") AND (");
++    duckdb_deparse_column_ref(buf, varno, bbox.miny_attnum,
++                              context->root, false);
++    appendStringInfoString(buf, " <= ");
++    duckdb_append_float8_literal(buf, bbox.ymax);
++    appendStringInfoString(buf, ") AND (");
++    duckdb_deparse_column_ref(buf, varno, bbox.maxy_attnum,
++                              context->root, false);
++    appendStringInfoString(buf, " >= ");
++    duckdb_append_float8_literal(buf, bbox.ymin);
++    appendStringInfoString(buf, "))");
++    return true;
++}
++
+ /*
+  * Returns true if given expr is safe to evaluate on the foreign server.
+  */
+@@ -1912,6 +2209,9 @@ duckdb_deparse_target_list(StringInfo buf,
+ 	bool		have_wholerow;
+ 	bool		first;
+ 	int			i;
++    Oid         geometry_oid;
++
++    geometry_oid = duckdb_postgis_type_oid("geometry");
+ 
+ 	/* If there's a whole-row reference, we'll need all the columns. */
+ 	have_wholerow = bms_is_member(0 - FirstLowInvalidHeapAttributeNumber,
+@@ -1952,7 +2252,13 @@ duckdb_deparse_target_list(StringInfo buf,
+              * to serialize them to text. Otherwise duckdb_value_varchar may return NULL.
+              * We do this by wrapping the column in a CAST(... AS VARCHAR).
+              */
+-			                        if (attr->atttypid == INT4OID || 
++            if (OidIsValid(geometry_oid) && attr->atttypid == geometry_oid)
++            {
++                appendStringInfoString(buf, "hex(");
++                duckdb_deparse_column_ref(buf, rtindex, i, root, qualify_col);
++                appendStringInfoChar(buf, ')');
++            }
++			else if (attr->atttypid == INT4OID ||
+ 			                attr->atttypid == INT8OID || 
+ 			                attr->atttypid == FLOAT8OID || 
+ 			                attr->atttypid == BOOLOID ||
+@@ -2784,6 +3090,11 @@ duckdb_deparse_func_expr(FuncExpr *node, deparse_expr_cxt *context)
+ 	bool		first;
+ 	ListCell   *arg;
+ 
++    if (duckdb_deparse_bbox_clause((Expr *) node, context))
++    {
++        return;
++    }
++
+ 	/*
+ 	 * If the function call came from an implicit coercion, then just show the
+ 	 * first argument.
+@@ -2852,6 +3163,11 @@ duckdb_deparse_op_expr(OpExpr *node, deparse_expr_cxt *context)
+ 	Form_pg_operator form;
+ 	char		oprkind;
+ 
++    if (duckdb_deparse_bbox_clause((Expr *) node, context))
++    {
++        return;
++    }
++
+ 	/* Retrieve information about the operator from system catalog. */
+ 	tuple = SearchSysCache1(OPEROID, ObjectIdGetDatum(node->opno));
+ 	if (!HeapTupleIsValid(tuple))
+@@ -4011,6 +4327,11 @@ duckdb_classify_conditions(PlannerInfo *root,
+ 
+ 		if (duckdb_is_foreign_expr(root, baserel, ri->clause))
+ 			*remote_conds = lappend(*remote_conds, ri);
++        else if (duckdb_match_bbox_clause(root, baserel, ri->clause, NULL))
++        {
++            *remote_conds = lappend(*remote_conds, ri);
++            *local_conds = lappend(*local_conds, ri);
++        }
+ 		else
+ 			*local_conds = lappend(*local_conds, ri);
+ 	}
 diff --git a/duckdb_fdw.c b/duckdb_fdw.c
-index 142a1db..a0b6f77 100644
+index 142a1db..8704cf3 100644
 --- a/duckdb_fdw.c
 +++ b/duckdb_fdw.c
 @@ -26,6 +26,9 @@
@@ -82,7 +488,117 @@ index 142a1db..a0b6f77 100644
                                       startup_cost,
                                       total_cost,
                                       NIL,   /* no pathkeys */
-@@ -898,6 +907,9 @@ duckdbGetForeignUpperPaths(PlannerInfo *root, UpperRelationKind stage,
+@@ -577,6 +586,41 @@ duckdbGetForeignPaths(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntableid
+                                      NIL)); /* no fdw_private */
+ }
+ 
++static bool
++duckdb_can_pushdown_limit(PlannerInfo *root, RelOptInfo *baserel)
++{
++    Query *query = root->parse;
++    DuckDBFdwRelationInfo *fpinfo;
++    Const *limit_count;
++    RangeTblRef *from_ref;
++
++    if (!IS_SIMPLE_REL(baserel) || baserel->fdw_private == NULL ||
++        query->jointree == NULL ||
++        list_length(query->jointree->fromlist) != 1 ||
++        !IsA(linitial(query->jointree->fromlist), RangeTblRef))
++        return false;
++
++    from_ref = (RangeTblRef *) linitial(query->jointree->fromlist);
++    if (from_ref->rtindex != baserel->relid)
++        return false;
++
++    fpinfo = (DuckDBFdwRelationInfo *) baserel->fdw_private;
++    if (fpinfo->local_conds != NIL || query->commandType != CMD_SELECT ||
++        query->limitCount == NULL || query->limitOffset != NULL ||
++        query->limitOption != LIMIT_OPTION_COUNT ||
++        query->sortClause != NIL || query->distinctClause != NIL ||
++        query->groupClause != NIL || query->groupingSets != NIL ||
++        query->havingQual != NULL || query->windowClause != NIL ||
++        query->setOperations != NULL || query->rowMarks != NIL ||
++        query->hasAggs || query->hasWindowFuncs || query->hasTargetSRFs ||
++        query->hasSubLinks ||
++        !IsA(query->limitCount, Const))
++        return false;
++
++    limit_count = (Const *) query->limitCount;
++    return limit_count->consttype == INT8OID && !limit_count->constisnull;
++}
++
+ static ForeignScan *
+ duckdbGetForeignPlan(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntableid,
+                      ForeignPath *best_path, List *tlist, List *scan_clauses,
+@@ -615,7 +659,10 @@ duckdbGetForeignPlan(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntableid,
+         deparse_tlist = duckdb_build_tlist_to_deparse(baserel);
+     }
+ 
+-    duckdb_deparse_select_stmt_for_rel(&sql, root, baserel, deparse_tlist, fpinfo->remote_conds, NIL, false, false, false, &retrieved_attrs, &params_list);
++    duckdb_deparse_select_stmt_for_rel(
++        &sql, root, baserel, deparse_tlist, fpinfo->remote_conds, NIL,
++        false, duckdb_can_pushdown_limit(root, baserel), false,
++        &retrieved_attrs, &params_list);
+ 
+     fdw_private = list_make4(makeString(sql.data),
+                              retrieved_attrs,
+@@ -676,7 +723,7 @@ duckdbBeginForeignScan(ForeignScanState *node, int eflags)
+ }
+ 
+ static Datum
+-duckdb_value_to_pg(DuckDBFdwExecState *festate, int col_idx, uint64_t global_row, Oid pgtype)
++duckdb_value_to_pg(DuckDBFdwExecState *festate, int col_idx, uint64_t global_row, Oid pgtype, int32 pgtypmod)
+ {
+     if (duckdb_value_is_null(&festate->res, col_idx, global_row))
+         return (Datum)0;
+@@ -724,7 +771,7 @@ duckdb_value_to_pg(DuckDBFdwExecState *festate, int col_idx, uint64_t global_row
+             else {
+                 Oid typinput, typioparam;
+                 getTypeInputInfo(pgtype, &typinput, &typioparam);
+-                res = OidInputFunctionCall(typinput, s, typioparam, -1);
++                res = OidInputFunctionCall(typinput, s, typioparam, pgtypmod);
+             }
+             duckdb_free(s);
+             return res;
+@@ -741,6 +788,11 @@ duckdbIterateForeignScan(ForeignScanState *node)
+ 	    int         i;
+ 
+     ExecClearTuple(slot);
++    for (i = 0; i < slot->tts_tupleDescriptor->natts; i++)
++    {
++        slot->tts_values[i] = (Datum) 0;
++        slot->tts_isnull[i] = true;
++    }
+ 
+ 	    if (festate->use_chunk_scan)
+ 		{
+@@ -765,6 +817,7 @@ duckdbIterateForeignScan(ForeignScanState *node)
+ 	        if (attnum_pg > 0 && attnum_pg <= slot->tts_tupleDescriptor->natts) {
+ 	            int attnum_idx = attnum_pg - 1;
+ 	            Oid pgtype = TupleDescAttr(festate->tupdesc, attnum_idx)->atttypid;
++            int32 pgtypmod = TupleDescAttr(festate->tupdesc, attnum_idx)->atttypmod;
+ 				bool	isnull = false;
+ 				Datum	dvalue = (Datum) 0;
+ 
+@@ -807,7 +860,7 @@ duckdbIterateForeignScan(ForeignScanState *node)
+ 								dvalue = Int64GetDatum(((duckdb_timestamp *) data)[row].micros - DUCKDB_EPOCH_DIFF_MICROS);
+ 								break;
+ 							default:
+-								dvalue = duckdb_value_to_pg(festate, i, festate->global_row_idx, pgtype);
++								dvalue = duckdb_value_to_pg(festate, i, festate->global_row_idx, pgtype, pgtypmod);
+ 								break;
+ 						}
+ 					}
+@@ -818,7 +871,7 @@ duckdbIterateForeignScan(ForeignScanState *node)
+ 				}
+ 				else
+ 				{
+-					dvalue = duckdb_value_to_pg(festate, i, festate->current_chunk_row_idx, pgtype);
++					dvalue = duckdb_value_to_pg(festate, i, festate->current_chunk_row_idx, pgtype, pgtypmod);
+ 				}
+ 
+ 				slot->tts_isnull[attnum_idx] = isnull;
+@@ -898,6 +951,9 @@ duckdbGetForeignUpperPaths(PlannerInfo *root, UpperRelationKind stage,
                   create_foreignscan_path(root, output_rel,
                                            output_rel->reltarget,
                                            rows,
@@ -92,7 +608,7 @@ index 142a1db..a0b6f77 100644
                                            startup_cost,
                                            total_cost,
                                            NIL,
-@@ -1069,7 +1081,7 @@ duckdbEndForeignModify(EState *executor, ResultRelInfo *resultRelInfo)
+@@ -1069,7 +1125,7 @@ duckdbEndForeignModify(EState *executor, ResultRelInfo *resultRelInfo)
  }
  
  static void

@@ -1,0 +1,23 @@
+[Server]
+HttpHost = "0.0.0.0"
+HttpPort = 9000
+BasePath = "/features"
+CORSOrigins = "*"
+AssetsPath = "./assets"
+ReadTimeoutSec = 5
+WriteTimeoutSec = 30
+
+[Database]
+DbPoolMaxConnLifeTime = "1h"
+DbPoolMaxConns = 4
+TableIncludes = ["public.features"]
+TableExcludes = []
+FunctionIncludes = []
+
+[Paging]
+LimitDefault = 20
+LimitMax = 1000
+
+[Metadata]
+Title = "QuackGIS OGC API Features"
+Description = "Read-only QuackGIS features"

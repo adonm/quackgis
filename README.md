@@ -21,14 +21,16 @@ HTTP clients ──► Caddy ──┬──► Martin (MVT, TileJSON, PMTiles)
 
 ## Status
 
-**Architecture reset / proof of concept.** The previous owned Rust pgwire and
+**Architecture reset / working proof of concept.** The previous owned Rust pgwire and
 PostGIS-emulation implementation is preserved in Git history at `17a7710`. It is
 not the implementation direction of this branch.
 
-The first gate is intentionally narrow: prove that `duckdb_fdw` can reach a
-DuckDB worker over Quack, transport geometry with an authoritative SRID, and push
-a QGIS-style bounding-box predicate to the worker. Until that passes, QuackGIS
-does not claim a usable remote spatial layer.
+The critical path now passes in the development stack: `duckdb_fdw` reaches a
+DuckDB worker through a loopback iroh tunnel, transports native WKB as
+`geometry(Point,4326)`, and pushes QGIS, GDAL/OGR, Martin, and
+`pg_featureserv` bbox candidates to the worker while retaining exact PostGIS
+rechecks. Real QGIS 3.44 and GDAL/OGR clients, OGC API Features, dynamic MVT,
+TileJSON, and an immutable PMTiles fixture are exercised end to end.
 
 ## First release
 
@@ -52,19 +54,20 @@ translation, and a general-purpose control plane are post-first-release work.
 
 ## Start the current proof of concept
 
-The current stack proves scalar Quack reads and a temporary WKT-to-PostGIS
-geometry bridge. It does **not** yet satisfy the bbox-pushdown gate.
-
 ```sh
 just quackgis-up
 just quackgis-smoke
 just quackgis-plan
+just quackgis-http-smoke
+just quackgis-transport-smoke
+just quackgis-client-smoke
 just quackgis-down
 ```
 
-The stack requires Docker Compose or Podman with a Docker Compose provider. It
-downloads DuckDB's experimental Quack extension during this proof of concept;
-production packaging must pin and preinstall every extension.
+The stack requires Docker Compose or Podman with a Docker Compose provider.
+The first image build needs outbound access. DuckDB and extension artifacts are
+version/checksum-pinned into the built images; runtime containers do not install
+extensions. Current extension checksums are `linux_amd64` only.
 
 Read:
 

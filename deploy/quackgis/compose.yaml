@@ -2,7 +2,9 @@ name: quackgis
 
 services:
   worker:
-    image: docker.io/duckdb/duckdb:1.5.4
+    image: quackgis-worker:1.5.4
+    build:
+      context: ./worker
     stdin_open: true
     command:
       - /duckdb
@@ -11,10 +13,30 @@ services:
       - /config/init.sql
     volumes:
       - worker-data:/data
-      - worker-extensions:/root/.duckdb
       - ./worker/init.sql:/config/init.sql:ro,Z
-    expose:
-      - "9494"
+    restart: unless-stopped
+
+  iroh_server:
+    image: quackgis-iroh:0.39.0
+    build:
+      context: ./iroh
+      args:
+        DUMBPIPE_VERSION: 0.39.0
+    command: ["/usr/local/bin/listen.sh"]
+    user: "0:0"
+    environment:
+      IROH_SECRET: 3b9e768b70a4c59e57342dd894afe67a302072399b99959c2548244e120d5c04
+      RUST_LOG: dumbpipe=info,iroh=info
+    network_mode: service:worker
+    volumes:
+      - iroh-ticket:/tunnel
+    depends_on:
+      - worker
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /tunnel/worker.ticket"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
     restart: unless-stopped
 
   postgres:
@@ -36,13 +58,90 @@ services:
     depends_on:
       - worker
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d quackgis"]
+      test: ["CMD-SHELL", "test \"$(psql -XAt -U postgres -d quackgis -c \"SELECT (to_regclass('public.features') IS NOT NULL)::int\" 2>/dev/null)\" = 1"]
       interval: 2s
       timeout: 3s
       retries: 30
     restart: unless-stopped
 
+  iroh_client:
+    image: quackgis-iroh:0.39.0
+    build:
+      context: ./iroh
+      args:
+        DUMBPIPE_VERSION: 0.39.0
+    command: ["/usr/local/bin/connect.sh"]
+    environment:
+      IROH_SECRET: d9b9227e770f662ce90fb403971899414bc9fa3353379e61204e280e2c470060
+      RUST_LOG: dumbpipe=info,iroh=info
+    network_mode: service:postgres
+    volumes:
+      - iroh-ticket:/tunnel:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      iroh_server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "grep -aq dumbpipe /proc/1/cmdline"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: unless-stopped
+
+  pg_featureserv:
+    image: quackgis-pg_featureserv:1.3.1
+    build:
+      context: ./pg_featureserv
+      args:
+        PG_FEATURESERV_COMMIT: 2f1bd809f2c745d6d332495ee336f604f3ad9063
+    command: ["--config", "/config/pg_featureserv.toml"]
+    environment:
+      DATABASE_URL: postgresql://quackgis_features:quackgis-features-dev@postgres:5432/quackgis?sslmode=disable&search_path=feature_metadata%2Cpublic
+    volumes:
+      - ./pg_featureserv/pg_featureserv.toml:/config/pg_featureserv.toml:ro,Z
+    expose:
+      - "9000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      iroh_client:
+        condition: service_healthy
+    restart: unless-stopped
+
+  martin:
+    image: ghcr.io/maplibre/martin:1.12.0@sha256:6cb9f6fbe3f3aa9d76841120ac02ba562037bd2d303f38a93e80764298a0d21f
+    command: ["--config", "/config/martin.yaml"]
+    environment:
+      DATABASE_URL: postgresql://quackgis_tiles:quackgis-tiles-dev@postgres:5432/quackgis?sslmode=disable
+    volumes:
+      - ./martin/martin.yaml:/config/martin.yaml:ro,Z
+      - ./martin/fixtures:/data/pmtiles:ro,Z
+    expose:
+      - "3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      iroh_client:
+        condition: service_healthy
+    restart: unless-stopped
+
+  caddy:
+    image: docker.io/library/caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro,Z
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - pg_featureserv
+      - martin
+    restart: unless-stopped
+
 volumes:
   worker-data:
-  worker-extensions:
   postgres-data:
+  iroh-ticket:
+  caddy-data:
+  caddy-config:

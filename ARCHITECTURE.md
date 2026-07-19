@@ -19,9 +19,8 @@ PostgreSQL catalogs, or PostGIS functions.
 │                                iroh tunnel/proxy                 │
 │                                                                 │
 │  Caddy :443                                                     │
-│    /tiles/*    ──► Martin                                       │
+│    /tiles/*    ──► Martin (dynamic and PMTiles-backed)           │
 │    /features/* ──► pg_featureserv                               │
-│    /archives/* ──► immutable static PMTiles                     │
 │                                                                 │
 └──────────────────────────────────────┬──────────────────────────┘
                                        │ iroh
@@ -32,6 +31,13 @@ PostgreSQL catalogs, or PostGIS functions.
 PostgreSQL may be exposed separately on port 5432. Martin,
 `pg_featureserv`, PostgreSQL administration, and the local Quack/iroh endpoint
 remain on the private deployment network.
+
+The development implementation under `deploy/quackgis/` enforces the transport
+shape with two `dumbpipe` 0.39.0 sidecars: Quack listens only on worker
+loopback, and `duckdb_fdw` attaches only to PostgreSQL loopback. Stopping the
+client sidecar makes new remote reads fail; direct `worker:9494` connections are
+refused. This proves the seam, not the final production client-identity or relay
+policy.
 
 ## Component ownership
 
@@ -94,6 +100,14 @@ Every published layer has:
 Geometry crosses the FDW boundary as WKB/EWKB, not lossy WKT. PostgreSQL exposes
 a native `geometry(<type>, <srid>)` column. A layer with missing or conflicting
 CRS/type metadata fails publication.
+
+Published extents are local edge metadata, not a cold aggregate over the remote
+geometry column. The development stack gives only the direct-client and feature
+roles a narrow `ST_EstimatedExtent(text,text,text)` search-path function backed
+by the allowlisted layer registry. `pg_featureserv` loads that value for its
+catalog. Missing metadata falls back to a conservative world box rather than an
+unbounded `ST_Extent` scan; publication is responsible for installing the exact
+revision extent.
 
 The minimum translated spatial shape is the expression used by QGIS and tile
 servers:

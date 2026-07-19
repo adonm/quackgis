@@ -1,6 +1,4 @@
-INSTALL quack FROM core_nightly;
 LOAD quack;
-INSTALL spatial;
 LOAD spatial;
 
 CREATE TABLE IF NOT EXISTS features (
@@ -19,11 +17,24 @@ INSERT OR REPLACE INTO features VALUES
   (3, 'south', ST_GeomFromText('POINT(-123.05 48.90)'), -123.05, 48.90, -123.05, 48.90);
 
 CREATE OR REPLACE VIEW features_export AS
-SELECT id, name, ST_AsText(geom) AS geom_wkt, minx, miny, maxx, maxy
+SELECT id, name, ST_AsWKB(geom) AS geom, minx, miny, maxx, maxy
 FROM features;
 
+CREATE OR REPLACE VIEW geometry_contract_export AS
+SELECT 1::BIGINT AS id, ST_AsWKB(ST_GeomFromText('POINT(-123.10 49.20)')) AS geom
+UNION ALL
+SELECT 2::BIGINT AS id, NULL::BLOB AS geom;
+
+CREATE OR REPLACE VIEW geometry_malformed_export AS
+SELECT 1::BIGINT AS id, from_hex('00') AS geom;
+
+CREATE OR REPLACE VIEW geometry_wrong_family_export AS
+SELECT
+  1::BIGINT AS id,
+  ST_AsWKB(ST_GeomFromText('POLYGON((-123 49,-122 49,-122 50,-123 49))')) AS geom;
+
 CALL quack_serve(
-  'quack://0.0.0.0:9494',
+  'quack://127.0.0.1:9494',
   token = 'quackgis-dev-token',
-  allow_other_hostname = true
+  allow_other_hostname = false
 );

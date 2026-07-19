@@ -25,9 +25,13 @@ This branch is implementing the real-PostgreSQL QuackGIS direction described in
 just quackgis-up
 just quackgis-smoke
 just quackgis-plan
+just quackgis-http-smoke
+just quackgis-transport-smoke
+just quackgis-client-smoke
 just quackgis-down
 ```
 
-`just quackgis-plan` currently records the missing spatial pushdown rather than
-claiming success. The P2 gate in [ROADMAP.md](ROADMAP.md) closes only when native
-PostGIS geometry and remote bbox filtering pass.
+`just quackgis-plan` fails unless QGIS, GDAL/OGR, Martin, and
+`pg_featureserv` viewport shapes contain worker-side bbox candidates and a
+simple scalar `LIMIT` is remote. The P2 scale gate remains open until the same
+contract and scan-byte bounds pass on representative million-feature data.

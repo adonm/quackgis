@@ -1,0 +1,44 @@
+diff --git a/internal/data/catalog_db.go b/internal/data/catalog_db.go
+index 5603d92..173545e 100644
+--- a/internal/data/catalog_db.go
++++ b/internal/data/catalog_db.go
+@@ -277,6 +277,12 @@ func (cat *catalogDB) readTables(db *pgxpool.Pool) map[string]*Table {
+ 		log.Fatal(err)
+ 	}
+ 	rows.Close()
++	for _, tbl := range tables {
++		isExtentLoaded := cat.loadExtent(sqlExtentEstimated(tbl), tbl)
++		if !isExtentLoaded {
++			cat.loadExtent(sqlExtentExact(tbl), tbl)
++		}
++	}
+ 	return tables
+ }
+ 
+diff --git a/internal/data/db_sql.go b/internal/data/db_sql.go
+index 35b1001..92404fc 100644
+--- a/internal/data/db_sql.go
++++ b/internal/data/db_sql.go
+@@ -31,7 +31,21 @@ const sqlTables = `SELECT
+ 	a.attname AS geometry_column,
+ 	postgis_typmod_srid(a.atttypmod) AS srid,
+ 	postgis_typmod_type(a.atttypmod) AS geometry_type,
+-	coalesce(ia.attname, '') AS id_column,
++	coalesce(
++		ia.attname,
++		(
++			SELECT va.attname
++			FROM pg_attribute va
++			JOIN pg_type vt ON (va.atttypid = vt.oid)
++			WHERE c.relkind = 'v'
++			AND va.attrelid = c.oid
++			AND va.attname = 'id'
++			AND va.attnum > 0
++			AND NOT va.attisdropped
++			AND vt.typname IN ('int2', 'int4', 'int8')
++		),
++		''
++	) AS id_column,
+ 	(
+ 		SELECT array_agg(ARRAY[sa.attname, st.typname, coalesce(da.description,''), sa.attnum::text]::text[] ORDER BY sa.attnum)
+ 		FROM pg_attribute sa
