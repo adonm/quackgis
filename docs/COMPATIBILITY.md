@@ -336,7 +336,10 @@ unless a focused test says otherwise.
   local native work: the current decision adopts existing Spatial CRS behavior,
   retains the DuckLake identity patch only for a confirmed public-API gap, and
   rechecks newer upstream R-tree work for deletion of local bbox machinery. The
-  central build and the upgrade/rollback matrix remain open. The current
+  central configuration now verifies one DuckDB checkout loading prepared
+  DuckLake/Spatial tests and one normalized merged vcpkg graph under the pinned
+  compiler/CMake/Ninja versions. Candidate artifact compilation/acceptance and the
+  upgrade/rollback matrix remain open. The current
   source/artifact-pinned DuckLake lane remains the evidence floor until N0
   reproduces it. Authoritative CRS expansion belongs
   to S0 after official native/DuckLake lifecycle qualification; primary/unique

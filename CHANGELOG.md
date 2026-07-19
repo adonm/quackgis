@@ -23,9 +23,13 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   native capability/patch to be adopted, retained for an exact gap, or scheduled
   for deletion. Current evidence selects latest DuckDB 1.5.4/current DuckLake 1.5,
   directs S0 to adopt existing Spatial CRS support, and requires M4 to reevaluate
-  newer upstream R-tree work before retaining local bbox machinery. S0 then qualifies official
-  CRS-aware geometry and DuckLake persistence before any narrow type-fidelity
-  patch; Q0 separately decides and proves validated keys before OGR-created tables
+  newer upstream R-tree work before retaining local bbox machinery. The same
+  authority now configures one DuckDB 1.5.4 CMake graph over prepared
+  DuckLake/Spatial sources and verifies a normalized ten-entry merged vcpkg
+  dependency graph under pinned GCC/CMake/Ninja versions; generated candidate
+  binaries remain unaccepted until the full native and lifecycle matrix passes.
+  S0 then qualifies official CRS-aware geometry and DuckLake persistence before
+  any narrow type-fidelity patch; Q0 separately decides and proves validated keys before OGR-created tables
   or direct-table QGIS can be claimed. Metadata-only keys and a Spatial fork for
   PostgreSQL catalog presentation are explicitly rejected.
 - The first executable G0 offline PostGIS migration slice adds a dedicated

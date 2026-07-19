@@ -42,6 +42,9 @@ The current runtime and completed N0 foundation slices prove part of this model:
   workspace-local checkouts, leaves extension submodules uninitialized, applies
   patches in manifest order with `git apply --index`, and verifies each staged
   Git tree against the tracked result tree;
+- `just native-bundle-configure` loads DuckLake and Spatial from those prepared
+  trees into one central DuckDB CMake graph and verifies the normalized merged
+  vcpkg dependency digest;
 - DuckDB 1.5.4 and the official Spatial artifact are checksum-pinned;
 - the common bundle and DuckLake series retain the current separately built
   artifact's exact source, patch, legacy vcpkg/tool, and digest provenance;
@@ -77,6 +80,7 @@ patches/
   spatial/
     series.json
 scripts/
+  build_native_bundle.py
   check_native_upstreams.py
   prepare_native_bundle.py
   build_native_bundle.py
@@ -180,6 +184,27 @@ the manifest binds that binary to the qualified source/ABI and all runtime gates
 pass against those exact bytes. Static linking may be evaluated separately but
 must not create a second untested runtime. Build configuration, generated source,
 and optional-module choices are part of the bundle identity.
+
+Configure the common graph with:
+
+```sh
+mise exec -- just native-bundle-configure
+```
+
+The verified configuration uses the manifest-pinned GCC 16.1.1, CMake 4.3.3,
+Ninja 1.13.2, and vcpkg baseline. DuckDB reports one 1.5.4 core, prepared
+DuckLake/Spatial sources, both extension test suites, and one merged dependency
+graph. The normalized graph has ten dependency entries, permits only Spatial's
+tracked overlay, replaces its workspace path with `${SPATIAL_SOURCE}`, and must
+hash to `1139b3f4e66cb1cbb2233dab2b0c9641ded7dc548b502b36edc4f8bc58e286e4`.
+The path-free `.tmp/native-bundle/central-build-plan.json` binds that graph and
+toolchain to the complete native authority digest.
+
+`just native-bundle-build` continues from this graph, prepares only the exact
+vcpkg commit, and writes candidate artifact digests with state
+`built-unaccepted`. New bytes do not become runtime artifacts automatically: the
+manifest's accepted digests and legacy provenance change only after upstream,
+QuackGIS, package, reopen, recovery, and rollback gates pass.
 
 ## Upstream first
 

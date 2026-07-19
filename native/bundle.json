@@ -82,7 +82,7 @@
     },
     "compiler": {
       "family": "gcc",
-      "version": "15.2.1"
+      "version": "16.1.1"
     },
     "cmake_version": "4.3.3",
     "ninja_version": "1.13.2"
@@ -92,6 +92,7 @@
     "generator": "Ninja",
     "central_duckdb_checkout": true,
     "extension_config": "native/extension_config.cmake",
+    "merged_vcpkg_sha256": "1139b3f4e66cb1cbb2233dab2b0c9641ded7dc548b502b36edc4f8bc58e286e4",
     "runtime_online_install": false
   },
   "test_groups": {

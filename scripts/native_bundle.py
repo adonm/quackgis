@@ -223,7 +223,14 @@ def load_bundle(path: Path = BUNDLE_PATH, root: Path = ROOT) -> dict[str, Any]:
     require_keys(toolchain["compiler"], {"family", "version"}, "compiler")
     build = require_keys(
         bundle["build"],
-        {"type", "generator", "central_duckdb_checkout", "extension_config", "runtime_online_install"},
+        {
+            "type",
+            "generator",
+            "central_duckdb_checkout",
+            "extension_config",
+            "merged_vcpkg_sha256",
+            "runtime_online_install",
+        },
         "build",
     )
     if build["central_duckdb_checkout"] is not True or build["runtime_online_install"] is not False:
@@ -231,6 +238,7 @@ def load_bundle(path: Path = BUNDLE_PATH, root: Path = ROOT) -> dict[str, Any]:
     config_path = root / safe_relative_path(build["extension_config"], "extension_config")
     if not config_path.is_file() or config_path.is_symlink():
         raise ValueError("central extension_config is missing or is a symlink")
+    require_hex(build["merged_vcpkg_sha256"], HEX64, "merged vcpkg digest")
 
     tests = require_keys(bundle["test_groups"], {"upstream", "quackgis"}, "test_groups")
     for name, values in tests.items():
