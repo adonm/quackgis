@@ -1,15 +1,21 @@
 # Contributing
 
-QuackGIS owns a Rust pgwire/control edge over pinned DuckDB Spatial and official
-DuckLake. Missing compatibility belongs in bounded SQL rewrites/macros, the Rust
-edge, or a narrowly scoped DuckDB extension after native SQL is exhausted. See
-[DIVERGENCE.md](./DIVERGENCE.md) for the one retained Arrow encoder fork.
+QuackGIS owns a Rust pgwire/control edge over a pinned DuckDB/DuckLake/Spatial
+native bundle. Missing compatibility belongs in bounded SQL rewrites/macros, the
+Rust edge, an N0-owned QuackGIS extension, or a minimal upstream patch after the
+earlier levels are exhausted. See [docs/NATIVE_BUNDLE.md](./docs/NATIVE_BUNDLE.md)
+for source/patch/build rules and [DIVERGENCE.md](./DIVERGENCE.md) for current
+divergence.
 
 Fork rules:
 
 - Pin native libraries/extensions by version and digest.
+- Move DuckDB, DuckLake, Spatial, and QuackGIS-native revisions together through
+  the bundle manifest; never use a floating branch in build or runtime policy.
 - Keep vendored diffs minimal and documented in `DIVERGENCE.md`.
 - Prefer upstream DuckDB/DuckLake behavior over parallel engine abstractions.
+- Keep upstream trees pristine before applying ordered, digest-pinned patches;
+  do not rely on extension load order to override private C++ behavior.
 
 ```sh
 mise install                   # pinned Rust/tool bootstrap

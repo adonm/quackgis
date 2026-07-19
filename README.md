@@ -233,6 +233,12 @@ Missing behavior follows one decision ladder:
 Rust does not provide row-wise spatial fallback. Shared storage and broad client
 compatibility do not block the first single-node release.
 
+The immediate native path is N0: pin compatible DuckDB, DuckLake, Spatial, and
+QuackGIS-native sources in one manifest; apply reviewed patch queues; build/test
+against one DuckDB checkout; and package one immutable upgrade/rollback unit.
+S0 authoritative CRS and Q0 validated keys follow that bundle instead of creating
+separate forks or artifact lanes.
+
 Read:
 
 - [docs/PROJECT_DIRECTION.md](./docs/PROJECT_DIRECTION.md) — product focus,
@@ -245,13 +251,16 @@ Read:
   catalog/RBAC contract and ordered implementation plan.
 - [docs/DUCKDB_ROADMAP_ALIGNMENT.md](./docs/DUCKDB_ROADMAP_ALIGNMENT.md) —
   conditional adoption/deletion gates for upstream DuckDB and DuckLake work.
+- [docs/NATIVE_BUNDLE.md](./docs/NATIVE_BUNDLE.md) — target source pins, patch
+  queues, central extension build, native trust boundary, and upgrade workflow.
 - [docs/OPERATIONS.md](./docs/OPERATIONS.md) — local runtime and security baseline.
 - [docs/POSTGIS_MIGRATION.md](./docs/POSTGIS_MIGRATION.md) — first offline
   snapshot configuration, trust boundary, report states, and current limits.
 - [docs/IROH_TRANSPORT.md](./docs/IROH_TRANSPORT.md) — implemented I0 protocol,
   lease, key-proof, relay, and transport boundaries.
 - [docs/QUICKSTART.md](./docs/QUICKSTART.md) — guided setup.
-- [DIVERGENCE.md](./DIVERGENCE.md) — retained `arrow-pg` divergence.
+- [DIVERGENCE.md](./DIVERGENCE.md) — active vendored/source patches,
+  ownership, and deletion gates.
 - [docs/HISTORY.md](./docs/HISTORY.md) — retired architecture context.
 
 ## Development principles

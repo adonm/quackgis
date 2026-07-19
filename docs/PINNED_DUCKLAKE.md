@@ -1,5 +1,11 @@
 # Pinned DuckLake identity extension
 
+This document describes the current executable DuckLake-only source/patch lane.
+N0 will absorb or delete it under the atomic native bundle contract in
+[NATIVE_BUNDLE.md](./NATIVE_BUNDLE.md). Until N0 passes equivalent source,
+lifecycle, package, recovery, and rollback gates, the commands and digests here
+remain authoritative.
+
 Local 1.0 owns one narrowly patched DuckLake build until the public
 `ducklake_column_info(catalog)` API is available upstream. The patch is read-only:
 it exposes durable schema, table, and column identity from DuckLake's committed
@@ -175,9 +181,11 @@ validation. Client SQL cannot select the path or digest and cannot execute
 ## Upgrade and deletion plan
 
 QuackGIS owns ABI, source, artifact, lifecycle, and upgrade qualification for this
-patch at every supported DuckDB/DuckLake bundle. A candidate cannot replace the
-pin until the upstream function tests, QuackGIS identity lifecycle, native
-storage/pgwire workflows, independent reopen, runtime image, backup/restore, and
-rollback gates pass. Delete the patch, unsigned-extension policy, and build
-ownership once a version-matched official extension exposes the same accepted API
-and passes those gates.
+patch at every supported DuckDB/DuckLake bundle. N0's first migration gate is to
+represent this base and patch in the common manifest/patch queue, build it against
+the same central DuckDB as Spatial and QuackGIS-native code, and reproduce all
+current tests. A candidate cannot replace the pin until upstream function tests,
+QuackGIS identity lifecycle, native storage/pgwire workflows, independent reopen,
+runtime image, backup/restore, and rollback gates pass. Delete the patch,
+unsigned-extension policy, and dedicated builder once a version-matched official
+extension or N0 replacement exposes the same accepted API and passes those gates.

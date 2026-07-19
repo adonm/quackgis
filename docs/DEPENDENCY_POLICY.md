@@ -4,21 +4,26 @@
 
 - DuckDB is the sole query/spatial engine.
 - Official DuckLake is the sole writer for new durable storage.
-- DuckDB, `spatial`, and `ducklake` versions move together behind native storage,
-  pgwire, independent-reopen, runtime-package, and upgrade gates.
+- DuckDB, `spatial`, `ducklake`, and any QuackGIS-native extension move as one N0
+  bundle behind native storage, pgwire, independent-reopen, runtime-package,
+  recovery, rollback, and upgrade gates.
 - Runtime artifacts are checksum-pinned and preinstalled; production does not
   download extensions.
-- Local 1.0 owns the read-only DuckLake identity patch documented in
-  `PINNED_DUCKLAKE.md`. The accepted unsigned artifact must match the exact
-  tracked source/patch/tool/platform pins, DuckDB ABI, absolute non-symlink path,
-  and SHA-256. Release images keep it immutable and client SQL cannot load native
-  extensions. Startup without the paired path/digest remains signed-only and does
-  not publish dynamic object identity.
+- The current read-only DuckLake identity patch documented in
+  `PINNED_DUCKLAKE.md` remains supported until N0 reproduces its evidence. N0
+  generalizes that policy to full DuckDB/DuckLake/Spatial/QuackGIS source commits,
+  ordered patch digests, build options, toolchain, licenses/SBOM, and artifacts as
+  specified in `NATIVE_BUNDLE.md`.
+- Upstream sources are prepared into ignored workspace-local checkouts. The main
+  repository tracks manifests, patch queues, owned extension source, tests, and
+  accepted digests rather than full Git histories, generated CRS source, build
+  outputs, or vcpkg caches. Offline source archives may be release artifacts.
 - DataFusion, SedonaDB, forked DuckLake writers, and auxiliary engines require a
   new architecture decision and are not acceptable transitive conveniences.
-- Upstream roadmap adoption follows `DUCKDB_ROADMAP_ALIGNMENT.md`: evaluate
-  DuckDB 1.5.5 after release and DuckDB 2.0 as a full bundle; do not publish Local
-  1.0 on an unsupported engine line. Async client I/O and C/Rust extension APIs
+- Upstream roadmap adoption follows `DUCKDB_ROADMAP_ALIGNMENT.md`: N0 evaluates
+  only released supported candidates and treats calendar/nightly entries as
+  evidence inputs; do not publish Local 1.0 on an unsupported engine line. Async
+  client I/O and C/Rust extension APIs
   may replace current code only after equivalence and upgrade gates pass. Quack or
   another remote engine protocol is watch-only and requires an explicit direction
   change plus complete attached-DuckLake data-plane evidence.
@@ -55,17 +60,27 @@ New vendor/fork acceptance requires:
 4. tests and upgrade ownership; and
 5. a deletion/upstream plan.
 
-The DuckLake identity patch satisfies these conditions as a Local 1.0 dependency:
+Native patches additionally require one N0 patch-queue entry, an exact base
+commit, patch digest, clean application check, upstream test coverage,
+unmodified-versus-patched differential evidence, artifact provenance, and
+recovery/upgrade ownership. Loading a later extension does not count as overriding
+private C++ behavior; changed writer/type/planner semantics require a source patch
+or accepted upstream hook.
+
+The DuckLake identity patch satisfies the current pre-N0 conditions:
 exact source/submodule commits, tracked patch, build inputs, accepted artifact
 digest, focused tests, trust boundary, upgrade ownership, and deletion plan are
 recorded in `PINNED_DUCKLAKE.md` and `DIVERGENCE.md`. It does not modify or replace
-DuckLake's writer path. Upstream adoption remains the preferred deletion path.
+DuckLake's writer path. N0 must ingest or delete this patch without weakening its
+gates. Upstream adoption remains the preferred deletion path.
 
 ## Upgrade evidence
 
 An engine/storage upgrade is complete only when exact artifact versions/digests
 are recorded and these gates pass:
 
+- N0 clean preparation, patch application, source/toolchain/license/SBOM checks,
+  and mixed-bundle refusal;
 - Rust unit/all-target tests and clippy;
 - pinned native ADBC storage workflow;
 - real pgwire workflow and spatial corpus;

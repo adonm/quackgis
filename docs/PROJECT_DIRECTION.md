@@ -10,6 +10,8 @@ This document defines the durable product direction.
   catalog, role, privilege, and REST delivery contract.
 - [DUCKDB_ROADMAP_ALIGNMENT.md](./DUCKDB_ROADMAP_ALIGNMENT.md) owns conditional
   adoption and deletion gates for upstream DuckDB/DuckLake roadmap features.
+- [NATIVE_BUNDLE.md](./NATIVE_BUNDLE.md) owns the target DuckDB/DuckLake/Spatial/
+  QuackGIS source, patch, build, trust, and upgrade boundary.
 
 ## Product thesis
 
@@ -28,7 +30,8 @@ The intended product advantage is the combination of:
 
 1. maintained pgwire/PostGIS workflows at the edge;
 2. DuckDB-native analytical and spatial performance;
-3. official DuckLake storage and snapshot semantics;
+3. official DuckLake storage and snapshot semantics through one reproducible
+   pinned DuckDB/DuckLake/Spatial/QuackGIS native bundle;
 4. bounded, trace-driven compatibility rather than broad emulation;
 5. one role, privilege, and metadata contract shared by pgwire, GIS clients, and
    a load-balanceable PostgREST-style HTTP edge;
@@ -52,8 +55,10 @@ The repository proves a bounded local runtime:
 - Parameterized reads/mutations, transactions, text COPY, SCRAM, table policy,
   maintained session settings/search path, `public` mapping, quoted COPY, restart,
   and reopen have pinned native integration tests.
-- Forty-three native, rewrite, or macro spatial cases execute through pgwire.
-- DuckDB and extension artifacts are version- and checksum-pinned.
+- Forty-four native, rewrite, or macro spatial cases execute through pgwire.
+- DuckDB and extension artifacts are version- and checksum-pinned; preparation is
+  still split between the official DuckDB/Spatial artifacts and the source-built
+  DuckLake identity patch, which N0 consolidates.
 
 M1 bounded execution and M2 streaming ingest now have reference evidence:
 
@@ -69,11 +74,15 @@ M1 bounded execution and M2 streaming ingest now have reference evidence:
   native worker, DuckDB memory/thread/temp/spill controls, and sampled resource
   metrics are implemented;
 - maximum native-batch and additional type/shape resource profiles remain open;
-- PostgreSQL catalogs, geometry identity, and named GIS clients are incomplete;
-- the REST preview has a separate read-only schema cache and bearer identity; it
-  does not yet use database role switching or role-aware OpenAPI;
+- PostgreSQL catalogs and geometry identity remain bounded rather than complete;
+  packaged psql, psycopg, OGR read/predeclared COPY, and QGIS query-layer
+  workflows pass while direct-table/key and authoritative CRS expansion remain
+  explicit;
+- two packaged REST replicas use exact authenticator leases, transaction-local
+  database role/context, role-filtered catalog caches, and role-aware OpenAPI;
 - shared catalog/object-storage profiles fail closed; and
-- current scale evidence is fixture-level, not a product performance claim.
+- current clean 10M/100M single-node profiles support the maintained M4 workload;
+  they are not a general clustered or arbitrary spatial-index performance claim.
 
 Direction starts from these constraints, not from capabilities of retired engines.
 
@@ -107,11 +116,22 @@ Release-required outcomes:
 - restart, backup, restore, compaction, and upgrade procedures; and
 - reproducible packages with no runtime extension downloads.
 
-Local 1.0 accepts one source-pinned DuckLake divergence: a read-only table
-function exposing durable schema/table/column identity from the committed
-snapshot. QuackGIS owns its tracked patch, exact artifact digest, immutable
-packaging, ABI/lifecycle/upgrade gates, and upstream deletion path. DuckLake's
-official code remains the only metadata and data writer.
+The immediate Local 1.0 dependency is N0: one machine-readable bundle pins a
+supported DuckDB core, compatible DuckLake and Spatial sources, ordered patch
+queues, additive QuackGIS-native code, toolchain, licenses/SBOM, and accepted
+artifacts. One central DuckDB checkout builds and tests the prepared sources. The
+current read-only DuckLake identity patch remains the supported development lane
+until N0 reproduces its lifecycle and package evidence. DuckLake's official code
+remains the only metadata and data writer.
+
+After N0, S0 adopts and qualifies released CRS-aware geometry through DuckLake
+before QuackGIS projects authoritative PostGIS CRS metadata. Q0 independently
+decides the required direct-table/creation client surface and publishes keys only
+after real NOT NULL/uniqueness enforcement passes every supported write and
+recovery path. S0 is the first implementation target; Q0's product decision may
+run in parallel. Neither widens the default Local 1.0 contract without its own
+decision/gates, creates another native build lane, or infers semantics from names,
+non-NULL data, or metadata-only declarations.
 
 Using PostgreSQL as a shared DuckLake metadata catalog and object storage is a
 later storage capability. It is distinct from QuackGIS's PostgreSQL-compatible
@@ -226,8 +246,11 @@ leases never grant this operator capability.
 
 - DuckDB is the only query planner and spatial execution engine.
 - DuckLake is the only writer of new durable user-schema catalogs and table data.
-  QuackGIS's source patch adds one read-only identity function and does not alter
-  that writer authority. The separate Shared 1.x PostgreSQL control database writes only
+  The current source patch adds one read-only identity function and does not alter
+  that writer authority. N0 may add compatibility/validation functions through a
+  QuackGIS extension; any DuckLake writer/commit hook requires an explicit
+  architecture decision, transactional/recovery evidence, and an upstream or
+  deletion plan. The separate Shared 1.x PostgreSQL control database writes only
   QuackGIS identity, policy, configuration, and operational state.
 - Rust does not implement row-wise spatial kernels or pull arbitrary table rows
   out of DuckDB for fallback execution.
@@ -267,14 +290,17 @@ Every missing requirement follows this order:
 | **1. DuckDB native** | DuckDB or an official extension already provides the semantics | pgwire fixture, direct DuckDB comparison, stable result/type/error behavior, acceptable plan |
 | **2. SQL macro or rewrite** | Behavior composes from DuckDB operations and stays optimizer-visible | quote-safe/AST rewrite, NULL/empty/overload fixtures, `EXPLAIN`, no Rust materialization |
 | **3. Rust edge** | Behavior is inherently PostgreSQL-facing or control-plane work | protocol/catalog trace, bounded memory, stable SQLSTATE/OID behavior, no row-wise spatial fallback |
-| **4. DuckDB extension** | A maintained row, aggregate, or table operation cannot be efficient at earlier levels | real workload demand, semantic oracle, vectorized benchmark, fuzz/property, ABI/package/upgrade gates |
+| **4. QuackGIS/DuckDB extension** | Maintained additive native behavior cannot be efficient or authoritative at earlier levels | N0 bundle ownership, real workload demand, semantic oracle, vectorized benchmark, fuzz/property, ABI/package/upgrade gates |
+| **5. Upstream source patch** | A required engine/storage lifecycle behavior has no supported extension hook | minimal ordered patch, upstream tests, differential behavior, recovery/upgrade ownership, explicit upstream/deletion plan |
 
 Additional rules:
 
 - Function-count coverage alone never justifies an extension.
 - Extension candidates require a maintained client or workload.
-- Extension code may not own pgwire, auth, policy, catalogs, COPY protocol,
-  snapshots, or DuckLake writes.
+- Native extension code may not own pgwire, auth, SQL policy, COPY protocol, or an
+  independent snapshot/storage writer. It may expose bounded native metadata and
+  validation primitives backed by the same authoritative DuckDB/DuckLake state;
+  Rust retains PostgreSQL catalog/OID/SRID projection.
 - Every DuckDB upgrade reruns the ladder; compatibility code is deleted when
   native behavior satisfies the contract.
 - Speculative upstream features may intentionally defer overlapping QuackGIS

@@ -625,11 +625,10 @@ typmods, and `format_type` have explicit pgwire types and lifecycle tests. Actua
 descriptions for every foundation catalog are checked against the client-neutral
 `pg18-column-core-v1` fixture. Unsupported column types, malformed/private
 functions, complex provenance outside the maintained shape, and signed-only
-startup without identity fail closed. The later bounded C5 structural slices
-are described below; authoritative spatial typemod/CRS metadata, broader
-privilege-aware structure, and expression provenance remain later M3 work, while
-key/index semantics require
-upstream DuckLake support or an explicit client limitation policy.
+startup without identity fail closed. The later bounded C5 structural slices are described below. N0 now owns the
+native bundle boundary. S0 owns authoritative spatial type/CRS adoption from that
+bundle, while Q0 owns an explicit validated-key contract or client limitation.
+Neither is implemented by adding guessed C5 rows.
 
 All startup auth modes advertise the frozen PostgreSQL 18.4 profile. Structural
 `version()` identifies QuackGIS/DuckDB without claiming PostgreSQL execution,
@@ -745,18 +744,21 @@ grant. Durable NOT-NULL constraint rows and definitions now carry PostgreSQL
 `name`, internal `char`, `int2[]`, and OID references; rename continuity passes.
 The maintained `pg_index`/`pg_get_indexdef` shape returns no rows/definitions in
 agreement with DuckLake. Generic spatial catalog/version/SRID/extent shapes pass
-focused actual pgwire with role and legacy filtering. Authoritative CRS/subtype/
-dimension metadata, generated-column semantics, wider traced query shapes, and
-any future upstream key/index support remain open C5 work.
+focused actual pgwire with role and legacy filtering. Generic SRID-0 spatial rows
+and an empty key/index projection remain the truthful C5 floor. Authoritative
+CRS/subtype/dimension metadata moves to S0 after N0; validated key/index semantics
+move to Q0. Generated-column semantics and wider traced query shapes remain open
+C5 work.
 
-### C6 — qualify named clients
+### C6 — qualify baseline named clients
 
 Deliver:
 
 - copied-data psql and psycopg discovery workflows;
 - OGR read and COPY workflows without optional discovery failure;
 - headless QGIS discovery, filter, identify, and render;
-- stable subtype/SRID/dimension metadata required by those clients; and
+- stable generic subtype/SRID/dimension behavior required by the baseline clients,
+  with authoritative expansion owned by S0; and
 - query-shape regression fixtures independent of client-name branches.
 
 Gate: all Local 1.0 named clients pass in the pinned Kind topology and the same
@@ -777,7 +779,7 @@ classified spatial fields, and a fresh connection proves exact atomic
 publication. Psql 18.3 runs the full captured `\d+` workflow and reports
 `ducklake`; psycopg and OGR also pass again after ordered Pod replacement and
 mTLS/iroh key rotation with old-client denial. OGR-created tables and
-authoritative CRS metadata remain open.
+authoritative CRS metadata are not baseline claims; they move to Q0 and S0.
 
 Exact offscreen QGIS 3.44.11-Solothurn now passes the optional digest-pinned Kind
 gate as a read-only copied-data query layer with an explicit `id` key. It discovers
@@ -798,8 +800,32 @@ identification, and a non-empty 128×128 offscreen render. The viewport SQL
 compatibility rule accepts only QGIS's literal SRID-0 envelope over the maintained
 WKB column and rewrites the bbox overlap to exact `ST_Intersects`;
 dynamic/nonzero-SRID/non-WKB overlap shapes fail closed. Direct ordinary-table
-open remains blocked on real primary/unique-key support, and authoritative CRS
-behavior remains C6 work.
+open remains blocked on Q0's real primary/unique-key contract, and authoritative
+CRS behavior remains S0 work after N0.
+
+### S0 — adopt authoritative CRS after N0
+
+S0 first tests the released native bundle rather than extending the compatibility
+catalog in isolation. It must prove CRS-parameterized geometry and the official
+coordinate-system catalog survive DuckLake create, write, rename, compaction,
+reopen, backup/restore, and bundle upgrade. Only then may one mapping project
+PostGIS integer SRIDs, `geometry_columns`, `spatial_ref_sys`, `ST_SRID`,
+`Find_SRID`, OGR, QGIS, and migration. Axis order and unknown/custom CRS behavior
+are part of the contract. A narrow DuckLake type-fidelity patch is allowed only
+for a demonstrated persistence gap; a Spatial fork is not used to present
+PostgreSQL catalog rows.
+
+### Q0 — decide and prove validated keys after N0
+
+Q0 first records whether OGR-created tables and direct ordinary-table QGIS are
+Local 1.0 requirements. If they are, durable key declarations use DuckLake
+table/column identity and publish PostgreSQL rows only after NOT NULL and
+uniqueness are enforced for existing data, COPY, INSERT, key-changing UPDATE,
+concurrent writers, restart, restore, and upgrade. Unenforced upstream syntax,
+names, or non-NULL integer columns are not keys. A missing public writer hook may
+justify one N0-governed DuckLake patch, but not a private storage format or second
+writer. If the enforcement gate is not selected or does not pass, the current
+query-layer/no-FID client limitation remains explicit.
 
 ### H1 — migrate and package role-aware REST
 

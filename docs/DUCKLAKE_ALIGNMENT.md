@@ -3,6 +3,11 @@
 QuackGIS creates new storage only through DuckDB's official `ducklake` extension.
 It does not implement or vendor a DuckLake metadata writer.
 
+N0 will select and build the exact DuckDB/DuckLake/Spatial/QuackGIS source set as
+one bundle while preserving this authority. Patch queues may expose metadata or a
+narrow reviewed lifecycle hook; they do not create a separate format or writer.
+See [NATIVE_BUNDLE.md](./NATIVE_BUNDLE.md).
+
 ## Current profile
 
 - local DuckLake catalog path;
@@ -45,6 +50,12 @@ Local 1.0 packages that artifact as an explicit QuackGIS support obligation whil
 upstreaming remains the deletion path. The patch is read-only and the official
 DuckLake code remains the only metadata/data writer. QuackGIS does not depend on
 hidden metadata tables or expose the attachment name to clients.
+
+N0 must reproduce this identity contract before replacing the dedicated build
+lane. S0 then tests official CRS-aware geometry type fidelity through DuckLake;
+only demonstrated metadata loss can justify another narrow patch. Q0 may request
+a writer validation hook only after defining enforceable key semantics. DuckLake
+metadata-only key declarations do not become PostgreSQL key claims.
 
 ## Authority and migration
 

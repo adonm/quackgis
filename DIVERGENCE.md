@@ -80,6 +80,11 @@ cases before changing the pinned revision.
 
 ## Active source patches
 
+N0 will move native divergence into ordered DuckDB/DuckLake/Spatial patch queues
+under the one bundle manifest described in `docs/NATIVE_BUNDLE.md`. The entries
+below describe current evidence until N0 reproduces or deletes them; source trees
+and unexplained edits are not vendored into QuackGIS.
+
 ### DuckLake column identity
 
 QuackGIS applies `patches/ducklake/ducklake-column-info.patch` to an exact
@@ -99,6 +104,12 @@ storage, pgwire, packaging, recovery, and rollback gates. Retire the patch and
 unsigned-extension policy when an official version-matched DuckLake exposes the
 same API and passes those gates.
 
+N0 must either ingest this patch as an exact ordered bundle patch or replace it
+with a released public API. CRS work first qualifies official DuckDB/Spatial and
+DuckLake type persistence; key work may add a DuckLake lifecycle hook only after
+Q0 defines enforced semantics. Neither is added to this ledger merely as a design
+idea.
+
 ## Retired forks
 
 The following forks/vendors are no longer compiled or retained in the repository:
@@ -109,5 +120,6 @@ The following forks/vendors are no longer compiled or retained in the repository
 - DataFusion itself.
 
 Their historical patches remain available in Git history through commit
-`81328a3` and earlier. New compatibility work belongs at the owned pgwire edge,
-DuckDB SQL/macros, a narrowly scoped DuckDB extension, or upstream DuckDB/DuckLake.
+`81328a3` and earlier. New compatibility work follows the native → SQL/rewrite →
+Rust edge → N0 QuackGIS extension → minimal upstream patch ladder; official
+DuckLake remains the only user-data writer.

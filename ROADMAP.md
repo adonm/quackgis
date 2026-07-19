@@ -51,10 +51,13 @@ run must use the same implementation and oracle as its reference counterpart.
 ## Closure workstreams
 
 The identifiers below preserve the established work-package names. Completed
-foundations remain listed. I0 has established the iroh transport/resource
-baseline needed by Local 1.0; C0 then H0 remain the
-compatibility dependency chain, while P0 can proceed after its evidence/layout
-prerequisites.
+foundations remain listed. The immediate native/compatibility dependency is now
+**N0 → {S0, Q0}**: establish one clean DuckDB/DuckLake/Spatial/QuackGIS bundle,
+then qualify authoritative CRS behavior and decide/implement a truthful validated-
+key contract from that common base. S0 is the first adoption target; Q0's client-
+scope decision can proceed in parallel. Key and CRS work must not grow separate
+native fork/build paths. Neither expands the default Local 1.0 client contract
+until its own product decision and gates pass. M6/G1 remain behind Local 1.0.
 
 1. **E0 — evidence harness:** split reusable runtime/client/fixture/oracle/evidence
    support from monolithic native scenarios; add smoke/local/reference entrypoints.
@@ -70,25 +73,37 @@ prerequisites.
    one tiny client bridge, local durable volume, required credential configuration,
    optional relay configuration, and pinned psql/psycopg/GDAL jobs entering
    through the bridge; no service mesh or deferred clients.
-5. **C0 — PostgreSQL compatibility program:** freeze a PostgreSQL 18 profile,
+5. **N0 — pinned native bundle:** resolve one exact compatible DuckDB, DuckLake,
+   Spatial, and QuackGIS-native source set; apply ordered digest-pinned patches;
+   build and test every extension against one DuckDB checkout; package immutable
+   artifacts, source provenance, licenses, and an SBOM; and own one upgrade and
+   rollback matrix.
+6. **C0 — PostgreSQL compatibility program:** freeze a PostgreSQL 18 profile,
    implement stable catalog identity and role/privilege/session semantics, then
    qualify psql, psycopg, OGR, and headless QGIS against copied data.
-6. **H0 — role-aware HTTP:** migrate schema discovery and OpenAPI to the common
+7. **S0 — authoritative CRS:** qualify released CRS-aware native geometry and
+   DuckLake persistence before projecting PostgreSQL/PostGIS CRS metadata or
+   widening migration beyond SRID 0.
+8. **Q0 — validated keys:** decide the required direct-table/creation client
+   surface and expose only primary/unique semantics enforced across every
+   supported write, restart, restore, and upgrade path; metadata-only keys do not
+   qualify.
+9. **H0 — role-aware HTTP:** migrate schema discovery and OpenAPI to the common
    catalog/authorization boundary, route the sidecar through the tiny client, then
    package multiple stateless replicas.
-7. **G0 — offline PostGIS migration:** inventory and fail-closed schema preflight,
+10. **G0 — offline PostGIS migration:** inventory and fail-closed schema preflight,
    one consistent read-only source snapshot, bounded COPY through the packaged
    tiny client, exact verification, and an auditable cutover report.
-8. **P0 — M4 host profiles:** conservative predicate/layout work followed by two
+11. **P0 — M4 host profiles:** conservative predicate/layout work followed by two
    10M runs; introduce 100M only after those runs pass.
-9. **K1 — operations and shared rehearsal:** termination, rotation, upgrade,
+12. **K1 — operations and shared rehearsal:** termination, rotation, upgrade,
    recovery, mixed workload and soak locally; PostgreSQL/MinIO shared-profile
    rehearsal begins only after Local 1.0 closes.
-10. **I1 — shared iroh cluster:** durable user/control metadata, one-time client
+13. **I1 — shared iroh cluster:** durable user/control metadata, one-time client
    pairing, a tiny desktop/serverless client, one-credential/one-worker affinity,
    bounded bootstrap/worker gossip, complete shared-DuckLake workers, and common
    pgwire/HTTP delivery. It builds on I0 and begins after Local 1.0 closes.
-11. **G1 — online PostGIS catch-up/cutover:** after shared control/storage is
+14. **G1 — online PostGIS catch-up/cutover:** after shared control/storage is
     proven, pair one replication-slot snapshot with ordered logical changes,
     durable source-LSN checkpoints, idempotent DuckLake microbatches, lag and
     response-loss reconciliation, and an explicit source-freeze cutover.
@@ -98,13 +113,14 @@ prerequisites.
 | Area | Current floor | Important limit |
 |---|---|---|
 | Engine/storage | pinned DuckDB 1.5.4 through ADBC and local DuckLake with one tracked read-only identity patch | local paths only; QuackGIS owns patch/ABI/upgrade qualification |
+| Native bundle | exact DuckDB library, signed Spatial artifact, and source/patch/artifact-pinned DuckLake identity build are packaged with no online install | three inputs still use separate preparation/acceptance paths; N0 must produce one manifest, patch queue, central build, trust policy, and upgrade/rollback unit before S0/Q0 |
 | Protocol | bounded simple/extended pgwire | narrow statements and parameter types |
 | Results | one driver Arrow batch at a time through pgwire with fail-closed byte ceiling; clean 1M/10M BIGINT and 1M nullable VARCHAR/BLOB reference profiles pass RSS and exact-value gates | maximum native-batch and additional type/shape RSS profiles open |
 | COPY | pre-body bounded pgwire frames, incremental bounded text decoding to one ADBC stream, atomic DuckLake publication, and a clean passing 10M RSS/throughput reference | total COPY remains unbounded while each frame/chunk/row/Arrow batch is bounded; idle clients observe cancellation when they resume or disconnect |
 | Transactions | independent sessions, commit/rollback/isolation, failed-transaction `25P02` precedence, harmless idle transaction end, QGIS-style failed COMMIT/ROLLBACK cleanup, storage-enforced `BEGIN READ ONLY` with `25006` at DML/DDL and COPY seams, cancellable pre-commit writes, and a non-cancellable indeterminate-failure commit boundary | commit response-loss reconciliation remains a Local 1.0 operations gate |
 | Spatial | 44 native/rewrite/macro cases through pgwire | 8 edge gaps and 5 extension candidates |
 | Security | SCRAM, outer read/write table allowlists, immutable table/operation RBAC, role-filtered maintained metadata, HS256 JWT role mapping with transaction-local claims and atomic direct key-file rotation, owner-only direct authenticator-password rotation, loopback-only role-catalog edge preauthentication, exact credential-to-role leases, role-aware OpenAPI, actual-process required-TLS/restart rotation, and packaged mTLS/edge/authenticator/JWT replacement with old-credential denial | no RLS, mutable administration, zero-downtime multi-key overlap, durable revocation, or production revocation drill |
-| PostgreSQL catalogs/RBAC | PostgreSQL 18.4 startup/version/recovery identity, relational core catalogs, pinned stable user-object/default/comment/NOT-NULL identity, truthfully empty index projection, bounded role-aware spatial metadata, immutable roles/sessions/grants/inquiry, role-aware information schema, packaged psycopg COPY/reopen, complete psql 18.3 `\d+`, OGR SQL-result/direct Point/NULL discovery plus COPY to a predeclared target, and pinned QGIS 3.44.11 query-layer discovery/filter/extent/viewport-identify/render reads | DuckLake primary/unique/foreign-key indexes and authoritative CRS metadata remain upstream gaps; OGR-created tables and direct-table QGIS remain gated on real key support |
+| PostgreSQL catalogs/RBAC | PostgreSQL 18.4 startup/version/recovery identity, relational core catalogs, pinned stable user-object/default/comment/NOT-NULL identity, truthfully empty index projection, bounded role-aware spatial metadata, immutable roles/sessions/grants/inquiry, role-aware information schema, packaged psycopg COPY/reopen, complete psql 18.3 `\d+`, OGR SQL-result/direct Point/NULL discovery plus COPY to a predeclared target, and pinned QGIS 3.44.11 query-layer discovery/filter/extent/viewport-identify/render reads | S0 must qualify authoritative native CRS persistence/projection; Q0 must choose and prove validated key semantics before OGR-created tables or direct-table QGIS are claimed |
 | REST | signed-JWT read-only PostgREST-style subset through an exact authenticator lease, transaction-local effective role/context, and automatically revalidated per-role catalog/OpenAPI cache; consumes shared monotonic schema/security epochs where durable identity exists with an exact revision fallback; two packaged replicas pass readiness, role denial, balancing, failover, core reconnect, and old authenticator/JWT denial | package pinned epochs with the owned DuckLake artifact; no full PostgREST parity, public HTTP edge, multi-key overlap, or RLS |
 | Operations | restart/reopen, snapshot inspection, adjacent-file merge, checksummed offline exact-path backup/restore | no online/relocated production recovery or shared profile |
 | Performance | M4-complete mixed-shape selective scan, grouped aggregate, bounded spatial join, wide projection, compaction, and exact 10M/100M profiles | single-node maintained workloads only; no general spatial-index or clustered-performance claim |
@@ -295,6 +311,58 @@ Exit gates:
 - the measured budgets and any required client/worker protocol changes are
   committed before M3 and M5 close and make them expensive to alter.
 
+## N0 — pinned native bundle
+
+**Outcome:** QuackGIS selects, patches, builds, tests, packages, upgrades, and
+rolls back DuckDB, DuckLake, Spatial, and QuackGIS-native code as one atomic,
+reproducible unit.
+
+N0 supersedes the one-off DuckLake-only source builder without invalidating its
+current evidence. Exact design and ownership live in
+[docs/NATIVE_BUNDLE.md](./docs/NATIVE_BUNDLE.md).
+
+Deliver:
+
+- one machine-readable bundle manifest pinning full DuckDB, DuckLake, Spatial,
+  vcpkg/toolchain, patch, owned-source, artifact, license, and platform identity;
+- one central DuckDB checkout used to build every prepared extension source;
+- ignored workspace-local upstream checkouts plus ordered digest-pinned patch
+  queues; no floating branch, implicit edit, duplicate DuckDB build, or checked-in
+  generated/build tree;
+- a separate QuackGIS extension for additive native behavior, retaining source
+  patches only for private DuckLake/Spatial/core behavior that cannot use a
+  supported hook;
+- clean-source, patch-application, upstream-test, QuackGIS-test, artifact, SBOM,
+  and license automation;
+- one immutable runtime trust policy for every project-built/patched artifact;
+  an official signature is retained only when the selected runtime member is the
+  exact vendor-built signed binary rather than a local rebuild;
+- unmodified-versus-patched differential evidence naming every intentional
+  behavior change; and
+- one candidate upgrade/reopen/restore/rollback workflow with patch deletion
+  review.
+
+Exit gates:
+
+- a clean preparer resolves only exact allowed commits, rejects mismatched
+  extension/core pins, verifies every patch hash, and fails on patch conflict or
+  dirty/unrecognized source;
+- one build invocation emits candidate DuckDB library/CLI and DuckLake, Spatial,
+  and QuackGIS extensions against the same core and pinned dependency graph; any
+  selected vendor-built signed binary is separately bound to that qualified
+  source/ABI and tested as the exact runtime artifact;
+- upstream DuckLake/Spatial tests plus QuackGIS storage, identity, pgwire,
+  migration, REST, spatial, and package gates pass from the prepared source;
+- runtime startup verifies every project-owned native path and digest before
+  enabling unsigned loading, denies client `LOAD`/`INSTALL`, and refuses mixed or
+  incomplete bundles;
+- version-matched independent DuckDB reopens current data; the candidate reopens
+  the prior bundle, writes, backs up/restores, and has a tested rollback decision;
+- the runtime manifest records source, patch, build-option, artifact, license, and
+  SBOM identity without local paths; and
+- current DuckLake-only scripts/docs either become compatibility wrappers over N0
+  or are deleted after equivalent gates pass.
+
 ## M3 — focused compatibility product
 
 **Outcome:** the first named client set and HTTP read edge share one coherent
@@ -368,6 +436,94 @@ Mutable role/grant DDL, PostgreSQL RLS, REST mutations/RPC, and full PostgREST
 parity are explicitly outside this M3 exit. They follow the ordered security
 slices in `docs/POSTGRESQL_COMPATIBILITY.md`; table/operation RBAC must not be
 described as RLS.
+
+The maintained Local 1.0 client contract may close with OGR read/predeclared COPY
+and QGIS query-layer workflows already proven. OGR-created tables and direct
+ordinary-table QGIS are promoted into the release contract only by Q0's explicit
+product decision and validated-key evidence; they do not justify invented rows or
+an unbounded native fork. Authoritative nonzero CRS expansion follows S0.
+
+## S0 — authoritative CRS
+
+**Outcome:** PostgreSQL/GIS clients and migration observe one truthful CRS contract
+derived from released DuckDB/Spatial behavior that survives official DuckLake
+storage lifecycle operations.
+
+S0 starts only after N0 can reproduce and compare an unmodified candidate and the
+QuackGIS bundle. It adopts upstream before adding patches.
+
+Deliver:
+
+- candidate probes for CRS-parameterized native `GEOMETRY`, `ST_CRS`,
+  `ST_SetCRS`, `ST_Transform`, and the official coordinate-system catalog;
+- DuckLake create/COPY/mutate/rename/compact/snapshot/reopen/backup/restore
+  evidence preserving the column CRS and value semantics;
+- one explicit mapping between DuckDB string CRS identities and maintained
+  PostGIS integer SRIDs, including axis order and unknown/custom CRS policy;
+- role-aware `geometry_columns` and `spatial_ref_sys` rows derived from the same
+  authority, with stable PostgreSQL wire types and no guessed definitions;
+- pgwire text/binary, OGR, QGIS, and PostGIS migration evidence for each accepted
+  CRS/family/dimension shape; and
+- a narrow DuckLake type-fidelity patch only if the official bundle loses
+  otherwise-supported CRS metadata. Spatial is not forked merely to present a
+  PostgreSQL catalog.
+
+Exit gates:
+
+- CRS identity is equal before and after commit, independent reopen, rename,
+  compaction, backup/restore, and supported bundle upgrade;
+- mixed/incompatible CRS operations fail rather than silently relabel or combine
+  coordinates;
+- unknown CRS behavior is explicit and never drops metadata under an accepted
+  migration;
+- `geometry_columns`, `spatial_ref_sys`, `ST_SRID`/`Find_SRID`, OGR, and QGIS
+  agree on every maintained column; and
+- nonzero-SRID migration verifies source/target bytes, CRS identity, extents, and
+  client behavior after reopen.
+
+## Q0 — validated key contract
+
+**Outcome:** QuackGIS either publishes keys with enforced semantics or keeps the
+dependent client feature explicitly unsupported; names, non-NULL columns, and
+unenforced upstream declarations never become fabricated PostgreSQL keys.
+
+Q0 starts after N0. Its first deliverable is a product decision naming whether
+direct ordinary-table QGIS and OGR-created tables are Local 1.0 requirements or a
+post-release capability.
+
+Deliver:
+
+- a client-neutral key requirement trace and explicit supported key shapes;
+- durable declarations keyed by DuckLake table/column identity, with stable
+  PostgreSQL constraint/index identity and tombstone lifecycle;
+- primary-key NOT NULL and uniqueness validation for existing data, each incoming
+  COPY/INSERT batch, key-changing UPDATE, restart, restore, and upgrade;
+- writer serialization/fencing that prevents two supported commits from both
+  validating against stale state;
+- startup and recovery revalidation plus deterministic commit-response-loss
+  classification;
+- truthful `pg_constraint`, `pg_index`, inquiry, information-schema, OGR, and QGIS
+  projection only after enforcement passes; and
+- an upstream hook or narrowly reviewed DuckLake patch when every-write
+  enforcement cannot use public extension APIs. A separate private storage writer
+  or format is not introduced.
+
+Exit gates:
+
+- duplicate and NULL key cases fail atomically across every supported write path;
+- concurrent writers cannot publish duplicate values, and indeterminate commits
+  reconcile without retrying blindly;
+- rename preserves key identity; drop/recreate does not reuse it; rollback and
+  failed declaration publish no row or epoch change;
+- backup/restore and bundle upgrade reproduce declarations and enforcement before
+  accepting writes;
+- catalog, privilege inquiry, direct-table QGIS, and OGR behavior agree with the
+  same key authority; and
+- independent readers remain interoperable while unsupported external writers
+  are explicitly outside and fenced by the storage-authority contract.
+
+Shared-worker enforcement remains an M6 concern and must be requalified against
+distributed writer fencing; Local Q0 evidence cannot be promoted implicitly.
 
 ## M4 — spatial analytical performance
 
@@ -475,14 +631,15 @@ Deliver:
 
 - immutable runtime artifacts with DuckDB/extension provenance and no online
   extension install;
-- exact source, patch, ABI, artifact, immutable-path, lifecycle, and upgrade
-  evidence for the pinned read-only DuckLake identity extension;
+- N0's exact source, ordered patch, ABI, build-option, artifact, SBOM,
+  immutable-path, lifecycle, upgrade, and rollback evidence for the complete
+  DuckDB/DuckLake/Spatial/QuackGIS native bundle;
 - health, readiness, graceful shutdown, and transaction drain;
 - backup, restore, compaction, capacity, spill, and incident procedures;
 - supported DuckDB/extension upgrade and reopen tests;
-- one supported, non-EOL release bundle decision after evaluating DuckDB 1.5.5
-  and the released DuckDB 2.0 line; preview/nightly artifacts are evidence inputs,
-  not release dependencies;
+- one supported, non-EOL release bundle decision after evaluating the released
+  candidates available when N0 closes; release-calendar, preview, and nightly
+  artifacts are evidence inputs, not release dependencies;
 - classic/PEG parser equivalence for every maintained allow/deny/rewrite family
   while both parser modes exist;
 - retain complete in-process ADBC workers unless a released transport can serve
@@ -503,6 +660,8 @@ Deliver:
 
 Exit gates:
 
+- N0 closes and the selected native bundle passes old/new reopen, recovery,
+  rollback, package, and mixed-bundle-refusal gates;
 - a clean environment starts from published artifacts only;
 - backup/restore reproduces the declared committed snapshot and exact counts;
 - controlled termination exposes no partial mutation;
@@ -781,6 +940,8 @@ Exit gates:
 | Risk | Required response |
 |---|---|
 | native/extension supply-chain or ABI drift | pin artifacts, verify checksums, prohibit production downloads, test upgrades/mixed-version refusal |
+| native patches become an unmergeable product fork | N0 keeps pristine upstream sources plus ordered minimal patch queues, runs upstream and differential tests, records one owner/deletion plan per patch, and forbids automatic conflict resolution or floating refs |
+| key/CRS work creates parallel native authorities | N0 closes first; S0 adopts official CRS behavior before patching; Q0 publishes only enforced keys; official DuckLake remains the sole user-data writer |
 | unbounded ADBC materialization or blocking work | M1 streaming, cancellation, admission, memory/spill budgets before broader clients |
 | compatibility sprawl | require client traces, implementation disposition, stable errors, and delete shims replaced upstream |
 | metadata and authorization drift | one policy engine plus cross-surface tests for privilege inquiry, information schema, execution, and OpenAPI |

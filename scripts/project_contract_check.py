@@ -100,7 +100,7 @@ def check_claim_text(errors: list[str]) -> None:
         "ROADMAP.md": "44 native/rewrite/macro cases",
         "docs/ROADMAP_STATUS.md": "44 original PostGIS expressions",
         "docs/COMPATIBILITY.md": "44 curated spatial cases",
-        "docs/PROJECT_DIRECTION.md": "Forty-three native, rewrite, or macro spatial cases",
+        "docs/PROJECT_DIRECTION.md": "Forty-four native, rewrite, or macro spatial cases",
     }
     for relative, phrase in required.items():
         text = (ROOT / relative).read_text(encoding="utf-8")

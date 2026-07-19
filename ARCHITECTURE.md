@@ -10,7 +10,9 @@ rules belong in [docs/PROJECT_DIRECTION.md](./docs/PROJECT_DIRECTION.md). The
 target PostgreSQL catalog/RBAC design belongs in
 [docs/POSTGRESQL_COMPATIBILITY.md](./docs/POSTGRESQL_COMPATIBILITY.md). Conditional
 adoption of upstream DuckDB/DuckLake roadmap work belongs in
-[docs/DUCKDB_ROADMAP_ALIGNMENT.md](./docs/DUCKDB_ROADMAP_ALIGNMENT.md).
+[docs/DUCKDB_ROADMAP_ALIGNMENT.md](./docs/DUCKDB_ROADMAP_ALIGNMENT.md). The target
+native source/patch/build/trust boundary belongs in
+[docs/NATIVE_BUNDLE.md](./docs/NATIVE_BUNDLE.md).
 
 ## Layer model
 
@@ -28,8 +30,9 @@ PostgreSQL / GIS / application clients
                   │ Arrow / ADBC inside one complete worker
                   ▼
 ┌──────────────────────────────────────────────────────────────┐
-│ DuckDB + official extensions                                 │
-│ SQL planning/execution · Spatial · memory/spill · DuckLake    │
+│ Current: pinned DuckDB + Spatial + patched DuckLake           │
+│ N0 target: one pinned bundle + QuackGIS native extension      │
+│ SQL planning/execution · exact spatial · memory/spill         │
 └──────────────────────────────────────────────────────────────┘
                   │
                   ▼
@@ -48,10 +51,11 @@ capability is implemented in the current preview.
 | Rust pgwire edge | protocol state, TLS/SCRAM, target PostgreSQL-facing roles/session/catalog projection, parsed policy, COPY framing, PostgreSQL types/errors, connection lifecycle | SQL planning, spatial kernels, table data, an independent user-schema authority |
 | DuckDB | SQL planning, vectorized execution, exact spatial operations, transactions, resource/spill behavior | PostgreSQL protocol or identity policy |
 | official DuckLake | catalog, snapshots, Parquet publication, maintenance primitives | client compatibility or authorization |
+| N0 native bundle tooling | exact compatible source selection, patch queues, one central build, upstream/product tests, immutable artifact provenance, SBOM, upgrade/rollback matrix | runtime policy, silent patch conflict resolution, floating versions, an independent storage format |
+| QuackGIS native extension | additive native metadata extraction and validation functions that require vectorized/catalog APIs and remain inside N0 | PostgreSQL catalog/OID/SRID projection, pgwire, authentication, SQL authorization, COPY framing, or an independent DuckLake writer |
 | `quackgis-migrate` preview | pinned PostGIS source identity/inventory, fail-closed type/object disposition, one repeatable-read source snapshot, bounded pgwire COPY forwarding, canonical verification, path-free report | source credentials in workers, DuckDB/ADBC/object-store access, private DuckLake metadata, implicit DDL/security conversion, online replication or cutover authority |
 | planned QuackGIS control metadata | local compatibility identity through supported DuckDB/DuckLake transactions; shared users, credentials, roles, policy, pools, assignments, and security/configuration epochs in a protected PostgreSQL control database | user table definitions/data, SQL planning, independent snapshot publication |
 | `vendor/arrow-pg` | Arrow field/row encoding and maintained WKB wire identity | planning, catalogs, DataFusion support |
-| optional future QuackGIS DuckDB extension | measured vectorized functions unavailable through native SQL/macros | pgwire, auth, policy, COPY, catalogs, snapshots, DuckLake writes |
 
 ## Trust boundaries
 
@@ -59,8 +63,14 @@ capability is implemented in the current preview.
 
 `QUACKGIS_DUCKDB_ADBC_DRIVER` points to native code loaded in-process. It is
 operator configuration, never SQL/client input. Startup verifies the exact
-committed library SHA-256 and DuckDB version before claiming storage. Production
-uses preinstalled signed `spatial` and `ducklake` extensions with `LOAD` only.
+committed library SHA-256 and DuckDB version before claiming storage. The current
+runtime uses preinstalled signed Spatial plus an exact path/digest-pinned patched
+DuckLake artifact. N0 replaces these separate acceptance paths with one bundle
+manifest and one trust decision. An official signature is retained only when the
+runtime uses the exact vendor-built signed binary; every locally built extension
+is project-owned even when unmodified. Each project-owned artifact has an
+immutable absolute path, accepted digest, source/patch/toolchain identity, and
+bootstrap-only load. Client `LOAD` and `INSTALL` remain denied.
 
 ### Network and identity
 

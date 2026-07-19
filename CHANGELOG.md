@@ -7,6 +7,16 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
 
 ### Added
 
+- Native work is now ordered through N0, one planned manifest-driven
+  DuckDB/DuckLake/Spatial/QuackGIS bundle with exact compatible source commits,
+  ordered digest-pinned patch queues, one central DuckDB build, an additive
+  QuackGIS extension, upstream/product test matrices, immutable artifact trust,
+  licenses/SBOM, and upgrade/rollback evidence. The current DuckLake-only builder
+  remains authoritative until N0 reproduces it. S0 then qualifies official
+  CRS-aware geometry and DuckLake persistence before any narrow type-fidelity
+  patch; Q0 separately decides and proves validated keys before OGR-created tables
+  or direct-table QGIS can be claimed. Metadata-only keys and a Spatial fork for
+  PostgreSQL catalog presentation are explicitly rejected.
 - The first executable G0 offline PostGIS migration slice adds a dedicated
   `quackgis-migrate` client with exact PostgreSQL/PostGIS version pins, bounded
   selected-schema inventory, complete migrate/map/reject dispositions, one
@@ -93,7 +103,8 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   uses that unmodified SQL-result path to read the psycopg-created fixture and
   requires exact Point/NULL GeoJSON through mTLS, replacement, and key rotation.
   Direct OGR discovery, no-FID behavior, and predeclared-target COPY now pass;
-  OGR-created tables and authoritative CRS metadata remain open.
+  OGR-created tables and authoritative CRS metadata remain unsupported and are
+  now ordered under Q0 and S0 after N0.
 - The pinned psycopg 3.2.13 Kind job now runs a copied-data workflow through the
   mutual-TLS tiny-client ingress: create/reuse an official-DuckLake table, clear
   it, stream PostgreSQL COPY with exact WKB and NULL rows, close/reconnect, and

@@ -1,7 +1,8 @@
 # QuackGIS project history
 
 This is selective context for retired architecture. Current truth lives in
-`PROJECT_DIRECTION.md`, `ARCHITECTURE.md`, `ROADMAP.md`, and `ROADMAP_STATUS.md`.
+`PROJECT_DIRECTION.md`, `ARCHITECTURE.md`, `ROADMAP.md`, `ROADMAP_STATUS.md`,
+and `NATIVE_BUNDLE.md`.
 
 ## Evolution
 

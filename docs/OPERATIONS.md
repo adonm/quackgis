@@ -19,6 +19,12 @@ extensions into an isolated DuckDB home for baseline tests. The
 DuckLake identity patch. Runtime image assembly replaces only DuckLake with that exact artifact;
 startup uses `LOAD` only and never installs extensions over the network.
 
+This split bootstrap remains current evidence. N0 will replace it with one
+manifest-driven preparation/build/package workflow for compatible exact DuckDB,
+DuckLake, Spatial, and QuackGIS-native sources. Proposed N0 commands are not
+operator commands until they are registered and pass the existing runtime gates;
+see [NATIVE_BUNDLE.md](./NATIVE_BUNDLE.md).
+
 ## Run locally
 
 ```sh
@@ -78,6 +84,9 @@ that artifact from a root-owned read-only path; client SQL cannot `LOAD` or
 `INSTALL` extensions. Startup without the pair remains signed-only and omits
 durable user-object identity. See [PINNED_DUCKLAKE.md](PINNED_DUCKLAKE.md) for the
 source/build pins, trust boundary, lifecycle gate, and deletion plan.
+N0 will generalize the same immutable-path/digest rule to every project-owned
+bundle member and will reject mixed or incomplete bundles rather than broadening
+this variable into an arbitrary extension path.
 
 The optional `quackgis-rest` process has a separate configuration and failure
 domain. It requires an authenticator `QUACKGIS_REST_DATABASE_URL`,

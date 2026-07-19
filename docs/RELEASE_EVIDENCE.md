@@ -88,7 +88,10 @@ The release packet must include:
 
 ## Evidence rules
 
-- Artifacts identify exact source SHA and native bundle.
+- Artifacts identify exact QuackGIS source SHA and N0 bundle ID plus DuckDB,
+  DuckLake, Spatial, QuackGIS-extension, patch, toolchain, build-option, license,
+  SBOM, and artifact digests. Before N0 closes, the current DuckLake pin and
+  separate official artifact identities remain explicit.
 - Artifacts identify their evidence level and execution environment.
 - Performance claims identify rows, bytes, files, row groups, load method,
   hardware, concurrency, plans, and budget outcome.
