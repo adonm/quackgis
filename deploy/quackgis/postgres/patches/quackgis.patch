@@ -1,0 +1,115 @@
+diff --git a/connection.c b/connection.c
+index d4427cb..b00d3ae 100644
+--- a/connection.c
++++ b/connection.c
+@@ -433,6 +433,7 @@ duckdb_get_connection(ForeignServer *server, bool truncatable)
+         const char *dbpath = NULL;
+         const char *quack_host = NULL;
+         const char *quack_token = NULL;
++        bool disable_ssl = false;
+         Oid userid = GetUserId();
+         ListCell *lc;
+ 
+@@ -460,6 +461,8 @@ duckdb_get_connection(ForeignServer *server, bool truncatable)
+                 quack_host = defGetString(def);
+             else if (strcmp(def->defname, "quack_token") == 0 && quack_token == NULL)
+                 quack_token = defGetString(def);
++            else if (strcmp(def->defname, "disable_ssl") == 0)
++                disable_ssl = defGetBoolean(def);
+         }
+ 
+         /* Quack mode: use in-memory DuckDB if no database specified */
+@@ -476,7 +479,8 @@ duckdb_get_connection(ForeignServer *server, bool truncatable)
+         /* Quack proxy mode: load Quack extension and ATTACH remote */
+         if (quack_host)
+         {
+-            char *host_lit;
++            char *quack_uri;
++            char *quack_uri_lit;
+             char *attach_sql;
+ 
+             duckdb_do_sql_command(entry->conn,
+@@ -492,9 +496,16 @@ duckdb_get_connection(ForeignServer *server, bool truncatable)
+                 pfree(secret_sql);
+             }
+ 
+-            host_lit = duckdb_fdw_quote_literal(quack_host);
+-            attach_sql = psprintf("ATTACH 'quack:%s' AS remote;", quack_host);
++            quack_uri = psprintf("quack:%s", quack_host);
++            quack_uri_lit = duckdb_fdw_quote_literal(quack_uri);
++            if (disable_ssl)
++                attach_sql = psprintf(
++                    "ATTACH %s AS remote (DISABLE_SSL true);", quack_uri_lit);
++            else
++                attach_sql = psprintf("ATTACH %s AS remote;", quack_uri_lit);
+             duckdb_do_sql_command(entry->conn, attach_sql, ERROR);
++            pfree(quack_uri);
++            pfree(quack_uri_lit);
+             pfree(attach_sql);
+         }
+ 	}
+diff --git a/duckdb_fdw.c b/duckdb_fdw.c
+index 142a1db..a0b6f77 100644
+--- a/duckdb_fdw.c
++++ b/duckdb_fdw.c
+@@ -26,6 +26,9 @@
+ #include "miscadmin.h"
+ #include "executor/executor.h"
+ #include "commands/explain.h"
++#if PG_VERSION_NUM >= 180000
++#include "commands/explain_format.h"
++#endif
+ #include "nodes/nodeFuncs.h"
+ 
+ PG_MODULE_MAGIC;
+@@ -472,6 +475,9 @@ duckdbGetForeignJoinPaths(PlannerInfo *root, RelOptInfo *joinrel,
+                  create_foreignscan_path(root, joinrel,
+                                           joinrel->reltarget,
+                                           rows,
++#if PG_VERSION_NUM >= 180000
++                                          0, /* disabled_nodes */
++#endif
+                                           startup_cost,
+                                           total_cost,
+                                           NIL,
+@@ -568,6 +574,9 @@ duckdbGetForeignPaths(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntableid
+              create_foreignscan_path(root, baserel,
+                                      baserel->reltarget,
+                                      rows,
++#if PG_VERSION_NUM >= 180000
++                                     0, /* disabled_nodes */
++#endif
+                                      startup_cost,
+                                      total_cost,
+                                      NIL,   /* no pathkeys */
+@@ -898,6 +907,9 @@ duckdbGetForeignUpperPaths(PlannerInfo *root, UpperRelationKind stage,
+                  create_foreignscan_path(root, output_rel,
+                                           output_rel->reltarget,
+                                           rows,
++#if PG_VERSION_NUM >= 180000
++                                          0, /* disabled_nodes */
++#endif
+                                           startup_cost,
+                                           total_cost,
+                                           NIL,
+@@ -1069,7 +1081,7 @@ duckdbEndForeignModify(EState *executor, ResultRelInfo *resultRelInfo)
+ }
+ 
+ static void
+-duckdbExplainForeignScan(ForeignScanState *node, ExplainState *es)
++duckdbExplainForeignScan(ForeignScanState *node, struct ExplainState *es)
+ {
+     List       *fdw_private = ((ForeignScan *) node->ss.ps.plan)->fdw_private;
+     char       *sql = strVal(list_nth(fdw_private, 0));
+diff --git a/option.c b/option.c
+index 52a36b3..8761abe 100644
+--- a/option.c
++++ b/option.c
+@@ -60,6 +60,7 @@ static struct DuckDBFdwOption valid_options[] =
+     {"quack_host", ForeignServerRelationId}, /* host:port of the Quack server */
+     {"quack_token", UserMappingRelationId},  /* Quack auth token (secure: user mapping) */
+     {"quack_token", ForeignServerRelationId}, /* fallback: server option */
++    {"disable_ssl", ForeignServerRelationId}, /* plain HTTP Quack endpoint */
+ 
+     /* Extensions */
+     {"extensions", ForeignServerRelationId}, /* e.g., 'httpfs,spatial,iceberg' */

@@ -29,6 +29,26 @@ ref_gdal_branch := env_var_or_default("REF_GDAL_BRANCH", "master")
 default:
     just --list
 
+# Build and start the real-PostgreSQL/Quack QuackGIS proof of concept.
+quackgis-up:
+    ./scripts/quackgis-compose.sh up -d --build
+
+# Verify exact remote rows and read-only role behavior through PostgreSQL.
+quackgis-smoke:
+    ./scripts/quackgis-smoke.sh
+
+# Print the current QGIS-shaped viewport plan and its explicit P2 blocker.
+quackgis-plan:
+    ./scripts/quackgis-plan.sh
+
+# Stop and remove QuackGIS containers while retaining development volumes.
+quackgis-down:
+    ./scripts/quackgis-compose.sh down
+
+# Stop the QuackGIS and delete its disposable data/extension volumes.
+quackgis-clean:
+    ./scripts/quackgis-compose.sh down --volumes
+
 # Install mise-managed tools and bootstrap project-local DuckDB artifacts.
 setup:
     mise install

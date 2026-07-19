@@ -1,0 +1,48 @@
+name: quackgis
+
+services:
+  worker:
+    image: docker.io/duckdb/duckdb:1.5.4
+    stdin_open: true
+    command:
+      - /duckdb
+      - /data/worker.duckdb
+      - -init
+      - /config/init.sql
+    volumes:
+      - worker-data:/data
+      - worker-extensions:/root/.duckdb
+      - ./worker/init.sql:/config/init.sql:ro,Z
+    expose:
+      - "9494"
+    restart: unless-stopped
+
+  postgres:
+    build:
+      context: ./postgres
+      args:
+        DUCKDB_FDW_COMMIT: 9354241029df691b695f15428082b7c5cd81e2c7
+        DUCKDB_VERSION: 1.5.4
+    environment:
+      HOME: /var/lib/postgresql
+      POSTGRES_DB: quackgis
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: quackgis-dev
+    volumes:
+      - postgres-data:/var/lib/postgresql
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/20_quackgis.sql:ro,Z
+    ports:
+      - "55432:5432"
+    depends_on:
+      - worker
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d quackgis"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+volumes:
+  worker-data:
+  worker-extensions:
+  postgres-data:
