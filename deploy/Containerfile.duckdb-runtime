@@ -13,6 +13,7 @@ COPY duckdb /usr/local/bin/duckdb
 COPY libduckdb.so /opt/quackgis/lib/libduckdb.so
 COPY duckdb-home /opt/quackgis/duckdb
 COPY artifact-manifest.json /opt/quackgis/artifact-manifest.json
+COPY sbom.spdx.json /opt/quackgis/sbom.spdx.json
 COPY licenses /opt/quackgis/licenses
 RUN mkdir -p /var/lib/quackgis && chown -R 999:999 /var/lib/quackgis
 ENV HOME=/opt/quackgis/duckdb

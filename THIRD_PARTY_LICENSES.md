@@ -8,7 +8,11 @@ The QuackGIS runtime bundle contains the following DuckDB artifacts:
 | DuckDB Spatial extension | <https://github.com/duckdb/duckdb-spatial> | MIT |
 | DuckLake extension plus QuackGIS read-only identity patch | <https://github.com/duckdb/ducklake> and `patches/ducklake` | MIT |
 
-Exact versions and SHA-256 values are recorded in `artifact-manifest.json`.
+Exact selected native source and artifact SHA-256 values are recorded in
+`artifact-manifest.json` and its bundled SPDX 2.3 document. The generated
+`licenses/native-licenses.json` inventory is authoritative about completeness:
+`complete=false` and `local-evaluation-only` remain release blockers until all
+items below have exact concluded-license evidence.
 
 The Spatial binary also bundles third-party native libraries, including GEOS,
 GDAL, PROJ, OpenSSL, curl, expat, zlib, and SQLite. The repository-generated image

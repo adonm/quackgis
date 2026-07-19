@@ -116,6 +116,29 @@ trees, ordered patch identities, shared toolchain, and central-build options int
 backup/migration/package evidence to the native authority before the central
 artifact build is accepted.
 
+## SBOM and license inventory
+
+Run the deterministic metadata slice independently with:
+
+```sh
+mise exec -- just native-bundle-metadata
+```
+
+It emits the manifest-declared `sbom.spdx.json` and
+`licenses/native-licenses.json`. Runtime context assembly generates the same bytes,
+hashes both into `artifact-manifest.json`, and the image copies them under
+`/opt/quackgis`. The SPDX 2.3 document describes the exact selected DuckDB library,
+DuckLake extension, and Spatial extension source/artifact digests. The license
+inventory records the DuckLake patch and selected source commits without local
+paths.
+
+This is deliberately fail-closed release evidence, not a false complete-license
+claim. The inventory has `complete=false`, keeps redistribution at
+`local-evaluation-only`, and lists every known Spatial bundled dependency as
+release-blocking until its exact version, source, concluded license, notice, and
+where applicable relinking material are attached. An N0 release cannot become
+accepted merely because an SPDX file exists.
+
 ## Bundle authority
 
 One machine-readable manifest records at least:

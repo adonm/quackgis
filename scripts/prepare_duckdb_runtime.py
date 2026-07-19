@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 import native_bundle
+import package_native_bundle
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BUNDLE = native_bundle.load_bundle()
@@ -120,6 +121,7 @@ def prepare(
     licenses.mkdir()
     for name in ("LICENSE", "NOTICE", "THIRD_PARTY_LICENSES.md"):
         shutil.copy2(REPO_ROOT / name, licenses / name)
+    metadata = package_native_bundle.write_metadata(BUNDLE, out)
 
     manifest: dict[str, object] = {
         "duckdb_version": version,
@@ -164,6 +166,10 @@ def prepare(
             "licenses/NOTICE": sha256(licenses / "NOTICE"),
             "licenses/THIRD_PARTY_LICENSES.md": sha256(
                 licenses / "THIRD_PARTY_LICENSES.md"
+            ),
+            BUNDLE["outputs"]["sbom"]: sha256(metadata["sbom"]),
+            BUNDLE["outputs"]["license_inventory"]: sha256(
+                metadata["license_inventory"]
             ),
         },
         "native_bundle": runtime_bundle_identity(),

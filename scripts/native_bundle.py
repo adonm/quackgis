@@ -221,10 +221,18 @@ def load_bundle(path: Path = BUNDLE_PATH, root: Path = ROOT) -> dict[str, Any]:
         if not isinstance(values, list) or not values or len(values) != len(set(values)):
             raise ValueError(f"{name} test group must be a non-empty unique list")
     outputs = require_keys(
-        bundle["outputs"], {"runtime_manifest", "sbom", "license_inventory"}, "outputs"
+        bundle["outputs"],
+        {"runtime_manifest", "sbom", "license_inventory", "spdx_created"},
+        "outputs",
     )
-    for name, value in outputs.items():
+    for name in ("runtime_manifest", "sbom", "license_inventory"):
+        value = outputs[name]
         safe_relative_path(value, f"output {name}")
+    if not isinstance(outputs["spdx_created"], str) or re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
+        outputs["spdx_created"],
+    ) is None:
+        raise ValueError("output spdx_created must be a stable UTC timestamp")
 
     for component in COMPONENTS:
         source = source_for(bundle, component)

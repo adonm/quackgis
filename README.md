@@ -200,6 +200,7 @@ mise exec -- just check-fast
 mise exec -- just ci
 mise exec -- just native-bundle-check
 mise exec -- just native-bundle-prepare
+mise exec -- just native-bundle-metadata
 mise exec -- just duckdb-adbc-storage-test
 mise exec -- just duckdb-pgwire-workflow-test
 mise exec -- just duckdb-spatial-compat-probe

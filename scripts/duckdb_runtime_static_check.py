@@ -22,6 +22,7 @@ EXPECTED_COPIES = {
     "COPY libduckdb.so /opt/quackgis/lib/libduckdb.so",
     "COPY duckdb-home /opt/quackgis/duckdb",
     "COPY artifact-manifest.json /opt/quackgis/artifact-manifest.json",
+    "COPY sbom.spdx.json /opt/quackgis/sbom.spdx.json",
     "COPY licenses /opt/quackgis/licenses",
 }
 ROOT = pathlib.Path(__file__).resolve().parent.parent

@@ -112,6 +112,7 @@
   "outputs": {
     "runtime_manifest": "artifact-manifest.json",
     "sbom": "sbom.spdx.json",
-    "license_inventory": "licenses/native-licenses.json"
+    "license_inventory": "licenses/native-licenses.json",
+    "spdx_created": "2026-07-19T00:00:00Z"
   }
 }

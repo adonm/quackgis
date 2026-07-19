@@ -216,6 +216,10 @@ native-bundle-check:
 native-bundle-prepare out=".tmp/native-bundle":
     @out_arg='{{out}}'; out_arg="${out_arg#out=}"; python3 scripts/prepare_native_bundle.py --out "$out_arg"
 
+# Generate deterministic SPDX 2.3 and fail-closed native license inventory metadata.
+native-bundle-metadata out=".tmp/native-bundle-metadata":
+    @out_arg='{{out}}'; out_arg="${out_arg#out=}"; python3 scripts/package_native_bundle.py --out "$out_arg"
+
 # Build and test the accepted DuckLake identity extension from tracked source pins.
 ducklake-pinned-build:
     mise x aqua:Kitware/CMake@4.3.3 aqua:ninja-build/ninja@1.13.2 -- python3 scripts/build_pinned_ducklake.py
@@ -570,9 +574,10 @@ clean-dev:
 # Static validation for maintained helper scripts.
 probe-static-check:
     mkdir -p .tmp/pycache
-    PYTHONPYCACHEPREFIX=.tmp/pycache python3 -m py_compile scripts/*.py deploy/kind/render.py scripts/tests/test_build_pinned_ducklake.py scripts/tests/test_duckdb_authority_probe.py scripts/tests/test_duckdb_catalog_identity_probe.py scripts/tests/test_duckdb_engine_probe.py scripts/tests/test_duckdb_runtime_static_check.py scripts/tests/test_duckdb_spatial_compat_probe.py scripts/tests/test_evidence_manifest_check.py scripts/tests/test_kind_render.py scripts/tests/test_native_bundle.py scripts/tests/test_prepare_duckdb_runtime.py scripts/tests/test_prepare_native_bundle.py scripts/tests/test_project_doctor.py
+    PYTHONPYCACHEPREFIX=.tmp/pycache python3 -m py_compile scripts/*.py deploy/kind/render.py scripts/tests/test_build_pinned_ducklake.py scripts/tests/test_duckdb_authority_probe.py scripts/tests/test_duckdb_catalog_identity_probe.py scripts/tests/test_duckdb_engine_probe.py scripts/tests/test_duckdb_runtime_static_check.py scripts/tests/test_duckdb_spatial_compat_probe.py scripts/tests/test_evidence_manifest_check.py scripts/tests/test_kind_render.py scripts/tests/test_native_bundle.py scripts/tests/test_package_native_bundle.py scripts/tests/test_prepare_duckdb_runtime.py scripts/tests/test_prepare_native_bundle.py scripts/tests/test_project_doctor.py
     python3 scripts/tests/test_native_bundle.py
     python3 scripts/tests/test_prepare_native_bundle.py
+    python3 scripts/tests/test_package_native_bundle.py
     python3 scripts/tests/test_build_pinned_ducklake.py
     python3 scripts/tests/test_duckdb_authority_probe.py
     python3 scripts/tests/test_duckdb_catalog_identity_probe.py

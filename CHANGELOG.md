@@ -15,8 +15,10 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   result-tree validation pass; bootstrap, the current DuckLake artifact builder,
   runtime static checks, Rust digest assertions, and package assembly consume the
   common authority, and runtime manifests carry path-free bundle/source/patch/
-  toolchain identity. The current artifact remains explicitly marked as a legacy
-  separate build until the central build reproduces it. S0 then qualifies official
+  toolchain identity. Deterministic SPDX 2.3 and native-license outputs are hashed
+  into runtime manifests and copied into images; unresolved Spatial transitive
+  details remain explicitly incomplete and release-blocking. The current artifact
+  remains marked as a legacy separate build until the central build reproduces it. S0 then qualifies official
   CRS-aware geometry and DuckLake persistence before any narrow type-fidelity
   patch; Q0 separately decides and proves validated keys before OGR-created tables
   or direct-table QGIS can be claimed. Metadata-only keys and a Spatial fork for
