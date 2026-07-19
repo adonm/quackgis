@@ -322,8 +322,11 @@ unless a focused test says otherwise.
   candidate manifest for exact compatible DuckDB/DuckLake/Spatial commits,
   selected artifacts, shared toolchain/tests/outputs, and ordered digest-pinned
   patch queues; `just native-bundle-check` enforces common core identity and exact
-  base/result trees in CI. Central source preparation/build, package SBOM/license
-  provenance, and the upgrade/rollback matrix remain open. The current
+  base/result trees in CI. `just native-bundle-prepare` now prepares those exact
+  three source trees, applies the queue, verifies the staged result trees, and
+  refuses dirty/unrecognized reuse without initializing per-extension DuckDB
+  submodules. The central build, package SBOM/license provenance, and the
+  upgrade/rollback matrix remain open. The current
   source/artifact-pinned DuckLake lane remains the evidence floor until N0
   reproduces it. Authoritative CRS expansion belongs
   to S0 after official native/DuckLake lifecycle qualification; primary/unique

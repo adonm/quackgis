@@ -35,6 +35,10 @@ The current runtime and first N0 authority slice prove part of this model:
 - `just native-bundle-check` validates the closed manifest schema, common core
   commit, patch paths/digests, source/tree pins, central-build declaration, and
   path-free output contract in CI;
+- `just native-bundle-prepare` fetches only the three exact commits into ignored
+  workspace-local checkouts, leaves extension submodules uninitialized, applies
+  patches in manifest order with `git apply --index`, and verifies each staged
+  Git tree against the tracked result tree;
 - DuckDB 1.5.4 and the official Spatial artifact are checksum-pinned;
 - `patches/ducklake/pin.json` pins one DuckLake source, DuckDB submodule, patch,
   toolchain, and accepted artifact;
@@ -44,7 +48,8 @@ The current runtime and first N0 authority slice prove part of this model:
   extension installation.
 
 The common manifest currently describes a candidate, not an accepted central
-build. Until the preparation/build/package and lifecycle matrices pass, the
+build. Clean common-source preparation now passes, but until the
+build/package and lifecycle matrices pass, the
 existing DuckLake command remains the supported artifact reproduction path. The
 next N0 slice must make all artifact consumers read the common authority and then
 retire the duplicated DuckLake pin rather than allowing two authorities to drift.
@@ -81,6 +86,28 @@ not shipped merely to satisfy the layout.
 A release may publish checksum-pinned source archives for offline rebuilding. Full
 upstream Git histories, generated build trees, vcpkg caches, and large test data do
 not belong in the main repository.
+
+## Prepare sources
+
+Run:
+
+```sh
+mise exec -- just native-bundle-check
+mise exec -- just native-bundle-prepare
+```
+
+The preparer writes `.tmp/native-bundle/prepared-sources.json` and three checkouts
+under `.tmp/native-bundle/sources/`. The record contains only bundle/source/patch
+identity, not host paths. A second run validates and reuses the exact prepared
+trees. A changed bundle, changed patch, wrong origin/commit/base tree, unexpected
+staged tree, unstaged edit, untracked file, symlink, partial checkout, or
+unrecognized output directory fails closed. It never resets or repairs an
+existing tree; the operator must remove rejected workspace output explicitly.
+
+DuckLake and Spatial's embedded DuckDB submodules are deliberately not
+initialized. `native/extension_config.cmake` points their prepared source into the
+single prepared DuckDB checkout, preventing an extension-specific core build from
+becoming an accidental second ABI.
 
 ## Bundle authority
 
