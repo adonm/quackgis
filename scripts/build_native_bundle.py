@@ -153,12 +153,12 @@ def prepare_vcpkg(bundle: dict[str, Any], prepared: Path) -> Path:
             raise ValueError("prepared vcpkg checkout is not at the manifest commit")
         if output(["git", "remote", "get-url", "origin"], cwd=target) != authority["url"]:
             raise ValueError("prepared vcpkg origin drifted")
+        if output(["git", "rev-parse", "--is-shallow-repository"], cwd=target) == "true":
+            run(["git", "fetch", "--quiet", "--unshallow", "origin"], cwd=target)
     else:
         target.parent.mkdir(parents=True, exist_ok=True)
-        run(["git", "init", "--quiet", str(target)])
-        run(["git", "remote", "add", "origin", authority["url"]], cwd=target)
-        run(["git", "fetch", "--quiet", "--depth", "1", "origin", authority["commit"]], cwd=target)
-        run(["git", "checkout", "--quiet", "--detach", "FETCH_HEAD"], cwd=target)
+        run(["git", "clone", "--quiet", "--no-checkout", authority["url"], str(target)])
+        run(["git", "checkout", "--quiet", "--detach", authority["commit"]], cwd=target)
     executable = target / "vcpkg"
     if not executable.is_file():
         run([str(target / "bootstrap-vcpkg.sh"), "-disableMetrics"], cwd=target)
@@ -176,8 +176,12 @@ def build(bundle: dict[str, Any], prepared: Path) -> dict[str, Any]:
             "VCPKG_TOOLCHAIN_PATH": str(vcpkg / "scripts/buildsystems/vcpkg.cmake"),
         }
     )
-    run(["make", "release"], cwd=sources / "duckdb", environment=environment)
     build_root = sources / "duckdb/build/release"
+    if build_root.exists():
+        if build_root.is_symlink():
+            raise ValueError("central release build output cannot be a symlink")
+        shutil.rmtree(build_root)
+    run(["make", "release"], cwd=sources / "duckdb", environment=environment)
     candidates = {
         "duckdb": build_root / "duckdb",
         "libduckdb.so": build_root / "src/libduckdb.so",
