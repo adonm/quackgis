@@ -159,6 +159,12 @@ def prepare_vcpkg(bundle: dict[str, Any], prepared: Path) -> Path:
         target.parent.mkdir(parents=True, exist_ok=True)
         run(["git", "clone", "--quiet", "--no-checkout", authority["url"], str(target)])
         run(["git", "checkout", "--quiet", "--detach", authority["commit"]], cwd=target)
+    if output(["git", "rev-parse", "HEAD"], cwd=target) != authority["commit"]:
+        raise ValueError("prepared vcpkg checkout changed during preparation")
+    if output(["git", "rev-parse", "--is-shallow-repository"], cwd=target) != "false":
+        raise ValueError("vcpkg needs complete pinned history for version-tree resolution")
+    if subprocess.run(["git", "diff", "--quiet"], cwd=target, check=False).returncode != 0:
+        raise ValueError("prepared vcpkg checkout contains tracked modifications")
     executable = target / "vcpkg"
     if not executable.is_file():
         run([str(target / "bootstrap-vcpkg.sh"), "-disableMetrics"], cwd=target)
