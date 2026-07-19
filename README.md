@@ -201,6 +201,7 @@ mise exec -- just ci
 mise exec -- just native-bundle-check
 mise exec -- just native-bundle-prepare
 mise exec -- just native-bundle-metadata
+mise exec -- just native-upstream-check
 mise exec -- just duckdb-adbc-storage-test
 mise exec -- just duckdb-pgwire-workflow-test
 mise exec -- just duckdb-spatial-compat-probe
@@ -256,6 +257,8 @@ Read:
   conditional adoption/deletion gates for upstream DuckDB and DuckLake work.
 - [docs/NATIVE_BUNDLE.md](./docs/NATIVE_BUNDLE.md) — target source pins, patch
   queues, central extension build, native trust boundary, and upgrade workflow.
+- [docs/UPSTREAM_ADOPTION.md](./docs/UPSTREAM_ADOPTION.md) — live latest-release/
+  compatible-branch review and mandatory adopt-before-duplicate deletion rules.
 - [docs/OPERATIONS.md](./docs/OPERATIONS.md) — local runtime and security baseline.
 - [docs/POSTGIS_MIGRATION.md](./docs/POSTGIS_MIGRATION.md) — first offline
   snapshot configuration, trust boundary, report states, and current limits.
@@ -269,6 +272,8 @@ Read:
 ## Development principles
 
 - Prefer upstream DuckDB/DuckLake primitives over QuackGIS mechanisms.
+- Check current upstream releases/compatible branches before native work; adopt
+  and delete overlap rather than duplicating released capabilities.
 - Validate at protocol/native trust boundaries and fail closed.
 - Keep memory proportional to configured bounds, not workload cardinality.
 - Require client/workload evidence before adding compatibility or extensions.

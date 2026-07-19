@@ -109,6 +109,7 @@
       "duckdb-runtime-offline-smoke"
     ]
   },
+  "upstream_review": "native/upstream-review.json",
   "outputs": {
     "runtime_manifest": "artifact-manifest.json",
     "sbom": "sbom.spdx.json",

@@ -32,6 +32,7 @@ def main() -> None:
     identity = MODULE.runtime_bundle_identity()
     assert identity["bundle_id"] == MODULE.BUNDLE["bundle_id"]
     assert identity["bundle_sha256"] == MODULE.native_bundle.canonical_sha256(MODULE.BUNDLE)
+    assert identity["authority_sha256"] == MODULE.native_bundle.authority_sha256(MODULE.BUNDLE)
     assert identity["components"]["duckdb"]["commit"] == MODULE.BUNDLE["duckdb"]["source"]["commit"]
     assert identity["components"]["ducklake"]["patches"] == [
         {

@@ -62,6 +62,23 @@ class NativeBundleTests(unittest.TestCase):
             MODULE.canonical_sha256(bundle), MODULE.canonical_sha256(reversed_bundle)
         )
 
+    def test_every_patch_has_an_upstream_deletion_review(self) -> None:
+        bundle = MODULE.load_bundle()
+        review = MODULE.validate_upstream_review(bundle)
+        reviewed = {item["path"] for item in review["patch_reviews"]}
+        tracked = {
+            patch["path"]
+            for component in MODULE.COMPONENTS
+            for patch in MODULE.validate_series(bundle, component, ROOT)["patches"]
+        }
+        self.assertEqual(reviewed, tracked)
+
+    def test_authority_digest_binds_linked_review_and_series(self) -> None:
+        bundle = MODULE.load_bundle()
+        self.assertNotEqual(
+            MODULE.authority_sha256(bundle), MODULE.canonical_sha256(bundle)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

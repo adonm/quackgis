@@ -34,6 +34,14 @@ reproduce the current 1.5.4 floor now. M5 selects only from released supported
 inputs available when the bundle closes; calendar entries cannot become release
 dependencies or excuses to defer bundle tooling.
 
+The companion [upstream adoption review](./UPSTREAM_ADOPTION.md) checks repository
+reality in addition to roadmap prose. On 2026-07-19, DuckDB 1.5.4 remains the
+latest published non-LTS release and DuckLake's selected commit remains the latest
+1.5 branch tip. Spatial's 1.5 branch has newer CRS/R-tree/spatial-join changes but
+targets an unreleased DuckDB commit, so it is candidate/deletion evidence rather
+than a binary to mix with 1.5.4. Run `just native-upstream-check` to detect when
+those exact observations move.
+
 ## Decisions
 
 | Upstream direction | QuackGIS burden it may remove | Alignment now | Adoption gate |

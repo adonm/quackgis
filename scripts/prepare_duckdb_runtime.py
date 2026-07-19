@@ -200,7 +200,14 @@ def runtime_bundle_identity() -> dict[str, object]:
         "schema_version": BUNDLE["schema_version"],
         "bundle_id": BUNDLE["bundle_id"],
         "bundle_sha256": native_bundle.canonical_sha256(BUNDLE),
+        "authority_sha256": native_bundle.authority_sha256(BUNDLE, REPO_ROOT),
         "status": BUNDLE["status"],
+        "upstream_review": {
+            "reviewed_at": native_bundle.validate_upstream_review(BUNDLE, REPO_ROOT)[
+                "reviewed_at"
+            ],
+            "sha256": native_bundle.file_sha256(REPO_ROOT / BUNDLE["upstream_review"]),
+        },
         "components": components,
         "toolchain": BUNDLE["toolchain"],
         "build": BUNDLE["build"],

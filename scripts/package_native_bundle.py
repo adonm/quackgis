@@ -45,7 +45,7 @@ def spdx_package(
 
 
 def spdx_document(bundle: dict[str, Any]) -> dict[str, Any]:
-    bundle_sha256 = native_bundle.canonical_sha256(bundle)
+    authority_sha256 = native_bundle.authority_sha256(bundle, ROOT)
     duckdb = bundle["duckdb"]
     ducklake = bundle["extensions"]["ducklake"]
     spatial = bundle["extensions"]["spatial"]
@@ -85,7 +85,7 @@ def spdx_document(bundle: dict[str, Any]) -> dict[str, Any]:
         "name": bundle["bundle_id"],
         "documentNamespace": (
             "https://quackgis.invalid/spdx/"
-            f"{bundle['bundle_id']}/{bundle_sha256}"
+            f"{bundle['bundle_id']}/{authority_sha256}"
         ),
         "creationInfo": {
             "created": bundle["outputs"]["spdx_created"],
@@ -115,6 +115,7 @@ def license_inventory(bundle: dict[str, Any]) -> dict[str, Any]:
         "schema_version": 1,
         "bundle_id": bundle["bundle_id"],
         "bundle_sha256": native_bundle.canonical_sha256(bundle),
+        "authority_sha256": native_bundle.authority_sha256(bundle, ROOT),
         "complete": False,
         "redistribution_status": "local-evaluation-only",
         "components": [

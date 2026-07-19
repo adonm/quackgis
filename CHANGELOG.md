@@ -18,7 +18,12 @@ anchors live in [docs/HISTORY.md](./docs/HISTORY.md) and Git history.
   toolchain identity. Deterministic SPDX 2.3 and native-license outputs are hashed
   into runtime manifests and copied into images; unresolved Spatial transitive
   details remain explicitly incomplete and release-blocking. The current artifact
-  remains marked as a legacy separate build until the central build reproduces it. S0 then qualifies official
+  remains marked as a legacy separate build until the central build reproduces it.
+  A machine-readable upstream review and opt-in live ref check now require every
+  native capability/patch to be adopted, retained for an exact gap, or scheduled
+  for deletion. Current evidence selects latest DuckDB 1.5.4/current DuckLake 1.5,
+  directs S0 to adopt existing Spatial CRS support, and requires M4 to reevaluate
+  newer upstream R-tree work before retaining local bbox machinery. S0 then qualifies official
   CRS-aware geometry and DuckLake persistence before any narrow type-fidelity
   patch; Q0 separately decides and proves validated keys before OGR-created tables
   or direct-table QGIS can be claimed. Metadata-only keys and a Spatial fork for

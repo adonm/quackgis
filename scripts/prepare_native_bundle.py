@@ -149,6 +149,7 @@ def expected_marker(bundle: dict[str, Any], root: Path) -> dict[str, Any]:
         "schema_version": 1,
         "bundle_id": bundle["bundle_id"],
         "bundle_sha256": native_bundle.canonical_sha256(bundle),
+        "authority_sha256": native_bundle.authority_sha256(bundle, root),
         "extension_config_sha256": native_bundle.file_sha256(extension_config),
         "components": components,
     }

@@ -323,6 +323,10 @@ current evidence. Exact design and ownership live in
 
 Deliver:
 
+- one machine-readable upstream adoption review that checks the latest supported
+  DuckDB release and current compatible DuckLake/Spatial refs, adopts released
+  capabilities before local code, and gives every retained patch an exact search
+  record and deletion gate;
 - one machine-readable bundle manifest pinning full DuckDB, DuckLake, Spatial,
   vcpkg/toolchain, patch, owned-source, artifact, license, and platform identity;
 - one central DuckDB checkout used to build every prepared extension source;
@@ -344,6 +348,9 @@ Deliver:
 
 Exit gates:
 
+- the recorded latest-release/compatible-branch refs are current at candidate
+  review time; every overlapping upstream capability has an adopt/delete decision
+  and every retained patch names the exact missing API and deletion gate;
 - a clean preparer resolves only exact allowed commits, rejects mismatched
   extension/core pins, verifies every patch hash, and fails on patch conflict or
   dirty/unrecognized source;

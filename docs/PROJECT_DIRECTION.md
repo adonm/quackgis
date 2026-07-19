@@ -124,6 +124,14 @@ current read-only DuckLake identity patch remains the supported development lane
 until N0 reproduces its lifecycle and package evidence. DuckLake's official code
 remains the only metadata and data writer.
 
+N0 is explicitly upstream-first. Before adding a native function, patch, metadata
+adapter, or side structure, QuackGIS checks the latest supported release and
+current compatible DuckLake/Spatial branches, runs the existing oracle against
+unmodified source, and adopts/deletes overlap. `native/upstream-review.json` makes
+that decision checkable; `just native-upstream-check` reports moved refs. Nightly
+or `main` behavior informs the next candidate but cannot be mixed into a released
+bundle. See [UPSTREAM_ADOPTION.md](./UPSTREAM_ADOPTION.md).
+
 After N0, S0 adopts and qualifies released CRS-aware geometry through DuckLake
 before QuackGIS projects authoritative PostGIS CRS metadata. Q0 independently
 decides the required direct-table/creation client surface and publishes keys only

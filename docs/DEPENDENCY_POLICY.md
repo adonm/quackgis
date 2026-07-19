@@ -18,6 +18,11 @@
   repository tracks manifests, patch queues, owned extension source, tests, and
   accepted digests rather than full Git histories, generated CRS source, build
   outputs, or vcpkg caches. Offline source archives may be release artifacts.
+- Before local native code is added or retained, run `just native-upstream-check`
+  and follow `UPSTREAM_ADOPTION.md`: inspect the latest supported release plus
+  compatible extension branches, run the existing oracle on unmodified sources,
+  adopt upstream behavior, and delete overlap. Floating branch tips are review
+  evidence only; they never become implicit build inputs.
 - DataFusion, SedonaDB, forked DuckLake writers, and auxiliary engines require a
   new architecture decision and are not acceptable transitive conveniences.
 - Upstream roadmap adoption follows `DUCKDB_ROADMAP_ALIGNMENT.md`: N0 evaluates
@@ -66,6 +71,10 @@ unmodified-versus-patched differential evidence, artifact provenance, and
 recovery/upgrade ownership. Loading a later extension does not count as overriding
 private C++ behavior; changed writer/type/planner semantics require a source patch
 or accepted upstream hook.
+
+The machine-readable upstream review must cover every patch exactly once and name
+the exact selected/current commits searched. A moved release or branch invalidates
+the recorded live review until capability and deletion decisions are refreshed.
 
 The DuckLake identity patch satisfies the current pre-N0 conditions:
 exact source/submodule commits, tracked patch, build inputs, accepted artifact

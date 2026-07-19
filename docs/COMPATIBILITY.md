@@ -331,8 +331,12 @@ unless a focused test says otherwise.
   the duplicate DuckLake pin is gone. Deterministic SPDX 2.3 and native-license
   outputs are hashed into the manifest and copied into the image, but the license
   inventory remains explicitly incomplete/local-only until every bundled Spatial
-  dependency has exact source/license/notice evidence. The central build and the
-  upgrade/rollback matrix remain open. The current
+  dependency has exact source/license/notice evidence. A machine-readable upstream
+  review and opt-in live ref check require adopt/retain/delete decisions before
+  local native work: the current decision adopts existing Spatial CRS behavior,
+  retains the DuckLake identity patch only for a confirmed public-API gap, and
+  rechecks newer upstream R-tree work for deletion of local bbox machinery. The
+  central build and the upgrade/rollback matrix remain open. The current
   source/artifact-pinned DuckLake lane remains the evidence floor until N0
   reproduces it. Authoritative CRS expansion belongs
   to S0 after official native/DuckLake lifecycle qualification; primary/unique

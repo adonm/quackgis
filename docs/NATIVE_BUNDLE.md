@@ -25,7 +25,7 @@ digests. Production does not follow branches or download extensions.
 
 ## Current and target state
 
-The current runtime and first N0 authority slice prove part of this model:
+The current runtime and completed N0 foundation slices prove part of this model:
 
 - `native/bundle.json` is the common candidate authority for exact DuckDB,
   DuckLake, Spatial, shared toolchain, selected artifact, test-group, and output
@@ -35,6 +35,9 @@ The current runtime and first N0 authority slice prove part of this model:
 - `just native-bundle-check` validates the closed manifest schema, common core
   commit, patch paths/digests, source/tree pins, central-build declaration, and
   path-free output contract in CI;
+- `native/upstream-review.json` records latest-release/current-branch evidence
+  plus adopt/retain/delete decisions for every native capability and tracked
+  patch; `just native-upstream-check` fails when those refs move;
 - `just native-bundle-prepare` fetches only the three exact commits into ignored
   workspace-local checkouts, leaves extension submodules uninitialized, applies
   patches in manifest order with `git apply --index`, and verifies each staged
@@ -65,6 +68,7 @@ build orchestration, tests, licenses, and accepted artifact digests:
 native/
   bundle.json
   extension_config.cmake
+  upstream-review.json
 patches/
   duckdb/
     series.json
@@ -73,6 +77,7 @@ patches/
   spatial/
     series.json
 scripts/
+  check_native_upstreams.py
   prepare_native_bundle.py
   build_native_bundle.py
   package_native_bundle.py
@@ -110,11 +115,12 @@ initialized. `native/extension_config.cmake` points their prepared source into t
 single prepared DuckDB checkout, preventing an extension-specific core build from
 becoming an accidental second ABI.
 
-Runtime context assembly projects the bundle ID/digest, exact source/base/result
-trees, ordered patch identities, shared toolchain, and central-build options into
-`artifact-manifest.json`. The projection contains no workspace paths. This binds
-backup/migration/package evidence to the native authority before the central
-artifact build is accepted.
+Runtime context assembly projects the bundle ID/manifest digest, a linked-authority
+digest covering the patch series, upstream review, and extension config, exact
+source/base/result trees, ordered patch identities, shared toolchain, and
+central-build options into `artifact-manifest.json`. The projection contains no
+workspace paths. This binds backup/migration/package evidence to the native
+authority before the central artifact build is accepted.
 
 ## SBOM and license inventory
 
@@ -174,6 +180,21 @@ the manifest binds that binary to the qualified source/ABI and all runtime gates
 pass against those exact bytes. Static linking may be evaluated separately but
 must not create a second untested runtime. Build configuration, generated source,
 and optional-module choices are part of the bundle identity.
+
+## Upstream first
+
+Before adding or retaining native behavior, follow
+[UPSTREAM_ADOPTION.md](./UPSTREAM_ADOPTION.md): inspect the latest published
+DuckDB release and current DuckDB-versioned DuckLake/Spatial branches, search the
+exact sources, and run the existing oracle against an unmodified release-matched
+candidate. Adopt upstream and delete overlapping local code whenever it passes.
+A newer floating branch is evidence, not a runtime input, and is not compatible
+unless its core commit matches the candidate bundle.
+
+Every tracked patch has exactly one machine-readable upstream review naming the
+commits searched, current gap, disposition, and deletion gate. An accepted bundle
+cannot disable this policy or carry unresolved review blockers. This prevents the
+bundle tooling from preserving local forks after upstream supplies the capability.
 
 ## Layering and patch rules
 

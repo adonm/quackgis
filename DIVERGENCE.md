@@ -97,7 +97,10 @@ legacy accepted-artifact build provenance, common candidate toolchain, platform,
 and accepted artifact digest. `scripts/build_pinned_ducklake.py` now consumes
 that common authority while preserving the current artifact reproduction gate.
 Exact behavior, trust boundaries, and lifecycle evidence are documented in
-`docs/PINNED_DUCKLAKE.md`.
+`docs/PINNED_DUCKLAKE.md`. `native/upstream-review.json` records that both the
+selected DuckLake 1.5 tip and reviewed `main` still lack an equivalent public
+column-identity function; every moved ref requires this retain/delete decision to
+be revisited.
 
 Local 1.0 packages the accepted unsigned binary and passes its absolute immutable
 path plus exact SHA-256 to the server. This is a long-term support obligation:

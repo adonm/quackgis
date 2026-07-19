@@ -92,6 +92,10 @@ The release packet must include:
   DuckLake, Spatial, QuackGIS-extension, patch, toolchain, build-option, license,
   SBOM, and artifact digests. Before N0 closes, the current DuckLake pin and
   separate official artifact identities remain explicit.
+- Candidate review records the latest supported DuckDB release, current
+  DuckDB-versioned DuckLake/Spatial tips, every local native capability's
+  adopt/retain/delete disposition, and one deletion review per patch. A moved ref
+  requires a fresh `just native-upstream-check` review before acceptance.
 - Artifacts identify their evidence level and execution environment.
 - Performance claims identify rows, bytes, files, row groups, load method,
   hardware, concurrency, plans, and budget outcome.

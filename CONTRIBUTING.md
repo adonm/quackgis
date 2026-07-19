@@ -4,7 +4,9 @@ QuackGIS owns a Rust pgwire/control edge over a pinned DuckDB/DuckLake/Spatial
 native bundle. Missing compatibility belongs in bounded SQL rewrites/macros, the
 Rust edge, an N0-owned QuackGIS extension, or a minimal upstream patch after the
 earlier levels are exhausted. See [docs/NATIVE_BUNDLE.md](./docs/NATIVE_BUNDLE.md)
-for source/patch/build rules and [DIVERGENCE.md](./DIVERGENCE.md) for current
+for source/patch/build rules,
+[docs/UPSTREAM_ADOPTION.md](./docs/UPSTREAM_ADOPTION.md) for the mandatory
+upstream-first/deletion workflow, and [DIVERGENCE.md](./DIVERGENCE.md) for current
 divergence.
 
 Fork rules:
@@ -14,6 +16,9 @@ Fork rules:
   the bundle manifest; never use a floating branch in build or runtime policy.
 - Keep vendored diffs minimal and documented in `DIVERGENCE.md`.
 - Prefer upstream DuckDB/DuckLake behavior over parallel engine abstractions.
+- Before native work, run `just native-upstream-check`, inspect moved release and
+  compatible-branch refs, and prove why upstream cannot replace the change. Delete
+  local overlap instead of preserving it behind the bundle.
 - Keep upstream trees pristine before applying ordered, digest-pinned patches;
   do not rely on extension load order to override private C++ behavior.
 
@@ -24,6 +29,7 @@ just --list                    # discover common tasks
 just doctor                    # verify the pinned local toolchain
 just smoke                     # smallest server + spatial query smoke
 just ci                        # same fast gate used by GitHub Actions
+just native-upstream-check     # opt-in live upstream/adoption review
 just build                     # server binary
 just test                      # unit tests + compile native integration targets
 just check                     # fmt + clippy + tests

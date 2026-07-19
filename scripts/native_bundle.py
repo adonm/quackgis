@@ -35,6 +35,21 @@ def canonical_sha256(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def authority_sha256(bundle: dict[str, Any], root: Path = ROOT) -> str:
+    authority = {
+        "manifest": bundle,
+        "patch_series": {
+            component: validate_series(bundle, component, root)
+            for component in COMPONENTS
+        },
+        "upstream_review": validate_upstream_review(bundle, root),
+        "extension_config_sha256": file_sha256(
+            root / bundle["build"]["extension_config"]
+        ),
+    }
+    return canonical_sha256(authority)
+
+
 def require_keys(value: Any, expected: set[str], label: str) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != expected:
         actual = sorted(value) if isinstance(value, dict) else type(value).__name__
@@ -129,6 +144,7 @@ def load_bundle(path: Path = BUNDLE_PATH, root: Path = ROOT) -> dict[str, Any]:
             "toolchain",
             "build",
             "test_groups",
+            "upstream_review",
             "outputs",
         },
         "native bundle",
@@ -239,7 +255,150 @@ def load_bundle(path: Path = BUNDLE_PATH, root: Path = ROOT) -> dict[str, Any]:
         if not isinstance(source["url"], str) or not source["url"].startswith("https://github.com/"):
             raise ValueError(f"{component} source URL must be an HTTPS GitHub URL")
         validate_series(bundle, component, root)
+    validate_upstream_review(bundle, root)
     return bundle
+
+
+def validate_upstream_review(bundle: dict[str, Any], root: Path = ROOT) -> dict[str, Any]:
+    relative = safe_relative_path(bundle["upstream_review"], "upstream_review")
+    path = root / relative
+    if not path.is_file() or path.is_symlink():
+        raise ValueError("upstream review is missing or is a symlink")
+    review = require_keys(
+        json.loads(path.read_text(encoding="utf-8")),
+        {
+            "schema_version",
+            "reviewed_at",
+            "policy",
+            "components",
+            "capability_reviews",
+            "patch_reviews",
+            "blockers",
+        },
+        "upstream review",
+    )
+    if review["schema_version"] != 1 or not isinstance(review["reviewed_at"], str):
+        raise ValueError("upstream review identity is invalid")
+    if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", review["reviewed_at"]) is None:
+        raise ValueError("upstream review date must use YYYY-MM-DD")
+    policy = require_keys(
+        review["policy"],
+        {
+            "latest_supported_release_before_local_code",
+            "unreleased_tips_are_evidence_only",
+            "accepted_bundle_requires_review",
+        },
+        "upstream review policy",
+    )
+    if any(value is not True for value in policy.values()):
+        raise ValueError("upstream-first review policy cannot be disabled")
+    components = require_keys(
+        review["components"], set(COMPONENTS), "upstream review components"
+    )
+    for name in COMPONENTS:
+        component = require_keys(
+            components[name],
+            {
+                "source_url",
+                "selected_commit",
+                "release_model",
+                "selection",
+                "latest_release",
+                "observed_refs",
+                "notes",
+            },
+            f"{name} upstream review",
+        )
+        source = source_for(bundle, name)
+        if component["source_url"] != source["url"] or component["selected_commit"] != source["commit"]:
+            raise ValueError(f"{name} upstream review does not match the selected source")
+        refs = component["observed_refs"]
+        if not isinstance(refs, dict) or not refs:
+            raise ValueError(f"{name} upstream review must record observed refs")
+        for ref, commit in refs.items():
+            if not isinstance(ref, str) or not ref.startswith("refs/heads/"):
+                raise ValueError(f"{name} upstream review contains an invalid ref")
+            require_hex(commit, HEX40, f"{name} observed ref")
+        latest = component["latest_release"]
+        if name == "duckdb":
+            latest = require_keys(latest, {"tag", "commit"}, "DuckDB latest release")
+            if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", latest["tag"]):
+                raise ValueError("DuckDB latest release tag is invalid")
+            require_hex(latest["commit"], HEX40, "DuckDB latest release commit")
+        elif latest is not None:
+            raise ValueError(f"{name} must use its DuckDB-versioned release model")
+        for field in ("release_model", "selection", "notes"):
+            if not isinstance(component[field], str) or not component[field].strip():
+                raise ValueError(f"{name} upstream review {field} must be non-empty")
+
+    capabilities = review["capability_reviews"]
+    if not isinstance(capabilities, list) or not capabilities:
+        raise ValueError("upstream capability review must be non-empty")
+    capability_ids: set[str] = set()
+    for item in capabilities:
+        capability = require_keys(
+            item,
+            {
+                "id",
+                "area",
+                "local_implementation",
+                "upstream_evidence",
+                "disposition",
+                "deletion_gate",
+            },
+            "upstream capability review",
+        )
+        if capability["id"] in capability_ids:
+            raise ValueError("upstream capability review IDs must be unique")
+        capability_ids.add(capability["id"])
+        if capability["disposition"] not in {
+            "adopt-upstream",
+            "retain-upstream-gap",
+            "reevaluate-and-delete",
+        }:
+            raise ValueError("upstream capability disposition is invalid")
+        if any(not isinstance(capability[field], str) or not capability[field].strip() for field in capability):
+            raise ValueError("upstream capability review fields must be non-empty")
+
+    patch_reviews = review["patch_reviews"]
+    if not isinstance(patch_reviews, list):
+        raise ValueError("upstream patch reviews must be a list")
+    reviewed_paths: set[str] = set()
+    for item in patch_reviews:
+        patch = require_keys(
+            item,
+            {
+                "path",
+                "upstream_status",
+                "searched_commits",
+                "disposition",
+                "reason",
+                "deletion_gate",
+            },
+            "upstream patch review",
+        )
+        safe_relative_path(patch["path"], "upstream patch review path")
+        if patch["path"] in reviewed_paths or patch["disposition"] not in {"retain", "delete"}:
+            raise ValueError("upstream patch review path/disposition is invalid")
+        reviewed_paths.add(patch["path"])
+        if not isinstance(patch["searched_commits"], list) or not patch["searched_commits"]:
+            raise ValueError("upstream patch review must name searched commits")
+        for commit in patch["searched_commits"]:
+            require_hex(commit, HEX40, "upstream patch searched commit")
+    tracked_paths = {
+        patch["path"]
+        for component in COMPONENTS
+        for patch in validate_series(bundle, component, root)["patches"]
+    }
+    if reviewed_paths != tracked_paths:
+        raise ValueError("every tracked native patch must have exactly one upstream review")
+    if not isinstance(review["blockers"], list) or not all(
+        isinstance(blocker, str) and blocker.strip() for blocker in review["blockers"]
+    ):
+        raise ValueError("upstream review blockers must be a string list")
+    if bundle["status"] == "accepted" and review["blockers"]:
+        raise ValueError("an accepted bundle cannot have unresolved upstream review blockers")
+    return review
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -254,7 +413,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "native_bundle_check_ok "
         f"bundle={bundle['bundle_id']} status={bundle['status']} "
-        f"sha256={canonical_sha256(bundle)}"
+        f"sha256={canonical_sha256(bundle)} authority_sha256={authority_sha256(bundle)}"
     )
     return 0
 

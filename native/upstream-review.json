@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "reviewed_at": "2026-07-19",
+  "policy": {
+    "latest_supported_release_before_local_code": true,
+    "unreleased_tips_are_evidence_only": true,
+    "accepted_bundle_requires_review": true
+  },
+  "components": {
+    "duckdb": {
+      "source_url": "https://github.com/duckdb/duckdb.git",
+      "selected_commit": "08e34c447bae34eaee3723cac61f2878b6bdf787",
+      "release_model": "github-release",
+      "selection": "selected-latest-supported-release",
+      "latest_release": {
+        "tag": "v1.5.4",
+        "commit": "08e34c447bae34eaee3723cac61f2878b6bdf787"
+      },
+      "observed_refs": {
+        "refs/heads/main": "117e1a46be1c903c5a36ee3c881c125597f93c60",
+        "refs/heads/v1.5-variegata": "e14c3db18700c8f730a3421f6b96a8655d7662c4"
+      },
+      "notes": "DuckDB 1.5.4 is the latest published non-LTS release. Newer branch commits are candidate evidence, not runtime inputs."
+    },
+    "ducklake": {
+      "source_url": "https://github.com/duckdb/ducklake.git",
+      "selected_commit": "84ef2d14a0161f6f6197d6c8d2b4dbc45bf40375",
+      "release_model": "duckdb-versioned-extension-branch",
+      "selection": "selected-compatible-branch-tip",
+      "latest_release": null,
+      "observed_refs": {
+        "refs/heads/main": "2856687c875bbee90d523fe15627f8d8fd494622",
+        "refs/heads/v1.5-variegata": "84ef2d14a0161f6f6197d6c8d2b4dbc45bf40375"
+      },
+      "notes": "DuckLake publishes through DuckDB-versioned extension branches rather than GitHub Releases; the selected commit is the current 1.5 branch tip."
+    },
+    "spatial": {
+      "source_url": "https://github.com/duckdb/duckdb-spatial.git",
+      "selected_commit": "28db190f7184bcf61eb01d291e0cba79849bddb6",
+      "release_model": "duckdb-versioned-extension-branch",
+      "selection": "selected-release-matched-commit",
+      "latest_release": null,
+      "observed_refs": {
+        "refs/heads/main": "e8bef46b7ebd1656600c24132620c633f6a7de82",
+        "refs/heads/v1.5-variegata": "eb1e57c9d92c0f3f76eb03eaa52c315090f328cc"
+      },
+      "notes": "The newer 1.5 branch tip targets unreleased DuckDB commit bd77d596392f567d1d8cc18d45874c78b145d3d3; the selected source and signed artifact target released DuckDB 1.5.4 exactly."
+    }
+  },
+  "capability_reviews": [
+    {
+      "id": "ducklake-column-identity",
+      "area": "catalog identity",
+      "local_implementation": "patches/ducklake/ducklake-column-info.patch",
+      "upstream_evidence": "The selected 1.5 tip and current main expose ducklake_table_info but no public ducklake_column_info or equivalent top-level committed-column identity function.",
+      "disposition": "retain-upstream-gap",
+      "deletion_gate": "Delete the patch when a release-matched public API passes the complete identity lifecycle and package gates."
+    },
+    {
+      "id": "spatial-authoritative-crs",
+      "area": "CRS semantics",
+      "local_implementation": "none",
+      "upstream_evidence": "The selected release-matched Spatial source already contains CRS-parameterized GEOMETRY, ST_CRS/ST_SetCRS guidance, ST_Transform propagation, and mismatch tests.",
+      "disposition": "adopt-upstream",
+      "deletion_gate": "S0 must qualify and project upstream behavior before considering any local native implementation."
+    },
+    {
+      "id": "native-spatial-pruning",
+      "area": "spatial pruning",
+      "local_implementation": "maintained WKB bbox columns and conservative exact-recheck rewrite",
+      "upstream_evidence": "DuckDB 1.5.4 native geometry Parquet statistics already pass M4 comparisons; newer unreleased Spatial 1.5 commits add R-tree scan, filtering, parallel fetch, CRS, and spatial-join improvements.",
+      "disposition": "reevaluate-and-delete",
+      "deletion_gate": "At every release-matched candidate, rerun the M4 write/client/exact-plan matrix and delete local bbox machinery when upstream satisfies the same gates."
+    },
+    {
+      "id": "ducklake-writer-lifecycle",
+      "area": "storage writer and lifecycle",
+      "local_implementation": "none",
+      "upstream_evidence": "Official DuckLake remains the only selected create/write/snapshot/compaction implementation.",
+      "disposition": "adopt-upstream",
+      "deletion_gate": "Do not add a private writer; use a released hook or narrowly reviewed patch only for a proven requirement."
+    }
+  ],
+  "patch_reviews": [
+    {
+      "path": "patches/ducklake/ducklake-column-info.patch",
+      "upstream_status": "missing-in-selected-and-main",
+      "searched_commits": [
+        "84ef2d14a0161f6f6197d6c8d2b4dbc45bf40375",
+        "2856687c875bbee90d523fe15627f8d8fd494622"
+      ],
+      "disposition": "retain",
+      "reason": "No public release-matched or main-branch column identity API currently satisfies the catalog lifecycle requirement.",
+      "deletion_gate": "Recheck before every bundle update and delete on upstream equivalence."
+    }
+  ],
+  "blockers": []
+}
